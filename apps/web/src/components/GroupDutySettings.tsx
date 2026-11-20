@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { useMutation } from '@tanstack/react-query';
 import { Check } from 'lucide-react';
-import type { ScenarioParam } from '@dutydeck/shared';
+import { scenarioPreviewLimits, type ScenarioParam } from '@dutydeck/shared';
 import { ApiError, collaborationApi, type CollaborationDuty, type CollaborationScenario, type UpdateCollaborationDutyInput } from '../api';
 import { Banner, Button, Field, Input, Select } from './primitives';
 
@@ -48,6 +48,50 @@ function paramValue(param: ScenarioParam, text: string, current: unknown): unkno
 const missingSourceParams = (scenario: CollaborationScenario, pack: PackDraft) => pack.enabled
   ? Object.entries(scenario.params).filter(([name, param]) => param.type === 'bot_list' && param.role === 'source' && !listItems(pack.params[name] ?? '').length).map(([name]) => name)
   : [];
+
+function ScenarioPreview({ appId, chatId, id, params }: { appId: string; chatId: string; id: string; params: Record<string, unknown> }) {
+  const [count, setCount] = useState(String(scenarioPreviewLimits.default));
+  const limit = Number(count);
+  const key = JSON.stringify([appId, chatId, id, params, limit]);
+  const preview = useMutation({
+    mutationFn: (_key: string) => collaborationApi.previewScenario(appId, chatId, id, { params, limit })
+  });
+  const result = preview.variables === key ? preview.data : undefined;
+  const error = preview.variables === key ? preview.error : null;
+  return (
+    <div className="space-y-3">
+      <div className="flex flex-wrap items-center gap-2">
+        <label className="flex items-center gap-2 text-meta text-subtle">
+          <span>预演条数</span>
+          <Input type="number" min={1} max={scenarioPreviewLimits.max} className="w-24" value={count} onChange={event => setCount(event.target.value)} />
+        </label>
+        <Button variant="secondary" loading={preview.isPending} disabled={!Number.isInteger(limit) || limit < 1 || limit > scenarioPreviewLimits.max} onClick={() => preview.mutate(key)}>
+          预演
+        </Button>
+      </div>
+      {error && <Banner tone="danger">{error.message}</Banner>}
+      {result?.status === 'unavailable' && <Banner tone="warning">{result.message}</Banner>}
+      {result?.status === 'ok' && (
+        <div className="space-y-2 rounded-lg border border-subtle p-3 text-meta" aria-live="polite">
+          <p className="font-semibold text-primary">{result.messages.length
+            ? `按最近 ${result.messages.length} 条消息预演：${result.mode === 'model' ? '候选' : '会接手'} ${result.matched} 条，${result.mode === 'model' ? '未入选' : '不会接手'} ${result.skipped} 条。`
+            : '群里暂无可预演的历史消息。'}</p>
+          {result.note && <p className="text-subtle">{result.note}</p>}
+          {result.messages.length > 0 && <ul className="divide-y divide-subtle">
+            {result.messages.map(item => <li key={item.messageId} className="space-y-1 py-2">
+              <div className="text-subtle">
+                <time dateTime={item.at}>{new Date(item.at).toLocaleString()}</time>
+                {' · '}{item.senderKind === 'bot' ? '机器人' : item.senderKind === 'human' ? '真人' : '未知发送者'}
+                {' · '}{item.matched ? result.mode === 'model' ? '候选' : '会接手' : '跳过'}{' · '}{item.detail}
+              </div>
+              <div className="break-words text-primary">{item.excerpt || '（无正文）'}</div>
+            </li>)}
+          </ul>}
+        </div>
+      )}
+    </div>
+  );
+}
 
 /** 群设置里的分工：接话人和各场景包的开关与参数。只提交改动的那几项。 */
 export function GroupDutySettings({ appId, chatId, botName, duty, scenarios, onSaved }: { appId: string; chatId: string; botName?: string; duty: CollaborationDuty; scenarios: CollaborationScenario[]; onSaved(): Promise<unknown> }) {
@@ -146,6 +190,9 @@ export function GroupDutySettings({ appId, chatId, botName, duty, scenarios, onS
                 </Field>
               ))}
             </div>
+            <ScenarioPreview appId={appId} chatId={chatId} id={scenario.id}
+              params={Object.fromEntries(Object.entries(scenario.params).map(([name, param]) =>
+                [name, paramValue(param, pack.params[name] ?? paramText(param, scenario.binding?.params[name]), scenario.binding?.params[name])]))} />
           </div>
         );
       })}

@@ -640,7 +640,7 @@ async function dutyRuntime() {
   const repos = createRepositories(':memory:');
   cleanups.push(() => repos.close());
   const host = await PluginHost.load({ dataDir: directory });
-  const participation = new LarkGroupParticipation({ repository: repos.collaboration, decider: {} as any, authorize: async () => true, serviceFor: () => ({}) as any,
+  const participation = new LarkGroupParticipation({ repository: repos.collaboration, decider: {} as any, authorize: async () => true, serviceFor: () => ({ listChatMessages: async () => ({ items: [], hasMore: false }) }) as any,
     readConfig: async appId => appId === 'cli_a' ? { appId, appSecret: 'secret-a' } as any : undefined, scenarios: host.scenarios });
   cleanups.push(() => participation.close());
   const service = new CollaborationService({ repositories: repos, authorize: async () => true, resolveScheduleScope: async () => ({ channelBotId: 'bot', identityRef: 'identity', secretRef: 'secret' }) });
@@ -648,7 +648,8 @@ async function dutyRuntime() {
   app.setErrorHandler((error, _request, reply) => reply.code((error as RuntimeError).statusCode ?? 500).send({ error: { code: (error as RuntimeError).code, message: error.message } }));
   app.get('/api/lark/management/groups', async () => ({ groups: [{ key: 'k', chatId: 'oc_duty', name: '测试群', bots: [{ appId: 'cli_a', membership: 'member', validity: 'valid', roles: [], applied: true, binding: { revision: 1, state: 'staged', oncall: false } }] }] }));
   await registerCollaborationRoutes(app, { service, runtime: {} as any, tools: {} as any, evaluation: {} as any, extensions: {} as any, bootstrap: async () => {}, authorizeManagement: async () => 'ou_owner',
-    updateDuty: (scope, patch, actorId) => participation.updateDuty(scope, patch, actorId), scenarios: scope => participation.scenarioOverview(scope) });
+    updateDuty: (scope, patch, actorId) => participation.updateDuty(scope, patch, actorId), scenarios: scope => participation.scenarioOverview(scope),
+    previewScenario: (scope, id, input) => participation.previewScenario(scope, id, input) });
   cleanups.push(() => app.close());
   const fetcher = bridge(app);
   const dutyBodies = () => fetcher.mock.calls.filter(([url, init]) => new URL(String(url)).pathname.endsWith('/collaboration/duty') && init?.method === 'PATCH').map(([, init]) => JSON.parse(String(init!.body)));
@@ -659,6 +660,14 @@ async function dutyRuntime() {
 describe('settings CLI group duty against the real collaboration routes', () => {
   const sources = [{ appId: 'cli_source_a', name: '来源 A' }];
   const alarmOf = (result: Record<string, unknown>) => (result.collaboration as { scenarios: Array<{ id: string }> }).scenarios.find(item => item.id === 'alarm');
+
+  it('runs a scenario preview without creating or changing a binding', async () => {
+    const { repos, scope, run, fetcher } = await dutyRuntime();
+    await expect(run('group-preview', { scenarioId: 'alarm', scenarioParams: '{"levels":["P0"]}', limit: '80' }))
+      .resolves.toMatchObject({ status: 'ok', mode: 'direct', limit: 80, matched: 0, skipped: 0 });
+    expect(fetcher.mock.calls.map(([, init]) => init?.method)).toEqual(['GET', 'POST']);
+    expect(await repos.collaboration.getDuty(scope)).toMatchObject({ revision: 0 });
+  });
 
   it('writes scenario bindings, merges partial params, and shows each pack with its params, binding and staleness', async () => {
     const { repos, scope, run } = await dutyRuntime();
@@ -845,6 +854,14 @@ describe('settings commands', () => {
     expect(settings).toHaveBeenLastCalledWith('approval-rule-list', expect.objectContaining({ appId: 'cli_a', workspace: '/repo', instance: 'tag' }));
     await createCliProgram('0.0.7', { settings }).parseAsync(['node', 'dutydeck', 'settings', 'approval-rules', 'remove', 'war_1']);
     expect(settings).toHaveBeenLastCalledWith('approval-rule-remove', expect.objectContaining({ ruleId: 'war_1' }));
+  });
+
+  it('registers group preview with draft parameters and the bot and runtime selectors', async () => {
+    const settings = vi.fn();
+    await createCliProgram('0.0.7', { settings }).parseAsync(['node', 'dutydeck', 'settings', 'group', 'preview', 'oc_1', 'alarm',
+      '--params', '{"levels":["P0"]}', '--limit', '100', '--app', 'cli_a', '--instance', 'tag']);
+    expect(settings).toHaveBeenCalledWith('group-preview', expect.objectContaining({ chatId: 'oc_1', scenarioId: 'alarm', scenarioParams: '{"levels":["P0"]}',
+      limit: '100', appId: 'cli_a', instance: 'tag' }));
   });
 
   it('documents every bot key in the Chinese and English CLI references', async () => {

@@ -6,6 +6,11 @@ export const markdownElement = (elementId: string, content: string): CardElement
   tag: 'markdown', element_id: elementId, content
 });
 
+export const clipCardField = (value: string, limit: number) => {
+  const characters = Array.from(value);
+  return characters.length <= limit ? value : `${characters.slice(0, Math.max(1, limit - 1)).join('')}…`;
+};
+
 export const escapeCardInline = (value: string) => value.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;');
 
 export const textFence = (text: string) => `\`\`\`text\n${text.replaceAll('```', '``\\`')}\n\`\`\``;

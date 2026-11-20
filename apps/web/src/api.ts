@@ -10,7 +10,7 @@ export type { HistoryOutline, HistoryTurnPlace, HistoryTurnSummary } from '@duty
 import type { AutomationSchedulePage, AutomationRunDetail } from '@dutydeck/shared';
 import type { PluginBinding, SavePluginBinding, PluginConfigSchema, PluginBindingScope } from '@dutydeck/shared';
 import type { LarkAllowedUser, PublicLarkConfig, PublicLarkConfigCollection, RiskControlMode, SaveLarkConfigInput } from '@dutydeck/shared';
-import type { InboxAction, InboxResponse, LarkAppCreationJob, PermissionMode, ScenarioBinding, ScenarioParam, Session as SharedSession, RunSummary as SharedRunSummary, SessionSourceContext, SessionUsageSnapshot } from '@dutydeck/shared';
+import type { InboxAction, InboxResponse, LarkAppCreationJob, PermissionMode, ScenarioBinding, ScenarioParam, ScenarioPreview, ScenarioPreviewInput, Session as SharedSession, RunSummary as SharedRunSummary, SessionSourceContext, SessionUsageSnapshot } from '@dutydeck/shared';
 import type {
   SessionInsightDetailsResponse,
   SessionInsightRefreshResponse,
@@ -620,6 +620,8 @@ export const collaborationApi = {
     send<{ settings: CollaborationSettings }>('PATCH', `/api/lark/groups/${encodeURIComponent(appId)}/${encodeURIComponent(chatId)}/collaboration/settings`, body),
   updateDuty: (appId: string, chatId: string, body: UpdateCollaborationDutyInput) =>
     send<{ duty: CollaborationDuty; announced?: boolean }>('PATCH', `/api/lark/groups/${encodeURIComponent(appId)}/${encodeURIComponent(chatId)}/collaboration/duty`, body),
+  previewScenario: (appId: string, chatId: string, id: string, body: ScenarioPreviewInput) =>
+    send<ScenarioPreview>('POST', `/api/lark/groups/${encodeURIComponent(appId)}/${encodeURIComponent(chatId)}/collaboration/scenarios/${encodeURIComponent(id)}/preview`, body),
   createFollowup: (appId: string, chatId: string, body: CreateCollaborationFollowupInput) =>
     send<{ followup: CollaborationFollowup }>('POST', `/api/lark/groups/${encodeURIComponent(appId)}/${encodeURIComponent(chatId)}/collaboration/followups`, body),
   updateFollowup: (appId: string, chatId: string, id: string, body: UpdateCollaborationFollowupInput) =>

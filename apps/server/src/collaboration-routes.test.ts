@@ -238,3 +238,18 @@ it('routes agent mandate changes that widen it to the confirmation card, applies
   expect(refused.statusCode).toBe(503);
   expect(await unwired.repos.collaboration.getMandate(scope, other)).toMatchObject({ revision: 1, prompt: '总结' });
 });
+
+it('previews a scenario with the same management and scope checks as reading settings', async () => {
+  const previewScenario = vi.fn(async () => ({ status: 'ok' as const, mode: 'direct' as const, limit: 50, matched: 0, skipped: 0, messages: [] }));
+  const f = await fixture({ previewScenario });
+  const url = '/api/lark/groups/cli_one/oc_one/collaboration/scenarios/alarm/preview';
+  const headers = { authorization: 'Bearer management' };
+  const post = (target = url, auth = headers, payload = { params: { levels: ['P0'] } }) =>
+    f.app.inject({ method: 'POST', url: target, headers: auth, payload });
+  expect((await post(url, { authorization: '' })).statusCode).toBe(403);
+  expect((await post(url.replace('oc_one', 'oc_foreign'))).statusCode).toBe(403);
+  expect((await post(url, headers, { ...{ params: {} }, requesterId: 'other' } as any)).statusCode).toBe(400);
+  expect(previewScenario).not.toHaveBeenCalled();
+  expect((await post()).statusCode).toBe(200);
+  expect(previewScenario).toHaveBeenCalledWith(scope, 'alarm', { params: { levels: ['P0'] } });
+});

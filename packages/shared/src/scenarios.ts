@@ -419,3 +419,24 @@ export interface ScenarioProvider {
   /** 同步；整轮关联共 1s 截止。 */
   correlationKey?(input: { entries: Array<{ label: string; lines: string[] }> }): Record<string, string> | undefined;
 }
+
+export const scenarioPreviewLimits = { default: 50, max: 200 } as const;
+
+export interface ScenarioPreviewInput {
+  params?: Record<string, unknown>;
+  limit?: number;
+}
+
+export interface ScenarioPreviewMessage {
+  messageId: string;
+  at: string;
+  senderKind: 'human' | 'bot' | 'unknown';
+  excerpt: string;
+  matched: boolean;
+  reason: string;
+  detail: string;
+}
+
+export type ScenarioPreview =
+  | { status: 'ok'; mode: ScenarioPack['mode']; limit: number; matched: number; skipped: number; messages: ScenarioPreviewMessage[]; note?: string }
+  | { status: 'unavailable'; message: string };

@@ -22,7 +22,7 @@ export type SettingsAction =
   | 'bot-list' | 'bot-show' | 'bot-add' | 'bot-set' | 'bot-remove' | 'bot-install-hook'
   | 'channel-bot-list' | 'channel-bot-show' | 'channel-bot-set'
   | 'group-binding-list' | 'group-binding-show' | 'group-binding-add' | 'group-binding-set'
-  | 'group-list' | 'group-show' | 'group-set' | 'group-members' | 'group-sync'
+  | 'group-list' | 'group-show' | 'group-preview' | 'group-set' | 'group-members' | 'group-sync'
   | 'usage-show' | 'usage-set-cap' | 'usage-remove-cap'
   | 'approval-rule-list' | 'approval-rule-remove';
 
@@ -43,6 +43,9 @@ export interface SettingsCliInput {
   workspaceRoot?: string;
   expectedRevision?: string;
   chatId?: string;
+  scenarioId?: string;
+  scenarioParams?: string;
+  limit?: string;
   pairs?: string[];
   appSecret?: string;
   agentId?: string;
@@ -469,6 +472,15 @@ export async function runSettingsCli(action: SettingsAction, input: SettingsCliI
       };
     }
     case 'group-show': return showGroup(request, required(input.chatId, 'Chat ID'), input.appId);
+    case 'group-preview': {
+      const id = required(input.scenarioId, 'Scenario ID');
+      const params = input.scenarioParams === undefined ? undefined : parseValue('--params', input.scenarioParams, 'json');
+      const limit = input.limit === undefined ? undefined : parseValue('--limit', input.limit, 'integer');
+      if (params !== undefined && !isRecord(params)) throw new SettingsCliError('SETTINGS_VALUE_INVALID', '--params expects a JSON object');
+      const chatId = required(input.chatId, 'Chat ID');
+      const { bot } = await findGroup(request, chatId, input.appId);
+      return request('POST', `${collaborationPath(bot.appId, chatId)}/scenarios/${path(id)}/preview`, { params, limit });
+    }
     case 'group-set': return setGroup(request, input);
     case 'group-members': {
       const chatId = required(input.chatId, 'Chat ID');

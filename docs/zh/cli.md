@@ -254,6 +254,7 @@ dutydeck settings group set oc_xxx participation=selective   # 设置群聊按�
 dutydeck settings usage set-cap 50 --app cli_xxx             # 设置月度用量上限（美元）
 dutydeck settings approval-rules list --workspace .          # 查看本目录的工作区审批规则（按真实路径比较）
 dutydeck settings approval-rules remove war_xxx              # 撤销一条规则，下一条同类命令恢复弹卡
+dutydeck settings group preview oc_xxx alarm --params '{"levels":["P0"]}' --limit 100
 dutydeck settings group set oc_xxx 'scenarios={"alarm":{"enabled":true,"params":{"levels":["P0","P1"]}}}'  # 改告警初筛的级别
 ```
 
@@ -262,6 +263,8 @@ dutydeck settings group set oc_xxx 'scenarios={"alarm":{"enabled":true,"params":
 保存接口对私聊模式、群回复模式、群记忆范围、Claude 自带记忆和应用品牌使用严格枚举校验；非法值返回 `400 INVALID_LARK_CONFIG`，不会清除已保存值。`groupReplyMode=null` 仍用于清除覆盖，CLI 用 `groupReplyMode=auto`。
 
 群里的场景包用 `scenarios={"<包 id>":{"enabled":true|false,"params":{...}}}` 改，`params` 只写要改的键，`{"<包 id>":null}` 删掉这个包的绑定；`group show` 列出本群可用的包、参数和当前绑定。`direct` 模式的包（如告警初筛）要先在群里点确认卡开启过一次，之后才能用命令行或 Web 改。旧的 `alarm=<JSON>`（平铺的告警订阅）作为弃用别名保留一个版本，会转成 `scenarios.alarm`，输出里带弃用提示。
+
+`group preview <群 ID> <场景包 ID>` 用最近的群消息预演场景。省略 `--params` 时沿用已保存的参数和默认值，传入时只需写要覆盖的键。有多个机器人时用 `--app <App ID>` 指定，`--limit` 默认 50，最多 200。输出包含条数和逐条原因，场景设置及运行额度不变。读不到历史时输出权限提示。
 
 实验页「群配置与权限」里的 Bot 用 `channel-bot` 管理，参数是 `list` 返回的内部 `id`，不是飞书 App ID：
 

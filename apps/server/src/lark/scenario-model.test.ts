@@ -353,3 +353,35 @@ describe('冻结和注入的纯函数', () => {
     expect(modelScenarioExecution(undefined, expected)).toBe('判定记录不存在');
   });
 });
+
+it('previews unsaved FAQ parameters as candidates only and bounds paginated history reads', async () => {
+  const h = await harness();
+  const item = (n: number, text: string, senderType = 'user', messageType = 'text') => ({
+    messageId: `om_${n}`, chatId: scope.chatId, createTime: String(1789707600000 - n * 1000),
+    messageType, rawContent: JSON.stringify({ text }), sender: { id: 'ou_sender', type: senderType },
+    mentions: [], deleted: false, updated: false
+  });
+  const params = { topics: ['订单服务'], docs: ['orders.md'] };
+  expect(await h.participation.previewScenario(scope, 'team-faq', { params })).toMatchObject({ status: 'ok', limit: 50, matched: 0, skipped: 0, messages: [] });
+  h.service.listChatMessages.mockClear();
+  h.service.listChatMessages.mockImplementation(async input => {
+    const start = Number(input.pageToken ?? 0);
+    const items = Array.from({ length: 50 }, (_, i) => item(start + i, '今天吃什么'));
+    if (!start) items.splice(0, 5, item(0, '订单服务怎么发布'), item(1, '今天吃什么'),
+      item(2, '订单服务怎么发布', 'app'), item(3, '订单服务怎么发布', 'user', 'image'),
+      { ...item(4, '订单服务怎么发布'), mentions: [{ id: scope.appId, idType: 'app_id' }] });
+    return { items, hasMore: true, pageToken: String(start + 50) };
+  });
+  const result = await h.participation.previewScenario(scope, 'team-faq', { params, limit: 250 });
+  expect(result).toMatchObject({ status: 'ok', mode: 'model', limit: 200, matched: 1, skipped: 199, note: '是否回复由模型逐条判断，预演不调用模型。' });
+  if (result.status !== 'ok') throw new Error(result.message);
+  expect(result.messages.slice(0, 5).map(({ matched, reason }) => [matched, reason])).toEqual([
+    [true, 'participation_observes'], [false, 'not_addressed'], [false, 'bot_message'], [false, 'not_addressed'], [false, 'not_addressed']
+  ]);
+  expect(h.service.listChatMessages.mock.calls.map(([input]) => input.pageToken)).toEqual([undefined, '50', '100', '150']);
+  expect(h.decide).not.toHaveBeenCalled();
+  expect(h.respond).not.toHaveBeenCalled();
+  expect(h.context).not.toHaveBeenCalled();
+  expect(h.dispatch).not.toHaveBeenCalled();
+  expect(await h.repository.listDecisions(scope)).toEqual([]);
+});

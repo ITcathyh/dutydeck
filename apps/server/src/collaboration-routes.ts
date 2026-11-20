@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { z } from 'zod';
-import { RuntimeError, isRecord, collaborationScopeSchema, parseLarkSourceId, updateCollaborationSettingsInputSchema, updateFollowupInputSchema, type CollaborationScope } from '@dutydeck/shared';
+import { RuntimeError, isRecord, collaborationScopeSchema, parseLarkSourceId, updateCollaborationSettingsInputSchema, updateFollowupInputSchema, type CollaborationScope, type ScenarioPreview, type ScenarioPreviewInput } from '@dutydeck/shared';
 import type { DutydeckRuntime } from '@dutydeck/runtime';
 import type { CollaborationService } from './collaboration-service.js';
 import type { CollaborationEvaluation } from './collaboration-evaluation.js';
@@ -26,6 +26,7 @@ export interface CollaborationRouteOptions {
   updateDuty?(scope: CollaborationScope, patch: z.infer<typeof dutyPatchSchema>, actorId: string): Promise<unknown>;
   /** 群设置页列出的场景包和本群绑定，合进 GET 的结果，见 LarkGroupParticipation.scenarioOverview。 */
   scenarios?(scope: CollaborationScope): Promise<unknown[]>;
+  previewScenario?(scope: CollaborationScope, id: string, input: ScenarioPreviewInput): Promise<ScenarioPreview>;
 }
 /**
  * 接话人只能设成本 Bot（self）或清掉（null）。场景包按包 id 改开关和参数，null 删掉绑定；
@@ -71,6 +72,17 @@ export async function registerCollaborationRoutes(app: FastifyInstance, options:
     return context.taskId ? { ...input, id: createHash('sha256').update(JSON.stringify([context.scope, context.taskId, input.id])).digest('hex') } : input;
   };
   const changed = async (scope: CollaborationScope) => { await options.onChange?.(scope); };
+  if (options.previewScenario) {
+    const previewScenario = options.previewScenario;
+    app.post<{ Params: { id: string } }>('/api/lark/groups/:appId/:chatId/collaboration/scenarios/:id/preview', async (request, reply) => {
+      const { scope, actorId } = await managementContext(request);
+      await options.service.require(scope, actorId, 'read', true);
+      const id = parse(z.string().min(1).max(64), request.params.id);
+      const input = parse(z.object({ params: z.record(z.unknown()).optional(), limit: z.number().int().min(1).optional() }).strict(), request.body ?? {});
+      reply.header('cache-control', 'no-store');
+      return previewScenario(scope, id, input);
+    });
+  }
   for (const [base, context] of [
     ['/api/lark/groups/:appId/:chatId/collaboration', managementContext],
     ['/api/lark/agent-tools/collaboration', agentContext]

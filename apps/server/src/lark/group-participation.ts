@@ -5,7 +5,7 @@ import { larkMessageAnchor } from './message-anchor.js';
 import { RuntimeError, serialByKey, COLLABORATION_LIST_LIMIT, DECISION_BUDGET_GATE, DECISION_WINDOW_LIMIT, USAGE_CAP_GATE, countDecisionUsage, listWindowIncomplete, type ListedItems } from '@dutydeck/shared';
 import { BOT_LOOP_DEPTH_LIMIT, BOT_LOOP_GATE, BOT_TURN_RECORD } from '@dutydeck/shared';
 import { DECIDER_META_KEY, INTRUSIVE_FEEDBACK_PREFIX, MISSED_FEEDBACK_PREFIX, deciderMetaOf, isDecisionGate, participationLevelBehaviors, participationLevelLabels, participationLevelPhraseHint, participationLevelPhrases, participationLevels, resolveParticipation } from '@dutydeck/shared';
-import { resolveScenarioParams, scenarioBindingStatus, scenarioMajorVersion, scenarioRecordOf, scenarioSourceBots, scenarioTriggerSources, type CollaborationDuty, type ResponderAnnouncement, type ScenarioBinding, type ScenarioBotRef, type ScenarioMessage, type ScenarioPack } from '@dutydeck/shared';
+import { resolveScenarioParams, scenarioBindingStatus, scenarioMajorVersion, scenarioRecordOf, scenarioSourceBots, scenarioTriggerSources, type ScenarioPreviewInput, type ScenarioPreview, type CollaborationDuty, type ResponderAnnouncement, type ScenarioBinding, type ScenarioBotRef, type ScenarioMessage, type ScenarioPack } from '@dutydeck/shared';
 import { jsonSha256 as digest } from '../hash.js';
 import type { CollaborationRepository, CollaborationScope, CollaborationFollowup, CollaborationSnapshot, CollaborationObservation, CollaborationDecision, CollaborationAction, CollaborationTeamContext, CollaborationDeciderMeta, CollaborationScenarioSnapshot, CollaborationSettings, ParticipationLevel } from '@dutydeck/shared';
 import { larkMemoryEnabled, type StoredLarkConfig } from './config.js';
@@ -29,6 +29,7 @@ import { ACKNOWLEDGEMENT_REACTION_EMOJI } from './reaction-records.js';
 import { boundCollaborationSnapshot } from '../collaboration-context.js';
 import { withLarkContextReadTimeout } from './context-read-timeout.js';
 import { renderGroupTaskContext, TASK_CONTEXT_WINDOW, type GroupTaskContext, type GroupTaskContextRequest } from './group-task-context.js';
+import { previewScenario, previewUnavailable, scenarioHistoryFailure } from './scenario-preview.js';
 import { evaluateParticipation } from './participation-evaluate.js';
 
 export interface GroupParticipationOptions {
@@ -37,10 +38,11 @@ export interface GroupParticipationOptions {
   decider: ParticipationDecider;
   polishReply?: ReplyPolish;
   authorize(scope: CollaborationScope, actorId: string | undefined, action: 'observe' | 'update' | 'deliver', followup?: CollaborationFollowup): Promise<boolean>;
-  readConfig(appId: string, chatId?: string): Promise<StoredLarkConfig | undefined>;
+  readConfig(appId: string, chatId?: string, readOnly?: boolean): Promise<StoredLarkConfig | undefined>;
+  readPreviewSettings?(scope: CollaborationScope): Promise<CollaborationSettings>;
   /** 规则层要读父消息和群成员，确认卡要发卡和刷新；缺这些能力时对应规则不触发、确认卡不可用。 */
   serviceFor(config: StoredLarkConfig): Pick<LarkCardService, 'listChatMessages' | 'sendText' | 'replyText' | 'addReaction' | 'deleteReaction' | 'listOwnReactions'>
-    & Partial<Pick<LarkCardService, 'getMessage' | 'listChatMembers' | 'reply' | 'update'>>;
+    & Partial<Pick<LarkCardService, 'getMessage' | 'getBotOpenId' | 'listChatMembers' | 'reply' | 'update'>>;
   readMemory?(scope: CollaborationScope): Promise<string>;
   readTeamContext?(scope: CollaborationScope, query: string): Promise<CollaborationTeamContext>;
   authorizeTeamContext?(scope: CollaborationScope, context: CollaborationTeamContext): Promise<boolean>;
@@ -1010,8 +1012,7 @@ export class LarkGroupParticipation {
       mentionsSelf: Boolean(botOpenId) && event.mentions.some(mention => mention.openId === botOpenId), mentionsOther: event.mentions.some(mention => !botOpenId || mention.openId !== botOpenId) };
     // 同一条消息命中多个包时按包 id 排序取第一个，其余只记诊断，不起任务也不写记录。
     let chosen: { entry: (typeof direct)[number]['entry']; matched: Extract<ScenarioMatch, { matched: true }> } | undefined;
-    for (const { entry, binding } of [...direct].sort((a, b) => a.entry.pack.id < b.entry.pack.id ? -1 : a.entry.pack.id > b.entry.pack.id ? 1 : 0)) {
-      if (!scenarioTriggerSources(entry.pack, binding).some(source => source.appId === appId)) continue;
+    for (const { entry, binding } of direct) {
       const matched = await this.scenarios.match(entry, binding, message, { scope, cwd: config.workspace });
       if (!matched.matched) continue;
       if (chosen) { this.options.log?.warn({ scope, messageId: event.messageId, scenario: entry.pack.id, chosen: chosen.entry.pack.id }, '同一条消息命中了多个场景包，只处理包 id 排在最前的'); continue; }
@@ -1145,6 +1146,28 @@ export class LarkGroupParticipation {
     }
     return { enabled: value.enabled, params, ...(current?.requesterId ? { requesterId: current.requesterId } : {}), packVersion: current?.packVersion ?? pack.version };
   }
+  async previewScenario(scope: CollaborationScope, id: string, input: ScenarioPreviewInput): Promise<ScenarioPreview> {
+    const config = await this.options.readConfig(scope.appId, scope.chatId, true).catch(() => undefined);
+    if (!config) return { status: 'unavailable', message: '暂时无法读取机器人或群配置，请检查群配置后重试。' };
+    const duty = await this.options.repository.getDuty(scope);
+    const entry = this.scenarios.entries(config).find(item => item.pack.id === id);
+    if (!entry) throw new RuntimeError('COLLABORATION_SCENARIO_UNKNOWN', `没有可用的场景包 ${id}。`, 400);
+    const { params, issues } = resolveScenarioParams(entry.pack, duty.scenarios?.[id]?.params, input.params);
+    if (issues.length) throw new RuntimeError('COLLABORATION_SCENARIO_INVALID', `${entry.pack.title}的设置不对：${issues.join('；')}`, 400);
+    if (scenarioSourceBots(entry.pack, { params }).some(source => source.appId === scope.appId)) throw new RuntimeError('COLLABORATION_SCENARIO_SELF_SOURCE', `${entry.pack.title}的来源不能是本机器人自己。`, 400);
+    // 初次开通也可预演。确认人仅是本次推算的前提，启用仍由群里的确认卡授权。
+    const binding = { enabled: true, packVersion: entry.pack.version, params, requesterId: duty.scenarios?.[id]?.requesterId ?? 'preview' };
+    return this.previewDraft(scope, config, duty, { entry, binding }, input.limit);
+  }
+
+  private async previewDraft(scope: CollaborationScope, config: StoredLarkConfig, duty: CollaborationDuty,
+    target: Parameters<typeof previewScenario>[0]['target'], limit?: number, timeoutMs?: number): Promise<ScenarioPreview> {
+    const settings = target.entry.pack.mode === 'model'
+      ? await (this.options.readPreviewSettings?.(scope) ?? this.options.repository.getSettings(scope)) : undefined;
+    const modelActive = Boolean(settings && activeModes.has(resolveParticipation({ mentionPolicy: config.mentionPolicy, participation: settings.participation }).level));
+    return previewScenario({ scenarios: this.scenarios, scope, config, duty, target, modelActive, service: this.options.serviceFor(config), limit, timeoutMs });
+  }
+
   /** 群设置页列出的场景包：作用域适用于本机器人的包、本群绑定和状态。 */
   async scenarioOverview(scope: CollaborationScope) {
     const config = await this.options.readConfig(scope.appId, scope.chatId).catch(() => undefined);
@@ -1514,9 +1537,11 @@ export class LarkGroupParticipation {
     if (sourceParam) {
       const existing = binding ? scenarioTriggerSources(pack, binding) : [];
       const param = pack.params[sourceParam];
-      const inferred = param?.type === 'bot_list' && param.inferOnEnable ? await this.scenarioSources(event, config, existing) : { chosen: existing, others: [] };
+      const inferred = param?.type === 'bot_list' && param.inferOnEnable ? await this.scenarioSources(event, config, existing) : { chosen: existing, others: [], historyFailure: undefined };
       if (!inferred.chosen.length) {
-        await this.replyText(config, event, `最近没看到别的机器人在本群发消息，不知道该订阅哪个${pack.noun}来源。请在${pack.noun}消息下面回复我再说一次，或在 Dutydeck Web 的群设置里填写来源。`, key);
+        const reason = inferred.historyFailure ? `${inferred.historyFailure}暂时无法自动确定${pack.noun}来源。`
+          : `最近没看到别的机器人在本群发消息，不知道该订阅哪个${pack.noun}来源。`;
+        await this.replyText(config, event, `${reason}请在${pack.noun}消息下面回复我再说一次，或在 Dutydeck Web 的群设置里填写来源。`, key);
         return true;
       }
       patch[sourceParam] = inferred.chosen;
@@ -1527,12 +1552,14 @@ export class LarkGroupParticipation {
     const record = await this.confirmations.request({ kind: scenarioConfirmKind(pack.id), scope, requesterId: sender, replyTo, title: pack.confirm.enableTitle,
       summary: `${renderScenarioTemplate(pack.confirm.enableSummary, confirmValues(pack, params))}${others.length
         ? `最近在本群发过消息的机器人还有：${others.map(item => item.name ?? item.appId).join('、')}；来源不对可以在 Dutydeck Web 的群设置里改。` : ''}`,
+      preview: () => this.previewDraft(scope, config, duty, { entry: phrase.entry, binding: { enabled: true, packVersion: pack.version, params, requesterId: sender } }, undefined, 3_000)
+        .catch(() => previewUnavailable()),
       payload: { enabled: true, params: JSON.stringify(params), packVersion: pack.version } });
     if (!record) await this.replyText(config, event, '确认卡没发出去，请稍后再说一次，或在 Dutydeck Web 的群设置里开启。', key);
     return true;
   }
   /** 开启时的来源：回复或话题里的那条机器人消息优先；没有就沿用已有绑定；再没有就看最近 50 条消息里发过言的机器人，发得最多的排第一。 */
-  private async scenarioSources(event: LarkMessageEvent, config: StoredLarkConfig, existing: ScenarioBotRef[]): Promise<{ chosen: ScenarioBotRef[]; others: ScenarioBotRef[] }> {
+  private async scenarioSources(event: LarkMessageEvent, config: StoredLarkConfig, existing: ScenarioBotRef[]): Promise<{ chosen: ScenarioBotRef[]; others: ScenarioBotRef[]; historyFailure?: string }> {
     const service = this.options.serviceFor(config);
     const members = await this.memberCounts(config, event.chatId);
     const source = (appId: string) => { const name = members?.botList.find(item => item.appId === appId)?.name; return { appId, ...(name ? { name } : {}) }; };
@@ -1545,7 +1572,12 @@ export class LarkGroupParticipation {
       if (message && otherBot(message)) return { chosen: [source(message.sender.id!)], others: [] };
     }
     if (existing.length) return { chosen: existing, others: [] };
-    const recent = await service.listChatMessages({ chatId: event.chatId, order: 'desc', pageSize: 50 }).then(page => page.items, () => []);
+    let recent: LarkChatMessage[];
+    try {
+      recent = (await service.listChatMessages({ chatId: event.chatId, order: 'desc', pageSize: 50 })).items;
+    } catch (error) {
+      return { chosen: [], others: [], historyFailure: scenarioHistoryFailure(error) };
+    }
     const counts = new Map<string, number>();
     for (const item of recent) if (!item.deleted && otherBot(item)) counts.set(item.sender.id!, (counts.get(item.sender.id!) ?? 0) + 1);
     const ranked = [...counts].sort((left, right) => right[1] - left[1]).map(([appId]) => source(appId));
