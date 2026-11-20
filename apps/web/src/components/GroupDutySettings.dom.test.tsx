@@ -106,3 +106,29 @@ describe('group duty draft revision', () => {
     await waitFor(() => expect((screen.getByRole('button', { name: '保存分工' }) as HTMLButtonElement).disabled).toBe(true));
   });
 });
+
+it('previews edited parameters before saving and displays the full report', async () => {
+  const update = vi.spyOn(collaborationApi, 'updateDuty');
+  const preview = vi.spyOn(collaborationApi, 'previewScenario').mockResolvedValue({
+    status: 'ok', mode: 'model', limit: 75, matched: 1, skipped: 1, note: '是否回复由模型逐条判断，预演不调用模型。',
+    messages: [
+      { messageId: 'one', at: now, senderKind: 'human', excerpt: '部署问题', matched: true, reason: 'participation_observes', detail: '通过场景规则' },
+      { messageId: 'two', at: now, senderKind: 'bot', excerpt: '部署通知', matched: false, reason: 'bot_message', detail: '模型场景只看真人消息' }
+    ]
+  });
+  mount(duty(1), [scenario('A', false)]);
+  fireEvent.change(screen.getByLabelText('A 关键字'), { target: { value: '部署' } });
+  fireEvent.change(screen.getByLabelText('预演条数'), { target: { value: '75' } });
+  fireEvent.click(screen.getByRole('button', { name: '预演' }));
+  expect(await screen.findByText('部署通知')).toBeTruthy();
+  expect(screen.getByText('部署问题')).toBeTruthy();
+  expect(screen.getByText('是否回复由模型逐条判断，预演不调用模型。')).toBeTruthy();
+  expect(preview).toHaveBeenCalledWith('bot', 'group', 'A', { params: { topics: ['部署'] }, limit: 75 });
+  expect(update).not.toHaveBeenCalled();
+  fireEvent.change(screen.getByLabelText('A 关键字'), { target: { value: '发布' } });
+  expect(screen.queryByText('部署通知')).toBeNull();
+  preview.mockResolvedValue({ status: 'unavailable', message: '无法读取群历史，请检查 im:message:readonly。' });
+  fireEvent.click(screen.getByRole('button', { name: '预演' }));
+  expect(await screen.findByText('无法读取群历史，请检查 im:message:readonly。')).toBeTruthy();
+  expect((screen.getByRole('button', { name: '保存分工' }) as HTMLButtonElement).disabled).toBe(false);
+});

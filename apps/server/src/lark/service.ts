@@ -12,7 +12,7 @@ import type { ContactIdType, ContactUser } from './owner-identity.js';
 import { executeWithLarkGate, resolveLarkGateConfig, LarkCircuitOpenError } from './api-gate.js';
 import { buildLarkCardActions, buildLarkCardDetailButton, buildLarkCardFollowUpActions, safeLarkWebUrl, type LarkCardCapabilities } from './card-actions.js';
 import { larkSessionDetailUrl } from './detail-link.js';
-import { collapsiblePanel, countCardComponents } from './card-elements.js';
+import { clipCardField, collapsiblePanel, countCardComponents } from './card-elements.js';
 import type { LarkScenarioRecallLine } from './scenario-recall.js';
 import { larkConclusionHeadline, larkElapsedLabel, larkStoppedAtLabel, larkUserStatus } from './card-status.js';
 
@@ -292,10 +292,6 @@ const statePresentation = {
   reconcile_required: { title: '需要核对', color: 'orange', template: 'orange' },
   legacy_unresolved: { title: '需要核对', color: 'orange', template: 'orange' }
 } as const;
-const clipCardField = (value: string, limit: number) => {
-  const characters = Array.from(value);
-  return characters.length <= limit ? value : `${characters.slice(0, Math.max(1, limit - 1)).join('')}…`;
-};
 // 标题按显示宽度截（汉字算 2），约 22 个汉字：电脑上一行，手机上最多两行。
 const clipTitleWidth = (text: string, limit = 44) => {
   let width = 0;

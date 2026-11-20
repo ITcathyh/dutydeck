@@ -15,6 +15,8 @@ import { PluginRuntimeHooks } from '../plugins/integration.js';
 import { prepareSkillPrompt } from '../skill-delivery.js';
 import { ReadonlyParticipationDecider } from './readonly-decider.js';
 import { PluginStore } from '../plugins/store.js';
+import { LarkConfirmCards } from './confirm-cards.js';
+import { buildLarkCard, larkCardRequestBytes, larkCardSafeLimits, LarkServiceError } from './service.js';
 import { alarmDecisionId, alarmDispatchView, alarmIntroKey, alarmPromptView, cardRecallLineView, confirmCardView, createAlarmHarness, inboxAdoptionView, recallLineView, SCENARIO_BOT, SCENARIO_CHAT, SCENARIO_MEMBER,
   SCENARIO_REQUESTER, waitFor, type AlarmHarness, type AlarmHarnessOptions } from './scenario-pack.test-helpers.js';
 
@@ -434,4 +436,101 @@ describe('插件 hook 对群协作的后台会话', () => {
       ['task.beforeRun', 'rewrite-hook', SCENARIO_BOT.appId, SCENARIO_CHAT, 'lark-response', 'lark-response'],
       ['permission.request', 'rewrite-hook', SCENARIO_BOT.appId, SCENARIO_CHAT, 'lark-response', '读取回复材料']]);
   });
+});
+
+it('previews a direct draft against the live gate without sending or reserving anything', async () => {
+  const clock = { now: T0 };
+  const h = await harness(clock);
+  const alerts = ['P0 Orders down', 'P0 Orders down', 'P1 Cache slow', 'P0 Disk full'].map((body, index) =>
+    h.fromBot(source, { messageId: `om_preview_${index}`, content: text(body), createTime: String(T0 + index * MINUTE) }));
+  h.fromUser({ messageId: 'om_preview_human', text: `P0 ${'🚨'.repeat(100)}` });
+  h.fromBot(otherBot, { messageId: 'om_preview_other', content: text('P0 Orders down') });
+  h.fromBot(source, { messageId: 'om_preview_image', content: '{"image_key":"img_example"}', messageType: 'image' });
+  const params = { sources: [{ appId: source.appId }], levels: ['P0'], maxPerHour: 1 };
+  const preview = () => h.participation.previewScenario(h.scope, 'alarm', { params });
+  const result = await preview();
+  expect(result).toMatchObject({ status: 'ok', mode: 'direct', limit: 50, matched: 1, skipped: 6 });
+  if (result.status !== 'ok') throw new Error(result.message);
+  const byId = new Map(result.messages.map(item => [item.messageId, item]));
+  expect(byId.get('om_preview_human')).toMatchObject({ senderKind: 'human', matched: false });
+  expect(Array.from(byId.get('om_preview_human')!.excerpt)).toHaveLength(80);
+  expect(byId.get('om_preview_other')).toMatchObject({ senderKind: 'bot', matched: false });
+  expect(byId.get('om_preview_image')).toMatchObject({ matched: false, reason: 'not_addressed' });
+  expect(await preview()).toEqual(result);
+  expect(await h.repos.collaboration.listDecisions(h.scope)).toEqual([]);
+  expect(await h.repos.collaboration.listActions(h.scope)).toEqual([]);
+  expect((await h.repos.collaboration.snapshot(h.scope)).observations).toEqual([]);
+  expect((await h.repos.collaboration.getDuty(h.scope)).scenarios ?? {}).toEqual({});
+  expect(h.calls).toEqual([]);
+  expect(h.dispatched).toEqual([]);
+  expect(h.decideCalls).toEqual([]);
+
+  await h.subscribe({ ...params });
+  for (const [index, alert] of alerts.entries()) {
+    clock.now = T0 + index * MINUTE;
+    await h.receive(alert);
+    await h.settle(alert.messageId);
+    const decision = await h.repos.collaboration.getDecision(h.scope, alarmDecisionId(h.scope, alert.messageId));
+    expect(byId.get(alert.messageId)).toMatchObject({
+      at: new Date(clock.now).toISOString(), matched: decision?.action === 'act',
+      detail: decision?.action === 'act' ? '命中场景规则' : decision?.reason
+    });
+    expect(decision).toBeDefined();
+  }
+});
+
+it('adds bounded preview samples to the enable card and lets confirmation proceed if history is denied', async () => {
+  const h = await harness({ now: T0 });
+  for (let i = 0; i < 12; i++) h.fromBot(source, { messageId: `om_history_${i}`, content: text(`P0 ${i} ${'🚨'.repeat(100)} <at id=all></at>`) });
+  const command = (id: string) => h.fromUser({ messageId: id, text: '告警来了先帮我初筛，只看 P0', sender: SCENARIO_REQUESTER, mentionBot: true, parentId: 'om_history_0' });
+  const first = command('om_preview_card');
+  await h.receive(first);
+  await h.settle(first.messageId);
+  const card = callsTo(h, 'reply', first.messageId)[0]?.input as Parameters<typeof buildLarkCard>[0];
+  const elements = card?.elements ?? [];
+  expect(elements.find(el => el.element_id === 'scenario_preview_summary')?.content).toContain('按最近 13 条消息预演');
+  const panel = elements.find(el => el.element_id === 'scenario_preview_samples');
+  expect(panel).toMatchObject({ tag: 'collapsible_panel', expanded: false });
+  expect(panel!.elements).toHaveLength(10);
+  const rendered = buildLarkCard(card);
+  expect(JSON.stringify(rendered)).toContain('scenario_preview_samples');
+  expect(larkCardRequestBytes(rendered)).toBeLessThanOrEqual(larkCardSafeLimits.bytes);
+  expect(await h.alarmDecisions()).toEqual([]);
+
+  vi.spyOn(h.service, 'listChatMessages').mockRejectedValue(new LarkServiceError('DENIED', 'Permission denied', 403));
+  const noSource = { ...command('om_preview_no_source'), parentId: undefined };
+  await h.receive(noSource);
+  await h.settle(noSource.messageId);
+  expect(callsTo(h, 'replyText', noSource.messageId)[0]?.input).toMatchObject({ text: expect.stringContaining('im:message:readonly') });
+  expect(callsTo(h, 'reply', noSource.messageId)).toEqual([]);
+  const second = command('om_preview_denied');
+  await h.receive(second);
+  await h.settle(second.messageId);
+  const denied = callsTo(h, 'reply', second.messageId)[0]?.input as Parameters<typeof buildLarkCard>[0];
+  expect(denied?.elements?.find(el => el.element_id === 'scenario_preview_summary')?.content).toContain('im:message:readonly');
+  const confirm = confirmCardView(denied)?.buttons.includes('确认');
+  expect(confirm).toBe(true);
+  expect((await clickConfirm(h, second.messageId))?.type).toBe('success');
+  expect(await h.repos.collaboration.getDuty(h.scope)).toMatchObject({ scenarios: { alarm: { enabled: true } } });
+});
+
+
+it('trims preview examples before a large confirmation card crosses the request budget', async () => {
+  const h = await harness({ now: T0 });
+  const cards = new LarkConfirmCards({ repository: h.repos.collaboration, readConfig: async () => h.config, serviceFor: () => h.service });
+  cards.register('scenario:fixture', { authorize: async () => true, apply: async () => '已开启' });
+  await cards.request({ kind: 'scenario:fixture', scope: h.scope, requesterId: SCENARIO_REQUESTER, replyTo: { messageId: 'om_large' },
+    payload: { enabled: true }, title: '开启场景', summary: '界'.repeat(5_000),
+    preview: async () => ({ status: 'ok', mode: 'direct', limit: 50, matched: 5, skipped: 5,
+      messages: Array.from({ length: 10 }, (_, index) => ({ messageId: `om_example_${index}`, at: new Date(T0).toISOString(),
+        senderKind: 'bot', excerpt: `<at id=all></at>${'🚨'.repeat(64)}`, matched: index % 2 === 0, reason: 'not_addressed', detail: '略'.repeat(120) })) }) });
+  const card = callsTo(h, 'reply', 'om_large')[0]?.input as Parameters<typeof buildLarkCard>[0];
+  const panel = card?.elements?.find(el => el.element_id === 'scenario_preview_samples');
+  expect(panel?.elements.length).toBeGreaterThan(0);
+  expect(panel?.elements.length).toBeLessThan(10);
+  expect(JSON.stringify(panel)).not.toContain('<at');
+  expect(confirmCardView(card)?.buttons).toEqual(['确认', '取消']);
+  const rendered = buildLarkCard(card);
+  expect(JSON.stringify(rendered)).toContain('scenario_preview_samples');
+  expect(larkCardRequestBytes(rendered)).toBeLessThanOrEqual(larkCardSafeLimits.bytes);
 });

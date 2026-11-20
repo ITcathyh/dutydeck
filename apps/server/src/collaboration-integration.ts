@@ -42,8 +42,8 @@ export function createCollaborationIntegration(options: CollaborationIntegration
   const { repositories: stored, runtime, groups } = options;
   // Keep the saved group override distinct from the effective Bot default. All collaboration
   // consumers (including snapshots, bootstrap and management) use the same resolution.
-  const effectiveSettings = async (settings: CollaborationSettings): Promise<CollaborationSettings> => settings.inheritParticipation
-    ? { ...settings, participation: resolveParticipation({ inheritParticipation: true, botDefaultParticipation: (await readLarkConfig(stored.config, settings.scope.appId))?.defaultGroupParticipation }).participation }
+  const effectiveSettings = async (settings: CollaborationSettings, readOnly = false): Promise<CollaborationSettings> => settings.inheritParticipation
+    ? { ...settings, participation: resolveParticipation({ inheritParticipation: true, botDefaultParticipation: (await readLarkConfig(stored.config, settings.scope.appId, { readOnly }))?.defaultGroupParticipation }).participation }
     : settings;
   const repos: RepositoryBundle = { ...stored, collaboration: {
     ...stored.collaboration,
@@ -97,10 +97,10 @@ export function createCollaborationIntegration(options: CollaborationIntegration
       return policy(scope, installationOwnerTaskActor, action === 'observe' ? 'group_tools.read' : 'group_tools.send');
     } catch { return false; }
   };
-  const readConfig = async (appId: string, chatId?: string) => {
-    const config = await readLarkConfig(repos.config, appId);
+  const readConfig = async (appId: string, chatId?: string, readOnly = false) => {
+    const config = await readLarkConfig(repos.config, appId, { readOnly });
     if (!config || !chatId) return config;
-    return groups.resolved(config, chatId);
+    return groups.resolved(config, chatId, readOnly);
   };
   const roleParticipationSettings = async (settings: CollaborationSettings): Promise<CollaborationSettings> => {
     if (settings.participation !== 'off') return settings;
@@ -130,6 +130,7 @@ export function createCollaborationIntegration(options: CollaborationIntegration
     polishReply: options.polishReply,
     withDelivery: (scope, actionId, send) => deliveries.run(scope, actionId, send),
     repository: roleParticipationRepo, decider, readConfig, serviceFor: client, readMemory: options.readMemory, usageRefusal: options.usageRefusal, log: options.log, scenarios: options.scenarios,
+    readPreviewSettings: async scope => roleParticipationSettings(await effectiveSettings(await stored.collaboration.getSettings(scope), true)),
     readTeamContext: (scope, query) => teamContext.read(scope, query),
     authorizeTeamContext: (scope, context) => teamContext.authorize(scope, context),
     // 发起人本人能对机器人说话就能处理自己的请求；替别人确认要本群操作员或管理员（run.interrupt 的现有授权）。
@@ -175,7 +176,7 @@ export function createCollaborationIntegration(options: CollaborationIntegration
     try { const { config } = await live(scope, false, propagateReadErrors); return (await client(config).getMessage(delivery.rootMessageRef)).chatId === scope.chatId; }
     catch (error) { if (propagateReadErrors) throw error; return false; }
   };
-  const service = new CollaborationService({ repositories: repos, authorize,
+  const service = new CollaborationService({ repositories: repos, authorize, authorizeReadOnly: previewAuthorize,
     resolveScheduleScope: async scope => {
       const { owner, binding } = await live(scope);
       const identity = await repos.remoteIdentityFacts.getCurrentByChannelBot(owner.channelBotId);

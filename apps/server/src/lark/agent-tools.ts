@@ -20,6 +20,7 @@ import { readTaskAttemptResult, resolveTaskResultAttemptId, type TaskResultRepos
 import { withLarkContextReadTimeout } from './context-read-timeout.js';
 import type { LarkTeamContextReader } from './team-context.js';
 import { parseLarkMessageContent } from './message-content.js';
+import { isLarkPermissionError, larkHistoryScopes, larkPermissionNextStep } from './history-permission.js';
 import { escapeCardInline, neutralizeCardTags } from './card-elements.js';
 import { larkMemoryToolsPrompt, type LarkGroupMemoryScope } from './memory.js';
 import { stableMemoryCommand } from './memory-view.js';
@@ -279,26 +280,18 @@ class GroupMessageCursor {
 const operationScopes = {
   peers: ['im:chat.members:read'],
   members: ['im:chat.members:read'],
-  messages: ['im:message:readonly', 'im:chat:read'],
+  messages: larkHistoryScopes,
   message: ['im:message:readonly'],
   send: ['im:message'],
   reply: ['im:message', 'im:message:readonly']
 } as const;
-
-function isPermissionError(error: unknown) {
-  if (!(error instanceof LarkServiceError)) return false;
-  const upstreamCode = Number(error.details?.upstreamCode);
-  return Boolean(error.statusCode === 403 || error.details?.consoleUrl || error.details?.permissionViolations
-    || [99991661, 99991663, 99991668, 99991672, 99991679].includes(upstreamCode)
-    || /permission|forbidden|access denied|权限|无权/i.test(error.message));
-}
 
 function authorizationError(context: ToolContext, operation: keyof typeof operationScopes, error: LarkServiceError) {
   const requiredScopes = [...operationScopes[operation]];
   const authorizationUrl = typeof error.details?.consoleUrl === 'string'
     ? error.details.consoleUrl
     : `https://open.larkoffice.com/app/${encodeURIComponent(context.appId)}/auth`;
-  const instruction = `当前机器人「${context.config.name ?? context.appId}」缺少飞书 bot 权限：${requiredScopes.join('、')}。请让管理员在飞书开放平台开通权限并发布应用版本，然后重试。bot 身份不能通过 lark-cli auth login 补权；不要向用户索要 App Secret 或访问令牌。授权地址：${authorizationUrl}`;
+  const instruction = `当前机器人「${context.config.name ?? context.appId}」缺少飞书 bot 权限：${requiredScopes.join('、')}。${larkPermissionNextStep}bot 身份不能通过 lark-cli auth login 补权；不要向用户索要 App Secret 或访问令牌。授权地址：${authorizationUrl}`;
   return new AgentGroupToolError('GROUP_TOOL_AUTHORIZATION_REQUIRED', instruction, 403, {
     requiredScopes,
     authorizationUrl,
@@ -612,8 +605,9 @@ export class LarkAgentToolsService {
     catch (error) {
       if (error instanceof OrdinarySendError) throw new AgentGroupToolError(error.code, error.message, error.statusCode);
       if (error instanceof Error && 'code' in error && error.code === 'FINAL_CONTENT_CONFLICT') throw new AgentGroupToolError('FINAL_CONTENT_CONFLICT', error.message, 409);
-      if (isPermissionError(error)) throw authorizationError(context, operation, error as LarkServiceError);
-      if (error instanceof LarkServiceError) throw groupLarkError(operation, error);
+      if (error instanceof LarkServiceError) {
+        throw isLarkPermissionError(error) ? authorizationError(context, operation, error) : groupLarkError(operation, error);
+      }
       throw error;
     }
   }

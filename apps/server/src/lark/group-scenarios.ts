@@ -1,14 +1,14 @@
 // 群里的场景包：哪些包对这个机器人生效、来源消息命中哪个包、群里开关的说法、/status 的行。
 // 包作者写的正则一律经宿主的正则执行器跑（一个包一次调用，超时或出错只让这个包弃权），provider 经截止时间封装调用。
 
-import { errorMessage as errorText, isDecisionGate, resolveScenarioParams, scenarioBindingStatus, scenarioRecordOf, scenarioSourceBots, type CollaborationDecision, type CollaborationDuty, type ScenarioBinding, type ScenarioMessage, type ScenarioPack } from '@dutydeck/shared';
+import { errorMessage as errorText, isDecisionGate, resolveScenarioParams, scenarioBindingStatus, scenarioRecordOf, scenarioSourceBots, scenarioTriggerSources, type CollaborationDecision, type CollaborationDuty, type ScenarioBinding, type ScenarioMessage, type ScenarioPack } from '@dutydeck/shared';
 import { ScenarioRegistry, type RegisteredScenarioPack } from '../plugins/scenario-registry.js';
 import { scenarioRegexRunner, type ScenarioRegexJob, type ScenarioRegexRunner } from '../plugins/scenario-regex.js';
 import { stripMentionPlaceholders } from './participation-rules.js';
 import { keywordsMatch } from './scenario-fingerprint.js';
 import { scenarioSummary } from './scenario-template.js';
 
-export type ScenarioMatch = { matched: false } | { matched: true; dedupeKey?: string } | { matched: true; abstained: string };
+export type ScenarioMatch = { matched: false; detail: string } | { matched: true; dedupeKey?: string } | { matched: true; abstained: string };
 export type ScenarioPhrase = { entry: RegisteredScenarioPack; kind: 'enable'; captures: Record<string, string[]> } | { entry: RegisteredScenarioPack; kind: 'disable' };
 
 /** 判定快照里冻结的场景（model 包）。 */
@@ -50,7 +50,7 @@ export class LarkScenarios {
 
   /** 本群开着的 model 包（开启、大版本一致），按包 id 排序：一条消息命中多个时取第一个。 */
   model(config: { appId: string; workspace?: string }, duty: Pick<CollaborationDuty, 'scenarios'>): Array<{ entry: RegisteredScenarioPack; binding: ScenarioBinding }> {
-    return this.open(config, duty, 'model').sort((a, b) => a.entry.pack.id < b.entry.pack.id ? -1 : a.entry.pack.id > b.entry.pack.id ? 1 : 0);
+    return this.open(config, duty, 'model');
   }
 
   /**
@@ -67,25 +67,28 @@ export class LarkScenarios {
         return [];
       }
       return [{ entry, binding: { ...binding, params } }];
-    });
+    }).sort((a, b) => a.entry.pack.id < b.entry.pack.id ? -1 : a.entry.pack.id > b.entry.pack.id ? 1 : 0);
   }
 
   /**
-   * 来源消息过不过这个包的匹配：消息类型 → 文字包含任一参数值（空列表不匹配）→ 正则 → provider，任一步不过就不匹配，不留记录。
+   * 来源消息过不过这个包的匹配：direct 来源 → 消息类型 → 文字包含任一参数值（空列表不匹配）→ 正则 → provider，任一步不过就不匹配，不留记录。
    * 正则或 provider 出错、超时时返回 abstained。包声明了去重 provider 时，取它 match 返回的 dedupeKey。
    */
   async match(entry: RegisteredScenarioPack, binding: ScenarioBinding, message: ScenarioMessage, context?: { scope: { appId: string; chatId: string }; cwd?: string }): Promise<ScenarioMatch> {
     const { pack } = entry;
+    if (pack.mode === 'direct' && !scenarioTriggerSources(pack, binding).some(source => source.appId === message.senderAppId)) {
+      return { matched: false, detail: '不是这个场景的来源机器人' };
+    }
     const { messageTypes, match } = pack.trigger;
-    if (messageTypes && !messageTypes.includes(message.messageType)) return { matched: false };
+    if (messageTypes && !messageTypes.includes(message.messageType)) return { matched: false, detail: '消息类型不在场景范围内' };
     if (match?.textAnyParam) {
       const values = stringList(binding.params[match.textAnyParam]);
-      if (!values.length || !keywordsMatch(values, message.text)) return { matched: false };
+      if (!values.length || !keywordsMatch(values, message.text)) return { matched: false, detail: '不含场景配置的关键字' };
     }
     if (match?.pattern) {
       try {
         const [result] = await this.regex.run([{ source: match.pattern.source, ...(match.pattern.flags ? { flags: match.pattern.flags } : {}), input: message.text }]);
-        if (!result?.matched) return { matched: false };
+        if (!result?.matched) return { matched: false, detail: '正文不符合场景规则' };
       } catch (error) {
         this.log?.warn({ scenario: pack.id, error: errorText(error) }, '场景包匹配正则出错，这条消息弃权');
         return { matched: true, abstained: `匹配正则出错：${errorText(error)}` };
@@ -96,7 +99,7 @@ export class LarkScenarios {
       if (!id) continue;
       const result = await entry.providers.get(id)!.match({ message, params: binding.params, ...context });
       if (result.status !== 'ok') return { matched: true, abstained: result.status === 'timeout' ? `provider ${id} 超时` : `provider ${id} 出错：${result.error}` };
-      if (id === match?.provider && !result.value.matched) return { matched: false };
+      if (id === match?.provider && !result.value.matched) return { matched: false, detail: '场景插件未匹配这条消息' };
       if (pack.dedupe && 'provider' in pack.dedupe && id === pack.dedupe.provider) dedupeKey = result.value.dedupeKey;
     }
     return { matched: true, ...(dedupeKey ? { dedupeKey } : {}) };

@@ -8,6 +8,7 @@ export type CollaborationAuthorization = (scope: CollaborationScope, actorId: st
 export interface CollaborationServiceOptions {
   repositories: CollaborationRepositories;
   authorize: CollaborationAuthorization;
+  authorizeReadOnly?: CollaborationAuthorization;
   resolveScheduleScope(scope: CollaborationScope): Promise<{ channelBotId: string; groupBindingId?: string; identityRef: string; secretRef: string }>;
   validateDelivery?: (scope: CollaborationScope, delivery: ScheduleDefinition['delivery']) => Promise<boolean>;
   now?: () => Date;
@@ -58,8 +59,9 @@ export class CollaborationService {
   private readonly locks = new Map<string, Promise<unknown>>();
   constructor(readonly options: CollaborationServiceOptions) { this.repositories = options.repositories; }
   private now() { return this.options.now?.() ?? new Date(); }
-  async require(scope: CollaborationScope, actorId: string, action: Parameters<CollaborationAuthorization>[2]) {
-    if (!actorId || !await this.options.authorize(scope, actorId, action)) throw new RuntimeError('COLLABORATION_FORBIDDEN', 'Current actor is not authorized', 403);
+  async require(scope: CollaborationScope, actorId: string, action: Parameters<CollaborationAuthorization>[2], readOnly = false) {
+    const authorize = readOnly ? this.options.authorizeReadOnly ?? this.options.authorize : this.options.authorize;
+    if (!actorId || !await authorize(scope, actorId, action)) throw new RuntimeError('COLLABORATION_FORBIDDEN', 'Current actor is not authorized', 403);
   }
   private async command(scope: CollaborationScope, actorId: string, id: string, kind: string, input: unknown) {
     const digest = executionJsonDigest(input);

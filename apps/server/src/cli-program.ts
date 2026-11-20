@@ -932,6 +932,11 @@ Examples:
   withTarget(groupSettings.command('show <chat-id>').description('Print a group binding, its effective settings, collaboration settings, duty and scenario packs')
     .option('--app <app-id>', 'Bot to show when several bots share the group'))
     .action((chatId, options, command) => runSettings('group-show', command, { chatId, appId: options.app }));
+  withTarget(groupSettings.command('preview <chat-id> <scenario-id>').description('Preview scenario rules against recent group messages without enabling the scenario')
+    .option('--app <app-id>', 'Bot to use when several bots share the group')
+    .option('--params <json>', 'Draft parameter overrides as a JSON object')
+    .option('--limit <count>', 'Recent messages to inspect (default 50, maximum 200)'))
+    .action((chatId, scenarioId, options, command) => runSettings('group-preview', command, { chatId, scenarioId, appId: options.app, scenarioParams: options.params, limit: options.limit }));
   withTarget(groupSettings.command('set <chat-id> <key=value...>').description('Change group settings; keys not given keep their values')
     .option('--app <app-id>', 'Bot to change when several bots share the group'))
     .addHelpText('after', `${fieldsHelp(groupFields)}

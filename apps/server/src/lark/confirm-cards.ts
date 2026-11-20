@@ -7,10 +7,12 @@
 // 复用方式：按种类注册一个 handler（谁能确认、确认后做什么），再用 request 发卡。
 
 import { jsonSha256 as digest } from '../hash.js';
-import type { CollaborationAction, CollaborationRepository, CollaborationScope } from '@dutydeck/shared';
-import { buildLarkConfirmElements, parseLarkConfirmValue } from './card-actions.js';
+import type { CollaborationAction, CollaborationRepository, CollaborationScope, ScenarioPreview } from '@dutydeck/shared';
+import { buildLarkConfirmElements, parseLarkConfirmValue, type LarkCardElement } from './card-actions.js';
 import type { StoredLarkConfig } from './config.js';
-import type { LarkCardService } from './service.js';
+import { buildLarkCard, type LarkCardService, type LarkReplyInput } from './service.js';
+import { clipCardField, collapsiblePanel, markdownElement, neutralizeCardTags } from './card-elements.js';
+import { previewSenderLabels } from './scenario-preview.js';
 
 export interface LarkConfirmRequest {
   /** 确认单种类，决定由哪个 handler 处理，例如 participation_level。 */
@@ -23,6 +25,7 @@ export interface LarkConfirmRequest {
   title: string;
   /** 一句话：改成什么、会有什么变化。 */
   summary: string;
+  preview?(): Promise<ScenarioPreview>;
   /** 确认后交给 handler.apply 的内容。 */
   payload: Record<string, string | number | boolean>;
   /** 同一条消息下要发多张同种类的卡时用它区分；缺省按回复的那条消息去重。 */
@@ -82,9 +85,11 @@ export class LarkConfirmCards {
       const config = await this.options.readConfig(input.scope.appId, input.scope.chatId);
       if (!config?.listening) throw new Error('机器人未在监听');
       // 等人点的卡按进行中且等人处理来画（橙色），与审批卡、定时委托确认卡一致。
-      const card = await this.options.serviceFor(config).reply({ messageId: input.replyTo.messageId, replyInThread: Boolean(input.replyTo.threadId),
+      const cardInput: LarkReplyInput = { messageId: input.replyTo.messageId, replyInThread: Boolean(input.replyTo.threadId),
         state: 'running', readOnly: true, retryable: false, ...(config.adhdMode && input.kind === 'participation_act' ? { adhdMode: true } : {}), taskName: input.title, statusLabel: '待确认', awaitingHuman: true,
-        elements: buildLarkConfirmElements({ confirmId: id, chatId: input.scope.chatId, body: input.summary, pending: true, ...(input.confirmLabel ? { confirmLabel: input.confirmLabel } : {}) }), idempotencyKey: id.slice(0, 50) });
+        elements: buildLarkConfirmElements({ confirmId: id, chatId: input.scope.chatId, body: input.summary, pending: true, ...(input.confirmLabel ? { confirmLabel: input.confirmLabel } : {}) }), idempotencyKey: id.slice(0, 50) };
+      if (input.preview) cardInput.elements = previewElements(cardInput, await input.preview());
+      const card = await this.options.serviceFor(config).reply(cardInput);
       const saved = await repo.updateAction(input.scope, id, { expectedRevision: begun.action.revision, status: 'intent', receipt: card.messageId });
       return recordOf(saved);
     } catch (error) {
@@ -156,4 +161,38 @@ function recordOf(action: CollaborationAction): LarkConfirmRecord {
   return { id: action.id, kind: payload.kind ?? action.kind.slice('confirm.'.length), scope: action.scope, requesterId: action.requesterId,
     replyTo: payload.replyTo ?? { messageId: '' }, title: payload.title ?? '确认', summary: payload.summary ?? '', payload: payload.payload ?? {},
     expiresAt: payload.expiresAt ?? new Date(0).toISOString(), ...(action.receipt ? { cardMessageId: action.receipt } : {}) };
+}
+
+
+function previewElements(card: LarkReplyInput, preview: ScenarioPreview): LarkCardElement[] {
+  const elements = card.elements!;
+  const summaryId = 'scenario_preview_summary';
+  const panelId = 'scenario_preview_samples';
+  const summary = preview.status === 'unavailable' ? preview.message
+    : preview.messages.length === 0 ? '群里暂无可预演的历史消息。'
+    : `按最近 ${preview.messages.length} 条消息预演：${preview.mode === 'model' ? '候选' : '会接手'} ${preview.matched} 条，${preview.mode === 'model' ? '未入选' : '不会接手'} ${preview.skipped} 条。`;
+  const rows = preview.status === 'ok' ? [...preview.messages] : [];
+  // 确保两类结果都有样例，再补最新的消息。
+  const firstMatched = rows.findIndex(row => row.matched);
+  const firstSkipped = rows.findIndex(row => !row.matched);
+  const first = [firstMatched, firstSkipped].filter(index => index >= 0);
+  const samples = [...first.map(index => rows[index]!), ...rows.filter((_row, index) => !first.includes(index))].slice(0, 10);
+  const summaryElement = markdownElement(summaryId, summary + (preview.status === 'ok' && preview.note ? `
+${preview.note}` : ''));
+  const sampleElements = samples.map((row, index) => {
+    const label = row.matched ? preview.status === 'ok' && preview.mode === 'model' ? '候选' : '会接手' : '跳过';
+    // 用普通文本显示群正文，防止群消息被解释成卡片链接或 @。
+    return { tag: 'div', element_id: `scenario_preview_sample_${index}`, text: { tag: 'plain_text', content:
+      `${row.at} · ${previewSenderLabels[row.senderKind]} · ${label} · ${neutralizeCardTags(clipCardField(row.detail, 120))}
+${neutralizeCardTags(row.excerpt) || '（无正文）'}` } };
+  });
+  for (let count = sampleElements.length; count >= 0; count--) {
+    const panel = count ? [collapsiblePanel(panelId, { tag: 'plain_text', content: `查看预演样例（${count} 条）` }, sampleElements.slice(0, count))] : [];
+    const expanded = [elements[0]!, summaryElement, ...panel, ...elements.slice(1)];
+    // 使用实际渲染器核对预算。默认请求体已为外层字段留空间，再预留 Agent 名称。
+    const rendered = buildLarkCard({ ...card, agentName: '😀'.repeat(64), showAgentName: true, elements: expanded });
+    const ids = new Set(rendered.body.elements.flatMap(element => 'element_id' in element ? [element.element_id] : []));
+    if (ids.has(summaryId) && (!count || ids.has(panelId))) return expanded;
+  }
+  return elements;
 }

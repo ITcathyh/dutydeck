@@ -41,7 +41,7 @@ export const larkScenarioAdoptionSchema = z.union([
 ]);
 
 /** decideDirect 的窗口：本包去重窗口内起了任务的场景记录、查询有没有被截断、读到的最旧一条的时间。 */
-export interface DirectWindow { records: readonly CollaborationDecision[]; truncated: boolean; oldestReadAt?: string }
+export interface DirectWindow { records: readonly Pick<CollaborationDecision, 'action' | 'status' | 'createdAt' | 'inputSnapshot'>[]; truncated: boolean; oldestReadAt?: string }
 /** 从 listScenarioRecords 的结果取窗口，转成显式对象（不依赖数组上的不可枚举属性）。 */
 export function directWindow(listed: ListedItems<CollaborationDecision>): DirectWindow {
   return { records: [...listed], truncated: listed.truncated === true, ...(listed.length ? { oldestReadAt: listed.at(-1)!.createdAt } : {}) };
@@ -81,7 +81,7 @@ export function decideDirect(input: DirectDecisionInput): DirectDecision {
   const dedupeMs = limits.dedupeWindowHours * HOUR_MS;
   const keywords = pack.trigger.filter ? stringList(binding.params[pack.trigger.filter.keywordsAnyParam]) : [];
   const counted = window.records.filter(item => scenarioRecordOf(item)?.packId === pack.id && item.action === 'act' && item.status !== 'failed');
-  const within = (item: CollaborationDecision, ms: number) => Date.parse(item.createdAt) >= now - ms;
+  const within = (item: { createdAt: string }, ms: number) => Date.parse(item.createdAt) >= now - ms;
   const outcome: ScenarioOutcome = !keywordsMatch(keywords, input.text) ? 'filtered'
     : input.responderAppId && input.responderAppId !== self.appId ? 'not_responder'
     : window.truncated && (!window.oldestReadAt || Date.parse(window.oldestReadAt) >= now - dedupeMs) ? 'window_incomplete'
