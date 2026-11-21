@@ -1,3 +1,4 @@
+import { queryKeys } from '../queries';
 import { useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { ClipboardList } from 'lucide-react';
@@ -20,7 +21,7 @@ export function PlanPanel({ session, tasks }: { session: Session; tasks: Task[] 
     onSuccess: (_result, { action }) => {
       setFeedback('');
       toastStore.push({ kind: 'success', key: `plan-${session.id}`, title: done[action] });
-      void qc.invalidateQueries({ queryKey: ['tasks', session.id] });
+      void qc.invalidateQueries({ queryKey: queryKeys.tasks(session.id) });
       void qc.invalidateQueries({ queryKey: ['plan', session.id] });
     },
     onError: error => {

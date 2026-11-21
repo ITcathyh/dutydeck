@@ -1,3 +1,4 @@
+import { queryKeys } from './queries';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import { api, type Session } from './api';
@@ -33,7 +34,7 @@ export function useSessionStream(sessionId: string | undefined, runId: string | 
       if (refreshingTasks) return refreshingTasks;
       refreshingTasks = (async () => {
         try {
-          const filters = { queryKey: ['tasks', sessionId], exact: true };
+          const filters = { queryKey: queryKeys.tasks(sessionId), exact: true };
           // Query deduplicates a cold GET even when invalidated. Wait for that
           // snapshot before consuming the demand for a newer authoritative read.
           if (qc.getQueryState(filters.queryKey)?.fetchStatus === 'fetching') {
@@ -69,7 +70,7 @@ export function useSessionStream(sessionId: string | undefined, runId: string | 
       }
       const newTask = batch.some(event => event.type === 'task' && !cached?.events.some(item => item.sequence === event.sequence));
       qc.setQueryData<EventWindow>(['events', sessionId], current => mergeReconciledEvents(current, batch));
-      if (statuses.length) qc.setQueryData<Session[]>(['sessions'], current => current?.map(session => {
+      if (statuses.length) qc.setQueryData<Session[]>(queryKeys.sessions(), current => current?.map(session => {
         if (session.id !== sessionId) return session;
         const updated = statuses.reduce(applyStatusEvent, session);
         recordSessionStatusUpdates(qc, updated, statuses);
@@ -125,7 +126,7 @@ export function useSessionStream(sessionId: string | undefined, runId: string | 
           const takeSnapshots = snapshotsRequired; snapshotsRequired = false;
           const snapshots = takeSnapshots ? Promise.all([
             refreshTasks(),
-            qc.refetchQueries({ queryKey: ['sessions'], exact: true }, { throwOnError: true })
+            qc.refetchQueries({ queryKey: queryKeys.sessions(), exact: true }, { throwOnError: true })
           ]) : Promise.resolve();
           // Attach a handler immediately while pages are being read.
           void snapshots.catch(() => {});
@@ -154,7 +155,7 @@ export function useSessionStream(sessionId: string | undefined, runId: string | 
           await snapshots;
           await refreshingTasks;
           if (!alive(generation)) return;
-          for (const key of [['tasks', sessionId], ['sessions']]) {
+          for (const key of [queryKeys.tasks(sessionId), queryKeys.sessions()]) {
             if (qc.getQueryState(key)?.status === 'error') throw new Error('Snapshot refresh failed');
           }
           if (requestVersion !== recoveryVersion) continue;

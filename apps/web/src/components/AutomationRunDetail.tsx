@@ -1,3 +1,4 @@
+import { tasksQuery } from '../queries';
 import { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { currentInstance } from '../instance';
@@ -19,7 +20,7 @@ export function AutomationRunDetail({ sessionId, scheduleId, occurrenceId }: { s
   const executionId = detail.data?.executionSessionId;
   const needsRecovery = detail.data?.occurrence.runStatus === 'blocked';
   const session = useQuery({ queryKey: ['session', currentInstance() ?? null, executionId], queryFn: () => api.session(executionId!), enabled: Boolean(executionId) && needsRecovery, retry: false });
-  const tasks = useQuery({ queryKey: ['tasks', currentInstance() ?? null, executionId], queryFn: () => api.tasks(executionId!), enabled: Boolean(executionId) && needsRecovery, retry: false });
+  const tasks = useQuery({ ...tasksQuery(executionId, { instance: currentInstance() ?? null }), enabled: Boolean(executionId) && needsRecovery });
   const [copied, setCopied] = useState('');
   if (detail.isPending) return <Spinner label="读取本次运行"/>;
   if (detail.isError) return <Banner tone="danger" action={{ label: '重新读取', onClick: () => void detail.refetch() }}>{detail.error instanceof ApiError && detail.error.status === 404 ? '这次运行不存在或已无法定位，未跳转到最新聊天。' : `本次运行读取失败：${detail.error.message}`}</Banner>;

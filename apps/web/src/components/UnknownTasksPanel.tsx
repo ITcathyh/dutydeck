@@ -1,3 +1,4 @@
+import { queryKeys } from '../queries';
 import { useEffect, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { unknownTaskActionLabels, unknownTaskRetryWarning, unknownTaskStoppedOriginalNotice, type UnknownTaskAction } from '@dutydeck/shared';
@@ -18,7 +19,7 @@ export function UnknownTasksPanel({ session, tasks, taskId }: { session: Session
   const [confirming, setConfirming] = useState<UnknownTask>();
   const pending = tasks.filter(task => task.status === 'reconcile_required').map(task => task.id).join(',');
   const unknown = useQuery({ queryKey: ['unknown-tasks', currentInstance() ?? null, session.id, pending], queryFn: () => api.unknownTasks(session.id), enabled: Boolean(pending) && !session.archivedAt, retry: false });
-  const refresh = () => Promise.all([qc.invalidateQueries({ queryKey: ['unknown-tasks'] }), qc.invalidateQueries({ queryKey: ['tasks'] }), qc.invalidateQueries({ queryKey: ['automation'] }), qc.invalidateQueries({ queryKey: ['automation-schedules'] }), qc.invalidateQueries({ queryKey: ['automation-history'] }), qc.invalidateQueries({ queryKey: ['automation-run'] })]);
+  const refresh = () => Promise.all([qc.invalidateQueries({ queryKey: ['unknown-tasks'] }), qc.invalidateQueries({ queryKey: queryKeys.allTasks() }), qc.invalidateQueries({ queryKey: ['automation'] }), qc.invalidateQueries({ queryKey: ['automation-schedules'] }), qc.invalidateQueries({ queryKey: ['automation-history'] }), qc.invalidateQueries({ queryKey: ['automation-run'] })]);
   const resolve = useMutation({
     mutationFn: ({ task, action }: { task: UnknownTask; action: UnknownTaskAction }) =>
       api.resolveUnknownTask(session.id, task.taskId, { target: task.target, action, ...(action === 'retry' ? { allowDuplicateEffects: true as const } : {}) }),

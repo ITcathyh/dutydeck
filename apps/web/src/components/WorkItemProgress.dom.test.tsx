@@ -383,3 +383,12 @@ describe('WorkItemProgress 步骤耗时', () => {
     expect(stepItem('summary').textContent).not.toMatch(/已运行|用时/);
   });
 });
+
+it('refreshes cached child tasks when goal progress is reopened', async () => {
+  const item = goal();
+  item.steps[0].attempts[0].taskId = 'child-task';
+  const { qc } = mount([item]);
+  await waitFor(() => expect(api.tasks).toHaveBeenCalledWith('child/2'));
+  await waitFor(() => expect(qc.getQueryState(['tasks', 'child/2'])?.status).toBe('success'));
+  expect(qc.getQueryCache().find({ queryKey: ['tasks', 'child/2'] })?.isStale()).toBe(true);
+});

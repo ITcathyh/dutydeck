@@ -1,3 +1,4 @@
+import { queryKeys } from './queries';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useIsMutating, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api, ApiError, type Session, type SteeringResult, type Task } from './api';
@@ -78,8 +79,8 @@ export function useSessionActions(activeSessionId: string | undefined, {
       if (variables.idempotencyKey) sendOperationStore.delete(variables.draftKey, variables.idempotencyKey);
       setSendFailure(current => current?.sessionId === variables.sessionId ? undefined : current);
       acknowledgeComposerDraft(variables.draftKey, variables.submittedDraft);
-      qc.setQueryData<Task[]>(['tasks', variables.sessionId], current => current?.some(task => task.id === result.task.id) ? current : [...(current ?? []), result.task]);
-      void qc.invalidateQueries({ queryKey: ['tasks', variables.sessionId], exact: true });
+      qc.setQueryData<Task[]>(queryKeys.tasks(variables.sessionId), current => current?.some(task => task.id === result.task.id) ? current : [...(current ?? []), result.task]);
+      void qc.invalidateQueries({ queryKey: queryKeys.tasks(variables.sessionId), exact: true });
       if (result.steering && (result.task.status === 'queued' || result.steering.outcome !== 'promptRequired')) toastStore.push(steeringToast(result.steering, result.task));
     },
     onError: (error, variables) => {
@@ -103,7 +104,7 @@ export function useSessionActions(activeSessionId: string | undefined, {
   const cancelQueued = useMutation({ mutationFn: ({ sessionId, taskId, operation }: { sessionId: string; taskId: string; key: string; operation: QueueCancelOperation; prompt?: string }) => api.cancelQueued(sessionId, taskId, operation.id), onSuccess: (result, variables) => {
     const { key, operation } = variables;
     if (queueCancelOperations.get(key) !== operation) return;
-    qc.setQueryData<Task[]>(['tasks', variables.sessionId], current => current?.map(task => task.id === result.id ? result : task));
+    qc.setQueryData<Task[]>(queryKeys.tasks(variables.sessionId), current => current?.map(task => task.id === result.id ? result : task));
     setActionError(undefined);
     if (operation.editDraftKey) {
       if (result.canEditQueued === false) {
@@ -133,7 +134,7 @@ export function useSessionActions(activeSessionId: string | undefined, {
     // 撤销只能把指令重新排到队尾，拿不回原来的任务 ID 和位置，所以 description 必须说清楚，不假装能还原现场。
     queueCancelOperations.delete(key);
     const restorable = result.canEditQueued === false ? undefined : variables.prompt?.trim();
-    toastStore.push({ kind: 'success', key: `cancel-queued-${variables.taskId}`, title: '已取消 1 条待执行指令', description: restorable ? '恢复会把这条指令重新排到队列末尾，不会回到原来的位置。' : undefined, action: restorable ? { label: '重新加入队尾', run: () => api.send(variables.sessionId, restorable, 'queue', result.skillRequests, requestId()).then(() => { void qc.invalidateQueries({ queryKey: ['tasks', variables.sessionId] }); }) } : undefined });
+    toastStore.push({ kind: 'success', key: `cancel-queued-${variables.taskId}`, title: '已取消 1 条待执行指令', description: restorable ? '恢复会把这条指令重新排到队列末尾，不会回到原来的位置。' : undefined, action: restorable ? { label: '重新加入队尾', run: () => api.send(variables.sessionId, restorable, 'queue', result.skillRequests, requestId()).then(() => { void qc.invalidateQueries({ queryKey: queryKeys.tasks(variables.sessionId) }); }) } : undefined });
   }, onError: (error, { key, operation }) => {
     const current = queueCancelOperations.get(key);
     if (current && current !== operation) return;
@@ -144,15 +145,15 @@ export function useSessionActions(activeSessionId: string | undefined, {
   const cancelQueueTask = (sessionId: string, taskId: string, editDraftKey?: string) => {
     const key = queueCancelKey(sessionId, taskId);
     const operation = queueCancelOperations.get(key) ?? { id: requestId() };
-    const task = qc.getQueryData<Task[]>(['tasks', sessionId])?.find(item => item.id === taskId);
+    const task = qc.getQueryData<Task[]>(queryKeys.tasks(sessionId))?.find(item => item.id === taskId);
     operation.editDraftKey = editDraftKey;
     operation.task = editDraftKey ? operation.task ?? task : undefined;
     queueCancelOperations.set(key, operation);
     cancelQueued.mutate({ sessionId, taskId, key, operation, prompt: task?.prompt });
   };
-  const steerQueued = useMutation({ mutationFn: ({ sessionId, taskId }: { sessionId: string; taskId: string }) => api.steerQueued(sessionId, taskId), onSuccess: (_result, variables) => { setActionError(undefined); void qc.invalidateQueries({ queryKey: ['tasks', variables.sessionId] }); }, onError: error => setActionError(error.message) });
-  const injectQueued = useMutation({ mutationFn: ({ sessionId, taskId }: { sessionId: string; taskId: string }) => api.injectQueued(sessionId, taskId), onSuccess: (result, variables) => { setActionError(undefined); toastStore.push(steeringToast(result, result.task)); void qc.invalidateQueries({ queryKey: ['tasks', variables.sessionId] }); }, onError: error => setActionError(error.message) });
-  const archive = useMutation({ mutationFn: (sessionId: string) => api.archive(sessionId), onSuccess: result => { qc.setQueryData<Session[]>(['sessions'], current => current?.map(session => session.id === result.id ? result : session)); setArchiveConfirm(false); selectSession(undefined); toastStore.push({ kind: 'success', key: 'archive', title: '任务已归档', description: '历史指令和执行记录仍可在「已归档」筛选中查看。' }); }, onError: error => setActionError(error.message) });
+  const steerQueued = useMutation({ mutationFn: ({ sessionId, taskId }: { sessionId: string; taskId: string }) => api.steerQueued(sessionId, taskId), onSuccess: (_result, variables) => { setActionError(undefined); void qc.invalidateQueries({ queryKey: queryKeys.tasks(variables.sessionId) }); }, onError: error => setActionError(error.message) });
+  const injectQueued = useMutation({ mutationFn: ({ sessionId, taskId }: { sessionId: string; taskId: string }) => api.injectQueued(sessionId, taskId), onSuccess: (result, variables) => { setActionError(undefined); toastStore.push(steeringToast(result, result.task)); void qc.invalidateQueries({ queryKey: queryKeys.tasks(variables.sessionId) }); }, onError: error => setActionError(error.message) });
+  const archive = useMutation({ mutationFn: (sessionId: string) => api.archive(sessionId), onSuccess: result => { qc.setQueryData<Session[]>(queryKeys.sessions(), current => current?.map(session => session.id === result.id ? result : session)); setArchiveConfirm(false); selectSession(undefined); toastStore.push({ kind: 'success', key: 'archive', title: '任务已归档', description: '历史指令和执行记录仍可在「已归档」筛选中查看。' }); }, onError: error => setActionError(error.message) });
   const bulkArchive = useMutation({
     mutationFn: async (ids: string[]) => {
       const archived = new Map<string, Session>();
@@ -164,8 +165,8 @@ export function useSessionActions(activeSessionId: string | undefined, {
       return { archived, failures };
     },
     onSuccess: async ({ archived, failures }) => {
-      await qc.cancelQueries({ queryKey: ['sessions'], exact: true });
-      qc.setQueryData<Session[]>(['sessions'], current => current?.map(session => archived.get(session.id) ?? session));
+      await qc.cancelQueries({ queryKey: queryKeys.sessions(), exact: true });
+      qc.setQueryData<Session[]>(queryKeys.sessions(), current => current?.map(session => archived.get(session.id) ?? session));
       setBulkArchiveIds(failures.map(failure => failure.id));
       toastStore.push({
         kind: failures.length ? archived.size ? 'warning' : 'error' : 'success',
@@ -175,13 +176,13 @@ export function useSessionActions(activeSessionId: string | undefined, {
       });
     }
   });
-  const restart = useMutation({ mutationFn: api.restart, onSuccess: result => { setActionError(undefined); qc.setQueryData<Session[]>(['sessions'], current => current?.map(session => session.id === result.id ? result : session)); void qc.invalidateQueries({ queryKey: ['sessions'] }); void qc.invalidateQueries({ queryKey: ['events', activeSessionId] }); void qc.invalidateQueries({ queryKey: ['tasks', activeSessionId] }); toastStore.push({ kind: 'success', key: 'restart', title: '任务已重新启动', description: '这是一个全新的 Agent 进程，会从空白上下文开始；之前的对话不会带过来。' }); }, onError: error => { setActionError(error.message); toastStore.push({ kind: 'error', key: 'restart', title: '重新启动失败', description: error.message }); } });
-  const resolvePermission = useMutation({ mutationFn: ({ sessionId, permissionId, approved, reason }: { sessionId: string; permissionId: string; approved: boolean; reason?: string }) => reason ? api.permission(sessionId, permissionId, approved, reason) : api.permission(sessionId, permissionId, approved), onSuccess: (_result, variables) => { qc.setQueryData<EventWindow>(['events', variables.sessionId], current => { if (!current) return current; const next = current.events.map(event => event.type === 'permission_request' && (event.data.id === variables.permissionId || event.id === variables.permissionId) ? { ...event, data: { ...event.data, status: variables.approved ? 'approved' : 'rejected', ...(variables.reason ? { reason: variables.reason } : {}) } } : event); return { ...current, events: next, previousEvents: undefined, changes: undefined }; }); }, onError: (error, variables) => { setActionError(error.message); void qc.invalidateQueries({ queryKey: ['events', variables.sessionId] }); void qc.invalidateQueries({ queryKey: ['sessions'] }); } });
+  const restart = useMutation({ mutationFn: api.restart, onSuccess: result => { setActionError(undefined); qc.setQueryData<Session[]>(queryKeys.sessions(), current => current?.map(session => session.id === result.id ? result : session)); void qc.invalidateQueries({ queryKey: queryKeys.sessions() }); void qc.invalidateQueries({ queryKey: ['events', activeSessionId] }); void qc.invalidateQueries({ queryKey: queryKeys.tasks(activeSessionId) }); toastStore.push({ kind: 'success', key: 'restart', title: '任务已重新启动', description: '这是一个全新的 Agent 进程，会从空白上下文开始；之前的对话不会带过来。' }); }, onError: error => { setActionError(error.message); toastStore.push({ kind: 'error', key: 'restart', title: '重新启动失败', description: error.message }); } });
+  const resolvePermission = useMutation({ mutationFn: ({ sessionId, permissionId, approved, reason }: { sessionId: string; permissionId: string; approved: boolean; reason?: string }) => reason ? api.permission(sessionId, permissionId, approved, reason) : api.permission(sessionId, permissionId, approved), onSuccess: (_result, variables) => { qc.setQueryData<EventWindow>(['events', variables.sessionId], current => { if (!current) return current; const next = current.events.map(event => event.type === 'permission_request' && (event.data.id === variables.permissionId || event.id === variables.permissionId) ? { ...event, data: { ...event.data, status: variables.approved ? 'approved' : 'rejected', ...(variables.reason ? { reason: variables.reason } : {}) } } : event); return { ...current, events: next, previousEvents: undefined, changes: undefined }; }); }, onError: (error, variables) => { setActionError(error.message); void qc.invalidateQueries({ queryKey: ['events', variables.sessionId] }); void qc.invalidateQueries({ queryKey: queryKeys.sessions() }); } });
   const resolveActivePermission = useCallback((permissionId: string, approved: boolean, reason?: string) => resolvePermission.mutateAsync({ sessionId: active!.id, permissionId, approved, reason }), [active?.id, resolvePermission.mutateAsync]);
   const pickComposerFile = useMutation({ mutationFn: api.selectFile, onError: error => setActionError(error.message) });
   const refreshModels = useMutation({ mutationFn: ({ agentId: targetAgentId, currentModel }: { agentId: string; currentModel?: string }) => loadAgentModels(targetAgentId, currentModel, true), onSuccess: (result, variables) => { setActionError(undefined); qc.setQueryData(agentModelsQueryKey(variables.agentId, variables.currentModel), result); }, onError: error => setActionError(error.message) });
-  const switchModel = useMutation({ mutationFn: ({ sessionId, nextModel }: { sessionId: string; nextModel: string }) => api.setSessionModel(sessionId, nextModel), onSuccess: result => { setActionError(undefined); qc.setQueryData<Session[]>(['sessions'], current => current?.map(session => session.id === result.id ? result : session)); void activeModels.refetch(); }, onError: error => setActionError(error.message) });
-  const switchReasoningEffort = useMutation({ mutationFn: ({ sessionId, nextReasoningEffort }: { sessionId: string; nextReasoningEffort: string }) => api.setSessionReasoningEffort(sessionId, nextReasoningEffort), onSuccess: result => { setActionError(undefined); qc.setQueryData<Session[]>(['sessions'], current => current?.map(session => session.id === result.id ? result : session)); }, onError: error => setActionError(error.message) });
+  const switchModel = useMutation({ mutationFn: ({ sessionId, nextModel }: { sessionId: string; nextModel: string }) => api.setSessionModel(sessionId, nextModel), onSuccess: result => { setActionError(undefined); qc.setQueryData<Session[]>(queryKeys.sessions(), current => current?.map(session => session.id === result.id ? result : session)); void activeModels.refetch(); }, onError: error => setActionError(error.message) });
+  const switchReasoningEffort = useMutation({ mutationFn: ({ sessionId, nextReasoningEffort }: { sessionId: string; nextReasoningEffort: string }) => api.setSessionReasoningEffort(sessionId, nextReasoningEffort), onSuccess: result => { setActionError(undefined); qc.setQueryData<Session[]>(queryKeys.sessions(), current => current?.map(session => session.id === result.id ? result : session)); }, onError: error => setActionError(error.message) });
   const modelReadiness = getModelReadiness({ loaded: activeModels.data !== undefined, loading: activeModels.data === undefined && (activeModels.isPending || activeModels.isFetching || refreshModels.isPending), switching: switchModel.isPending, failed: activeModels.data === undefined && activeModels.isError });
   const submit = () => {
     if (modelReadiness.kind !== 'ready') { setActionError(modelReadiness.reason); return; }

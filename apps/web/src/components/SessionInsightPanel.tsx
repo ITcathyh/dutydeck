@@ -1,3 +1,4 @@
+import { instanceSessionsQuery } from '../queries';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { X } from 'lucide-react';
@@ -302,7 +303,7 @@ export function SessionInsightPanel({ sessionId, compareSessionId, onCompareSess
     queryFn: ({ signal }) => insightApi.details(compareSessionId!, null, signal),
     enabled: Boolean(compareSessionId)
   });
-  const sessionsForCompare = useQuery({ queryKey: ['sessions', instance ?? null], queryFn: ({ signal }) => api.sessions(signal), staleTime: 30_000 });
+  const sessionsForCompare = useQuery(instanceSessionsQuery(instance ?? null));
 
   const currentContextKey = compareSessionId ? `${instance ?? ''}:${sessionId}:${compareSessionId}` : null;
   const currentLeftSnapshotId = status?.currentSnapshotId;

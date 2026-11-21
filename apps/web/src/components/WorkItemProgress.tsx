@@ -1,3 +1,4 @@
+import { finishedTaskStatuses, tasksQuery } from '../queries';
 import { useEffect, useId, useState, type ReactNode } from 'react';
 import { useQueries } from '@tanstack/react-query';
 import type { WorkAttempt, WorkItem } from '@dutydeck/shared';
@@ -9,17 +10,16 @@ import { Badge, Banner, Button, Spinner } from './primitives';
 import { isSessionActionDisabled } from './ui';
 import { useWorkItems, useWorkItemRequests, workStatusLabels } from './workItemQueries';
 
-const finishedStatus = ['completed', 'failed', 'interrupted', 'cancelled'];
 /**
  * 步骤耗时，一律标「约」。有任务记录时用任务的创建/最后更新时间（不含准备阶段，也不受之后补写的评审证据影响），
  * 但任务创建时间是入队时间，会把排队时间算进去，任务记录里没有真正开始执行的时间；
  * 任务记录读不到时退回尝试自己的时间戳。执行端已接收的尝试算运行中，准备中、需要处理的尝试没有可信耗时。
  */
 function attemptDuration(attempt: WorkAttempt | undefined, now: number, tasks: ReadonlyMap<string, Task>) {
-  if (!attempt || attempt.status !== 'accepted' && !finishedStatus.includes(attempt.status)) return;
+  if (!attempt || attempt.status !== 'accepted' && !finishedTaskStatuses.includes(attempt.status)) return;
   const running = attempt.status === 'accepted';
   const task = attempt.taskId ? tasks.get(attempt.taskId) : undefined;
-  const fromTask = Boolean(task && task.status !== 'queued' && (running || finishedStatus.includes(task.status)));
+  const fromTask = Boolean(task && task.status !== 'queued' && (running || finishedTaskStatuses.includes(task.status)));
   const elapsed = fromTask
     ? elapsedMilliseconds(task!.createdAt, running ? undefined : task!.updatedAt, now)
     : elapsedMilliseconds(attempt.createdAt, running ? undefined : attempt.updatedAt, now);
@@ -45,14 +45,7 @@ function useNow(enabled: boolean): number {
 function useAttemptTasks(item: WorkItem, enabled: boolean): ReadonlyMap<string, Task> {
   const attempts = item.steps.flatMap(step => step.attempts).filter(attempt => attempt.sessionId && attempt.taskId);
   const sessionIds = [...new Set(attempts.map(attempt => attempt.sessionId!))];
-  const results = useQueries({ queries: sessionIds.map(sessionId => ({
-    queryKey: ['tasks', sessionId], queryFn: () => api.tasks(sessionId), enabled, staleTime: 30_000, retry: false,
-    refetchInterval: (query: { state: { data?: Task[]; status: string } }) => {
-      if (query.state.status === 'error') return false;
-      return attempts.some(attempt => attempt.sessionId === sessionId && finishedStatus.includes(attempt.status)
-        && !finishedStatus.includes(query.state.data?.find(task => task.id === attempt.taskId)?.status ?? '')) ? 5_000 : false;
-    },
-  })) });
+  const results = useQueries({ queries: sessionIds.map(sessionId => ({ ...tasksQuery(sessionId, { attempts }), enabled })) });
   return new Map(results.flatMap(result => result.data ?? []).map(task => [task.id, task]));
 }
 
