@@ -198,7 +198,7 @@ export function createCollaborationIntegration(options: CollaborationIntegration
       if (!context) throw new Error('后台任务身份缺失。');
       const scope = { appId, chatId }, { config } = await live(scope);
       if (config.riskControlMode !== 'enforced') return { policy: undefined };
-      const allowedByBot = await allowedHighRiskActor(config, context.actorId, id => client(config).getUserEmails(id), options.log);
+      const allowedByBot = await allowedHighRiskActor(config, context.actorId, id => client(config).getUserEmails(id), options.log, 'throw');
       return { policy: { enabled: true, authorized: allowedByBot && await policy(scope, context.actorId, 'high_risk.execute'), pattern: config.highRiskPattern, reason: '委托发起人没有此高风险操作授权。' } };
     } catch {
       return { policy: { enabled: true, authorized: false, pattern: '.*', reason: '后台委托已变更或失去授权。' } };

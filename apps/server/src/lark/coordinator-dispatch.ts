@@ -2,6 +2,7 @@ import { readTaskReportSafely } from '@dutydeck/shared';
 import { taskReportCardElements } from './task-report-card.js';
 import { clearPendingPromptUsage, type BotPromptUsage, freezePromptUsage, pendingPromptUsageKey, promptUsageSnapshot, recordPromptUsage } from './prompt-versions.js';
 import { larkAgentUnavailableReason, larkFallbackHasActivity } from './agent-fallback.js';
+import { allowedHighRiskActor } from '../policy/high-risk.js';
 import { recordTaskAuthorization } from '../task-authorization.js';
 import { larkMessageAnchor } from './message-anchor.js';
 import type { PromptPart } from '@dutydeck/shared';
@@ -1133,7 +1134,11 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
     const taskTitle = this.taskTitle(task, planTask !== undefined ? `计划：${planTask}` : prompt);
     if (task.inbox?.request && task.inbox.request.prompt !== prompt) await this.inbox!.update(task.inbox, { request: { ...task.inbox.request, prompt } });
 
-    let actorEmails: string[] = [];
+    let actorEmails: string[] | undefined;
+    const lookupEmails = async (openId: string) => {
+      actorEmails ??= await this.service.getUserEmails(openId);
+      return actorEmails;
+    };
     const allowedUsers = config.allowedUsers ?? [];
     const allowedEmails = config.allowedEmails ?? [];
     const allowedBots = config.allowedBots ?? [];
@@ -1154,8 +1159,7 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
     } else if ((!allowedUsers.length && allowedEmails.length) || (riskControlEnabled && !highRiskAllowedUsers.length && highRiskAllowedEmails.length)) {
       try {
         if (!event.senderOpenId) throw new Error('消息事件未包含发送人 open_id');
-        actorEmails = await this.service.getUserEmails(event.senderOpenId);
-        if (!actorEmails.length) throw new LarkServiceError('LARK_SENDER_EMAIL_EMPTY', '飞书没有返回当前发送人的邮箱字段', 409);
+        if (!(await lookupEmails(event.senderOpenId)).length) throw new LarkServiceError('LARK_SENDER_EMAIL_EMPTY', '飞书没有返回当前发送人的邮箱字段', 409);
       } catch (error) {
         await failBeforeRun('身份解析权限缺失', withGroupMention(larkIdentityPermissionHelp(error, config.appId)), `fail_id_${event.messageId}_${currentTurn}`, 'identity_failed');
         return;
@@ -1163,23 +1167,17 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
     }
     const senderOpenId = event.senderOpenId ?? '';
     const allowedBot = allowedBots.find(bot => bot.openId === senderOpenId);
-    const highRiskAllowedUser = highRiskAllowedUsers.find(user => user.openId === senderOpenId);
     const accessRestricted = allowedUsers.length > 0 || allowedEmails.length > 0;
     const allowed = config.managedGroup ? true : botSender
       ? (!accessRestricted || (peerBotsAllowed && trustedPeerBot) || Boolean(allowedBot))
-      : larkHumanTaskAllowed(config, senderOpenId, actorEmails);
+      : larkHumanTaskAllowed(config, senderOpenId, actorEmails ?? []);
     if (!allowed) {
       await failBeforeRun('访问被拒绝', withGroupMention('**当前账号不在机器人白名单中。**\n\n如需使用，请联系机器人管理员添加你。'), `fail_acl_${event.messageId}_${currentTurn}`, 'access_denied');
       return;
     }
-    const highRiskAuthorized = botSender
-      ? false
-      : (!riskControlEnabled || (!highRiskAllowedUsers.length && !highRiskAllowedEmails.length)
-          ? allowed
-          : highRiskAllowedUsers.length
-            ? Boolean(highRiskAllowedUser)
-            : actorEmails.some(email => highRiskAllowedEmails.includes(email)));
-    const actorEmail = actorEmails[0];
+    const highRiskAuthorized = botSender ? false : !riskControlEnabled ? allowed
+      : await allowedHighRiskActor({ highRiskAllowedUsers, highRiskAllowedEmails }, event.senderOpenId, lookupEmails, this.log);
+    const actorEmail = actorEmails?.[0];
     const riskPolicy: ToolRiskPolicy | undefined = config.riskControlMode === 'enforced' ? {
       enabled: true,
       authorized: highRiskAuthorized,

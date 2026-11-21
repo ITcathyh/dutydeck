@@ -6,7 +6,8 @@ export async function allowedHighRiskActor(
   config: Pick<StoredLarkConfig, 'highRiskAllowedUsers' | 'highRiskAllowedEmails'>,
   actorId: string | undefined,
   lookupEmails: (openId: string) => Promise<string[]>,
-  log: { warn(details: unknown, message: string): void } = console
+  log: { warn(details: unknown, message: string): void } = console,
+  onLookupError: 'deny' | 'throw' = 'deny'
 ): Promise<boolean> {
   const { highRiskAllowedUsers, highRiskAllowedEmails } = config;
   if (actorId === installationOwnerTaskActor || (!highRiskAllowedUsers.length && !highRiskAllowedEmails.length)) return true;
@@ -17,6 +18,7 @@ export async function allowedHighRiskActor(
     return (await lookupEmails(actorId)).some(email => highRiskAllowedEmails.includes(email));
   } catch (error) {
     log.warn({ error }, 'High-risk actor email lookup failed');
+    if (onLookupError === 'throw') throw error;
     return false;
   }
 }
