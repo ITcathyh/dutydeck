@@ -2291,6 +2291,7 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
       commandAllowlisted: this.commandAllowlisted.bind(this),
       currentAccess: this.currentAccess.bind(this),
       executeRepairFlight: this.executeRepairFlight.bind(this),
+      groupManager: this.groupManager,
       isOperatorAllowed: this.isOperatorAllowed.bind(this),
       isRepairOperatorAllowed: this.isRepairOperatorAllowed.bind(this),
       larkRouteCapabilities: this.larkRouteCapabilities.bind(this),
@@ -2306,6 +2307,7 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
       automation: this.workflowOptions.automation,
       participation: this.workflowOptions.participation,
       store: this.workflowOptions.store,
+      workbench: this.workflowOptions.workbench,
     };
   }
 
@@ -2317,62 +2319,6 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
         const [key, , handle] = callback;
         return handle(this.buttonDependencies(), { key, workflow, operatorOpenId, context });
       }
-    }
-    // CI 失败卡「交给 Agent 修」：与 /ci 命令同一道权限门，卡片须是该订阅最新发出的失败卡。
-    if (workflow && typeof workflow.dutydeck_ci_fix === 'string') {
-      const ciWebhook = this.workflowOptions.automation?.ciWebhook;
-      if (!ciWebhook || !this.reconcileConfig || !context?.messageId || !context.chatId || !operatorOpenId || typeof workflow.failure !== 'string') {
-        return { type: 'error', content: 'CI 失败卡已失效，请发送 /ci 查看最新状态。' };
-      }
-      try {
-        const config = await readLarkConfig(this.workflowOptions.store, this.reconcileConfig.appId);
-        if (!config?.listening) return { type: 'warning', content: '机器人已停用，无法开始修复。' };
-        const subscription = await ciWebhook.get(workflow.dutydeck_ci_fix);
-        const session = subscription ? await this.runtime.getSession(subscription.sessionId) : undefined;
-        const { appId, chatId } = parseLarkSourceId(session?.source === 'lark' ? session.sourceId : undefined);
-        if (!subscription || appId !== config.appId || chatId !== context.chatId) return { type: 'warning', content: '这张 CI 失败卡不属于当前会话。' };
-        if (!await this.isOperatorAllowed(config, operatorOpenId, context.chatId, subscription.sessionId)) return { type: 'warning', content: '当前账号没有操作此任务的权限。' };
-        return { type: 'success', content: await ciWebhook.requestFix(subscription.id, { failureKey: workflow.failure, cardMessageId: context.messageId }, operatorOpenId) };
-      } catch (error) { return { type: 'error', content: error instanceof Error ? error.message : String(error) }; }
-    }
-    // 开 PR 的确认卡、「停止跟进」与评审意见问题卡。权限沿用重试：机器人白名单 / 群策略，以发起 /pr 的人为任务发起人。
-    if (workflow && typeof workflow.dutydeck_pr === 'string') {
-      const pullRequests = this.workflowOptions.automation?.pullRequests;
-      if (!pullRequests || !this.reconcileConfig || !context?.messageId || !context.chatId || !operatorOpenId) return { type: 'error', content: '这张卡片已失效，请重新发送 /pr。' };
-      try {
-        const config = await readLarkConfig(this.workflowOptions.store, this.reconcileConfig.appId);
-        if (!config?.listening) return { type: 'warning', content: '机器人已停用，无法执行此操作。' };
-        const record = await pullRequests.get(workflow.dutydeck_pr);
-        const session = record ? await this.runtime.getSession(record.sessionId) : undefined;
-        const { appId, chatId, chatType } = parseLarkSourceId(session?.source === 'lark' ? session.sourceId : undefined);
-        if (!record || appId !== config.appId || chatId !== context.chatId) return { type: 'warning', content: '这张卡片不属于当前会话。' };
-        const effective = chatType === 'group' && this.groupManager ? await this.groupManager.resolved(config, context.chatId) : config;
-        if (!await this.isOperatorAllowed(effective, operatorOpenId, context.chatId, record.sessionId, record.actorId)) return { type: 'warning', content: '当前账号没有操作此任务的权限。' };
-        const op = workflow.op;
-        if (op === 'confirm') return { type: 'success', content: (await pullRequests.confirm(record.id, operatorOpenId, { messageId: context.messageId })).message };
-        if (op === 'cancel' || op === 'stop') {
-          const updated = await pullRequests.cancel(record.sessionId, record.id);
-          return { type: 'success', content: updated.status === 'cancelled' ? '已取消，没有推送任何内容。' : updated.status === 'stopped' ? '已停止自动跟进，PR 本身不受影响。' : `当前状态：${updated.reason ?? updated.status}` };
-        }
-        // 推送前验证没过的卡上「仍然推送」：权限与确认推送相同（上面同一道门）。
-        if (op === 'force_push') return { type: 'success', content: await pullRequests.forcePush(record.id, { messageId: context.messageId }) };
-        if (op === 'answer' && typeof workflow.comment === 'string' && (workflow.choice === 'apply' || workflow.choice === 'ignore')) {
-          return { type: 'success', content: await pullRequests.answer(record.id, { commentId: workflow.comment, choice: workflow.choice, cardMessageId: context.messageId }) };
-        }
-        return { type: 'error', content: '无法识别的操作。' };
-      } catch (error) { return { type: 'error', content: error instanceof Error ? error.message : String(error) }; }
-    }
-    // 定时委托的确认卡 / 产出卡按钮（确认、取消、暂停、恢复、停止）；权限与状态判断都在 mandateCards 内。
-    if (workflow && typeof workflow.dutydeck_mandate === 'string') {
-      const cards = this.workflowOptions.automation?.mandateCards;
-      if (!cards || !this.reconcileConfig) return { type: 'error', content: '这张卡片已失效。' };
-      try { return { type: 'success', content: await cards.callback(this.reconcileConfig.appId, workflow, operatorOpenId, { messageId: context?.messageId, chatId: context?.chatId }) }; }
-      catch (error) { return { type: 'error', content: error instanceof Error ? error.message : String(error) }; }
-    }
-    if (workflow && typeof workflow.dutydeck_work_item === 'string') {
-      if (!this.workflowOptions.workbench || !this.reconcileConfig || !context) return { type: 'error', content: '目标卡片已失效。' };
-      try { return { type: 'success', content: await this.workflowOptions.workbench.callback(workflow, operatorOpenId, context, this.reconcileConfig) }; }
-      catch (error) { return { type: 'error', content: error instanceof Error ? error.message : String(error) }; }
     }
     // 排队卡上的「允许本次」「拒绝」：按钮值与审批卡同形，剥掉另带的两个字段后照常交给下面的审批分支。
     // 另带的字段只用来核对，关联哪条排队任务按这张卡在服务端查（见 respondFromQueuedCard）。
