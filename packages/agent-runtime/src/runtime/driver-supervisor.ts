@@ -36,7 +36,7 @@ interface DriverSupervisorDependencies {
   commandSwapWindow: () => Promise<void>;
   configurations: DriverConfigurationLedger;
   configureAgentForSession: (agent: AgentConfig, session: Session) => Promise<AgentConfig>;
-  driverEventChains: Map<string, Promise<void>>;
+  drainSessionEvents(id: string): Promise<void>;
   exitedDriverGenerations: Map<string, number>;
   factory: DriverFactory;
   fence: (session: Session) => SessionFence;
@@ -334,7 +334,7 @@ export class DriverSupervisor {
       } catch (error) { factError = error; }
       let stopError: unknown;
       try { await stopping; } catch (error) { stopError = error; }
-      while (this.deps.driverEventChains.has(id)) await this.deps.driverEventChains.get(id);
+      await this.deps.drainSessionEvents(id);
       if (!factError && intent.cancelQueue) actorRequired = !await this.mutations.write(id, () => this.deps.cancelSessionQueue(id, intent.actor));
       if (!shutdown && !discardSession) await this.deps.humanWaits().closeLeftoverPermissions(stoppedPermissions);
       await this.mutations.barrier(id);

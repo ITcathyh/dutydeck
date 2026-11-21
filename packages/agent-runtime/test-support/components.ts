@@ -1,3 +1,4 @@
+import type { EventIngest } from '../src/runtime/event-ingest.js';
 import type { Scheduler } from '../src/runtime/scheduler.js';
 import type { AgentDriver } from '@dutydeck/shared';
 import type { RecoveryService } from '../src/runtime/recovery-service.js';
@@ -8,6 +9,7 @@ import type { RuntimeSessionMutations } from '../src/ownership.js';
 import type { Maintenance } from '../src/runtime/maintenance.js';
 
 interface RuntimeComponents {
+  events: Pick<EventIngest, 'hasExitedDrain' | 'hasExitAdmission' | 'drainAll'> & { driverEventChains: ReadonlyMap<string, Promise<void>> };
   scheduler: Pick<Scheduler, 'drainQueue' | 'queueBlocked' | 'resourceQueueBlocked' | 'sessionHeld' | 'scheduleQueue' | 'applyQueueActions'> & {
     queues: Map<string, import('@dutydeck/shared').TaskRecord[]>;
     capacityTimers: Map<string, { taskId: string; timer?: NodeJS.Timeout }>;

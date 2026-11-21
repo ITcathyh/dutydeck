@@ -1,3 +1,4 @@
+import { runtimeComponents } from '../test-support/components.js';
 import { describe, expect, it, vi } from 'vitest';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -101,7 +102,7 @@ async function runCase(mode: 'natural' | 'stop_during_drain' | 'hold_attempt_con
     gate.resolve();
     await exitWork;
     if (stopping) await stopping;
-    while ((runtime as any).driverEventChains.size) await Promise.all([...(runtime as any).driverEventChains.values()]);
+    while (runtimeComponents(runtime).events.driverEventChains.size) await Promise.all([...runtimeComponents(runtime).events.driverEventChains.values()]);
 
     const persisted = await runtime.getEvents(session.id);
     const persistedTail = persisted.filter(event => event.type === 'raw_terminal' && String((event.data as any).text).includes(tail));
