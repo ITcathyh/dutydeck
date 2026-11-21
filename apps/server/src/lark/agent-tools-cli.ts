@@ -1,130 +1,60 @@
 import { open } from 'node:fs/promises';
-import { sleep } from '../daemon/time.js';
-import { retryWhileRefused } from '@dutydeck/relay';
 import type { AgentGroupCliOptions, HistoryShowCliOptions } from '../cli-program.js';
+import { AgentGroupToolHttpClient, type GroupToolClientOptions } from '../agent-host/http-client.js';
+import { otherEndpoints } from '../agent-host/tool-table.js';
 
-interface GroupToolErrorBody {
-  code: string;
-  message: string;
-  instruction?: string;
-  authorizationUrl?: string;
-  requiredScopes?: string[];
-  [key: string]: unknown;
-}
+export { AgentGroupToolCliError, AgentGroupToolHttpClient } from '../agent-host/http-client.js';
 
-export class AgentGroupToolCliError extends Error {
-  constructor(public readonly error: GroupToolErrorBody, public readonly statusCode?: number) {
-    super(error.message);
-    this.name = 'AgentGroupToolCliError';
-  }
-}
-
-interface GroupToolClientOptions {
-  turn?: string;
-  env?: NodeJS.ProcessEnv;
-  fetcher?: typeof globalThis.fetch;
-  sleep?: (ms: number) => Promise<void>;
-}
-
-export class AgentGroupToolHttpClient {
-  private readonly baseUrl: string;
-  private readonly token: string;
-  private readonly turn?: string;
-  private readonly fetcher: typeof globalThis.fetch;
-  private readonly sleep: (ms: number) => Promise<void>;
-
-  constructor(options: GroupToolClientOptions = {}) {
-    const env = options.env ?? process.env;
-    this.baseUrl = (env.dutydeck_group_tools_url ?? env.DUTYDECK_GROUP_TOOLS_URL)?.trim().replace(/\/$/, '') ?? '';
-    this.token = (env.dutydeck_group_tools_token ?? env.DUTYDECK_GROUP_TOOLS_TOKEN)?.trim() ?? '';
-    this.turn = options.turn;
-    this.fetcher = options.fetcher ?? globalThis.fetch;
-    this.sleep = options.sleep ?? sleep;
-    if (!this.baseUrl || !this.token) {
-      throw new AgentGroupToolCliError({
-        code: 'GROUP_TOOL_CONTEXT_REQUIRED',
-        message: '群协作工具只能由 Dutydeck 飞书群会话内的 Agent 调用；当前进程没有会话 capability。'
-      });
-    }
-  }
-
-  async request(path: string, init: RequestInit = {}) {
-    let response: Response;
-    try {
-      const headers = new Headers(init.headers);
-      headers.set('authorization', `Bearer ${this.token}`);
-      if (this.turn && !headers.has('x-dutydeck-work-turn')) headers.set('x-dutydeck-work-turn', this.turn);
-      if (init.body !== undefined) headers.set('content-type', 'application/json; charset=utf-8');
-      response = await retryWhileRefused(() => this.fetcher(`${this.baseUrl}${path}`, { ...init, headers }), { sleep: this.sleep });
-    } catch (error) {
-      throw new AgentGroupToolCliError({
-        code: 'GROUP_TOOL_UNAVAILABLE',
-        message: `无法连接 Dutydeck 群协作服务：${error instanceof Error ? error.message : String(error)}`
-      });
-    }
-    const payload = await response.json().catch(() => ({})) as { error?: GroupToolErrorBody } & Record<string, unknown>;
-    if (!response.ok) {
-      throw new AgentGroupToolCliError(payload.error ?? {
-        code: 'GROUP_TOOL_REQUEST_FAILED',
-        message: `Dutydeck 群协作服务返回 HTTP ${response.status}`
-      }, response.status);
-    }
-    return payload;
-  }
-}
-
-const queryPath = (path: string, options: AgentGroupCliOptions) => {
+// Legacy URLs put limit first in history and omit empty filters.
+const legacyQuery = (options: AgentGroupCliOptions) => {
   const query = new URLSearchParams();
-  if (options.after) query.set('after', options.after);
-  if (options.limit) query.set('limit', options.limit);
-  if (options.timeoutMs) query.set('timeoutMs', options.timeoutMs);
-  if (options.since) query.set('since', options.since);
-  if (options.until) query.set('until', options.until);
-  if (options.query) query.set('query', options.query);
-  return query.size ? `${path}?${query}` : path;
+  for (const key of ['after', 'limit', 'timeoutMs', 'since', 'until', 'query'] as const) {
+    if (options[key]) query.set(key, options[key]);
+  }
+  return query.size ? '?' + query : '';
 };
 
+// Old send commands omit empty string options and false flags from the JSON body.
+const sendOptions = (options: AgentGroupCliOptions) => Object.fromEntries(Object.entries(options).filter(([, value]) => value));
+
 export function runGroupSelf(options: GroupToolClientOptions = {}) {
-  return new AgentGroupToolHttpClient(options).request('/self');
+  return new AgentGroupToolHttpClient(options).callLegacy('group.self');
 }
 
 export function runGroupPeers(options: GroupToolClientOptions = {}) {
-  return new AgentGroupToolHttpClient(options).request('/peers');
+  return new AgentGroupToolHttpClient(options).callLegacy('group.peers');
 }
 
 export function runGroupMembers(options: GroupToolClientOptions = {}) {
-  return new AgentGroupToolHttpClient(options).request('/members');
+  return new AgentGroupToolHttpClient(options).callLegacy('group.members');
 }
 
 export function runGroupBots(options: GroupToolClientOptions = {}) {
-  return new AgentGroupToolHttpClient(options).request('/bots');
+  return new AgentGroupToolHttpClient(options).callLegacy('group.bots');
 }
 
 export function runGroupMessages(cliOptions: AgentGroupCliOptions, options: GroupToolClientOptions = {}) {
-  return new AgentGroupToolHttpClient(options).request(queryPath('/messages', cliOptions));
+  return new AgentGroupToolHttpClient(options).callLegacy('group.messages', [], cliOptions, legacyQuery(cliOptions));
 }
 
 export function runGroupMessage(messageId: string, options: GroupToolClientOptions = {}) {
-  const query = new URLSearchParams({ messageId });
-  return new AgentGroupToolHttpClient(options).request(`/message?${query}`);
+  return new AgentGroupToolHttpClient(options).callLegacy('group.message', [messageId]);
 }
 
 export function runGroupTeamSearch(query: string, options: GroupToolClientOptions = {}) {
-  return new AgentGroupToolHttpClient(options).request(`/team-search?${new URLSearchParams({ query })}`);
+  return new AgentGroupToolHttpClient(options).callLegacy('group.team-search', [query]);
 }
 
 export function runHistoryList(cliOptions: AgentGroupCliOptions, options: GroupToolClientOptions = {}) {
-  return new AgentGroupToolHttpClient(options).request(queryPath('/history', cliOptions));
+  return new AgentGroupToolHttpClient(options).callLegacy('history.list', [], cliOptions, legacyQuery(cliOptions));
 }
 
 export function runHistoryShow(taskId: string, options: GroupToolClientOptions = {}, range: HistoryShowCliOptions = {}) {
-  const query = new URLSearchParams();
-  for (const key of ['field', 'offset', 'length', 'cursor'] as const) if (range[key] !== undefined) query.set(key, range[key]!);
-  return new AgentGroupToolHttpClient(options).request(`/history/${encodeURIComponent(taskId)}${query.size ? `?${query}` : ''}`);
+  return new AgentGroupToolHttpClient(options).callLegacy('history.show', [taskId], range);
 }
 
 export function runGroupWait(cliOptions: AgentGroupCliOptions, options: GroupToolClientOptions = {}) {
-  return new AgentGroupToolHttpClient(options).request(queryPath('/wait', cliOptions));
+  return new AgentGroupToolHttpClient(options).callLegacy('group.wait', [], cliOptions, legacyQuery(cliOptions));
 }
 
 export async function runGroupSend(content: string, cliOptions: AgentGroupCliOptions, options: GroupToolClientOptions = {}) {
@@ -137,52 +67,25 @@ export async function runGroupSend(content: string, cliOptions: AgentGroupCliOpt
       cardBody = JSON.parse(await file.readFile('utf8'));
     } finally { await file.close(); }
   }
-  return new AgentGroupToolHttpClient(options).request('/send', {
-    method: 'POST',
-    body: JSON.stringify({
-      content,
-      ...(cardBody === undefined ? {} : { cardBody }),
-      ...(cliOptions.delivery ? { delivery: cliOptions.delivery } : {}),
-      ...(cliOptions.final ? { final: true } : {}),
-      ...(cliOptions.turn ? { turn: cliOptions.turn } : {}),
-      ...(cliOptions.to ? { to: cliOptions.to } : {}),
-      ...(cliOptions.replyTo ? { replyTo: cliOptions.replyTo } : {}),
-      ...(cliOptions.inThread ? { inThread: true } : {}),
-      ...(cliOptions.idempotencyKey ? { idempotencyKey: cliOptions.idempotencyKey } : {})
-    })
-  });
+  return new AgentGroupToolHttpClient(options).callLegacy('group.send', [content], { ...sendOptions(cliOptions), cardBody });
 }
 
 export function runGroupSendFile(path: string, cliOptions: AgentGroupCliOptions, options: GroupToolClientOptions = {}) {
-  return new AgentGroupToolHttpClient(options).request('/send-file', { method: 'POST', body: JSON.stringify({ path, ...(cliOptions.replyTo ? { replyTo: cliOptions.replyTo } : {}), ...(cliOptions.inThread ? { inThread: true } : {}), ...(cliOptions.idempotencyKey ? { idempotencyKey: cliOptions.idempotencyKey } : {}), ...(cliOptions.image ? { image: true } : {}) }) });
+  return new AgentGroupToolHttpClient(options).callLegacy('group.send-file', [path], sendOptions(cliOptions));
 }
 
 export function runGroupHandoff(target: string, content: string, cliOptions: { turn: string }, options: GroupToolClientOptions = {}) {
-  return new AgentGroupToolHttpClient(options).request('/handoff', {
-    method: 'POST',
-    body: JSON.stringify({
-      to: target,
-      content,
-      turn: cliOptions.turn
-    })
-  });
+  return new AgentGroupToolHttpClient(options).callLegacy('group.handoff', [target, content], cliOptions);
 }
 
 /** 替这一轮发起人发一条飞书 / 命令（见 agent-request-tools.ts）：查看类直接出结果卡，会改东西的先发确认卡。 */
 export function runAgentCommand(command: string, cliOptions: { turn: string }, options: GroupToolClientOptions = {}) {
-  return new AgentGroupToolHttpClient(options).request('/commands', {
-    method: 'POST',
+  return new AgentGroupToolHttpClient(options).call(otherEndpoints.command, [], {
     headers: { 'x-dutydeck-work-turn': cliOptions.turn },
     body: JSON.stringify({ command })
   });
 }
 
 export function runGroupReplyAgent(content: string, cliOptions: { turn: string }, options: GroupToolClientOptions = {}) {
-  return new AgentGroupToolHttpClient(options).request('/reply-agent', {
-    method: 'POST',
-    body: JSON.stringify({
-      content,
-      turn: cliOptions.turn
-    })
-  });
+  return new AgentGroupToolHttpClient(options).callLegacy('group.reply-agent', [content], cliOptions);
 }

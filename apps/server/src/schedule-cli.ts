@@ -1,8 +1,9 @@
+import { getTool } from './agent-host/tool-table.js';
 import { randomUUID } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { createSessionScheduleInputSchema, updateSessionScheduleInputSchema, previewSessionSchedule, resolveScheduleDeadline, type PublicSessionSchedule, type SessionAutomationList } from '@dutydeck/shared';
 import { executeLocalRuntimeRequest, type LocalRuntimeRequestDependencies } from './local-runtime-request.js';
-import { AgentGroupToolHttpClient } from './lark/agent-tools-cli.js';
+import { AgentGroupToolHttpClient } from './agent-host/http-client.js';
 
 export type ScheduleCliAction = 'create' | 'list' | 'show' | 'update' | 'enable' | 'disable' | 'run' | 'delete' | 'history';
 export interface ScheduleCliInput {
@@ -127,8 +128,7 @@ export interface ScheduleRequestCliInput { turn?: string; prompt?: string; name?
 export async function runScheduleRequest(input: ScheduleRequestCliInput): Promise<Record<string, unknown>> {
   const every = input.every === undefined ? undefined : Number(input.every);
   if (every !== undefined && !Number.isInteger(every)) argument('--every takes whole minutes, e.g. --every 15');
-  return new AgentGroupToolHttpClient(input).request('/schedules', {
-    method: 'POST',
+  return new AgentGroupToolHttpClient(input).call(getTool('schedule.create'), [], {
     headers: { 'x-dutydeck-work-turn': input.turn ?? '' },
     body: JSON.stringify({ prompt: input.prompt, name: input.name, every, cron: input.cron, at: input.at, mode: input.mode, ...(input.additional ? { additional: true } : {}) })
   });

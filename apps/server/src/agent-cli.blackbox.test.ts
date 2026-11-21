@@ -92,3 +92,15 @@ it('real CLI forwards immutable attempt credentials for legacy group, history, m
     expect(JSON.parse(requests[4]!.body)).toEqual({ content: 'final answer', final: true, turn: 'immutable-attempt' });
   } finally { await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())); }
 });
+
+it('records legacy tool use once in Node debug output without logging the turn or arguments', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dutydeck-legacy-usage-')); roots.push(root);
+  const invokeLegacy = (args: string[]) => spawnSync(process.execPath, [cliPath, ...args], {
+    cwd: root, env: { HOME: root, PATH: process.env.PATH, NODE_DEBUG: 'dutydeck-agent', NODE_COMPILE_CACHE: compileCache() }, encoding: 'utf8'
+  });
+  const legacy = invokeLegacy(['--agent-turn', 'private-attempt', 'group', 'send-file', 'private-file']);
+  expect(legacy.status).toBe(1);
+  expect(legacy.stderr.match(/legacy group send-file/g)).toHaveLength(1);
+  expect(legacy.stderr).not.toMatch(/private-attempt|private-file/);
+  expect(invokeLegacy(['agent', '--turn', 'private-attempt', 'group', 'send-file', 'private-file']).stderr).not.toContain('legacy ');
+});
