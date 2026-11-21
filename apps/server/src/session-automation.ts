@@ -167,7 +167,7 @@ const openRunStatuses = new Set(['pending', 'accepted', 'blocked']);
 /** CI 定义本身没有代际字段；binding 中的 generation 仅用于严格记录结构，取固定值。 */
 const CI_BINDING_GENERATION = 1;
 
-type ExecutionLedger = Pick<RepositoryBundle['execution'], 'getAcceptedTask' | 'getTaskExecution' | 'getAttemptEvents' | 'lookupAccepted'>;
+type ExecutionLedger = Pick<RepositoryBundle['execution'], 'getAcceptedTask' | 'getTaskExecution' | 'getTaskExecutionState' | 'getAttemptEvents' | 'lookupAccepted'>;
 type AutomationRepositories = Pick<RepositoryBundle, 'config' | 'sessions' | 'tasks' | 'matters'> & { execution: ExecutionLedger };
 type AuthorizationResult = boolean | PolicyDecision;
 
@@ -685,7 +685,7 @@ export class SessionAutomationService {
     const admission = value.admission;
     if (!admission) return { status: 'blocked', reason: 'admission_conflict', message: 'Source has no fixed task admission' };
     let projection;
-    try { projection = this.execution.getTaskExecution(admission.taskId); }
+    try { projection = this.execution.getTaskExecutionState(admission.taskId); }
     catch (error) {
       if (error instanceof RuntimeError && error.code === 'EXECUTION_AUTHORITY_LEGACY') {
         return { status: 'blocked', reason: 'reconcile_required', message: 'Execution ledger is unavailable' };
@@ -796,7 +796,7 @@ export class SessionAutomationService {
     const open = history.find(item => openRunStatuses.has(item.runStatus));
     if (open) {
       const value = migrateOccurrence(open);
-      const unknown = value.taskId && this.execution.getTaskExecution(value.taskId)?.attempts.some(attempt => attempt.state === 'reconcile_required' || attempt.state === 'legacy_unresolved');
+      const unknown = value.taskId && this.execution.getTaskExecutionState(value.taskId)?.attempts.some(attempt => attempt.state === 'reconcile_required' || attempt.state === 'legacy_unresolved');
       return value.runStatus === 'blocked' || unknown || value.taskId && this.options.awaitingHuman?.(value.executionSessionId ?? value.sessionId) ? 'awaiting_human' : 'running';
     }
     const latest = history[0] && migrateOccurrence(history[0]);
@@ -1167,7 +1167,7 @@ export class SessionAutomationService {
         if (actualId) {
           let canView = allowed.get(blockingSessionId);
           if (canView === undefined) { canView = await canRead(blockingSessionId); allowed.set(blockingSessionId, canView); }
-          const blocking = canView ? this.execution.getTaskExecution(actualId) : undefined;
+          const blocking = canView ? this.execution.getTaskExecutionState(actualId) : undefined;
           const attempt = blocking?.attempts.find(item => item.state === 'reconcile_required' || item.state === 'legacy_unresolved') ?? blocking?.currentAttempt;
           const status = blockedBy && !['reconcile_required', 'legacy_unresolved'].includes(blocking?.task.status ?? '') ? 'resource_blocked' : blocking?.task.status ?? open.runStatus;
           blocker = { status, waitingSince: open.createdAt,
@@ -1214,7 +1214,7 @@ export class SessionAutomationService {
     }
     const occurrence = migrateOccurrence(stored.value);
     const executionSessionId = occurrence.executionSessionId ?? sessionId;
-    const projection = occurrence.taskId ? this.execution.getTaskExecution(occurrence.taskId) : undefined;
+    const projection = occurrence.taskId ? this.execution.getTaskExecutionState(occurrence.taskId) : undefined;
     const accepted = occurrence.taskId ? this.execution.getAcceptedTask(occurrence.taskId) : undefined;
     if (projection && projection.task.sessionId !== executionSessionId) throw new RuntimeError('SESSION_AUTOMATION_RUN_NOT_FOUND', 'Run task ownership is unavailable', 404);
     if (accepted && occurrence.admission) assertAdmissionMatchesAccepted('Scheduled task', occurrence.admission, accepted);
@@ -1428,7 +1428,7 @@ export class SessionAutomationService {
   /** No schedule ID is accepted: only the current occurrence's durable host binding can request this. */
   async requestScheduleStop(sessionId: string, taskId: string, attemptId: string, actorId: string) {
     const revoked = () => new RuntimeError('SESSION_AUTOMATION_TASK_REVOKED', 'Only the active scheduled occurrence may stop its own schedule', 403);
-    const task = this.execution.getTaskExecution(taskId)?.task;
+    const task = this.execution.getTaskExecutionState(taskId)?.task;
     const binding = (await this.getRecord(taskBindingKey(taskId), value => taskBindingSchema.parse(value)))?.value;
     if (!task || task.status !== 'running' || task.currentAttemptId !== attemptId || task.sessionId !== sessionId || binding?.kind !== 'schedule' || binding.sessionId !== sessionId) throw revoked();
     const occurrence = (await this.getRecord(occurrenceKey(binding.occurrenceId), value => migrateOccurrence(sessionScheduleOccurrenceSchema.parse(value))))?.value;
@@ -1442,7 +1442,7 @@ export class SessionAutomationService {
     await this.requireAuthorized(originSessionId, actorId);
     const schedule = (await this.getRecord(scheduleKey(occurrence.scheduleId), readStoredSessionSchedule))?.value;
     if (!schedule || schedule.sessionId !== originSessionId || !schedule.enabled || schedule.deletedAt || schedule.generation !== occurrence.generation || schedule.trigger.kind === 'at') throw revoked();
-    const current = this.execution.getTaskExecution(taskId)?.task;
+    const current = this.execution.getTaskExecutionState(taskId)?.task;
     if (!current || current.status !== 'running' || current.currentAttemptId !== attemptId || current.sessionId !== sessionId) throw revoked();
     const value = stopRequestSchema.parse({ version: 1, sessionId: originSessionId, taskId, attemptId, occurrenceId: occurrence.id, scheduleId: schedule.id, generation: occurrence.generation, actorId, status: 'pending' });
     const key = `${STOP_REQUEST_PREFIX}${taskId}`;
@@ -1467,7 +1467,7 @@ export class SessionAutomationService {
         if (schedule?.value.stopRequestId === request.taskId && !schedule.value.enabled) { await finish('applied'); return; }
         if (!schedule || schedule.value.sessionId !== request.sessionId || schedule.value.generation !== request.generation || schedule.value.deletedAt || !schedule.value.enabled) { await finish('rejected', 'schedule_changed'); return; }
         const occurrence = (await this.getRecord(occurrenceKey(request.occurrenceId), value => migrateOccurrence(sessionScheduleOccurrenceSchema.parse(value))))?.value;
-        const task = this.execution.getTaskExecution(request.taskId)?.task;
+        const task = this.execution.getTaskExecutionState(request.taskId)?.task;
         if (!occurrence || occurrence.sessionId !== request.sessionId || occurrence.scheduleId !== request.scheduleId || occurrence.generation !== request.generation || occurrence.admission?.taskId !== request.taskId) { await finish('rejected', 'binding_changed'); return; }
         // Agent 收尾报了受阻或等人决定时计划层记为没做成（runStatus=failed），同样不算完成。
         if (['failed', 'interrupted', 'cancelled'].includes(task?.status ?? '') || occurrence.result && (occurrence.result.outcome !== 'completed' || occurrence.runStatus !== 'completed')) { await finish('rejected', 'task_not_successful'); return; }
@@ -1810,7 +1810,7 @@ export class SessionAutomationService {
     const unknown = '上一轮结果未知，等人确认处理';
     if (occurrence.runStatus === 'blocked') return occurrence.blockReason === 'admission_conflict' ? '任务受理冲突，等人处理' : unknown;
     const task = occurrence.taskId ? await this.options.repositories.tasks.get?.(occurrence.taskId) : undefined;
-    if (occurrence.taskId && this.execution.getTaskExecution(occurrence.taskId)?.attempts.some(attempt => attempt.state === 'reconcile_required' || attempt.state === 'legacy_unresolved')) return unknown;
+    if (occurrence.taskId && this.execution.getTaskExecutionState(occurrence.taskId)?.attempts.some(attempt => attempt.state === 'reconcile_required' || attempt.state === 'legacy_unresolved')) return unknown;
     if (task?.status === 'queued') return '任务一直在排队，还没开始（可能被同一工作区里未结束的任务挡住）';
     if (occurrence.runStatus === 'pending') return `还没开始${occurrence.error ? `：${occurrence.error.slice(0, 120)}` : ''}`;
     return task?.status === 'running' ? '任务还在执行，还没结束' : '还没结束';
@@ -1832,7 +1832,7 @@ export class SessionAutomationService {
       .filter(item => item.source === 'schedule' && item.sourceId === schedule.id && !item.archivedAt && item.id !== keep);
     for (const session of sessions) {
       const tasks = await this.options.repositories.tasks.listBySession(session.id);
-      if (tasks.some(task => !isTerminalTaskStatus(task.status) || this.execution.getTaskExecution(task.id)?.attempts.some(attempt => attempt.state !== 'settled'))) continue;
+      if (tasks.some(task => !isTerminalTaskStatus(task.status) || this.execution.getTaskExecutionState(task.id)?.attempts.some(attempt => attempt.state !== 'settled'))) continue;
       this.subscriptions.get(session.id)?.();
       this.subscriptions.delete(session.id);
       try { await this.options.runtime.archive(session.id); }
@@ -3126,7 +3126,7 @@ export class SessionAutomationService {
 
     // 先在自身 CAS 固定 number=1 Attempt.id，再读结果。
     if (!value.runtimeAttemptId) {
-      const projection = this.execution.getTaskExecution(value.admission!.taskId);
+      const projection = this.execution.getTaskExecutionState(value.admission!.taskId);
       const first = projection?.attempts.find(attempt => attempt.number === 1);
       if (first) {
         const fixedAttempt = sessionScheduleOccurrenceV2Schema.parse({ ...value, revision: value.revision + 1, runtimeAttemptId: first.attemptId, updatedAt: iso(this.clock()) });
@@ -3233,7 +3233,7 @@ export class SessionAutomationService {
       if (!value.runtimeAttemptId || value.blockReason !== 'reconcile_required' && !recoverLegacyCapacity) return;
     }
     if (!value.runtimeAttemptId) {
-      const projection = this.execution.getTaskExecution(value.admission!.taskId);
+      const projection = this.execution.getTaskExecutionState(value.admission!.taskId);
       const first = projection?.attempts.find(attempt => attempt.number === 1);
       if (first) {
         const fixedAttempt = ciSubscriptionV2Schema.parse({ ...value, revision: value.revision + 1, runtimeAttemptId: first.attemptId, updatedAt: iso(this.clock()) });

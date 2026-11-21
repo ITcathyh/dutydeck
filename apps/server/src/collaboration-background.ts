@@ -145,7 +145,7 @@ export class CollaborationBackground {
       accepted = this.options.repositories.execution.getAcceptedTask(taskId);
     }
     if (!accepted?.request || canonicalExecutionJson(accepted.request) !== canonicalExecutionJson(request)) return { status: 'unknown', error: '后台任务与冻结请求不一致。' };
-    const execution = this.options.repositories.execution.getTaskExecution(taskId);
+    const execution = this.options.repositories.execution.getTaskExecutionState(taskId);
     const attempt = execution?.attempts.find(item => item.number === 1);
     if (!attempt) {
       if (['cancelled', 'failed', 'interrupted'].includes(accepted.task.status)) return { status: 'failed', error: '任务未执行或已取消。' };

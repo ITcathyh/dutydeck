@@ -266,8 +266,8 @@ function ReferenceChips({ references, onChange }: { references: ComposerReferenc
   </span>)}</div>;
 }
 
-export function Composer({ planFirst = false, onPlanFirstChange, state, session, value, references, sending, mode, queuedTasks, cancellingTaskId, steeringTaskId, injectingTaskId, steerable, blockingPermissionId, rejectingPermission, onRejectPermission, skills, skillCatalogStatus, models, reasoningEfforts, currentModel, currentReasoningEffort, advertisedCommands, filePicker, modelReadiness, switchingModel, switchingReasoningEffort, refreshingModels, onChange, onReferencesChange, onModeChange, onSubmit, onInterrupt, onCancelQueued, onEditQueued, onSteerQueued, onInjectQueued, onPickFile, onModelChange, onReasoningEffortChange, onRefreshModels, onShowStatus, onRestart, onCreateTask, onOpenHelp, inputRef }: {
-  state: string; session?: Pick<Session, 'state' | 'archivedAt' | 'source'>; value: string; references: ComposerReference[]; sending: boolean; mode: SendMode; queuedTasks: Task[]; cancellingTaskId?: string; steeringTaskId?: string;
+export function Composer({ planFirst = false, onPlanFirstChange, state, session, value, references, sending, mode, queuedTasks, retryQueuedEdits = [], cancellingTaskId, steeringTaskId, injectingTaskId, steerable, blockingPermissionId, rejectingPermission, onRejectPermission, skills, skillCatalogStatus, models, reasoningEfforts, currentModel, currentReasoningEffort, advertisedCommands, filePicker, modelReadiness, switchingModel, switchingReasoningEffort, refreshingModels, onChange, onReferencesChange, onModeChange, onSubmit, onInterrupt, onCancelQueued, onEditQueued, onSteerQueued, onInjectQueued, onPickFile, onModelChange, onReasoningEffortChange, onRefreshModels, onShowStatus, onRestart, onCreateTask, onOpenHelp, inputRef }: {
+  state: string; session?: Pick<Session, 'state' | 'archivedAt' | 'source'>; value: string; references: ComposerReference[]; sending: boolean; mode: SendMode; queuedTasks: Task[]; retryQueuedEdits?: Task[]; cancellingTaskId?: string; steeringTaskId?: string;
   /** 先出计划：打开时这条消息让 Agent 只调研出计划，批准后才执行。未传 onPlanFirstChange 时不显示开关。 */
   planFirst?: boolean; onPlanFirstChange?(value: boolean): void;
   /** 当前 Agent 可能支持插话（ACP）；为假时不提供「插话」。 */
@@ -385,6 +385,10 @@ export function Composer({ planFirst = false, onPlanFirstChange, state, session,
   return <div className="bg-gradient-to-t from-canvas via-canvas to-transparent ui-composer-dock pt-7"><div className="ui-thread">
     {blockedPlan && <div role="alert" className="mb-2 text-caption text-secondary">这份草稿选择了先出计划。飞书会话请在飞书发送 /plan；如需直接执行，<button type="button" className="text-action underline" onClick={() => onPlanFirstChange?.(false)}>改为普通消息</button>。</div>}
     <NowStatusStrip state={state} blockingPermissionId={blockingPermissionId}/>
+    {onEditQueued && retryQueuedEdits.map(task => <div key={task.id} className="mx-4 flex items-center gap-2 rounded-md border border-default bg-surface px-3.5 py-1.5 text-caption text-secondary">
+      <span className="min-w-0 flex-1 truncate">{task.prompt}</span>
+      <Button size="md" variant="ghost" disabled={Boolean(cancellingTaskId || steeringTaskId || injectingTaskId)} onClick={() => onEditQueued(task.id)}>编辑</Button>
+    </div>)}
     <QueuedTasks tasks={queuedTasks} cancellingTaskId={cancellingTaskId} steeringTaskId={steeringTaskId} injectingTaskId={injectingTaskId} blockingPermissionId={blockingPermissionId} rejectingPermission={rejectingPermission} onCancel={onCancelQueued} onEdit={onEditQueued} onSteer={onSteerQueued} onInject={steerable && busy ? onInjectQueued : undefined} onRejectPermission={onRejectPermission}/>
 
     <div ref={shell} className={`relative rounded-xl border border-default bg-surface p-2 shadow-panel ring-1 ring-inset ring-subtle backdrop-blur-sm transition-[transform,border-color,box-shadow,background-color] duration-normal ease-out focus-within:-translate-y-0.5 focus-within:border-action focus-within:bg-raised ${queuedTasks.length ? 'rounded-t-md' : ''}`}>

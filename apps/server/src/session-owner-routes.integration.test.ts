@@ -74,6 +74,37 @@ describe('owner session routes with the real execution ledger', () => {
     expect(h.prompts).toEqual([]);
   });
 
+  it('replays the same queue cancellation with its original Skills after losing the response', async () => {
+    const skillRequests = ['/skills/review/SKILL.md'];
+    const h = await harness(skillRequests);
+    const url = `/api/sessions/${h.session.id}/queue/${h.queued.id}`;
+    const headers = { 'x-dutydeck-operation-id': 'Edit_queue:1-'.padEnd(100, 'a') };
+    const first = await h.app.inject({ method: 'DELETE', url, headers });
+    expect(first.statusCode).toBe(200);
+    expect(first.json()).toMatchObject({ id: h.queued.id, status: 'cancelled', prompt: 'queued', skillRequests });
+    const retry = await h.app.inject({ method: 'DELETE', url, headers });
+    expect(retry.statusCode).toBe(200);
+    expect(retry.json()).toEqual(first.json());
+    for (const headers of [undefined, { 'x-dutydeck-operation-id': 'other-operation' }]) {
+      const other = await h.app.inject({ method: 'DELETE', url, headers });
+      expect(other.statusCode).toBe(409);
+      expect(other.json().error.code).toBe('TASK_NOT_QUEUED');
+      expect(other.json().skillRequests).toBeUndefined();
+    }
+    expect(await h.status(h.queued.id)).toBe('cancelled');
+    expect(h.prompts).toEqual([]);
+  });
+
+  it('rejects malformed queue cancellation operation IDs before cancelling', async () => {
+    const h = await harness();
+    const url = `/api/sessions/${h.session.id}/queue/${h.queued.id}`;
+    for (const value of ['', 'a'.repeat(101), 'a/b', 'a b', 'one,two']) {
+      const response = await h.app.inject({ method: 'DELETE', url, headers: { 'x-dutydeck-operation-id': value } });
+      expect(response.statusCode).toBe(400);
+      expect(await h.status(h.queued.id)).toBe('queued');
+    }
+  });
+
   it('keeps cancellation available for migrated Skill tasks that have no original selection', async () => {
     const h = await harness(undefined, true);
     const sessionUrl = `/api/sessions/${h.session.id}`;

@@ -86,6 +86,25 @@ async function fixture() {
 }
 
 describe('SessionAutomation ledger integration with real SQLite and local JSONL driver', () => {
+  it('polls a queued occurrence without reading workspace diagnostics', async () => {
+    const f = await fixture();
+    f.runtime.setQueueHeld(true);
+    await f.enableSchedule();
+    await f.service.tick();
+    const [task] = await f.repos.tasks.listBySession(f.parent.id);
+    expect(task?.status).toBe('queued');
+
+    const diagnostic = vi.spyOn(f.repos.execution, 'getTaskExecution');
+    const state = vi.spyOn(f.repos.execution, 'getTaskExecutionState');
+    await f.service.tick();
+    expect(diagnostic).not.toHaveBeenCalled();
+    expect(state).toHaveBeenCalledWith(task!.id);
+    const { blockers: _blockers, ...fullState } = f.repos.execution.getTaskExecution(task!.id)!;
+    expect(f.repos.execution.getTaskExecutionState(task!.id)).toEqual(fullState);
+    expect((await f.service.listBySession(f.parent.id)).occurrences[0]?.runStatus).toBe('accepted');
+    expect(f.deliveries).toEqual([]);
+  });
+
   it('dispatches one schedule task, freezes the number=1 attempt result and delivers it once', async () => {
     const f = await fixture();
     await f.enableSchedule();

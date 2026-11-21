@@ -1410,7 +1410,7 @@ describe('App pending composer mutations', () => {
     const cancel = operation === 'cancelQueued' ? request : vi.spyOn(api, 'cancelQueued');
     cancel.mockResolvedValue({ ...queued[1], status: 'cancelled' });
     await userEvent.click(screen.getByRole('button', { name: '取消排队：q2' }));
-    await waitFor(() => expect(cancel).toHaveBeenLastCalledWith('s1', 'q2'));
+    await waitFor(() => expect(cancel).toHaveBeenLastCalledWith('s1', 'q2', expect.any(String)));
   });
 
   async function addFile(path: string) {
@@ -1434,7 +1434,7 @@ describe('App pending composer mutations', () => {
     vi.mocked(api.tasks).mockResolvedValue([queued]);
     act(() => client.setQueryData(['tasks', 's1'], [queued]));
     await userEvent.click(await screen.findByRole('button', { name: '编辑' }));
-    await waitFor(() => expect(cancel).toHaveBeenCalledWith('s1', 'q1'));
+    await waitFor(() => expect(cancel).toHaveBeenCalledWith('s1', 'q1', expect.any(String)));
     expect(input.value).toBe('正在写的草稿');
     expect(screen.queryByRole('button', { name: '移除引用 source notes.md' })).toBeNull();
     fireEvent.change(input, { target: { value: '等待期间又写了几句' } });
@@ -1486,7 +1486,7 @@ describe('App pending composer mutations', () => {
     ] }));
     await userEvent.click(await screen.findByRole('button', { name: '编辑' }));
     expect(await screen.findByRole('button', { name: '移除引用 check' })).toBeTruthy();
-    expect(cancel).toHaveBeenCalledWith('s1', 'q1');
+    expect(cancel).toHaveBeenCalledWith('s1', 'q1', expect.any(String));
     expect(screen.queryByRole('button', { name: '移除引用 auto' })).toBeNull();
     if (!skillOnly) {
       expect(screen.getByRole('button', { name: '移除引用 已选 review' })).toBeTruthy();
@@ -1499,6 +1499,44 @@ describe('App pending composer mutations', () => {
     await userEvent.click(screen.getByRole('button', { name: '加入队列' }));
     await waitFor(() => expect(send).toHaveBeenCalledWith('s1',
       skillOnly ? queued.prompt : '/file /tmp/original.md\n\n已有草稿\n\n原本的任务', 'queue', [review, check], expect.any(String)));
+  });
+
+  it('retries a lost edit response after the queue refresh and restores the draft once', async () => {
+    setup();
+    const queued = { ...queuedTask('lost-edit'), prompt: '恢复排队消息' };
+    const review = '/skills/review/SKILL.md';
+    const cancelled = { ...queued, status: 'cancelled', skillRequests: [review] };
+    vi.mocked(api.tasks).mockResolvedValue([queued]);
+    let loseResponse!: (error: Error) => void;
+    const operations: Array<string | null> = [];
+    vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
+      if (url !== '/api/sessions/s1/queue/lost-edit') throw new Error(`Unexpected request: ${url}`);
+      expect(init?.method).toBe('DELETE');
+      operations.push(new Headers(init?.headers).get('x-dutydeck-operation-id'));
+      if (operations.length === 1) return new Promise((_resolve, reject) => { loseResponse = reject; });
+      if (!operations[0] || operations[0] !== operations[1]) return new Response('{}', { status: 409 });
+      return new Response(JSON.stringify(cancelled));
+    }));
+    const send = vi.spyOn(api, 'send').mockResolvedValue({ accepted: true, task: queuedTask('edited') });
+    const { client } = renderApp();
+    const input = await screen.findByRole<HTMLTextAreaElement>('textbox', { name: '消息' });
+    fireEvent.change(input, { target: { value: '已有草稿' } });
+    await userEvent.click(await screen.findByRole('button', { name: '编辑' }));
+    await waitFor(() => expect(operations).toHaveLength(1));
+    await act(async () => loseResponse(new TypeError('network response lost')));
+    expect(await screen.findByText('取消待执行指令失败')).toBeTruthy();
+    expect(input.value).toBe('已有草稿');
+
+    // The cancellation event can refresh the queue before the user retries.
+    vi.mocked(api.tasks).mockResolvedValue([cancelled]);
+    act(() => client.setQueryData(['tasks', 's1'], [cancelled]));
+    await waitFor(() => expect(screen.queryByRole('button', { name: `取消排队：${queued.prompt}` })).toBeNull());
+    await userEvent.click(screen.getByRole('button', { name: '编辑' }));
+    await waitFor(() => expect(input.value).toBe(`已有草稿\n\n${queued.prompt}`));
+    expect(operations).toEqual([expect.stringMatching(/^[A-Za-z0-9_:-]{1,100}$/), operations[0]]);
+    expect(screen.queryByRole('button', { name: '编辑' })).toBeNull();
+    await userEvent.click(screen.getByRole('button', { name: '加入队列' }));
+    await waitFor(() => expect(send).toHaveBeenCalledExactlyOnceWith('s1', `已有草稿\n\n${queued.prompt}`, 'queue', [review], expect.any(String)));
   });
 
   it.each(['text', 'references', 'new references', 'unchanged', 'failure', 'session'] as const)('preserves the appropriate draft after a delayed send: %s', async change => {

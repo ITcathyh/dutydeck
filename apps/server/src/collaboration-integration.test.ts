@@ -103,7 +103,10 @@ it('delivers a verified capacity successor once and continues future schedule oc
   f.calls[0]!.capacity();
   const sessionId = f.calls[0]!.sessionId;
   await eventually(async () => (await f.runtime.getTasks(sessionId))[0]?.status === 'queued');
+  const diagnostic = vi.spyOn(f.repos.execution, 'getTaskExecution');
   await f.collaboration.scheduler.tick();
+  expect(diagnostic).not.toHaveBeenCalled();
+  diagnostic.mockRestore();
   expect((await f.repos.scheduleOccurrences.listByDefinition(created.mandate.scheduleDefinitionId))[0]?.state).toBe('running');
   vi.useFakeTimers({ toFake: ['Date'] });
   try {
