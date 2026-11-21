@@ -2,22 +2,11 @@ import { z } from 'zod';
 import { stripVTControlCharacters } from 'node:util';
 import type { DutydeckRuntime } from '@dutydeck/runtime';
 import type { RelayAskBroker } from '@dutydeck/relay';
-import { RuntimeError, type PermissionRequestData, type WorkItem } from '@dutydeck/shared';
+import { type WorkItemRequest, RuntimeError, type WorkItem } from '@dutydeck/shared';
 import type { WorkItemService } from './work-items.js';
 import { workInput } from './work-item-routes.js';
 
-export interface WorkItemRequest {
-  stepId: string;
-  sessionId: string;
-  taskId: string;
-  requestId: string;
-  kind: 'permission' | 'question';
-  text: string;
-  /** 工具授权的操作摘要（已脱敏、有长度上限），给代判的 Leader 看。 */
-  operation?: PermissionRequestData['operation'];
-  /** Leader 模式里交给用户的请求：Leader 写的问题、建议、不回复时会怎样，或没能代判的原因。 */
-  leader?: { problem?: string; suggestion?: string; ifNoReply?: string; reason?: string };
-}
+export type { WorkItemRequest } from '@dutydeck/shared';
 
 /** Leader 模式挂在请求上的钩子：决定卡片上看得到哪些请求，记下发起人的答复。 */
 export interface WorkItemRequestHooks {

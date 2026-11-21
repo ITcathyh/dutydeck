@@ -12,8 +12,8 @@ const alias = {
 };
 
 // 两个 project：
-//   node — packages/** + apps/server/** + tests/**，environment node（原有行为，超时 15s 不变）
-//   web  — apps/web/**，environment jsdom，见 apps/web/vitest.config.ts
+//   node — 服务端、包及跨端契约测试，environment node
+//   web  — 浏览器测试，environment jsdom，见 apps/web/vitest.config.ts
 //
 // web project 之所以引用独立配置文件而不是内联：jsdom / @vitejs/plugin-react /
 // @testing-library/* 只装在 apps/web 的 devDependencies，pnpm 不提升到根 node_modules，
@@ -33,9 +33,8 @@ export default defineConfig({
         test: {
           name: 'node',
           environment: 'node',
-          // 注意 apps/** 收窄到 apps/server/**：apps/web 的测试归 web project（jsdom），
-          // 否则同一份文件会被两个 project 各跑一遍。
-          include: ['packages/**/*.test.ts', 'apps/server/**/*.test.ts', 'plugins/**/*.test.ts', 'builtin-plugins/**/*.test.ts', 'tests/**/*.test.ts'],
+          // 路由契约要构造 Fastify 实例，只在这里运行。
+          include: ['packages/**/*.test.ts', 'apps/server/**/*.test.ts', 'apps/web/src/api/route-contract.test.ts', 'plugins/**/*.test.ts', 'builtin-plugins/**/*.test.ts', 'tests/**/*.test.ts'],
           setupFiles: [fileURLToPath(new URL('./tests/setup/node-env.ts', import.meta.url))],
           testTimeout: 15_000,
           hookTimeout: 15_000,

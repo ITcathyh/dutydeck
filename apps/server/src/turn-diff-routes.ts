@@ -1,6 +1,6 @@
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { z } from 'zod';
-import { installationOwnerTaskActor, RuntimeError, type ConfigRepository, type PolicyAction, type PolicyDecision } from '@dutydeck/shared';
+import { installationOwnerTaskActor, RuntimeError, turnDiffCommentsRequestSchema, type TurnDiffResponse, type ConfigRepository, type PolicyAction, type PolicyDecision } from '@dutydeck/shared';
 import type { DutydeckRuntime } from '@dutydeck/runtime';
 import { isValidTurnDiffCredential, SHARE_TOKEN_QUERY_KEY } from './auth/auth.js';
 import { buildTurnDiffReviewPrompt, listTurnDiffRecords, readTurnDiff, readTurnDiffFile, readTurnDiffRecord, resolveTurnDiffComment, type TurnDiffReviewComment } from './turn-diff.js';
@@ -20,15 +20,6 @@ export interface TurnDiffRouteOptions {
 const REVIEW_WINDOW_MS = 10 * 60_000;
 const REVIEW_PER_TURN = 3;
 const REVIEW_TOTAL = 30;
-
-const commentsBody = z.object({
-  comments: z.array(z.object({
-    path: z.string().min(1).max(1024),
-    side: z.enum(['old', 'new']),
-    line: z.number().int().min(1).max(10_000_000),
-    body: z.string().trim().min(1).max(2000)
-  }).strict()).min(1).max(20)
-}).strict();
 
 const titleOf = (prompt: string | undefined) => prompt?.trim().split('\n')[0]?.slice(0, 80) || undefined;
 
@@ -69,7 +60,7 @@ export function registerTurnDiffRoutes(app: FastifyInstance, runtime: DutydeckRu
     const { shared } = await access(request, id, taskId, 'task.view_result');
     const { record, diff } = await load(id, taskId);
     const task = (await runtime.getTasks(id)).find(item => item.id === taskId);
-    return { sessionId: id, taskId, title: titleOf(task?.prompt), finishedAt: record.finishedAt, ...diff, access: shared ? 'shared' : 'owner' };
+    return { sessionId: id, taskId, title: titleOf(task?.prompt), finishedAt: record.finishedAt, ...diff, access: shared ? 'shared' : 'owner' } satisfies TurnDiffResponse;
   });
 
   // 折叠的锁文件、生成物按需读正文。鉴权与整页相同（登录用户或「查看改动」token）。
@@ -98,7 +89,7 @@ export function registerTurnDiffRoutes(app: FastifyInstance, runtime: DutydeckRu
       }
       submissions.push({ key, at });
     }
-    const body = commentsBody.parse(request.body ?? {});
+    const body = turnDiffCommentsRequestSchema.parse(request.body ?? {});
     const { diff } = await load(id, taskId);
     const comments = body.comments.map(item => {
       const code = resolveTurnDiffComment(diff.files, item);

@@ -153,3 +153,7 @@ export interface UsageLedgerRepository {
   claimAlert(scope: UsageCapScope, appId: string, chatId: string | undefined, month: string, threshold: number): Promise<boolean>;
   releaseAlert(scope: UsageCapScope, appId: string, chatId: string | undefined, month: string, threshold: number): Promise<void>;
 }
+
+/** 明细查询：from / to 是 daemon 本地时区的日历日（YYYY-MM-DD，含首尾两天），其余是精确匹配的筛选。 */
+export type UsageReportQuery = UsageReportFilter & { from?: string; to?: string };
+export interface UsageSummaryWindow<Totals = UsageTotals, Group = UsageGroup> { since: string; totals: Totals; bots: Group[]; chats: Group[]; actors: Group[]; categories: Group[] }

@@ -1,8 +1,10 @@
 import { z } from 'zod';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
-import { installationOwnerTaskActor, RuntimeError, type ConfigRepository, type PolicyAction, type PolicyDecision } from '@dutydeck/shared';
+import { type PlanState, installationOwnerTaskActor, RuntimeError, type ConfigRepository, type PolicyAction, type PolicyDecision } from '@dutydeck/shared';
 import type { DutydeckRuntime } from '@dutydeck/runtime';
 import { planAgentPrompt, planApprovedPrompt, planDecisionWindowMs, planPrompt, planRevisePrompt, planTaskOf, planUnsupportedReason } from './plan-mode.js';
+
+export type { PlanState } from '@dutydeck/shared';
 
 export interface PlanRouteOptions {
   /** 记 Web 上对计划的决定（一次性 CAS）；未提供时不注册计划路由。 */
@@ -21,7 +23,6 @@ const decisionKey = (sessionId: string, taskId: string) => `plan.web.${sessionId
 const decided = { approve: 'approved', revise: 'needs_changes', cancel: 'cancelled' } as const;
 
 type PlanTask = { id: string; prompt: string; status: string; createdAt: string; updatedAt: string };
-export type PlanState = { state: 'none' | 'planning' | 'pending' | 'approved' | 'needs_changes' | 'cancelled' | 'expired'; taskId?: string; expiresAt?: string; operable?: boolean };
 
 /** 会话里最近一份计划的状态。GET 接口与「待处理」汇总共用同一套判定。 */
 export async function readPlanState(store: ConfigRepository, current: { id: string; source?: string }, tasks: PlanTask[]): Promise<PlanState> {

@@ -3,7 +3,7 @@ import { constants, existsSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { basename, dirname, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { isClaudeFamilyCli, shellQuote as quote, type AgentConfig } from '@dutydeck/shared';
+import { type LarkHookStatus, isClaudeFamilyCli, shellQuote as quote, type AgentConfig } from '@dutydeck/shared';
 import { secretGuardScriptPath } from '@dutydeck/shared/secret-guard';
 import { codexHookReadiness } from './codex-hook-readiness.js';
 import { LarkServiceError } from './service.js';
@@ -61,18 +61,6 @@ const paths = (adapter: HookAdapter, workspace: string) => ({
     ? join(workspace, adapter.configDirectory, adapter.configFile)
     : join(workspace, '.dutydeck', 'security', markerFor(adapter))
 });
-
-export interface LarkHookStatus {
-  agentId?: string;
-  supported: boolean;
-  installed: boolean;
-  nativeReady?: boolean;
-  writable: boolean;
-  trustRequired: boolean;
-  hooksPath?: string;
-  reason?: string;
-  trustInstructions?: string;
-}
 
 async function readableJson(path: string, fallback: Record<string, any>): Promise<Record<string, any>> {
   try { return JSON.parse(await readFile(path, 'utf8')); } catch (error: any) {
@@ -136,6 +124,8 @@ const piGuardExtension = () => `// ${guardVersion}
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { Worker } from 'node:worker_threads';
+
+export type { LarkHookStatus } from '@dutydeck/shared';
 
 const regexWorker = "const { parentPort, workerData } = require('node:worker_threads'); try { parentPort.postMessage({ matched: new RegExp(workerData.pattern, 'i').test(workerData.input) }); } catch (error) { parentPort.postMessage({ error: error instanceof Error ? error.message : String(error) }); }";
 const matches = (pattern: string, input: string) => new Promise<{ risky: boolean; error?: string }>(resolve => {

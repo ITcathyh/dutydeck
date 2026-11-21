@@ -1,26 +1,16 @@
 import { constants } from 'node:fs';
 import { createRequire } from 'node:module';
 import { readBoundedBytes } from './bounded-file.js';
-import { RuntimeError } from '@dutydeck/shared';
+import { type SkillReference, RuntimeError } from '@dutydeck/shared';
 import { open, opendir, realpath, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 
+export type { SkillReference } from '@dutydeck/shared';
+
 const require = createRequire(import.meta.url);
 
 export interface PluginSkillRoot { path: string; plugin?: string; version?: string; root?: string; resources?: Record<string, Array<{ path: string; maxBytes: number }>> }
-
-export interface SkillReference {
-  ref?: string;
-  plugin?: string;
-  version?: string;
-  root?: string;
-  resources?: Array<{ path: string; maxBytes: number }>;
-  name: string;
-  description: string;
-  path: string;
-  source: 'workspace' | 'user' | 'plugin';
-}
 
 export interface DiscoverSkillsOptions {
   homeDirectory?: string;

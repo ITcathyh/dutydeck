@@ -1,7 +1,9 @@
 import { createHash, createHmac, randomBytes, scrypt, timingSafeEqual, type ScryptOptions } from 'node:crypto';
 import { isIP } from 'node:net';
 import type { FastifyInstance, FastifyReply, FastifyRequest, RouteShorthandOptions } from 'fastify';
-import type { ConfigRepository } from '@dutydeck/shared';
+import type { BrowserAuthState, ConfigRepository } from '@dutydeck/shared';
+
+export type { BrowserAuthState } from '@dutydeck/shared';
 
 /** token 在 configs 表中的 key */
 export const AUTH_TOKEN_CONFIG_KEY = 'auth.accessToken';
@@ -419,8 +421,6 @@ export interface AuthMiddlewareOptions {
   /** 登录失败限流；不传则每个 app 自建一个 */
   loginThrottle?: LoginThrottle;
 }
-
-export type BrowserAuthState = { authenticated: boolean; required: boolean; password?: boolean };
 
 /**
  * 登录失败限流：同一来源地址连续失败 maxFailures 次后锁定 lockMs；距上次失败超过 lockMs 重新计数，

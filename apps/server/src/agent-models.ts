@@ -7,13 +7,12 @@ import { childEnvironment } from '@dutydeck/shared/child-environment';
 import { promisify } from 'node:util';
 import { createAcpRuntime, createAgentRegistry, createRuntimeStore, type AcpRuntime, type AcpRuntimeEnsureInput, type AcpRuntimeHandle, type AcpRuntimeStatus } from 'acpx/runtime';
 import { acpxAgentEnvironment, acpxPermissionMode, prepareAcpxAgentLaunch } from '@dutydeck/acp-client';
-import { supportsCodexProfiles, withTimeout, type AgentConfig } from '@dutydeck/shared';
+import { type AgentModel, type AgentProfile, type AgentModelsResult, supportsCodexProfiles, withTimeout, type AgentConfig } from '@dutydeck/shared';
+
+export type { AgentModel, AgentProfile, AgentModelsResult } from '@dutydeck/shared';
 
 const run = promisify(execFile);
 const ACP_MODEL_PROBE_TIMEOUT_MS = 30_000;
-export interface AgentModel { id: string; name: string }
-export interface AgentProfile { id: string; name: string }
-export interface AgentModelsResult { models: AgentModel[]; profiles?: AgentProfile[]; defaultModel?: string; reasoningEfforts: AgentModel[]; defaultReasoningEffort?: string; source?: 'acp' | 'cli' | 'agent'; protocol?: 'acp' }
 
 export class AgentModelProbeTimeoutError extends Error {
   constructor(readonly phase: 'ensureSession' | 'getStatus' | 'close', readonly timeoutMs: number) {

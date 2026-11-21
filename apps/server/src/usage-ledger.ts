@@ -1,8 +1,10 @@
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import { executionTaskId } from '@dutydeck/storage/helpers';
-import { backgroundKindFor, backgroundSource, errorMessage, isCapExcludedUsage, makeId, parseLarkSourceId, RuntimeError, type UsageBackgroundLimits, type UsageBackgroundBudget, type AttemptRef, type RepositoryBundle, type Session, type TaskRequestV1, type UsageCap, type UsageCapScope, type UsageCategory, type UsageGroup, type UsageLedgerEntry, type UsageTotals, type UsageFilter, type UsageReport, type UsageReportFilter, type UsageTaskPage, type JsonValue } from '@dutydeck/shared';
+import { type UsageReportQuery, type UsageSummaryWindow, backgroundKindFor, backgroundSource, errorMessage, isCapExcludedUsage, makeId, parseLarkSourceId, RuntimeError, type UsageBackgroundLimits, type UsageBackgroundBudget, type AttemptRef, type RepositoryBundle, type Session, type TaskRequestV1, type UsageCap, type UsageCapScope, type UsageCategory, type UsageLedgerEntry, type UsageTotals, type UsageFilter, type UsageReport, type UsageTaskPage, type JsonValue } from '@dutydeck/shared';
 import { isLarkPerGroupMemoryPool, larkMemoryScopeOfPool } from './lark/memory.js';
+
+export type { UsageReportQuery, UsageSummaryWindow } from '@dutydeck/shared';
 
 const rateSchema = z.object({ inputPerMTok: z.number().nonnegative(), cachedInputPerMTok: z.number().nonnegative(), outputPerMTok: z.number().nonnegative(), cacheWritePerMTok: z.number().nonnegative().optional(), provider: z.string().trim().min(1).optional() }).strict();
 const modelRateSchema = rateSchema.extend({ match: z.string().trim().min(1) }).strict();
@@ -269,8 +271,6 @@ export interface UsageLedgerOptions {
   log?: { warn(object: unknown, message: string): void };
   now?: () => Date;
 }
-/** 明细查询：from / to 是 daemon 本地时区的日历日（YYYY-MM-DD，含首尾两天），其余是精确匹配的筛选。 */
-export type UsageReportQuery = UsageReportFilter & { from?: string; to?: string };
 const dayText = (date: Date) => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
 function parseDay(value: string, label: string): Date {
   const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
@@ -287,7 +287,6 @@ export function resolveUsageRange(query: Pick<UsageReportQuery, 'from' | 'to'>, 
   const until = new Date(to.getFullYear(), to.getMonth(), to.getDate() + 1);
   return { from: dayText(from), to: dayText(to), since: from.toISOString(), until: until.toISOString() };
 }
-export interface UsageSummaryWindow { since: string; totals: UsageTotals; bots: UsageGroup[]; chats: UsageGroup[]; actors: UsageGroup[]; categories: UsageGroup[] }
 
 export class UsageLedger {
   private readonly pricing: UsagePricing;

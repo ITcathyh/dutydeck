@@ -6,9 +6,9 @@ import { isAbsolute } from 'node:path';
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import {
-  RuntimeError, canonicalExecutionJson, parseLarkSourceId, createGroupBindingInputSchema, createRoleAssignmentInputSchema, evaluatePolicyAction, installationOwnerTaskActor,
+  type ManagedGroupBot, type ManagedGroup, RuntimeError, canonicalExecutionJson, parseLarkSourceId, createGroupBindingInputSchema, createRoleAssignmentInputSchema, evaluatePolicyAction, installationOwnerTaskActor,
   groupBindingSchema, remoteChatFactValidity, resolveGroupEffectiveConfig, resolveParticipation, updateRoleAssignmentInputSchema,
-  type ChannelBotFoundation, type ChannelBotGroupPolicy, type EffectiveGroupConfig, type GroupBinding, type PolicyAction,
+  type ChannelBotFoundation, type ChannelBotGroupPolicy, type GroupBinding, type PolicyAction,
   type PolicyDecision, type PresentationSettings, type RepositoryBundle, type RemoteIdentityFact, type RoleAssignment, type Session, type ToolRiskPolicy
 } from '@dutydeck/shared';
 import { defaultLarkTraceLimit, larkExecutionConfirmed, readLarkConfig, readLarkConfigs, type StoredLarkConfig } from './config.js';
@@ -17,12 +17,8 @@ import type { LarkMessageEvent } from './listener.js';
 import { larkSourceId } from './session-resolver.js';
 import { discoverAgentModels } from '../agent-models.js';
 
-export interface ManagedGroupBot {
-  appId: string; channelBotId?: string; binding?: GroupBinding; effective?: EffectiveGroupConfig;
-  roles: RoleAssignment[]; membership: 'member' | 'not_member' | 'inaccessible' | 'unknown';
-  validity: string; checkedAt?: string; applied: boolean; error?: string;
-}
-export interface ManagedGroup { key: string; chatId: string; name: string; bots: ManagedGroupBot[] }
+export type { ManagedGroupBot, ManagedGroup } from '@dutydeck/shared';
+
 interface LiveOwner { channelBotId: string; credentialRefId: string; fingerprint: string; activeGroups: string[] }
 interface RunContext { activeOpenId?: string; appId: string; chatId: string; bindingId: string; principalId: string; openId: string; sourceId: string; revision: number; agentId: string; cwd: string; model?: string; reasoningEffort?: string }
 const ownerKey = (appId: string) => `lark.live-owner.${appId}`;
