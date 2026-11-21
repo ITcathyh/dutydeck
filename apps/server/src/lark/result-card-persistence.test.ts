@@ -6,6 +6,7 @@
 // 2) 验收刷新时 service.update 不传 capabilities，回落默认能力表后只读卡上 0 个按钮，
 //    但 elements 里「可点『运行验证』执行。」这句是渲染时写死进 markdown 的，于是按钮
 //    没了、文字还在指路。文案与按钮必须同源。
+import { persistedReplyTarget } from './persisted-card-task.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
@@ -191,6 +192,18 @@ describe('saveCardTask 的合并语义', () => {
     restored.event.replyMessageId = 'om_later';
     await (h.coordinator as any).persistCardTask(restored, 'completed');
     expect(await h.persisted()).toMatchObject({ anchor_message_id: 'om_anchor', fallback_note: note });
+  });
+
+  it('旧记录恢复并写回后仍回复保存的根消息', async () => {
+    const h = await harness();
+    await h.coordinator.handle({ ...event('om_child'), chatType: 'p2p' }, h.config);
+    await h.resultCard();
+    await h.patchPersisted({ anchor_message_id: undefined, reply_message_id: undefined, root_message_id: 'om_root' });
+    const [mapping] = await h.repos.channelMappings.list(h.channel);
+    const restored = (h.coordinator as any).restoredCardTask(h.config, mapping!, await h.persisted());
+    expect(restored.event).not.toHaveProperty('replyMessageId');
+    await (h.coordinator as any).persistCardTask(restored, 'completed');
+    expect(persistedReplyTarget(await h.persisted())).toMatchObject({ replyMessageId: 'om_root' });
   });
 
   it('推进到新一轮时不合并：上一轮的卡片归属与终态一律清掉', async () => {
