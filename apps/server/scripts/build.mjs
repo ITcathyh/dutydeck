@@ -191,5 +191,6 @@ mkdirSync(assetsDir, { recursive: true });
 cpSync(resolve(serverRoot, 'src/lark/assets/dutydeck-bouncing-ball.webp'), resolve(assetsDir, 'dutydeck-bouncing-ball.webp'));
 cpSync(resolve(serverRoot, 'src/lark/assets/SVG-SPINNERS-LICENSE.txt'), resolve(assetsDir, 'SVG-SPINNERS-LICENSE.txt'));
 cpSync(resolve(workspaceRoot, 'THIRD_PARTY_NOTICES.md'), resolve(assetsDir, 'THIRD_PARTY_NOTICES.md'));
-const { latestSchemaVersion } = await tsImport('../../../packages/storage/src/migrations.ts', import.meta.url);
-writeFileSync(resolve(serverRoot, 'dist/schema-reader.json'), JSON.stringify({ protocol: 1, schemaVersion: latestSchemaVersion }));
+const { latestSchemaVersion, migrations } = await tsImport('../../../packages/storage/src/migrations.ts', import.meta.url);
+const migrationNames = Object.fromEntries(migrations.map(({ version, name }) => [version, name]));
+writeFileSync(resolve(serverRoot, 'dist/schema-reader.json'), JSON.stringify({ protocol: 1, schemaVersion: latestSchemaVersion, migrationNames }));

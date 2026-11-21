@@ -1104,7 +1104,7 @@ describe('dutydeck deploy', () => {
   }, 60_000);
 
   it.each([
-    'reader-compatible', 'reader-too-new', 'reader-no-marker', 'reader-bad-backup',
+    'reader-compatible', 'reader-too-new', 'reader-no-marker', 'reader-no-names', 'reader-diverged', 'reader-earlier-diverged', 'reader-bad-backup',
     'same-schema', 'ddl-during-stop', 'migration-set-changed', 'current-unreadable', 'current-missing',
     'backup-missing', 'backup-unreadable', 'backup-schema-changed', 'initial-schema-unknown', 'initial-database-missing',
     'preservation-failed', 'stop-failed', 'stop-still-running', 'stop-threw', 'stop-check-threw',
@@ -1121,8 +1121,12 @@ describe('dutydeck deploy', () => {
     const ran: string[] = [], copies: Array<[string, string]> = [];
     const put = (sql: string) => { const db = new Database(database); try { db.exec(sql); } finally { db.close(); } };
     if (scenario.startsWith('reader-')) {
-      put(`CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY, compatible_reader_version INTEGER); INSERT INTO schema_migrations VALUES (${latestSchemaVersion}, ${latestSchemaVersion})`);
-      if (scenario !== 'reader-no-marker') writeFileSync(join(first.release!, 'dist/schema-reader.json'), JSON.stringify({ protocol: 1, schemaVersion: latestSchemaVersion }));
+      put(`CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY, compatible_reader_version INTEGER, name TEXT); INSERT INTO schema_migrations VALUES (${latestSchemaVersion}, ${latestSchemaVersion}, 'common')`);
+      if (scenario !== 'reader-no-marker') {
+        const schemaVersion = latestSchemaVersion + Number(scenario === 'reader-diverged');
+        const migrationNames = { [latestSchemaVersion]: scenario === 'reader-earlier-diverged' ? 'different' : 'common', ...(scenario === 'reader-diverged' && { [schemaVersion]: 'other_branch' }) };
+        writeFileSync(join(first.release!, 'dist/schema-reader.json'), JSON.stringify({ protocol: 1, schemaVersion, ...(scenario !== 'reader-no-names' && { migrationNames }) }));
+      }
     }
     if (scenario === 'migration-set-changed') put('CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY); INSERT INTO schema_migrations VALUES (1), (2)');
     const stopFailure = scenario.startsWith('stop-');
@@ -1140,7 +1144,7 @@ describe('dutydeck deploy', () => {
           if (scenario === 'current-missing') rmSync(database);
           if (scenario === 'backup-missing') rmSync(backup!);
           if (scenario === 'backup-unreadable') writeFileSync(backup!, 'unreadable backup');
-          if (scenario.startsWith('reader-')) put(`CREATE TABLE added(id); INSERT INTO schema_migrations VALUES (${latestSchemaVersion + 1}, ${latestSchemaVersion + Number(scenario === 'reader-too-new')})`);
+          if (scenario.startsWith('reader-')) put(`CREATE TABLE added(id); INSERT INTO schema_migrations VALUES (${latestSchemaVersion + 1}, ${latestSchemaVersion + Number(scenario === 'reader-too-new')}, 'added_table')`);
           if (scenario === 'backup-schema-changed' || scenario === 'reader-bad-backup') {
             const changed = new Database(backup!); changed.exec('CREATE TABLE changed_backup(id)'); changed.close();
           }
@@ -1189,6 +1193,9 @@ describe('dutydeck deploy', () => {
       expect(manifest.rollback_blocked_reason).toEqual(expect.any(String));
       if (scenario === 'reader-too-new') expect(manifest.rollback_blocked_reason).toContain('超过部署前的 schema 版本');
       if (scenario === 'reader-no-marker') expect(manifest.rollback_blocked_reason).toContain('无法核实上一版');
+      if (scenario === 'reader-no-names') expect(manifest.rollback_blocked_reason).toContain('迁移名称');
+      if (scenario === 'reader-diverged') expect(manifest.rollback_blocked_reason).toContain(`迁移 ${latestSchemaVersion + 1} 的名称与上一版不一致`);
+      if (scenario === 'reader-earlier-diverged') expect(manifest.rollback_blocked_reason).toContain(`迁移 ${latestSchemaVersion} 的名称与上一版不一致`);
       if (scenario === 'reader-bad-backup') expect(manifest.rollback_blocked_reason).toContain('备份');
       expect(manifest.rollback_service_stopped).toBe(!stopFailure);
       if (!stopFailure) expect(await controlled.mainPid()).toBeUndefined();

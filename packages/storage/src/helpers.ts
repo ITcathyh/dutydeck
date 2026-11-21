@@ -6,6 +6,8 @@ import { canonicalExecutionJson, taskExecutionSchemas, taskRequestV1Schema, type
 export { childProcessIdentity, currentProcessIdentity, observeProcess, type ProcessIdentity } from './process-identity.js';
 export { checkSqliteDriver, describeSqliteDriverFailure, type SqliteDriverCheck, type SqliteDriverCheckOptions } from './sqlite-preflight.js';
 export { createConfigReader } from './config-reader.js';
+export { assertConfigWrite } from './config-write.js';
+export { configKeyDefinition } from './config-keys.js';
 export { assertBotProcessStartup } from './bot-process.js';
 
 export const LEGACY_RETIREMENT_NOTICE = '升级已结束旧会话，历史记录保留；原上下文未自动恢复，请用 /new 新建。';
