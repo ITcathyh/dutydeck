@@ -87,9 +87,6 @@ const larkPlainText = (markdown: string) => markdown.replace(/\*\*/g, '').trim()
  * 别人在群里使唤它，实际就是拿部署者的权限在跑，这件事必须写在状态里，而不是靠人推断。
  */
 /** 生效的群访问口径的人话说明，/grant、/revoke 的回执用它写清「改之前/改之后谁能用」。 */
-const describeLarkAccess = (mode: 'owner_only' | 'allowlist' | 'all_chat_members' | 'disabled') =>
-  ({ owner_only: '仅机器人管理员可用', allowlist: '仅名单内成员可用', all_chat_members: '全部群成员可用', disabled: '本群已停用' })[mode];
-
 /** 私信里的登录卡：一句说明、链接按钮、一句使用限制。登录链接只出现在这张卡上。 */
 const larkDetailLoginElements = (url: string): LarkCardElement[] => [
   { tag: 'markdown', content: '点击下方按钮登录 Dutydeck Web，并打开这个任务的会话页。', margin: '0px' },
@@ -1538,6 +1535,7 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
   private commandDependencies() {
     return {
       absorbQueuedTask: this.absorbQueuedTask.bind(this),
+      botOpenId: this.botOpenId,
       cancelPreparingTurns: this.cancelPreparingTurns.bind(this),
       cancelUndeliveredRetries: this.cancelUndeliveredRetries.bind(this),
       cardMappings: this.cardMappings,
@@ -1550,8 +1548,10 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
       handleAction: this.handleAction.bind(this),
       inbox: this.inbox,
       isDeferredTask: this.isDeferredTask.bind(this),
+      isGrantOperatorAllowed: this.isGrantOperatorAllowed.bind(this),
       isInterruptOperatorAllowed: this.isInterruptOperatorAllowed.bind(this),
       isOperatorAllowed: this.isOperatorAllowed.bind(this),
+      isRepairOperatorAllowed: this.isRepairOperatorAllowed.bind(this),
       isStaticOperatorAllowed: this.isStaticOperatorAllowed.bind(this),
       isTaskOperatorAllowed: this.isTaskOperatorAllowed.bind(this),
       larkTaskOrigin: this.larkTaskOrigin.bind(this),
@@ -1617,21 +1617,6 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
       if (execute) return await execute({ ...this.commandDependencies(), route, event, config, group, scopeId, sessionId, latestTask, replyCard, acknowledgement });
 
 
-      if (route.command === 'repair') {
-        // 安装级发布动作：发卡前就按 high_risk/静态白名单口径拦一道，无权成员看不到确认卡。
-        const repairAuth = await this.isRepairOperatorAllowed(config, event.senderOpenId, event.chatId);
-        if (!repairAuth.allowed) {
-          const reason = repairAuth.reason === 'unconfigured'
-            ? '未配置操作白名单时，飞书里不能执行 /repair，请在 Web 上操作。'
-            : '当前账号无权执行应用修复：需要安装管理员权限。';
-          await replyCard('/repair 未执行', reason, { failed: true });
-          return 'handled';
-        }
-        // 只发二次确认卡；真正的发布动作只能由确认卡回调触发（handleAction 的 dutydeck_repair 分支）。
-        const card = buildRepairConfirmCard(config.appId);
-        await replyCard(card.title, card.markdown, { elements: card.elements });
-        return 'handled';
-      }
 
       if (route.command === 'status') {
         const participation = event.chatType === 'group'
@@ -1668,9 +1653,6 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
         });
         await replyCard('本机可用 Agent', lines.join('\n\n'));
         return 'handled';
-      }
-      if (route.command === 'grant' || route.command === 'revoke') {
-        return await this.executeGrantCommand(route.command, event, config, route.argsText, replyCard);
       }
       // 记忆命令的授权就是命令层的白名单门（发言人能在本聊天用命令，就能维护本聊天可见的记忆），
       // 作用域由当前聊天决定：群聊是本机器人的群共享池，私聊是自己的池；不接受参数指定别的聊天。
@@ -1818,79 +1800,6 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
       ...(cwd ? { cwd, git: await readGitSnapshot(cwd) } : {}) });
   }
 
-  /**
-   * 在聊天里改本群的对话授权。唯一写入路径仍是 LarkGroupManager.save（与 Web 的 PUT 同一条），
-   * 本方法只负责：定位当前授权 → 过授权门 → 把 @ 到的人解析成 principal → 算出新的 accessOverride。
-   *
-   * 三条硬规则：
-   * 1. 群没有同步/绑定就直说没有可改的授权，绝不替用户新建一份群配置；
-   * 2. 带参数（含 @）却解析不出群成员时整条命令失败，绝不静默按「放开全员」处理；
-   * 3. 回执必须写出改完之后谁能用，而不是只说一句「已更新」。
-   */
-  private async executeGrantCommand(
-    command: 'grant' | 'revoke',
-    event: LarkMessageEvent,
-    config: StoredLarkConfig,
-    argsText: string,
-    replyCard: (taskName: string, markdown: string, options?: { elements?: LarkCardElement[]; failed?: boolean }) => Promise<unknown>
-  ): Promise<'handled'> {
-    const manager = this.groupManager;
-    if (!manager || event.chatType !== 'group') throw new Error('只有群聊里才有可修改的对话授权。');
-    const state = await manager.groupAccess(config.appId, event.chatId);
-    if (!state) throw new Error('本群还没有在 Dutydeck 中同步群配置，聊天里没有可修改的授权。请管理员先在 Dutydeck Web 同步此机器人的群聊。');
-    if (!await this.isGrantOperatorAllowed(config, event.senderOpenId, event.chatId, command === 'grant' ? 'grant.create' : 'grant.revoke')) {
-      await replyCard(`/${command} 未执行`, '当前账号没有修改本群授权的权限：需要本机器人的管理员，或已被授予高风险操作权限的群成员。', { failed: true });
-      return 'handled';
-    }
-    // 目标成员只认真实的飞书提及（带 open_id），机器人自己的提及不算目标。
-    const mentioned = event.mentions.filter(mention => mention.openId && mention.openId !== this.botOpenId);
-    if (!mentioned.length && argsText) {
-      throw new Error('请用 @ 选中要操作的群成员，例如 `/grant @张三`。纯文字的名字解析不出群成员身份。');
-    }
-    const targets: string[] = [];
-    const unresolved: string[] = [];
-    for (const mention of mentioned) {
-      const principal = await manager.resolveGroupPrincipal(config.appId, event.chatId, mention.openId!);
-      if (principal) targets.push(principal);
-      else unresolved.push(mention.name || mention.openId!);
-    }
-    if (unresolved.length) {
-      throw new Error(`这些成员解析不到本群身份，本次授权没有做任何修改：${unresolved.map(name => larkCommandEcho(name, 40)).join('、')}。请确认他们仍在本群中。`);
-    }
-    // 基准只取**本群自己**的名单。继承来的机器人默认名单不是本群的 principal，
-    // 把它抄进群覆盖会写进一批没登记过身份的 principal，被 save 的作用域校验直接打回。
-    const own = state.override.mode === 'allowlist' ? state.override.principalIds : undefined;
-    if (command === 'revoke' && targets.length && !own) {
-      throw new Error(`本群现在不是按名单授权（当前：${describeLarkAccess(state.effective.mode)}），没有可移除的名单。要整体收回请直接发送 \`/revoke\`；要改成名单请先用 \`/grant @成员\` 建立。`);
-    }
-    const next = targets.length
-      ? (() => {
-        const list = new Set(own ?? []);
-        for (const id of targets) command === 'grant' ? list.add(id) : list.delete(id);
-        return list.size
-          ? { mode: 'allowlist' as const, principalIds: [...list] }
-          : { mode: 'owner_only' as const, principalIds: [] };
-      })()
-      : command === 'grant'
-        ? { mode: 'all_chat_members' as const, principalIds: [] }
-        : { mode: 'owner_only' as const, principalIds: [] };
-    await manager.save(config.appId, event.chatId, { expectedRevision: state.revision, patch: { accessOverride: next } });
-    const summary = next.mode === 'all_chat_members' ? '本群所有成员都可以使用本机器人'
-      : next.mode === 'allowlist' ? `仅名单内 ${next.principalIds.length} 人可以使用本机器人`
-        : '仅本机器人的管理员可以使用';
-    // 建了本群自己的名单就必须写出改之前是什么。从「继承机器人默认」切到群名单时，
-    // 原先按机器人默认（allowedUsers / allowedEmails）放行的人会一起失效——
-    // 这一步恰恰是用户最容易没想到的，必须显式说出来，不能只报改完的结果。
-    const narrowed = next.mode !== 'allowlist' || state.override.mode === 'allowlist' ? ''
-      : state.override.mode === 'inherit'
-        ? `\n\n此前本群继承机器人默认授权（${describeLarkAccess(state.effective.mode)}），现在改为本群自己的名单：原先按机器人默认放行的成员不再自动可用。`
-        : `\n\n此前本群是「${describeLarkAccess(state.effective.mode)}」，现在改为本群自己的名单。`;
-    const oncall = state.oncall ? '\n\n本群仍处于值班模式：值班期间所有群成员都能使用，名单要等关闭值班后才生效。' : '';
-    // 「谁能用」不止这一条口径：Web 上单独授予过 can_talk / can_operate 角色的成员
-    // 不受群 access 影响，回执不能把结论说成排他的。
-    await replyCard(`/${command} 已生效`, `**本群授权已改为：${summary}。**${narrowed}${oncall}\n\n在 Dutydeck Web 上单独授予过角色的成员不受本命令影响，需要到 Web 上撤销。`);
-    return 'handled';
-  }
 
   /**
    * 汇总会话/Agent/工作区/排队状态，口径与 Web 保持一致：运行数与待执行指令数分开。

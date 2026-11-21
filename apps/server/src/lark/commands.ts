@@ -222,7 +222,7 @@ export const larkCommandRegistry: readonly LarkCommandDefinition[] = [
     mutating: false
   },
   {
-    name: 'repair',
+    name: 'repair', execute: async ctx => (await import('./handlers/access.js')).handleRepair(ctx),
     summary: '诊断并一键补齐飞书应用权限、事件订阅与卡片回调（执行前二次确认，不会自动发布）',
     usage: '/repair',
     mutating: true
@@ -304,7 +304,7 @@ export const larkCommandRegistry: readonly LarkCommandDefinition[] = [
     unavailableReason: '当前服务没有计划卡所需的存储或无法派发任务，/plan 已停用。'
   },
   {
-    name: 'grant',
+    name: 'grant', execute: async ctx => (await import('./handlers/access.js')).handleGrant(ctx),
     summary: '把本群的对话权限放开给全部群成员，或把被 @ 的成员加进名单',
     usage: '/grant；/grant @成员',
     mutating: true,
@@ -312,7 +312,7 @@ export const larkCommandRegistry: readonly LarkCommandDefinition[] = [
     unavailableReason: '当前机器人没有接入群策略（缺少群绑定管理），/grant 无法修改任何授权，已停用。'
   },
   {
-    name: 'revoke',
+    name: 'revoke', execute: async ctx => (await import('./handlers/access.js')).handleGrant(ctx),
     summary: '收回本群的对话权限，或把被 @ 的成员移出名单',
     usage: '/revoke；/revoke @成员',
     mutating: true,
