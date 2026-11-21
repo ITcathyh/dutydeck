@@ -14,7 +14,7 @@ import { VerificationSummary } from './components/VerificationSummary';
 import { TurnMemoryPanel } from './components/TurnMemoryPanel';
 import { UnknownTasksPanel } from './components/UnknownTasksPanel';
 import { PlanPanel } from './components/PlanPanel';
-import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { lazy, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { BookOpen, CalendarClock, ChevronRight, Coins, MessagesSquare, PanelRightClose, PanelRightOpen, Settings2, Terminal, Users, X } from 'lucide-react';
 import { api, type RunSummary, type Session } from './api';
@@ -35,7 +35,7 @@ import { LazyBoundary } from './components/ErrorBoundary';
 import { WorkspaceOverview } from './components/WorkspaceOverview';
 import { InboxPanel } from './components/InboxPanel';
 import { RunDetailTabs, RunHeader } from './components/RunHeader';
-import { SessionTraceView } from './components/SessionTraceView';
+import { AutomationOverview, OverlayHost } from './OverlayHost';
 import { useSessionStream } from './useSessionStream';
 import { loadSessions } from './sessions-query';
 import { commandsFromEvents, currentContextStats } from './composer-utils';
@@ -61,18 +61,11 @@ import { useSessionActions, type SendFailure } from './useSessionActions';
 
 // 终端与控制面都属于低频重功能，避免进入工作台首屏 chunk。
 const TerminalView = lazy(() => import('./components/TerminalView').then(module => ({ default: module.TerminalView })));
-const ControlCenterModal = lazy(() => import('./components/ControlCenterModal').then(module => ({ default: module.ControlCenterModal })));
-const LarkConfigModal = lazy(() => import('./components/LarkConfigModal').then(module => ({ default: module.LarkConfigModal })));
-const GroupPolicyModal = lazy(() => import('./components/GroupPolicyModal').then(module => ({ default: module.GroupPolicyModal })));
-const AutomationOverview = lazy(() => import('./components/AutomationOverview').then(module => ({ default: module.AutomationOverview })));
-const UsageOverview = lazy(() => import('./components/UsageOverview').then(module => ({ default: module.UsageOverview })));
-const SessionInsightPanel = lazy(() => import('./components/SessionInsightPanel').then(module => ({ default: module.SessionInsightPanel })));
 // 机器人 / 群聊是一级视图但不是首屏：多数会话只用任务中心，两块管理界面各自带表单
 // 与目录浏览器，进首屏 chunk 只会拖慢每个人的第一次加载。
 const BotManagement = lazy(() => import('./components/BotManagement').then(module => ({ default: module.BotManagement })));
 const GroupManagement = lazy(() => import('./components/GroupManagement').then(module => ({ default: module.GroupManagement })));
 const SessionChangesPanel = lazy(() => import('./components/SessionChangesPanel').then(module => ({ default: module.SessionChangesPanel })));
-const WorkspaceGroupsModal = lazy(() => import('./components/WorkspaceGroupsModal').then(module => ({ default: module.WorkspaceGroupsModal })));
 
 type DetailTab = 'timeline' | 'changes' | 'terminal';
 
@@ -116,7 +109,7 @@ export default function App() {
     location, route, overlay, primaryNav, selectedAppId, selectedChatId, experimental,
     sidebarOpen, setSidebarOpen, taskFilters, workbenchView, updateTaskFilters, setWorkbenchView,
     navigate, openOverlay, closeOverlay, selectSession, setPrimaryNav, selectBot, selectGroup,
-    openSettings, openLarkSetup, registerSettingsLeaveGuard
+    openSettings, openLarkSetup
   } = navigation;
   const [density, setDensity] = useTimelineDensityPreference();
   const [runSummaries, setRunSummaries] = useState<Record<string, RunSummary>>({});
@@ -418,9 +411,6 @@ export default function App() {
     <div className="mt-3 space-y-2"><MemoryManagementPanel key={`memory-${session.id}`} session={session}/><ConfigurationExplanationPanel key={`configuration-${session.id}`} sessionId={session.id}/></div>
   </>;
 
-  // 四个懒加载浮层的加载态是同一件事，只有文案不同。
-  const overlayFallback = (label: string) => <div className="fixed inset-0 z-dialog grid place-items-center bg-scrim backdrop-blur-sm"><Spinner label={label}/></div>;
-
   const detailRail = active && primaryNav === 'tasks' ? (inspectorOpen && inspectorSideBySide ? 384 : 0) + (rawVisible && rawSideBySide ? 420 : 0) : 0;
   const createTask = createTaskAffordance({ agents: agents.data ?? [], agentsLoading: agents.isLoading, onCreate: openCreateTask, onPrepareAgents: () => openSettings('agents') });
   return <div style={{ '--sidebar-w': `${!mobile && sidebarCollapsed ? 68 : sidebarWidth}px`, '--main-inset': 'calc(var(--sidebar-w) + var(--shell-gap) * 2)', '--detail-rail': `${detailRail}px` } as React.CSSProperties} className="relative flex h-[100dvh] min-h-[100dvh] flex-col overflow-hidden bg-canvas font-sans text-primary md:bg-chrome">
@@ -508,49 +498,14 @@ export default function App() {
     </div>
     {showTabBar && <MobileTabBar current={primaryNav} onNavigate={setPrimaryNav} inboxCount={inbox.data?.items.length ?? 0}/>}
     {newOpen && <NewSessionDialog open creation={taskCreation} onClose={() => setNewOpen(false)} onOpenAgentSetup={() => { setNewOpen(false); openSettings('agents'); }} agents={agents.data ?? []} capabilities={systemCapabilities.data}/>}
-    {overlay?.kind === 'lark-setup' && <Suspense fallback={overlayFallback('正在打开 Bot 绑定向导…')}><LarkConfigModal key={overlay.target === 'new' ? 'new' : overlay.target?.appId ?? 'manage'} target={overlay.target} field={overlay.field} onLeaveGuardChange={registerSettingsLeaveGuard} agents={agents.data ?? []} onClose={() => { closeOverlay(); void qc.invalidateQueries({ queryKey: ['lark-config'] }); }}/></Suspense>}
-    {overlay?.kind === 'settings' && <Suspense fallback={overlayFallback('正在打开设置与接入…')}><ControlCenterModal open onLeaveGuardChange={registerSettingsLeaveGuard} initialSection={overlay.section} field={overlay.field} agents={agents.data ?? []} legacyBots={larkConfig.data?.bots ?? []} larkListeningDisabled={larkConfig.data?.listeningDisabled ?? false} larkBotsLoading={larkConfig.isLoading} larkBotsFailed={larkConfig.isError} larkBotsRetrying={larkConfig.isFetching} onRetryLarkBots={() => void larkConfig.refetch()} authRequired={authStatus.data?.required} onClose={closeOverlay} onCreateTask={agentId => { closeOverlay(); openCreateTaskForAgent(agentId); }} onOpenLarkSetup={openLarkSetup} onOpenGroups={() => openOverlay({ kind: 'groups' })} onOpenSchedules={() => openOverlay({ kind: 'automation' })}/></Suspense>}
-    {overlay?.kind === 'groups' && <Suspense fallback={overlayFallback('正在打开群配置…')}><GroupPolicyModal open onClose={closeOverlay}/></Suspense>}
-    {overlay?.kind === 'automation' && <Dialog open onClose={closeOverlay} label="任务自动化" size="lg">
-      <Dialog.Header><h2 className="text-title font-semibold">任务自动化</h2><span className="ml-auto"><IconButton label="关闭自动化" onClick={closeOverlay}><X size={16}/></IconButton></span></Dialog.Header>
-      <Dialog.Body><LazyBoundary fallback={<Spinner label="正在读取任务自动化…"/>}><AutomationOverview agents={agents.data ?? []} capabilities={systemCapabilities.data} onOpenAgentSetup={() => openSettings('agents')} sessions={visibleSessions} summaries={runSummaries} onSelectSession={id => { applySessionSelection(id); navigate({ route: { kind: 'session', sessionId: id }, nav: 'tasks', appId: selectedAppId, chatId: selectedChatId }, { replace: true }); }}/></LazyBoundary></Dialog.Body>
-    </Dialog>}
-    {overlay?.kind === 'usage' && <Dialog open onClose={closeOverlay} label="用量与成本" size="lg">
-      <Dialog.Header><h2 className="text-title font-semibold">用量与成本</h2><span className="ml-auto"><IconButton label="关闭用量与成本" onClick={closeOverlay}><X size={16}/></IconButton></span></Dialog.Header>
-      <Dialog.Body><LazyBoundary fallback={<Spinner label="正在读取用量…"/>}><UsageOverview
-        bots={larkConfig.data?.bots ?? []}
-        initialView={overlay.view === 'insight' ? 'insight' : 'cost'}
-        onViewChange={view => navigate({
-          route, nav: primaryNav, appId: selectedAppId, chatId: selectedChatId,
-          overlay: { kind: 'usage', ...(view === 'insight' ? { view: 'insight' as const } : {}) }
-        }, { replace: true })}
-        onOpenSession={id => {
-          applySessionSelection(id);
-          navigate({ route: { kind: 'session', sessionId: id }, nav: 'tasks', appId: selectedAppId, chatId: selectedChatId, overlay: { kind: 'insight' } });
-        }}
-        onOpenTask={id => {
-          applySessionSelection(id);
-          navigate({ route: { kind: 'session', sessionId: id }, nav: 'tasks', appId: selectedAppId, chatId: selectedChatId });
-        }}
-        onCompare={(leftSessionId, rightSessionId) => {
-          applySessionSelection(leftSessionId);
-          navigate({ route: { kind: 'session', sessionId: leftSessionId }, nav: 'tasks', appId: selectedAppId, chatId: selectedChatId, overlay: { kind: 'insight', compare: rightSessionId } });
-        }}
-      /></LazyBoundary></Dialog.Body>
-    </Dialog>}
-    {traceOpen && active && <SessionTraceView session={active} agent={activeAgent} events={completeRawEvents ?? eventList} loading={events.loadingRaw || events.isPending} error={events.rawError ?? (events.error instanceof Error ? events.error.message : undefined)} historyLoaded={Boolean(completeRawEvents)} streamStatus={streamStatus} onRetry={() => void events.loadAll()} onClose={closeOverlay}/>}
-    {overlay?.kind === 'insight' && route.kind === 'session' && <Suspense fallback={overlayFallback('正在打开会话分析…')}>
-      <SessionInsightPanel
-        sessionId={route.sessionId}
-        compareSessionId={overlay.compare ?? null}
-        onCompareSessionChange={compare => navigate({
-          route, nav: primaryNav, appId: selectedAppId, chatId: selectedChatId,
-          overlay: { kind: 'insight', ...(compare ? { compare } : {}) }
-        }, { replace: true })}
-        onClose={closeOverlay}
-      />
-    </Suspense>}
-    {workspaceGroupsOpen && <Suspense fallback={overlayFallback('正在打开整理分组…')}><WorkspaceGroupsModal open onClose={() => setWorkspaceGroupsOpen(false)} snapshot={workspaceGroups.data} loading={workspaceGroups.isLoading} error={workspaceGroups.error ?? undefined} sessions={visibleSessions} summaries={runSummaries} onRetry={() => void workspaceGroups.refetch()}/></Suspense>}
+    <OverlayHost location={navigation} agents={agents.data ?? []} larkConfig={larkConfig}
+      capabilities={systemCapabilities.data} authRequired={authStatus.data?.required}
+      visibleSessions={visibleSessions} runSummaries={runSummaries}
+      applySessionSelection={applySessionSelection} openCreateTaskForAgent={openCreateTaskForAgent}
+      trace={traceOpen && active ? { session: active, agent: activeAgent, events: completeRawEvents ?? eventList,
+        loading: events.loadingRaw || events.isPending, error: events.rawError ?? (events.error instanceof Error ? events.error.message : undefined),
+        historyLoaded: Boolean(completeRawEvents), streamStatus, onRetry: () => void events.loadAll() } : undefined}
+      workspaceGroupsOpen={workspaceGroupsOpen} closeWorkspaceGroups={() => setWorkspaceGroupsOpen(false)} workspaceGroups={workspaceGroups}/>
     <ConfirmDialog open={archiveConfirm} tone="danger" title="归档此任务？" description="归档后任务将变为只读且无法恢复，历史指令和执行记录会继续保留。" confirmLabel="确认归档" busy={archive.isPending} error={archive.error?.message} onCancel={() => { if (!archive.isPending) setArchiveConfirm(false); }} onConfirm={() => { if (active) archive.mutate(active.id); }}/>
     <ConfirmDialog open={bulkArchiveIds.length > 0} tone="danger" title={`清理所选的 ${bulkArchiveIds.length} 个任务？`} description="所选任务将归档为只读且无法恢复；正在执行的任务会停止，排队指令会取消。历史指令和执行记录会保留，可在「已归档」中查看。" confirmLabel={bulkArchive.data?.failures.length ? '重试失败项' : '确认清理'} busy={bulkArchive.isPending} error={bulkArchive.data?.failures.length ? `${bulkArchive.data.failures.length} 个任务未清理。首个错误：${bulkArchive.data.failures[0].message}` : undefined} onCancel={() => { if (!bulkArchive.isPending) setBulkArchiveIds([]); }} onConfirm={() => { if (bulkArchiveIds.length && !bulkArchive.isPending) bulkArchive.mutate(bulkArchiveIds); }}/>
     <SystemPromptModal open={systemPromptOpen} session={active} onClose={() => setSystemPromptOpen(false)}/>
