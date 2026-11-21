@@ -150,7 +150,7 @@ describe('scheduled delegation validity', () => {
     expect(f.client.send).not.toHaveBeenCalled();
   });
 
-  it('rejects an expired writer at Runtime submission after preparation', async () => {
+  it('settles the same task once when the writer lease expires before Runtime submission', async () => {
     vi.useFakeTimers({ toFake: ['Date'] });
     try {
       const f = await fixture({ sessionPrompt: (_session, prompt) => {
@@ -174,25 +174,25 @@ describe('scheduled delegation validity', () => {
       expect(Date.parse(lease.expiresAt!)).toBeGreaterThan(Date.now());
 
       f.runtime.setQueueHeld(false);
-      await eventually(async () => f.calls.length > 0 || (await f.runtime.getTasks(child.id))[0]?.status === 'failed');
+      await eventually(async () => f.calls.length === 1);
       expect(await f.repos.scheduleLeases.getByKey(leaseKey)).toEqual(lease);
       expect(Date.parse(lease.expiresAt!)).toBeLessThan(Date.now());
       expect(f.client.send).not.toHaveBeenCalled();
-      if (f.calls.length) f.calls[0]!.finish('Frozen summary');
-      await eventually(async () => ['completed', 'failed'].includes((await f.runtime.getTasks(child.id))[0]!.status));
+      // 原租约到期后提交仍写入驱动。下次调度拿到新租约后按任务 ID 接回结果，
+      // 所以用户只看到一次执行和一次投递。
+      expect(f.calls[0]!.sessionId).toBe(child.id);
+      f.calls[0]!.finish('Frozen summary');
+      await eventually(async () => (await f.runtime.getTasks(child.id))[0]?.status === 'completed');
       await f.collaboration.scheduler.tick();
 
       const currentLease = (await f.repos.scheduleLeases.getByKey(leaseKey))!;
       expect(currentLease.fenceToken).toBeGreaterThan(lease.fenceToken);
-      const lastCheck = check.mock.results.at(-1)!;
-      const errorCode = await lastCheck.value.then(() => null, (error: RuntimeError) => error.code);
-      const outcome = {
-        driverWrites: f.calls.length, deliveries: f.client.send.mock.calls.length,
-        task: (await f.runtime.getTasks(child.id))[0]?.status,
-        occurrence: (await f.repos.scheduleOccurrences.listByDefinition(mandate.scheduleDefinitionId))[0]?.state,
-        errorCode
-      };
-      expect(outcome, JSON.stringify(outcome)).toMatchObject({ driverWrites: 0, deliveries: 0 });
+      await expect(check.mock.results.at(-1)!.value).resolves.toBeUndefined();
+      expect(await f.runtime.getTasks(child.id)).toMatchObject([{ id: child.payload.taskId, status: 'completed' }]);
+      expect(await f.repos.collaboration.getAction(scope, child.id)).toMatchObject({ status: 'succeeded', receipt: child.payload.taskId });
+      expect(await f.repos.scheduleOccurrences.listByDefinition(mandate.scheduleDefinitionId)).toMatchObject([{ state: 'settled' }]);
+      expect(f.calls).toHaveLength(1);
+      expect(f.client.send).toHaveBeenCalledOnce();
     } finally { vi.useRealTimers(); }
   });
 });
@@ -580,7 +580,7 @@ describe.each(['group', 'collaboration', 'work item'] as const)('%s high-risk ac
         await f.groups.beginTurn(session.id, actorId);
         policy = await f.groups.riskPolicy(session.id);
       } else if (caller === 'collaboration') {
-        vi.spyOn(f.collaboration.background, 'authorizeTool').mockResolvedValue({ actorId });
+        vi.spyOn(f.collaboration.background, 'authorizeTool').mockResolvedValue({ actorId, scope });
         await f.runtime.setRiskPolicy(session.id);
         policy = JSON.parse(await readFile(join(session.cwd, '.dutydeck', 'security', 'sessions', session.id + '.json'), 'utf8'));
       } else {

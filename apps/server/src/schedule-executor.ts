@@ -1,9 +1,10 @@
 import { boundCollaborationSnapshot } from './collaboration-context.js';
 import { randomUUID } from 'node:crypto';
 import { digest as hash } from '@dutydeck/runtime/digest';
-import { canonicalExecutionJson, previewNextSchedule, RuntimeError, type CollaborationAction, type CollaborationMandate, type CollaborationScope, type CollaborationSnapshot, type ScheduleDefinition, type ScheduleActionFence, type ScheduleExecutionFence, type ScheduleLease, type ScheduleOccurrence } from '@dutydeck/shared';
+import { previewNextSchedule, RuntimeError, type CollaborationAction, type CollaborationMandate, type CollaborationScope, type CollaborationSnapshot, type ScheduleDefinition, type ScheduleActionFence, type ScheduleExecutionFence, type ScheduleLease, type ScheduleOccurrence } from '@dutydeck/shared';
 import { scheduleWriterLeaseKey } from '@dutydeck/storage/helpers';
 import { CollaborationService, collaborationContextSignature, scheduleMatchesMandate, type CollaborationAuthorization, type CollaborationRepositories } from './collaboration-service.js';
+import { assertCollaborationDelegation, assertCollaborationWriter, bootstrapSignature, delegationStale as stale, leaseLost } from './collaboration-delegation.js';
 import { DeliveryCircuitOpenError } from './delivery-error.js';
 
 export interface ScheduleExecutionInput {
@@ -27,11 +28,8 @@ export interface ScheduleExecutorOptions {
   now?: () => Date;
   holderId?: string;
 }
-const bootstrapSignature = (snapshot: CollaborationSnapshot) => hash({ status: snapshot.bootstrap?.status ?? null, missing: snapshot.bootstrap?.missing ?? [] });
 const actionId = (occurrence: ScheduleOccurrence, kind: string) => `collaboration_${kind}_${occurrence.idempotencyKey}`;
 const terminal = (state: string) => ['settled','failed','suppressed'].includes(state);
-const stale = () => new RuntimeError('COLLABORATION_EXECUTION_STALE', 'Delegation, context or authorization changed', 409);
-const leaseLost = () => new RuntimeError('SCHEDULE_LEASE_CONFLICT', 'Schedule writer lease expired or was replaced', 409);
 const invalidated = (error: unknown) => error instanceof RuntimeError && ['COLLABORATION_EXECUTION_STALE', 'COLLABORATION_DELIVERY_SUPPRESSED', 'COLLABORATION_BUDGET_EXHAUSTED', 'COLLABORATION_DESTINATION_CONFLICT'].includes(error.code);
 const message = (error: unknown) => error instanceof Error ? error.message : String(error);
 
@@ -68,34 +66,13 @@ export class ScheduleExecutor {
   private async advance(occurrence: ScheduleOccurrence, state: ScheduleOccurrence['state'], lease: ScheduleLease, error?: string) {
     return this.repos.scheduleOccurrences.advance(occurrence.id, occurrence.revision, state, this.fence(lease), error);
   }
-  private async assertWriter(schedule: ScheduleDefinition, lease: ScheduleLease) {
-    const writer = await this.repos.scheduleLeases.getByKey(lease.leaseKey);
-    if (lease.leaseKey !== scheduleWriterLeaseKey(schedule.channelBotId) || !writer || writer.state !== 'held' || writer.holderId !== this.holderId || writer.fenceToken !== lease.fenceToken || !writer.expiresAt || writer.expiresAt <= this.now().toISOString()) throw leaseLost();
+  private assertWriter(schedule: ScheduleDefinition, lease: ScheduleLease) {
+    return assertCollaborationWriter(this.repos, schedule, lease, this.holderId, () => this.now());
   }
-  private async valid(mandate: CollaborationMandate, schedule: ScheduleDefinition, snapshot: CollaborationSnapshot, lease: ScheduleLease, phase: 'execute' | 'deliver', coverageSignature?: string) {
-    await this.assertWriter(schedule, lease);
-    if (this.closed) throw stale();
-    const [current, definition, latest] = await Promise.all([this.repos.collaboration.getMandate(mandate.scope, mandate.id), this.repos.scheduleDefinitions.get(schedule.id), this.repos.collaboration.snapshot(mandate.scope)]);
-    const readiness = definition && await this.repos.scheduleDefinitions.readiness(definition.id, this.now().toISOString());
-    await this.assertWriter(schedule, lease);
-    if (!readiness?.executionEligible || !current || current.status !== 'active' || !scheduleMatchesMandate(schedule, mandate) || !definition || !scheduleMatchesMandate(definition, current) || definition.state !== 'enabled' || definition.currentGeneration !== schedule.currentGeneration || definition.delivery.chatRef !== current.scope.chatId) throw stale();
-    const executionSettings = ({ notificationsPaused: _paused, revision: _revision, updatedAt: _updatedAt, ...settings }: CollaborationSnapshot['settings']) => settings;
-    if (canonicalExecutionJson(executionSettings(latest.settings)) !== canonicalExecutionJson(executionSettings(snapshot.settings))) throw stale();
-    if (phase === 'deliver') {
-      if (current.deliveryPaused || latest.settings.notificationsPaused) throw stale();
-      // Scheduled work uses its frozen material; appended chat and history cursors do not revoke it.
-      // Coverage changes still invalidate the result, as do the live plan/permission/follow-up checks.
-      if (bootstrapSignature(latest) !== (coverageSignature ?? bootstrapSignature(snapshot))) throw stale();
-    }
-    const allowed = await this.options.authorize(mandate.scope, mandate.requesterId, phase);
-    await this.assertWriter(schedule, lease);
-    if (!allowed) throw stale();
-    const followup = current.followupId ? await this.repos.collaboration.getFollowup(current.scope, current.followupId) : undefined;
-    await this.assertWriter(schedule, lease);
-    if (current.condition !== 'always' && (!followup || followup.status !== 'open')) throw stale();
-    if (phase === 'deliver' && current.followupId && followup?.revision !== snapshot.followups.find(item => item.id === current.followupId)?.revision) throw stale();
-    if (current.condition === 'no_progress' && followup?.revision !== current.lastProgressRevision) throw stale();
-    if (this.closed) throw stale();
+  private valid(mandate: CollaborationMandate, schedule: ScheduleDefinition, snapshot: CollaborationSnapshot, lease: ScheduleLease, phase: 'execute' | 'deliver', coverageSignature?: string) {
+    return assertCollaborationDelegation(this.repos, this.options.authorize, {
+      phase, mandate, schedule, snapshot, lease, coverageSignature, holderId: this.holderId, now: () => this.now(), closed: () => this.closed
+    });
   }
   private async begin(mandate: CollaborationMandate, schedule: ScheduleDefinition, occurrence: ScheduleOccurrence, snapshot: CollaborationSnapshot, lease: ScheduleLease, kind: string, payload: Record<string, unknown>, contextSignature = collaborationContextSignature(snapshot), coverageSignature = bootstrapSignature(snapshot)) {
     payload = JSON.parse(JSON.stringify({ ...payload, contextSignature, coverageSignature })) as Record<string, unknown>;
