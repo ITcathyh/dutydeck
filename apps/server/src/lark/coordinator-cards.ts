@@ -1,4 +1,4 @@
-import { fromRecord, mergeRestoredRecord, toRecord } from './turn-record.js';
+import { fromRecord, mergeRestoredRecord, saveTurnRecord, type TurnRecordWrite } from './turn-record.js';
 import { larkMessageAnchor } from './message-anchor.js';
 import { formatUnknownTaskTime } from '../task-resolution.js';
 import { sleep } from '../daemon/time.js';
@@ -87,10 +87,17 @@ export abstract class LarkCoordinatorCards extends LarkCoordinatorCore {
     const mappings = this.cardMappings;
     const { sessionId, turn, runtimeTaskId } = task;
     if (!mappings || !sessionId || !task.startedAt) return { saved: false, reason: 'missing_mapping_context' };
-    const extra = toRecord(task, state, this.taskTitle(task));
     const channel = larkCardChannel(task.config.appId);
     const row = { id: `${channel}:${task.id}`, channel, externalId: task.id, sessionId,
       createdAt: new Date(task.startedAt).toISOString() };
+    const result = await saveTurnRecord(task, state, this.taskTitle(task), extra =>
+      this.writeCardMapping(task, mappings, row, turn, runtimeTaskId, extra));
+    return result.saved ? { saved: true } : result;
+  }
+
+  private async writeCardMapping(task: LarkTask, mappings: NonNullable<typeof this.cardMappings>,
+    row: Omit<ChannelMapping, 'extra'>, turn: number, runtimeTaskId: string | undefined, extra: PersistedLarkCardTask): Promise<TurnRecordWrite> {
+    const { sessionId, channel } = row;
     // 合并必须和写入基于同一次读：对账（reconciler.ts）用 compareAndSetExtra 写同一条
     // 记录，「读—改—写」会把它先写进去的字段整条丢掉。冲突时重读重算，而不是覆盖。
     let confirmWholeRow = false;
@@ -128,16 +135,16 @@ export abstract class LarkCoordinatorCards extends LarkCoordinatorCore {
           if (!confirmWholeRow) { confirmWholeRow = true; continue; }
           if (task.sessionId !== sessionId || task.turn !== turn || task.runtimeTaskId !== runtimeTaskId) return { saved: false, reason: 'obsolete_turn' };
           await mappings.save({ ...row, extra: merged });
-          return { saved: true };
+          return { saved: true, json: merged };
         }
         // CAS 到上限也不能退回无条件的整行覆写；保留当前记录，下一次心跳或对账可基于新读重试。
         if (attempt >= 5) {
           return { saved: false, reason: 'cas_conflict' };
         }
         // 心跳帧多数没有新内容：合并结果与库里一致时，CAS 写入也只是原值覆盖，直接跳过。
-        if (merged === current.extra) return { saved: true };
+        if (merged === current.extra) return { saved: true, json: merged };
         if (task.sessionId !== sessionId || task.turn !== turn || task.runtimeTaskId !== runtimeTaskId) return { saved: false, reason: 'obsolete_turn' };
-        if (await mappings.compareAndSetExtra(row.id, current.extra, merged)) return { saved: true };
+        if (await mappings.compareAndSetExtra(row.id, current.extra, merged)) return { saved: true, json: merged };
       } catch (error) {
         return { saved: false, reason: error instanceof Error ? error.message : String(error) };
       }

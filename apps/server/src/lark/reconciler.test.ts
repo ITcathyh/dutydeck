@@ -1040,6 +1040,19 @@ describe('performLarkCardReconcile 遵守群级呈现开关', () => {
     expect(JSON.parse(h.cardMappings.mappings[0]!.extra!).final_delivery_state).toBe('delivered');
   });
 
+  it('includes the last failed tool step in a reconciled result without an error event', async () => {
+    const task = { ...completedTask('session'), status: 'failed' as const };
+    const mapping = createMapping('mapping', 'om_req', task.sessionId, { runtime_task_id: task.id, state: 'running', turn: 1 });
+    const h = reconcileHarness([mapping], { session: [task] });
+    const runtime = { ...h.runtime, getEvents: async () => [
+      { id: 0, type: 'text', data: { role: 'user', text: task.prompt, taskId: task.id } },
+      { id: 1, type: 'tool_result', data: { id: 'tool', name: 'Read', input: { file_path: 'marker.txt' }, status: 'failed', output: 'ENOENT: marker.txt' } }
+    ] };
+    await performLarkCardReconcile({ ...h, runtime: runtime as any, service: h.service as any, config, channel: mapping.channel });
+    expect(h.service.send).toHaveBeenCalledWith(expect.objectContaining({ state: 'failed',
+      elements: expect.arrayContaining([expect.objectContaining({ element_id: 'failure_step' })]) }));
+  });
+
   it('completionReactionOnly 开启但终态是失败时，仍然补发结果卡', async () => {
     const task = { ...completedTask('ses-fail'), status: 'failed' as const };
     const mapping = createMapping('map-fail', 'om_req_fail', 'ses-fail', { runtime_task_id: task.id, state: 'running', turn: 1 });
@@ -1105,7 +1118,9 @@ describe('performLarkCardReconcile 遵守群级呈现开关', () => {
     // 发卡前取元素时带上本轮结果正文，计划记录缺失时据此补建。
     expect(resultElements).toHaveBeenCalledWith(expect.anything(), expect.anything(), '', { finalOutput: expect.stringContaining('结果内容'), groupMention: false });
     expect(h.service.addReaction.mock.calls).toEqual(reactions);
-    expect(h.service.update).toHaveBeenCalledWith(expect.objectContaining({ messageId: `om_card_${externalId}`, state: 'completed', resultFollows: true }));
+    const receipt = h.service.update.mock.calls.find(([card]) => card.messageId === `om_card_${externalId}`)?.[0];
+    expect(receipt).toMatchObject({ state: 'completed', cardKind: 'process' });
+    expect(receipt).not.toHaveProperty('resultFollows');
     expect(JSON.parse(h.cardMappings.mappings[0]!.extra!)).toMatchObject({ final_delivery_state: 'delivered', final_message_id: 'om_final' });
 
     expect(await reconcile()).toBe(0);
