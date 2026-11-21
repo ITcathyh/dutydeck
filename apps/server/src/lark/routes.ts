@@ -166,7 +166,7 @@ export async function registerLarkRoutes(app: FastifyInstance, options: LarkRout
     listeningDisabled,
     policyIntegration: options.executionPolicy?.integrationMode ?? 'legacy_unmanaged',
   }));
-  app.get('/api/lark/config', async () => publicLarkConfigs(await readLarkConfigs(options.config), { activeAppIds: listener.activeAppIds, listeningDisabled }));
+  app.get('/api/lark/config', async () => publicLarkConfigs(await readLarkConfigs(options.config, { includeUnavailable: true }), { activeAppIds: listener.activeAppIds, listeningDisabled }));
   app.post<{ Params: { appId: string } }>('/api/lark/bots/:appId/listener/sync', async (request, reply) => {
     reply.header('Cache-Control', 'no-store');
     const configs = await readLarkConfigs(options.config);
@@ -309,13 +309,21 @@ export async function registerLarkRoutes(app: FastifyInstance, options: LarkRout
   });
   async function saveBotConfig(input: SaveLarkConfigRequest): Promise<Awaited<ReturnType<typeof publicLarkConfigs>>> {
     input = { ...input, originalAppId: input.originalAppId?.trim() };
-    const existing = input.originalAppId ? await readLarkConfig(options.config, input.originalAppId) : undefined;
+    const target = input.originalAppId || input.appId?.trim();
+    const stored = target ? await readLarkConfig(options.config, target, { readOnly: true, includeUnavailable: true }) : undefined;
+    const repairing = stored !== undefined && !stored.appSecret;
+    const existing = (input.originalAppId || repairing) ? stored : undefined;
     if (existing && input.expectedRevision !== undefined && input.expectedRevision !== (existing.revision ?? 1)) throw new LarkServiceError('LARK_CONFIG_REVISION_CONFLICT', '此 Bot 已被修改，请比较最新配置后再保存。', 409);
     // Keep identity lookups and the saved inherited values on one revision.
     if (existing && input.expectedRevision === undefined) input = { ...input, expectedRevision: existing.revision ?? 1 };
     const appId = input.appId?.trim() || existing?.appId;
     const appSecret = input.appSecret?.trim() || existing?.appSecret;
     const appChanged = Boolean(existing && appId !== existing.appId);
+    if (repairing) {
+      if (!appSecret || appChanged) throw new LarkServiceError('INVALID_LARK_CONFIG', 'Repair the App Secret for the existing App ID first', 400);
+      if (input.stage === 'lark') await createLarkCardService(env, fetcher, { appId, appSecret, brand: stored.brand }).getBotInfo();
+      return persistBotConfig({ originalAppId: stored.appId, appSecret, expectedRevision: input.expectedRevision });
+    }
     const bot = createLarkCardService(env, fetcher, { appId, appSecret, brand: input.brand ?? existing?.brand });
     const resolvedAllowedUsers = input.allowedUserNames === undefined ? undefined : await bot.resolveChatUsersByNames(input.allowedUserNames);
     const resolvedAllowedBots = input.allowedBotNames === undefined ? undefined : await bot.resolveChatUsersByNames(input.allowedBotNames, ['bot']);
@@ -369,6 +377,10 @@ export async function registerLarkRoutes(app: FastifyInstance, options: LarkRout
         if (!hook.supported || !hook.installed || !hook.writable || hook.nativeReady === false) throw new LarkServiceError('RISK_CONTROL_HOOK_NOT_READY', `${agentId}: ${hook.reason ?? '请先为当前工作区的默认、兜底和分流 Agent 配置拦截 Hook，再保存强制风控设置。'}`, 409);
       }
     }
+    return persistBotConfig(input);
+  }
+
+  async function persistBotConfig(input: SaveLarkConfigRequest) {
     const saved = await saveLarkConfig(options.config, options.agents, listeningDisabled ? { ...input, listening: undefined } : input, { source: input.promptSource === 'cli' || input.promptSource === 'agent' ? input.promptSource : 'web' });
     // Bot 改 appId（跨应用复制配置）后，按 appId 作用域的模型服务设置不会自动跟随记录，
     // 显式搬到新 appId，避免新应用静默回退全局网关凭据。
@@ -385,7 +397,7 @@ export async function registerLarkRoutes(app: FastifyInstance, options: LarkRout
     try {
       return await saveBotConfig(request.body ?? {});
     } catch (error) {
-      if (error instanceof LarkServiceError) return reply.code(error.statusCode).send({ error: { code: error.code, message: error.message }, ...(error.code === 'LARK_CONFIG_REVISION_CONFLICT' ? { current: (await publicLarkConfigs(await readLarkConfigs(options.config))).bots.find(bot => bot.appId === request.body.originalAppId) } : {}) });
+      if (error instanceof LarkServiceError) return reply.code(error.statusCode).send({ error: { code: error.code, message: error.message }, ...(error.code === 'LARK_CONFIG_REVISION_CONFLICT' ? { current: (await publicLarkConfigs(await readLarkConfigs(options.config, { readOnly: true, includeUnavailable: true }))).bots.find(bot => bot.appId === (request.body.originalAppId?.trim() || request.body.appId?.trim())) } : {}) });
       throw error;
     }
   });

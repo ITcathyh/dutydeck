@@ -180,7 +180,32 @@ export function resolveBotSecret(bot: DiskCredentials, database?: string) {
     ? readLiveLarkSecret(database, bot.appId.trim(), bot.appSecretRef) : undefined) ?? bot.appSecret;
 }
 
+type DiskBot = Partial<StoredLarkConfig> & DiskCredentials;
+const unavailableBots = new WeakMap<StoredLarkConfig, DiskBot>();
+
+function readDiskBot(raw: DiskBot, database?: string, includeUnavailable = false) {
+  if (!raw?.appSecretRef) return normalizeStoredConfig(raw);
+  let secret: string | undefined;
+  try { secret = resolveBotSecret(raw, database); }
+  catch { /* An unreadable provider value cannot authenticate this bot. */ }
+  if (!secret && !includeUnavailable) return undefined;
+  const bot = normalizeStoredConfig({ ...raw, appSecret: secret ?? '' }, includeUnavailable);
+  if (bot) {
+    if (!secret) unavailableBots.set(bot, raw);
+    else diskCredentials.set(bot, { appSecretRef: raw.appSecretRef, appSecret: raw.appSecret });
+  }
+  return bot;
+}
+
+/** Transactional comparisons use the same defaults and credentials as the runtime read. */
+export function readTransactionBot(stored: string | undefined, appId: string, database?: string) {
+  const entry = stored && (JSON.parse(stored) as DiskBot[]).find(raw => rawAppId(raw)?.trim() === appId);
+  return entry ? readDiskBot(entry, database) : undefined;
+}
+
 const serializeLarkConfigs = (configs: StoredLarkConfig[], preserved: unknown[] = invalidLarkEntries.get(configs) ?? []) => JSON.stringify([...configs.map(stored => {
+  const unavailable = unavailableBots.get(stored);
+  if (unavailable) return unavailable;
   const invalid = invalidLarkFields.get(stored);
   const credentials = diskCredentials.get(stored);
   if (!invalid && !credentials) return stored;
@@ -205,8 +230,8 @@ export function larkBotEntryError(raw: unknown): string | undefined {
   }
 }
 
-function normalizeStoredConfig(parsed: Partial<StoredLarkConfig> & LegacyRiskControlShape): StoredLarkConfig | undefined {
-  if (!parsed.appId || !parsed.appSecret) return undefined;
+function normalizeStoredConfig(parsed: Partial<StoredLarkConfig> & LegacyRiskControlShape, includeUnavailable = false): StoredLarkConfig | undefined {
+  if (!parsed.appId || (!parsed.appSecret && !includeUnavailable)) return undefined;
   const invalidFields = new Map<string, InvalidLarkField>();
   let cardActionForwarding: CardActionForwarding | undefined;
   let cardActionForwardingError: string | undefined;
@@ -238,7 +263,7 @@ function normalizeStoredConfig(parsed: Partial<StoredLarkConfig> & LegacyRiskCon
     revision: Number.isInteger(parsed.revision) && Number(parsed.revision) > 0 ? parsed.revision : 1,
     mentionPolicy: resolveParticipation({ mentionPolicy: parsed.mentionPolicy }).mentionPolicy,
     ...(reactionTriggerEmoji && !isReceiptReactionEmoji(reactionTriggerEmoji) ? { reactionTriggerEmoji } : {}),
-    appSecret: parsed.appSecret,
+    appSecret: parsed.appSecret ?? '',
     ...(parsed.name?.trim() ? { name: parsed.name.trim() } : {}),
     ...(normalizeWorkspaceAliases(parsed.workspaceAliases) ? { workspaceAliases: normalizeWorkspaceAliases(parsed.workspaceAliases)! } : {}),
     ...(parsed.webMobileReachable !== false && normalizeWebBaseUrl(parsed.webBaseUrl) ? { webBaseUrl: normalizeWebBaseUrl(parsed.webBaseUrl) } : {}),
@@ -270,7 +295,9 @@ function normalizeStoredConfig(parsed: Partial<StoredLarkConfig> & LegacyRiskCon
   return config;
 }
 
-export async function readLarkConfigs(repository?: ConfigRepository, options: { readOnly?: boolean } = {}): Promise<StoredLarkConfig[]> {
+type ReadOptions = { readOnly?: boolean; includeUnavailable?: boolean };
+
+export async function readLarkConfigs(repository?: ConfigRepository, options: ReadOptions = {}): Promise<StoredLarkConfig[]> {
   const stored = await repository?.get(larkBotsConfigKey);
   if (stored) {
     // lark.bots 已存在时绝不回退迁移旧键 lark.credentials：那会用一个旧机器人覆盖全部现有配置。
@@ -279,17 +306,18 @@ export async function readLarkConfigs(repository?: ConfigRepository, options: { 
     if (!Array.isArray(parsed)) return [];
     const configs: StoredLarkConfig[] = [];
     const preserved: unknown[] = [];
+    let migrateRiskControl = false;
     for (const item of parsed) {
       try {
-        const config = normalizeStoredConfig(item?.appSecretRef ? { ...item, appSecret: resolveBotSecret(item, repository?.databasePath) } : item);
+        const config = readDiskBot(item, repository?.databasePath, options.includeUnavailable);
         if (config) {
-          if (item.appSecretRef) diskCredentials.set(config, { appSecretRef: item.appSecretRef, appSecret: item.appSecret });
           configs.push(config);
+          if (!unavailableBots.has(config) && needsRiskControlMigration(item)) migrateRiskControl = true;
         } else if (item?.appSecretRef) preserved.push(item);
       } catch { preserved.push(item); }
     }
     if (preserved.length) invalidLarkEntries.set(configs, preserved);
-    if (!options.readOnly && parsed.some(item => !preserved.includes(item) && needsRiskControlMigration(item))) {
+    if (!options.readOnly && migrateRiskControl) {
       if (repository?.compareAndSet) {
         if (!await repository.compareAndSet(larkBotsConfigKey, stored, serializeLarkConfigs(configs))) return readLarkConfigs(repository, options);
       } else await repository?.set(larkBotsConfigKey, serializeLarkConfigs(configs));
@@ -309,7 +337,7 @@ export async function readLarkConfigs(repository?: ConfigRepository, options: { 
   } catch { return []; }
 }
 
-export async function readLarkConfig(repository?: ConfigRepository, appId?: string, options: { readOnly?: boolean } = {}): Promise<StoredLarkConfig | undefined> {
+export async function readLarkConfig(repository?: ConfigRepository, appId?: string, options: ReadOptions = {}): Promise<StoredLarkConfig | undefined> {
   const configs = await readLarkConfigs(repository, options);
   return appId ? configs.find(config => config.appId === appId) : configs[0];
 }
@@ -327,7 +355,8 @@ export const publicLarkConfig = (config: StoredLarkConfig, activeAppIds: Readonl
   ...(config.reactionTriggerEmoji ? { reactionTriggerEmoji: config.reactionTriggerEmoji } : {}),
   name: config.name ?? config.appId,
   tabLabel: duplicateNames.has((config.name ?? config.appId).toLowerCase()) ? `${config.name ?? config.appId} · ${config.appId}` : config.name ?? config.appId,
-  setupComplete: Boolean(config.defaultAgentId && larkExecutionConfirmed(config)),
+  ...(unavailableBots.has(config) ? { credentialUnavailable: true as const } : {}),
+  setupComplete: Boolean(config.appSecret && config.defaultAgentId && larkExecutionConfirmed(config)),
   ...(config.workspaceAliases ? { workspaceAliases: config.workspaceAliases } : {}),
   cardLinks: config.cardLinks ?? [],
   ...(config.webBaseUrl ? { webBaseUrl: config.webBaseUrl } : {}),
@@ -369,12 +398,33 @@ export const publicLarkConfigs = (configs: StoredLarkConfig[], runtime: { active
 
 async function saveLarkConfigUnlocked(repository: ConfigRepository | undefined, agents: AgentRepository | undefined, input: SaveLarkConfigInput): Promise<StoredLarkConfig[]> {
   if (!repository) throw new LarkServiceError('LARK_CONFIG_STORAGE_UNAVAILABLE', 'Lark configuration storage is unavailable', 503);
-  const configs = await readLarkConfigs(repository);
-  const submittedForwarding = parseCardActionForwarding(input.cardActionForwarding);
+  const configs = await readLarkConfigs(repository, { readOnly: true, includeUnavailable: true });
   const originalAppId = input.originalAppId?.trim();
-  const index = originalAppId ? configs.findIndex(config => config.appId === originalAppId) : -1;
+  const targetId = input.appId?.trim();
+  if (invalidLarkEntries.get(configs)?.some(raw => rawAppId(raw)?.trim() === (originalAppId || targetId) && (raw as DiskBot)?.appSecretRef)) {
+    throw new LarkServiceError('INVALID_LARK_CONFIG', 'Invalid stored bot configuration', 409);
+  }
+  const index = configs.findIndex(bot => originalAppId ? bot.appId === originalAppId : bot.appId === targetId && unavailableBots.has(bot));
   if (originalAppId && index < 0) throw new LarkServiceError('LARK_BOT_NOT_FOUND', `Unknown Lark bot: ${originalAppId}`, 404);
-  const current = index >= 0 ? configs[index] : undefined;
+  const current = configs[index];
+  if (input.expectedRevision !== undefined && input.expectedRevision !== (current ? current.revision ?? 1 : 0)) {
+    throw new LarkServiceError('LARK_CONFIG_REVISION_CONFLICT', '此 Bot 已被修改，请比较最新配置后再保存。', 409);
+  }
+  if (current && unavailableBots.has(current)) {
+    const secret = input.appSecret?.trim();
+    if (!secret || (targetId && targetId !== current.appId)) throw new LarkServiceError('INVALID_LARK_CONFIG', 'Repair the App Secret for the existing App ID first', 400);
+    // Patch the persisted entry so setup defaults and normalization cannot rewrite unrelated fields.
+    const bots: DiskBot[] = JSON.parse((await repository.get(larkBotsConfigKey))!);
+    const matches = bots.filter(bot => rawAppId(bot)?.trim() === current.appId);
+    if (matches.length !== 1) throw new LarkServiceError('INVALID_LARK_CONFIG', 'Duplicate bot identifier', 409);
+    const raw = matches[0]!;
+    raw.appSecret = secret;
+    delete raw.appSecretRef;
+    raw.revision = (current.revision ?? 1) + 1;
+    await repository.set(larkBotsConfigKey, JSON.stringify(bots));
+    return readLarkConfigs(repository, { readOnly: true, includeUnavailable: true });
+  }
+  const submittedForwarding = parseCardActionForwarding(input.cardActionForwarding);
   // 该 Bot 存有损坏字段时，任何不相关写入都拒绝，逼调用方显式提交合法值或 null 修复，避免坏值被静默重写。
   const invalid = current ? invalidLarkFields.get(current) : undefined;
   if (invalid) for (const [field, { message }] of invalid) {
@@ -394,9 +444,6 @@ async function saveLarkConfigUnlocked(repository: ConfigRepository | undefined, 
   if (input.botLoopGuard !== undefined && typeof input.botLoopGuard !== 'boolean') throw new LarkServiceError('INVALID_LARK_CONFIG', 'botLoopGuard 必须为布尔值。', 400);
   if (input.showAgentName !== undefined && typeof input.showAgentName !== 'boolean') throw new LarkServiceError('INVALID_LARK_CONFIG', 'showAgentName 必须为布尔值。', 400);
   if (input.welcomeEnabled !== undefined && typeof input.welcomeEnabled !== 'boolean') throw new LarkServiceError('INVALID_LARK_CONFIG', 'welcomeEnabled 必须为布尔值。', 400);
-  if (input.expectedRevision !== undefined && input.expectedRevision !== (current ? current.revision ?? 1 : 0)) {
-    throw new LarkServiceError('LARK_CONFIG_REVISION_CONFLICT', '此 Bot 已被修改，请比较最新配置后再保存。', 409);
-  }
   if (input.mentionPolicy !== undefined && !mentionPolicies.includes(input.mentionPolicy)) {
     throw new LarkServiceError('INVALID_LARK_CONFIG', '提及方式无效。', 400);
   }
@@ -575,7 +622,7 @@ async function saveLarkConfigUnlocked(repository: ConfigRepository | undefined, 
 
 async function deleteLarkConfigUnlocked(repository: ConfigRepository | undefined, appId: string): Promise<StoredLarkConfig[]> {
   if (!repository) throw new LarkServiceError('LARK_CONFIG_STORAGE_UNAVAILABLE', 'Lark configuration storage is unavailable', 503);
-  const configs = await readLarkConfigs(repository);
+  const configs = await readLarkConfigs(repository, { includeUnavailable: true, readOnly: true });
   const next = configs.filter(config => config.appId !== appId);
   // 解析失败被隔离的条目也能按 appId 删掉。
   const preserved = invalidLarkEntries.get(configs) ?? [];
@@ -601,7 +648,7 @@ async function mutateLarkConfigs(repository: ConfigRepository | undefined, work:
       };
       const result = await work(snapshot);
       if (value === undefined && origin.source !== 'backfill') return result;
-      const prior = await readLarkConfigs({ databasePath: repository.databasePath, get: async key => key === larkBotsConfigKey ? before : key === larkCredentialsConfigKey ? legacyBefore : repository.get(key), set: async () => {} }, { readOnly: true });
+      const prior = await readLarkConfigs({ databasePath: repository.databasePath, get: async key => key === larkBotsConfigKey ? before : key === larkCredentialsConfigKey ? legacyBefore : repository.get(key), set: async () => {} }, { readOnly: true, includeUnavailable: true });
       const versions = await preparePromptVersions(repository, prior, result, origin);
       if (origin.source === 'backfill' && !versions.length) return result;
       const writes = origin.source === 'backfill' ? versions : [{ key: larkBotsConfigKey, value: value! }, ...versions];
