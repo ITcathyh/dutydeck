@@ -629,6 +629,7 @@ export * from './database-control.js';
 export * from './task-execution.js';
 
 export * from './lark-config.js';
+export * from './bot-setting-fields.js';
 
 export * from './driver-resources.js';
 

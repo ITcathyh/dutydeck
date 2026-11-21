@@ -1,3 +1,4 @@
+import type { SharedBotDraft } from './bot-settings-form';
 import { create } from 'zustand';
 import type { RoleChange } from './api';
 
@@ -21,7 +22,7 @@ import type { RoleChange } from './api';
  * 而不是 chatId**：chatId 只在单个租户内唯一，跨租户同 ID 会让两个群共用一份草稿。
  */
 
-export type BotDraft = {
+export type BotDraft = SharedBotDraft & {
   /**
    * 开始编辑这一份草稿时看到的版本号。
    *
@@ -31,12 +32,6 @@ export type BotDraft = {
    * 用户会在毫不知情的情况下覆盖掉别人的修改。这个字段就是「我编辑的是哪一版」。
    */
   baseRevision?: number;
-  workspace: string;
-  defaultAgentId: string;
-  fallbackAgentId: string;
-  fallbackModel: string;
-  defaultModel: string;
-  defaultReasoningEffort: string;
   p2pMode: 'chat' | 'thread';
   idleCompactEnabled: boolean;
   idleCompactHours: string;
@@ -45,34 +40,11 @@ export type BotDraft = {
   defaultGroupParticipation: 'off' | 'observe' | 'selective' | 'eager';
   roleTitle: string;
   roleScope: string;
-  preInjectPrompt: string;
   adhdMode: boolean;
-  replyPolishEnabled: boolean;
-  replyPolishAgentId: string;
-  replyPolishModel: string;
-  replyPolishTimeoutSeconds: string;
-  listening: boolean;
-  reactionTriggerEmoji: string;
-  groupToolsEnabled: boolean;
-  groupToolsAllowSend: boolean;
-  memoryEnabled: boolean;
-  memoryAutoExtract: boolean;
-  groupMemoryScope: 'shared' | 'per-group';
-  claudeAutoMemory: 'inherit' | 'off';
-  memoryAgentId: string;
-  memoryModel: string;
-  decisionAgentId: string;
-  decisionModel: string;
-  busyTriage: boolean;
-  botLoopGuard: boolean;
-  responseAgentId: string;
-  responseModel: string;
   executionMode: 'single' | 'layered';
   leaderAgentId: string;
   workerAgentIds: string[];
   leaderSkill: string;
-  riskControlMode: 'off' | 'guidance' | 'enforced';
-  highRiskPattern: string;
 };
 
 /** 群内 Bot 的访问范围。与 shared 的 accessOverride.mode 一一对应，不另造取值。 */

@@ -6,17 +6,6 @@ import { CompactSelect } from './CompactSelect';
 
 type Values = { replyPolishEnabled: boolean; replyPolishAgentId: string; replyPolishModel: string; replyPolishTimeoutSeconds: string };
 
-export function replyPolishTimeoutValue(seconds: string): number | null {
-  if (!seconds.trim()) return null;
-  const milliseconds = Number(seconds) * 1000;
-  const rounded = Math.round(milliseconds);
-  if (!Number.isSafeInteger(rounded) || rounded < 1 || rounded > 2_147_483_647
-    || Math.abs(milliseconds - rounded) > Number.EPSILON * Math.max(1, milliseconds) * 4) {
-    throw new Error('优化等待时间须为正数，精确到毫秒，并在系统计时器可表示的范围内。');
-  }
-  return rounded;
-}
-
 export function ReplyPolishSettings({ agents, value, onChange, appId }: {
   agents: Agent[]; appId?: string; value: Values; onChange(patch: Partial<Values>): void;
 }) {

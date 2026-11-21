@@ -1,6 +1,6 @@
 import type { SavePluginBinding } from '@dutydeck/shared';
 import type { AgentModelSettingsPatch } from './agent-model-settings.js';
-import { collaborationParticipationModes, groupReplyModes, isRecord, supportsCodexProfiles, mentionPolicies, riskControlModes, type GroupBinding, type UpdateGroupBindingInput, type PublicChannelBotFoundation, type UpdateChannelBotInput, type UpdateCollaborationSettingsInput } from '@dutydeck/shared';
+import { botSettingCliFields, type ScalarSettingCliKind, collaborationParticipationModes, isRecord, supportsCodexProfiles, type GroupBinding, type UpdateGroupBindingInput, type PublicChannelBotFoundation, type UpdateChannelBotInput, type UpdateCollaborationSettingsInput } from '@dutydeck/shared';
 import type { CollaborationRouteOptions } from './collaboration-routes.js';
 import type { GroupConfigPatch, ManagedGroup, ManagedGroupBot } from './lark/group-management.js';
 import type { SaveLarkConfigRequest } from './lark/routes.js';
@@ -60,7 +60,7 @@ export interface SettingsCliInput {
   ruleId?: string;
 }
 
-type FieldKind = 'boolean' | 'integer' | 'integer|null' | 'string' | 'string|null' | 'list' | 'users' | 'json' | 'override' | readonly string[];
+type FieldKind = ScalarSettingCliKind | 'string|null' | 'list' | 'users' | 'json' | 'override';
 
 type BotField = Exclude<keyof SaveLarkConfigRequest,
   'promptSource' | 'stage' | 'originalAppId' | 'expectedRevision' | 'appId' | 'appSecret' | 'name' | 'env' | 'startupCommands' | 'gateEnabled' | 'softGateEnabled' | 'hardGateEnabled' | 'hookTrustConfirmed'>;
@@ -76,31 +76,7 @@ export const channelBotFields = {
 } satisfies Record<Exclude<keyof UpdateChannelBotInput, 'expectedRevision'>, FieldKind>;
 
 /** dashboard 能保存的 Bot 字段。satisfies 保证保存接口新增字段时这里编译不过，CLI 不会漏项。 */
-export const botFields = {
-  cardLinks: 'json', eventHandlers: 'json', cardActionForwarding: 'json', welcomeEnabled: 'boolean',
-  workspace: 'string', workspaceAliases: 'json', webBaseUrl: 'string', webMobileReachable: 'boolean', displayName: 'string', brand: ['feishu', 'lark'],
-  defaultAgentId: 'string', fallbackAgentId: 'string', fallbackModel: 'string', defaultAgentWeights: 'json', defaultModel: 'string', defaultReasoningEffort: 'string',
-  permissionMode: ['ask', 'approve-reads', 'full-trust'], fullTrustConfirmed: 'boolean',
-  roleTitle: 'string', roleScope: 'string',
-  preInjectPrompt: 'string', verificationCommand: 'string', listening: 'boolean',
-  mentionPolicy: mentionPolicies, defaultGroupParticipation: collaborationParticipationModes, reactionTriggerEmoji: 'string',
-  p2pMode: ['chat', 'thread'], groupReplyMode: [...groupReplyModes, 'auto'],
-  idleCompactEnabled: 'boolean', idleCompactHours: 'integer',
-  groupToolsEnabled: 'boolean', groupToolsAllowSend: 'boolean',
-  memoryEnabled: 'boolean', memoryAutoExtract: 'boolean', groupMemoryScope: ['shared', 'per-group'], claudeAutoMemory: ['inherit', 'off'], memoryAgentId: 'string', memoryModel: 'string',
-  busyTriage: 'boolean', botLoopGuard: 'boolean', decisionAgentId: 'string', decisionModel: 'string', responseAgentId: 'string', responseModel: 'string',
-  replyPolishEnabled: 'boolean', replyPolishAgentId: 'string', replyPolishModel: 'string', replyPolishTimeoutMs: 'integer|null',
-  executionMode: ['single', 'layered'], leaderAgentId: 'string', workerAgentIds: 'list', leaderSkill: 'string',
-  structuredAskCards: 'boolean', groupCardMention: 'boolean', pushIntervalMs: 'integer', traceLimit: 'integer|null',
-  hideTraceOnComplete: 'boolean', compactTrace: 'boolean', showAgentName: 'boolean', completionReactionOnly: 'boolean', silentProgress: 'boolean', adhdMode: 'boolean',
-  urgentEnabled: 'boolean', urgentThresholdMs: 'integer|null', urgentMaxPerHourPerChat: 'integer|null',
-  notifyMentionAction: 'boolean', notifyMentionDone: 'boolean', notifyQuietHours: 'string',
-  pinLongTasks: 'boolean', pinAfterMs: 'integer|null',
-  allowedUsers: 'users', allowedUserNames: 'list', allowedEmails: 'list',
-  allowedBots: 'users', allowedBotNames: 'list', peerBotsAllowed: 'boolean',
-  highRiskAllowedUsers: 'users', highRiskAllowedUserNames: 'list', highRiskAllowedEmails: 'list',
-  highRiskPattern: 'string', riskControlMode: riskControlModes
-} satisfies Record<BotField, FieldKind>;
+export const botFields = botSettingCliFields satisfies Record<BotField, FieldKind>;
 // 这些键和 App Secret 走 Lark 设置步骤；其余键走 Agent 设置步骤（如完全信任确认），不能同一次提交。
 // 服务端在两个步骤都校验最终应用下的身份，stage 只选择设置流程。
 const larkStageFields = ['brand', 'allowedUserNames', 'allowedBotNames', 'allowedUsers', 'allowedEmails', 'allowedBots'];

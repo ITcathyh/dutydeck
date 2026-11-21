@@ -1,4 +1,5 @@
-import { ReplyPolishSettings, replyPolishTimeoutValue } from './ReplyPolishSettings';
+import { draftFromBot, saveBodyFromDraft, msFromSeconds, secondsFromMs, type SharedBotDraft } from '../bot-settings-form';
+import { ReplyPolishSettings } from './ReplyPolishSettings';
 import { ReactionTriggerSetting } from './ReactionTriggerSetting';
 import { BotPromptHistory } from './BotPromptHistory';
 import { botSettingFields, type BotSettingField, focusSettingField } from '../settings-search';
@@ -9,7 +10,7 @@ import type { LarkSetupTarget } from '../app-route';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { AlertTriangle, Bot, Check, ExternalLink, Eye, EyeOff, FolderOpen, Plus, Trash2, Wrench, X } from 'lucide-react';
-import { agentWeightsSchema, type AgentWeight, describeWebBaseUrlReachability, validateHighRiskPattern } from '@dutydeck/shared';
+import { botSettingDescriptors as fields, agentWeightsSchema, type AgentWeight, describeWebBaseUrlReachability, validateHighRiskPattern } from '@dutydeck/shared';
 import { api, ApiError, type Agent, type LarkAppCreationJob, type LarkBotConfig, type RiskControlMode } from '../api';
 import { agentModelsQueryKey, loadAgentModels, readCachedAgentModels } from '../model-cache';
 import { supportsModelServiceSettings } from '../agent-model-support';
@@ -41,17 +42,10 @@ type WorkspaceAliasRow = { alias: string; path: string };
 */
 /** 新建机器人的默认确认方式，与 CLI 和服务端同一口径：能在飞书逐项审批就默认逐项确认，否则默认完全信任并须勾选确认。 */
 const newBotPermissionMode = (agent?: Agent): 'ask' | 'full-trust' => !agent || agent.remoteApproval === true ? 'ask' : 'full-trust';
-const minUrgentThresholdSeconds = 60;
+const minUrgentThresholdSeconds = fields.urgentThresholdMs.min / 1000;
 /** 与服务端 parseLarkQuietHours 同一口径：HH:MM-HH:MM，起止不同。 */
 const validQuietHours = (value: string) => /^([01]\d|2[0-3]):[0-5]\d-([01]\d|2[0-3]):[0-5]\d$/.test(value) && value.slice(0, 5) !== value.slice(6);
-const minPinAfterSeconds = 1;
-
-/** 秒 ↔ 毫秒：这两项在配置里是毫秒，但让人按秒填才读得懂。空串表示沿用服务端默认。 */
-const secondsFromMs = (value: number | undefined) => value === undefined ? '' : String(Math.round(value / 1000));
-const msFromSeconds = (value: string) => {
-  const seconds = Number(value.trim());
-  return value.trim() && Number.isFinite(seconds) ? Math.round(seconds * 1000) : undefined;
-};
+const minPinAfterSeconds = fields.pinAfterMs.min / 1000;
 
 /** 编辑行折回后端接受的别名表；同名后写覆盖先写，与服务端归一化口径一致。 */
 const workspaceAliasTable = (rows: readonly WorkspaceAliasRow[]): Record<string, string> => {
@@ -68,19 +62,17 @@ const sameStringList = (left: readonly string[], right: readonly string[]) =>
   left.length === right.length && left.every((value, index) => value === right[index]);
 
 /** 表单草稿：除 name 外都计入未保存改动的比较。 */
-type Draft = {
-  appId: string; appSecret: string; workspace: string; webBaseUrl: string; verificationCommand: string; notifyQuietHours: string;
+type Draft = SharedBotDraft & {
+  appId: string; appSecret: string; webBaseUrl: string; verificationCommand: string; notifyQuietHours: string;
   urgentThresholdSeconds: string; urgentMaxPerHourPerChat: string; pinAfterSeconds: string; pushIntervalMs: number; traceLimit: string;
-  defaultAgentWeights: AgentWeight[]; defaultModel: string; permissionMode: 'ask' | 'approve-reads' | 'full-trust'; preInjectPrompt: string;
-  replyPolishEnabled: boolean; replyPolishAgentId: string; replyPolishModel: string; replyPolishTimeoutSeconds: string;
-  decisionAgentId: string; decisionModel: string; responseAgentId: string; responseModel: string; groupMemoryScope: 'shared' | 'per-group'; claudeAutoMemory: 'inherit' | 'off';
-  memoryAgentId: string; memoryModel: string; riskControlMode: RiskControlMode; highRiskPattern: string; webMobileReachable: boolean;
+  defaultAgentWeights: AgentWeight[]; permissionMode: 'ask' | 'approve-reads' | 'full-trust';
+  webMobileReachable: boolean;
   structuredAskCards: boolean; compactTrace: boolean; showAgentName: boolean; groupCardMention: boolean; notifyMentionAction: boolean;
   notifyMentionDone: boolean; completionReactionOnly: boolean; silentProgress: boolean; urgentEnabled: boolean; pinLongTasks: boolean;
-  peerBotsAllowed: boolean; listening: boolean; groupToolsEnabled: boolean; groupToolsAllowSend: boolean; busyTriage: boolean;
-  botLoopGuard: boolean; reactionTriggerEmoji: string; memoryEnabled: boolean; memoryAutoExtract: boolean; workspaceAliasRows: WorkspaceAliasRow[];
-  restrictUsers: boolean; allowedUserNames: string[]; allowedBotNames: string[]; defaultAgentId: string; fallbackAgentId: string;
-  defaultReasoningEffort: string; highRiskAllowedUserNames: string[]; fallbackModel: string; fullTrustConfirmed: boolean;
+  peerBotsAllowed: boolean;
+  workspaceAliasRows: WorkspaceAliasRow[];
+  restrictUsers: boolean; allowedUserNames: string[]; allowedBotNames: string[];
+  highRiskAllowedUserNames: string[]; fullTrustConfirmed: boolean;
   name: string;
 };
 
@@ -88,53 +80,46 @@ const browserOrigin = () => typeof window !== 'undefined' ? window.location.orig
 
 /** 读到配置、选定机器人之前的草稿。 */
 const initialDraft = (): Draft => ({
-  appId: '', appSecret: '', workspace: '', webBaseUrl: browserOrigin(), verificationCommand: '', notifyQuietHours: '',
-  urgentThresholdSeconds: '', urgentMaxPerHourPerChat: '', pinAfterSeconds: '', pushIntervalMs: 1000, traceLimit: '50',
-  defaultAgentWeights: [], defaultModel: '', permissionMode: 'full-trust', preInjectPrompt: '',
-  replyPolishEnabled: false, replyPolishAgentId: '', replyPolishModel: '', replyPolishTimeoutSeconds: '60',
-  decisionAgentId: '', decisionModel: '', responseAgentId: '', responseModel: '', groupMemoryScope: 'shared', claudeAutoMemory: 'inherit',
-  memoryAgentId: '', memoryModel: '', riskControlMode: 'off', highRiskPattern: '', webMobileReachable: true,
-  structuredAskCards: true, compactTrace: true, showAgentName: false, groupCardMention: true, notifyMentionAction: true,
-  notifyMentionDone: true, completionReactionOnly: false, silentProgress: false, urgentEnabled: false, pinLongTasks: false,
-  peerBotsAllowed: true, listening: false, groupToolsEnabled: false, groupToolsAllowSend: false, busyTriage: false,
-  botLoopGuard: false, reactionTriggerEmoji: '', memoryEnabled: false, memoryAutoExtract: true, workspaceAliasRows: [],
-  restrictUsers: false, allowedUserNames: [], allowedBotNames: [], defaultAgentId: '', fallbackAgentId: '',
-  defaultReasoningEffort: '', highRiskAllowedUserNames: [], fallbackModel: '', fullTrustConfirmed: false,
-  name: ''
+  ...wizardDraft(undefined, [], undefined, false),
+  listening: fields.listening.default,
+  permissionMode: 'full-trust',
+  traceLimit: String(fields.traceLimit.default)
 });
 
-/**
- * 选中机器人（新增时为 undefined）对应的草稿。还没选过 Agent 的机器人按所选 Agent 给默认确认方式；
- * 新建机器人刚保存完第一步时 enableListening 为 true，监听默认打开。
- */
-function draftFromBot(bot: LarkBotConfig | undefined, agents: Agent[], otherWebBaseUrl: string | undefined, enableListening: boolean): Draft {
-  const defaultAgentId = agents.some(agent => agent.id === bot?.defaultAgentId) ? bot?.defaultAgentId ?? '' : agents[0]?.id ?? '';
+/** The wizard selects an available Agent and can enable listening just after connecting a new bot. */
+function wizardDraft(bot: LarkBotConfig | undefined, agents: Agent[], otherWebBaseUrl: string | undefined, enableListening: boolean): Draft {
+  const shared = draftFromBot(bot);
+  const defaultAgentId = agents.some(agent => agent.id === bot?.defaultAgentId) ? shared.defaultAgentId : agents[0]?.id ?? '';
   return {
-    appId: bot?.appId ?? '', appSecret: '', workspace: bot?.workspace ?? '', webBaseUrl: bot?.webBaseUrl ?? otherWebBaseUrl ?? browserOrigin(),
+    ...shared,
+    appId: bot?.appId ?? '', appSecret: '', name: bot?.name ?? '',
+    webBaseUrl: bot?.webBaseUrl ?? otherWebBaseUrl ?? browserOrigin(),
     verificationCommand: bot?.verificationCommand ?? '', notifyQuietHours: bot?.notifyQuietHours ?? '',
-    urgentThresholdSeconds: secondsFromMs(bot?.urgentThresholdMs), urgentMaxPerHourPerChat: bot?.urgentMaxPerHourPerChat === undefined ? '' : String(bot.urgentMaxPerHourPerChat),
-    pinAfterSeconds: secondsFromMs(bot?.pinAfterMs), pushIntervalMs: bot?.pushIntervalMs ?? 1000, traceLimit: (bot?.traceLimit ?? 10).toString(),
-    defaultAgentWeights: bot?.defaultAgentWeights ?? [], defaultModel: bot?.defaultModel ?? '',
+    urgentThresholdSeconds: secondsFromMs(bot?.urgentThresholdMs),
+    urgentMaxPerHourPerChat: bot?.urgentMaxPerHourPerChat === undefined ? '' : String(bot.urgentMaxPerHourPerChat),
+    pinAfterSeconds: secondsFromMs(bot?.pinAfterMs), pushIntervalMs: bot?.pushIntervalMs ?? fields.pushIntervalMs.default,
+    traceLimit: String(bot?.traceLimit ?? 10),
+    defaultAgentWeights: bot?.defaultAgentWeights ?? [],
     permissionMode: !bot?.defaultAgentId ? newBotPermissionMode(agents.find(agent => agent.id === defaultAgentId)) : bot.permissionMode ?? 'full-trust',
-    preInjectPrompt: bot?.preInjectPrompt ?? '', decisionAgentId: bot?.decisionAgentId ?? '', decisionModel: bot?.decisionModel ?? '',
-    replyPolishEnabled: bot?.replyPolishEnabled ?? false, replyPolishAgentId: bot?.replyPolishAgentId ?? '', replyPolishModel: bot?.replyPolishModel ?? '', replyPolishTimeoutSeconds: String((bot?.replyPolishTimeoutMs ?? 60_000) / 1000),
-    responseAgentId: bot?.responseAgentId ?? '', responseModel: bot?.responseModel ?? '', groupMemoryScope: bot?.groupMemoryScope ?? 'shared', claudeAutoMemory: bot?.claudeAutoMemory ?? 'inherit',
-    memoryAgentId: bot?.memoryAgentId ?? '', memoryModel: bot?.memoryModel ?? '', riskControlMode: bot?.riskControlMode ?? 'off',
-    highRiskPattern: bot?.highRiskPattern ?? '', webMobileReachable: bot?.webMobileReachable !== false,
-    structuredAskCards: bot?.structuredAskCards ?? true, compactTrace: bot?.compactTrace ?? true, showAgentName: bot?.showAgentName ?? false,
-    groupCardMention: bot?.groupCardMention ?? true, notifyMentionAction: bot?.notifyMentionAction ?? true, notifyMentionDone: bot?.notifyMentionDone ?? true,
-    completionReactionOnly: bot?.completionReactionOnly ?? false, silentProgress: bot?.silentProgress ?? false,
-    urgentEnabled: bot?.urgentEnabled ?? false, pinLongTasks: bot?.pinLongTasks ?? false, peerBotsAllowed: bot?.peerBotsAllowed !== false,
-    listening: enableListening ? true : bot?.listening ?? true, groupToolsEnabled: bot?.groupToolsEnabled ?? false, groupToolsAllowSend: bot?.groupToolsAllowSend ?? false,
-    busyTriage: bot?.busyTriage === true, botLoopGuard: bot?.botLoopGuard === true, reactionTriggerEmoji: bot?.reactionTriggerEmoji ?? '',
-    memoryEnabled: bot?.memoryEnabled ?? (bot?.defaultGroupParticipation === 'selective'), memoryAutoExtract: bot?.memoryAutoExtract ?? true,
+    webMobileReachable: bot?.webMobileReachable !== false,
+    structuredAskCards: bot?.structuredAskCards ?? fields.structuredAskCards.default,
+    compactTrace: bot?.compactTrace ?? fields.compactTrace.default,
+    showAgentName: bot?.showAgentName ?? fields.showAgentName.default,
+    groupCardMention: bot?.groupCardMention ?? fields.groupCardMention.default,
+    notifyMentionAction: bot?.notifyMentionAction ?? fields.notifyMentionAction.default,
+    notifyMentionDone: bot?.notifyMentionDone ?? fields.notifyMentionDone.default,
+    completionReactionOnly: bot?.completionReactionOnly ?? fields.completionReactionOnly.default,
+    silentProgress: bot?.silentProgress ?? fields.silentProgress.default,
+    urgentEnabled: bot?.urgentEnabled ?? fields.urgentEnabled.default,
+    pinLongTasks: bot?.pinLongTasks ?? fields.pinLongTasks.default,
+    peerBotsAllowed: bot?.peerBotsAllowed !== false,
+    listening: enableListening ? true : shared.listening,
     workspaceAliasRows: Object.entries(bot?.workspaceAliases ?? {}).map(([alias, path]) => ({ alias, path })),
     restrictUsers: Boolean(bot?.allowedUsers.length || bot?.allowedEmails.length),
     allowedUserNames: (bot?.allowedUsers ?? []).map(user => user.name), allowedBotNames: (bot?.allowedBots ?? []).map(item => item.name),
-    defaultAgentId, fallbackAgentId: bot?.fallbackAgentId ?? '', defaultReasoningEffort: bot?.defaultReasoningEffort ?? '',
-    highRiskAllowedUserNames: (bot?.highRiskAllowedUsers ?? []).map(user => user.name), fallbackModel: bot?.fallbackModel ?? '',
-    fullTrustConfirmed: bot?.fullTrustConfirmed ?? false,
-    name: bot?.name ?? ''
+    defaultAgentId,
+    highRiskAllowedUserNames: (bot?.highRiskAllowedUsers ?? []).map(user => user.name),
+    fullTrustConfirmed: bot?.fullTrustConfirmed ?? fields.fullTrustConfirmed.default
   };
 }
 
@@ -264,14 +249,15 @@ export function LarkConfigModal({ agents, target, field, onLeaveGuardChange, onC
     draftRevision.current = bot ? bot.revision ?? 1 : 0;
     setOpenPlatformJobId('');
     permissionFollowsAgent.current = !bot?.defaultAgentId;
-    setDraft(draftFromBot(bot, agents, config.data.bots.find(item => item.webBaseUrl)?.webBaseUrl, enableListeningAfterNewBot.current));
+    setDraft(wizardDraft(bot, agents, config.data.bots.find(item => item.webBaseUrl)?.webBaseUrl, enableListeningAfterNewBot.current));
     enableListeningAfterNewBot.current = false;
   }, [config.data, agents, selectedAppId, reloadVersion]);
   const inspect = useMutation({ mutationFn: () => api.inspectLarkBot({ appId: appId.trim(), appSecret: appSecret.trim() }), onSuccess: result => setField('name', result.appName) });
   const save = useMutation({
     mutationFn: (_submitted: { step: 1 | 2; values: typeof draftValues; signature: string; appId: string; restrictUsers: boolean }) => step === 1
-      ? api.saveLarkConfig({ stage: 'lark', expectedRevision: draftRevision.current, ...(current ? { originalAppId: current.appId } : {}), appId: appId.trim(), ...(appSecret.trim() ? { appSecret: appSecret.trim() } : {}), workspace: workspace.trim(), workspaceAliases: workspaceAliasTable(workspaceAliasRows), verificationCommand: verificationCommand.trim(), webBaseUrl: webBaseUrl.trim(), webMobileReachable, structuredAskCards, groupCardMention, notifyMentionAction, notifyMentionDone, notifyQuietHours: notifyQuietHours.trim(), completionReactionOnly, urgentEnabled, urgentThresholdMs: urgentThresholdMs ?? null, urgentMaxPerHourPerChat: urgentQuota ?? null, pinLongTasks, pinAfterMs: pinAfterMs ?? null, ...allowedUsersPayload, allowedBotNames, peerBotsAllowed, pushIntervalMs, traceLimit: Number(traceLimit), compactTrace, showAgentName })
-      : api.saveLarkConfig({ stage: 'agent', expectedRevision: draftRevision.current, originalAppId: current!.appId, defaultAgentId, fallbackAgentId, fallbackModel, defaultAgentWeights, defaultModel, defaultReasoningEffort, fullTrustConfirmed, permissionMode, preInjectPrompt, listening, silentProgress, reactionTriggerEmoji: draftValues.reactionTriggerEmoji, groupToolsEnabled, groupToolsAllowSend, memoryEnabled, memoryAutoExtract, groupMemoryScope, claudeAutoMemory, memoryAgentId, memoryModel, decisionAgentId, decisionModel, busyTriage, botLoopGuard, responseAgentId, responseModel, replyPolishEnabled: draftValues.replyPolishEnabled, replyPolishAgentId: draftValues.replyPolishAgentId, replyPolishModel: draftValues.replyPolishModel, replyPolishTimeoutMs: replyPolishTimeoutValue(draftValues.replyPolishTimeoutSeconds), ...highRiskAllowedUsersPayload, highRiskPattern, riskControlMode }),
+      ? api.saveLarkConfig({ stage: 'lark', expectedRevision: draftRevision.current, ...(current ? { originalAppId: current.appId } : {}), appId: appId.trim(), ...(appSecret.trim() ? { appSecret: appSecret.trim() } : {}), ...saveBodyFromDraft(draft, 'lark'), workspaceAliases: workspaceAliasTable(workspaceAliasRows), verificationCommand: verificationCommand.trim(), webBaseUrl: webBaseUrl.trim(), webMobileReachable, structuredAskCards, groupCardMention, notifyMentionAction, notifyMentionDone, notifyQuietHours: notifyQuietHours.trim(), completionReactionOnly, urgentEnabled, urgentThresholdMs: urgentThresholdMs ?? null, urgentMaxPerHourPerChat: urgentQuota ?? null, pinLongTasks, pinAfterMs: pinAfterMs ?? null, ...allowedUsersPayload, allowedBotNames, peerBotsAllowed, pushIntervalMs, traceLimit: Number(traceLimit), compactTrace, showAgentName })
+      : api.saveLarkConfig({ stage: 'agent', expectedRevision: draftRevision.current, originalAppId: current!.appId,
+        ...saveBodyFromDraft(draft, 'agent'), defaultAgentWeights, fullTrustConfirmed, permissionMode, silentProgress, ...highRiskAllowedUsersPayload }),
     onSuccess: (data, submitted) => {
       setBaseline(previous => {
         const saved = previous ? JSON.parse(previous) : {};

@@ -83,3 +83,10 @@ it.each([
   await expect(saveLarkConfig(store, undefined, { originalAppId: bot.appId, [key]: value })).rejects.toMatchObject({ code: 'INVALID_LARK_CONFIG' });
   expect(await store.get(larkBotsConfigKey)).toBe(before);
 });
+
+it('reports the first invalid field when a patch contains several bad values', async () => {
+  const store = repository({});
+  const patch = (values: Record<string, unknown>) => saveLarkConfig(store, undefined, { originalAppId: bot.appId, ...values });
+  await expect(patch({ decisionModel: false, responseModel: false })).rejects.toThrow('input.decisionModel.trim is not a function');
+  await expect(patch({ replyPolishEnabled: 1, verificationCommand: false })).rejects.toMatchObject({ code: 'INVALID_LARK_CONFIG' });
+});

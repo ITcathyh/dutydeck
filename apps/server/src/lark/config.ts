@@ -1,3 +1,4 @@
+import { mergeBotScalarFields, mergeBotTextFields, publicBotScalarFields, readBotScalarFields } from './config-scalar-fields.js';
 import { refreshBotProjection } from './bot-projection.js';
 import { readLiveLarkSecret } from '@dutydeck/secret-provider';
 import { defaultHighRiskPattern } from '../policy/high-risk.js';
@@ -5,16 +6,15 @@ import { parseCardLinks, readCardLinks } from './card-links.js';
 import { preparePromptVersions, type PromptSaveOrigin } from './prompt-versions.js';
 import { parseLarkEventHandlers, validateLarkEventConfiguration, type LarkEventHandler } from './event-pipeline.js';
 import { parseCardActionForwarding, type CardActionForwarding } from './card-action-forwarding.js';
-import { NEW_BOT_MENTION_POLICY, agentWeightsSchema, type AgentWeight, collaborationParticipationModes, mentionPolicies, resolveParticipation, riskControlModes, supportsRemoteApproval, validateHighRiskPattern, type AgentRepository, type ConfigRepository, type LarkAllowedUser, type LarkClaudeAutoMemory, type PublicLarkConfig, type PublicLarkConfigCollection, type RiskControlMode, type SaveLarkConfigInput, type StoredLarkConfig } from '@dutydeck/shared';
+import { botSettingDescriptors, NEW_BOT_MENTION_POLICY, agentWeightsSchema, type AgentWeight, collaborationParticipationModes, mentionPolicies, resolveParticipation, riskControlModes, supportsRemoteApproval, validateHighRiskPattern, type AgentRepository, type ConfigRepository, type LarkAllowedUser, type LarkClaudeAutoMemory, type PublicLarkConfig, type PublicLarkConfigCollection, type RiskControlMode, type SaveLarkConfigInput, type StoredLarkConfig } from '@dutydeck/shared';
 import { isAbsolute } from 'node:path';
 import { hostname, userInfo } from 'node:os';
 import { LarkServiceError } from './service.js';
 import { parseLarkQuietHours } from './notify-tier.js';
 import { isReceiptReactionEmoji } from './reaction-records.js';
-import { isLarkGroupMemoryScope, normalizeLarkGroupMemoryScope, type LarkGroupMemoryScope } from './memory.js';
+import { isLarkGroupMemoryScope } from './memory.js';
 
 export const isLarkClaudeAutoMemory = (value: unknown): value is LarkClaudeAutoMemory => value === 'inherit' || value === 'off';
-export const normalizeLarkClaudeAutoMemory = (value: unknown): LarkClaudeAutoMemory => value === 'off' ? 'off' : 'inherit';
 
 export const larkBotsConfigKey = 'lark.bots';
 export const larkCredentialsConfigKey = 'lark.credentials';
@@ -44,11 +44,10 @@ export const defaultLarkPermissionMode = (agent?: Parameters<typeof supportsRemo
   !agent || supportsRemoteApproval(agent) ? 'ask' as const : 'full-trust' as const;
 export const larkExecutionConfirmed = (config: Pick<StoredLarkConfig, 'permissionMode' | 'fullTrustConfirmed'>) => larkPermissionMode(config) !== 'full-trust' || config.fullTrustConfirmed === true;
 
-export const defaultLarkPushIntervalMs = 1_000;
-export const defaultLarkTraceLimit = 50;
-export const defaultLarkIdleCompactHours = 24;
+export const defaultLarkTraceLimit = botSettingDescriptors.traceLimit.default;
+export const defaultLarkIdleCompactHours = botSettingDescriptors.idleCompactHours.default;
 /** Leader 指引设置的长度上限：技能名、`插件名/技能名` 或 SKILL.md 绝对路径都放得下。 */
-export const maxLeaderSkillLength = 300;
+export const maxLeaderSkillLength = botSettingDescriptors.leaderSkill.max;
 export { defaultHighRiskPattern };
 
 const normalizeEmails = (value: unknown) => [...new Set((Array.isArray(value) ? value : [])
@@ -85,20 +84,8 @@ const normalizeWorkspaceAliases = (value: unknown): Record<string, string> | und
   return Object.keys(aliases).length > 0 ? aliases : undefined;
 };
 
-const normalizeP2pMode = (value: unknown): 'chat' | 'thread' | undefined =>
-  value === 'chat' || value === 'thread' ? value : undefined;
-
-const normalizeGroupReplyMode = (value: unknown): StoredLarkConfig['groupReplyMode'] =>
-  value === 'chat' || value === 'shared' || value === 'new-topic' || value === 'chat-topic' ? value : undefined;
-
-const normalizeDefaultGroupParticipation = (value: unknown): NonNullable<StoredLarkConfig['defaultGroupParticipation']> =>
-  value === 'observe' || value === 'selective' || value === 'eager' ? value : 'off';
-
 export const larkMemoryEnabled = (config: Pick<StoredLarkConfig, 'memoryEnabled' | 'defaultGroupParticipation'>): boolean =>
-  config.memoryEnabled ?? ['selective', 'eager'].includes(normalizeDefaultGroupParticipation(config.defaultGroupParticipation));
-
-const normalizeBrand = (value: unknown): 'feishu' | 'lark' | undefined =>
-  value === 'feishu' || value === 'lark' ? value : undefined;
+  config.memoryEnabled ?? (config.defaultGroupParticipation === 'selective' || config.defaultGroupParticipation === 'eager');
 
 const normalizeEnv = (value: unknown): Record<string, string> | undefined => {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
@@ -116,21 +103,9 @@ const normalizeStartupCommands = (value: unknown): string[] | undefined => {
 };
 
 /** 加急阈值下限 1 分钟：更短就等于卡片一发出去就推强提醒横幅，那不叫「提醒无人处理」。 */
-export const minLarkUrgentThresholdMs = 60_000;
+export const minLarkUrgentThresholdMs = botSettingDescriptors.urgentThresholdMs.min;
 /** 长任务判定下限 1 秒：置顶随时可撤、终态自动撤，不需要和强提醒一样的下限。 */
-export const minLarkPinAfterMs = 1_000;
-
-/** 毫秒阈值：非法或低于下限的值整条丢弃，回落各自模块的内置默认。 */
-const normalizeDelayMs = (value: unknown, minimum: number): number | undefined => {
-  const parsed = Number(value);
-  return Number.isInteger(parsed) && parsed >= minimum ? parsed : undefined;
-};
-
-/** 每群每小时加急上限：≥ 1 的整数，其余丢弃回落默认。 */
-const normalizeUrgentQuota = (value: unknown): number | undefined => {
-  const parsed = Number(value);
-  return Number.isInteger(parsed) && parsed >= 1 ? parsed : undefined;
-};
+export const minLarkPinAfterMs = botSettingDescriptors.pinAfterMs.min;
 
 const normalizeTrimmedString = (value: unknown): string | undefined => {
   if (typeof value !== 'string') return undefined;
@@ -156,10 +131,10 @@ const normalizeRiskControlMode = (value: LegacyRiskControlShape): RiskControlMod
   if (value.gateEnabled === false) return 'off';
   if (value.hardGateEnabled === true) return 'enforced';
   if (value.gateEnabled === true || value.softGateEnabled === true) return 'guidance';
-  return 'off';
+  return botSettingDescriptors.riskControlMode.default;
 };
 
-export const resolveRiskControlModeInput = (input: SaveLarkConfigInput, fallback: RiskControlMode = 'off'): RiskControlMode => {
+export const resolveRiskControlModeInput = (input: SaveLarkConfigInput, fallback: RiskControlMode = botSettingDescriptors.riskControlMode.default): RiskControlMode => {
   if (isRiskControlMode(input.riskControlMode)) return input.riskControlMode;
   if (input.riskControlMode !== undefined) {
     throw new LarkServiceError('INVALID_LARK_CONFIG', 'Risk control mode must be off, guidance, or enforced', 400);
@@ -249,20 +224,11 @@ function normalizeStoredConfig(parsed: Partial<StoredLarkConfig> & LegacyRiskCon
     eventHandlersError = invalidEventHandlersMessage; eventHandlers = undefined;
     invalidFields.set('eventHandlers', { raw: parsed.eventHandlers, message: invalidEventHandlersMessage });
   }
-  const pushIntervalMs = Number(parsed.pushIntervalMs ?? defaultLarkPushIntervalMs);
-  const parsedTraceLimit = Number(parsed.traceLimit ?? defaultLarkTraceLimit);
-  const traceLimit = Number.isInteger(parsedTraceLimit) && parsedTraceLimit > 0 ? parsedTraceLimit : defaultLarkTraceLimit;
-  const p2pMode = normalizeP2pMode(parsed.p2pMode);
-  const groupReplyMode = normalizeGroupReplyMode(parsed.groupReplyMode);
   const env = normalizeEnv(parsed.env);
   const startupCommands = normalizeStartupCommands(parsed.startupCommands);
-  const brand = normalizeBrand(parsed.brand);
-  const displayName = normalizeTrimmedString(parsed.displayName);
-  const roleTitle = normalizeTrimmedString(parsed.roleTitle);
-  const roleScope = normalizeTrimmedString(parsed.roleScope);
   const reactionTriggerEmoji = normalizeTrimmedString(parsed.reactionTriggerEmoji);
   const config: StoredLarkConfig = {
-    welcomeEnabled: parsed.welcomeEnabled !== false,
+    ...readBotScalarFields(parsed),
     ...(eventHandlersError ? { eventHandlersError } : {}),
     ...(eventHandlers ? { eventHandlers } : {}),
     ...(cardActionForwardingError ? { cardActionForwardingError } : {}),
@@ -272,10 +238,8 @@ function normalizeStoredConfig(parsed: Partial<StoredLarkConfig> & LegacyRiskCon
     revision: Number.isInteger(parsed.revision) && Number(parsed.revision) > 0 ? parsed.revision : 1,
     mentionPolicy: resolveParticipation({ mentionPolicy: parsed.mentionPolicy }).mentionPolicy,
     ...(reactionTriggerEmoji && !isReceiptReactionEmoji(reactionTriggerEmoji) ? { reactionTriggerEmoji } : {}),
-    defaultGroupParticipation: normalizeDefaultGroupParticipation(parsed.defaultGroupParticipation),
     appSecret: parsed.appSecret,
     ...(parsed.name?.trim() ? { name: parsed.name.trim() } : {}),
-    ...(parsed.workspace?.trim() ? { workspace: parsed.workspace.trim() } : {}),
     ...(normalizeWorkspaceAliases(parsed.workspaceAliases) ? { workspaceAliases: normalizeWorkspaceAliases(parsed.workspaceAliases)! } : {}),
     ...(parsed.webMobileReachable !== false && normalizeWebBaseUrl(parsed.webBaseUrl) ? { webBaseUrl: normalizeWebBaseUrl(parsed.webBaseUrl) } : {}),
     ...(parsed.webMobileReachable === false ? { webMobileReachable: false as const } : {}),
@@ -283,71 +247,20 @@ function normalizeStoredConfig(parsed: Partial<StoredLarkConfig> & LegacyRiskCon
     ...(parsed.fallbackAgentId && parsed.fallbackModel?.trim() ? { fallbackModel: parsed.fallbackModel.trim() } : {}),
     ...(parsed.defaultAgentId ? { defaultAgentId: parsed.defaultAgentId } : {}),
     ...(parsed.defaultAgentWeights ? { defaultAgentWeights: agentWeightsSchema.parse(parsed.defaultAgentWeights) } : {}),
-    ...(parsed.defaultModel ? { defaultModel: parsed.defaultModel } : {}),
-    ...(parsed.defaultReasoningEffort ? { defaultReasoningEffort: parsed.defaultReasoningEffort } : {}),
-    fullTrustConfirmed: parsed.fullTrustConfirmed === true,
     // 没确认过完全信任时：显式写了 full-trust 的原样保留（照旧不能运行，迁移写回时也不丢），
     // 没写权限模式的默认只读自动放行：执行端声明为读取或搜索的操作直接执行，其余照常逐项审批。
     ...(parsed.permissionMode === 'ask' || parsed.permissionMode === 'approve-reads' ? { permissionMode: parsed.permissionMode }
-      : parsed.fullTrustConfirmed === true ? {} : { permissionMode: parsed.permissionMode === 'full-trust' ? 'full-trust' as const : 'approve-reads' as const }),
-    ...(p2pMode ? { p2pMode } : {}),
-    idleCompactEnabled: parsed.idleCompactEnabled !== false,
-    idleCompactHours: Number.isSafeInteger(parsed.idleCompactHours) && Number(parsed.idleCompactHours) >= 1 ? parsed.idleCompactHours : defaultLarkIdleCompactHours,
-    ...(groupReplyMode ? { groupReplyMode } : {}),
+      : parsed.fullTrustConfirmed === true ? {} : { permissionMode: parsed.permissionMode === 'full-trust' ? 'full-trust' as const : botSettingDescriptors.permissionMode.default }),
     ...(env ? { env } : {}),
     ...(startupCommands ? { startupCommands } : {}),
-    ...(brand ? { brand } : {}),
-    ...(displayName ? { displayName } : {}),
-    ...(roleTitle ? { roleTitle } : {}),
-    ...(roleScope ? { roleScope } : {}),
-    preInjectPrompt: String(parsed.preInjectPrompt ?? '').trim(),
-    listening: parsed.listening === true,
-    groupToolsEnabled: parsed.groupToolsEnabled === true,
     groupToolsAllowSend: parsed.groupToolsEnabled === true && parsed.groupToolsAllowSend === true,
     memoryEnabled: larkMemoryEnabled(parsed),
-    memoryAutoExtract: parsed.memoryAutoExtract !== false,
-    busyTriage: parsed.busyTriage === true,
-    botLoopGuard: parsed.botLoopGuard === true,
-    groupMemoryScope: normalizeLarkGroupMemoryScope(parsed.groupMemoryScope),
-    // inherit 不落盘：默认机器人的配置与引入这个设置前逐字节相同。
-    ...(parsed.claudeAutoMemory === 'off' ? { claudeAutoMemory: 'off' as const } : {}),
-    ...(parsed.memoryAgentId?.trim() ? { memoryAgentId: parsed.memoryAgentId.trim() } : {}),
-    ...(parsed.memoryModel?.trim() ? { memoryModel: parsed.memoryModel.trim() } : {}),
-    ...(parsed.decisionAgentId?.trim() ? { decisionAgentId: parsed.decisionAgentId.trim() } : {}),
-    ...(parsed.decisionModel?.trim() ? { decisionModel: parsed.decisionModel.trim() } : {}),
-    ...(parsed.responseAgentId?.trim() ? { responseAgentId: parsed.responseAgentId.trim() } : {}),
-    ...(parsed.responseModel?.trim() ? { responseModel: parsed.responseModel.trim() } : {}),
-    replyPolishEnabled: parsed.replyPolishEnabled === true,
-    ...(Number.isInteger(parsed.replyPolishTimeoutMs) && parsed.replyPolishTimeoutMs! >= 1 && parsed.replyPolishTimeoutMs! <= 2_147_483_647 ? { replyPolishTimeoutMs: parsed.replyPolishTimeoutMs } : {}),
-    ...(typeof parsed.replyPolishAgentId === 'string' && parsed.replyPolishAgentId.trim() ? { replyPolishAgentId: parsed.replyPolishAgentId.trim() } : {}),
     ...(typeof parsed.replyPolishModel === 'string' && parsed.replyPolishModel.trim() ? { replyPolishModel: parsed.replyPolishModel.trim() } : {}),
-    ...(parsed.executionMode === 'layered' ? { executionMode: 'layered' as const } : {}),
-    ...(parsed.leaderAgentId?.trim() ? { leaderAgentId: parsed.leaderAgentId.trim() } : {}),
     ...(normalizeAgentIds(parsed.workerAgentIds).length ? { workerAgentIds: normalizeAgentIds(parsed.workerAgentIds) } : {}),
-    ...(typeof parsed.leaderSkill === 'string' && parsed.leaderSkill.trim() ? { leaderSkill: parsed.leaderSkill.trim() } : {}),
-    structuredAskCards: parsed.structuredAskCards === undefined || parsed.structuredAskCards === true,
-    groupCardMention: parsed.groupCardMention === undefined || parsed.groupCardMention === true,
-    ...(parsed.verificationCommand?.trim() ? { verificationCommand: parsed.verificationCommand.trim() } : {}),
-    urgentEnabled: parsed.urgentEnabled === true,
-    ...(normalizeDelayMs(parsed.urgentThresholdMs, minLarkUrgentThresholdMs) !== undefined ? { urgentThresholdMs: normalizeDelayMs(parsed.urgentThresholdMs, minLarkUrgentThresholdMs)! } : {}),
-    ...(normalizeUrgentQuota(parsed.urgentMaxPerHourPerChat) !== undefined ? { urgentMaxPerHourPerChat: normalizeUrgentQuota(parsed.urgentMaxPerHourPerChat)! } : {}),
-    notifyMentionAction: parsed.notifyMentionAction !== false,
-    notifyMentionDone: parsed.notifyMentionDone !== false,
     ...(parseLarkQuietHours(parsed.notifyQuietHours) ? { notifyQuietHours: parsed.notifyQuietHours!.trim() } : {}),
-    pinLongTasks: parsed.pinLongTasks === true,
-    ...(normalizeDelayMs(parsed.pinAfterMs, minLarkPinAfterMs) !== undefined ? { pinAfterMs: normalizeDelayMs(parsed.pinAfterMs, minLarkPinAfterMs)! } : {}),
-    pushIntervalMs: Number.isInteger(pushIntervalMs) && pushIntervalMs >= 500 && pushIntervalMs <= 20_000 ? pushIntervalMs : defaultLarkPushIntervalMs,
-    traceLimit,
-    hideTraceOnComplete: parsed.hideTraceOnComplete !== false,
-    compactTrace: parsed.compactTrace !== false,
-    showAgentName: parsed.showAgentName === true,
-    completionReactionOnly: parsed.completionReactionOnly === true,
-    silentProgress: parsed.silentProgress === true,
-    adhdMode: parsed.adhdMode === true,
     allowedUsers: normalizeAllowedUsers(parsed.allowedUsers),
     allowedEmails: normalizeEmails(parsed.allowedEmails),
     allowedBots: normalizeAllowedUsers(parsed.allowedBots),
-    peerBotsAllowed: parsed.peerBotsAllowed !== false,
     highRiskAllowedUsers: normalizeAllowedUsers(parsed.highRiskAllowedUsers),
     highRiskAllowedEmails: normalizeEmails(parsed.highRiskAllowedEmails),
     highRiskPattern: parsed.highRiskPattern?.trim() || defaultHighRiskPattern,
@@ -405,18 +318,16 @@ export const publicLarkConfig = (config: StoredLarkConfig, activeAppIds: Readonl
   ...(config.eventHandlers ? { eventHandlers: config.eventHandlers.map(({ token, ...handler }) => handler) } : {}),
   ...(config.eventHandlersError ? { eventHandlersError: config.eventHandlersError } : {}),
   ...(config.cardActionForwarding ? { cardActionForwarding: { owner: config.cardActionForwarding.owner, url: config.cardActionForwarding.url, ...(config.cardActionForwarding.legacyActions ? { legacyActions: config.cardActionForwarding.legacyActions } : {}) } } : {}),
-  welcomeEnabled: config.welcomeEnabled !== false,
+  ...publicBotScalarFields(config),
   ...(config.cardActionForwardingError ? { cardActionForwardingError: config.cardActionForwardingError } : {}),
   configured: true,
   appId: config.appId,
   revision: config.revision ?? 1,
   mentionPolicy: resolveParticipation({ mentionPolicy: config.mentionPolicy }).mentionPolicy,
   ...(config.reactionTriggerEmoji ? { reactionTriggerEmoji: config.reactionTriggerEmoji } : {}),
-  defaultGroupParticipation: normalizeDefaultGroupParticipation(config.defaultGroupParticipation),
   name: config.name ?? config.appId,
   tabLabel: duplicateNames.has((config.name ?? config.appId).toLowerCase()) ? `${config.name ?? config.appId} · ${config.appId}` : config.name ?? config.appId,
   setupComplete: Boolean(config.defaultAgentId && larkExecutionConfirmed(config)),
-  ...(config.workspace ? { workspace: config.workspace } : {}),
   ...(config.workspaceAliases ? { workspaceAliases: config.workspaceAliases } : {}),
   cardLinks: config.cardLinks ?? [],
   ...(config.webBaseUrl ? { webBaseUrl: config.webBaseUrl } : {}),
@@ -425,66 +336,16 @@ export const publicLarkConfig = (config: StoredLarkConfig, activeAppIds: Readonl
   ...(config.fallbackAgentId && config.fallbackModel ? { fallbackModel: config.fallbackModel } : {}),
   ...(config.defaultAgentId ? { defaultAgentId: config.defaultAgentId } : {}),
   ...(config.defaultAgentWeights ? { defaultAgentWeights: config.defaultAgentWeights } : {}),
-  ...(config.defaultModel ? { defaultModel: config.defaultModel } : {}),
-  ...(config.defaultReasoningEffort ? { defaultReasoningEffort: config.defaultReasoningEffort } : {}),
-  fullTrustConfirmed: config.fullTrustConfirmed === true,
   permissionMode: larkPermissionMode(config),
-  ...(config.p2pMode ? { p2pMode: config.p2pMode } : {}),
-  idleCompactEnabled: config.idleCompactEnabled !== false,
-  idleCompactHours: config.idleCompactHours ?? defaultLarkIdleCompactHours,
-  ...(config.groupReplyMode ? { groupReplyMode: config.groupReplyMode } : {}),
-  ...(config.brand ? { brand: config.brand } : {}),
-  ...(config.displayName ? { displayName: config.displayName } : {}),
-  ...(config.roleTitle ? { roleTitle: config.roleTitle } : {}),
-  ...(config.roleScope ? { roleScope: config.roleScope } : {}),
-  ...(config.verificationCommand ? { verificationCommand: config.verificationCommand } : {}),
-  urgentEnabled: config.urgentEnabled === true,
-  ...(config.urgentThresholdMs !== undefined ? { urgentThresholdMs: config.urgentThresholdMs } : {}),
-  ...(config.urgentMaxPerHourPerChat !== undefined ? { urgentMaxPerHourPerChat: config.urgentMaxPerHourPerChat } : {}),
-  notifyMentionAction: config.notifyMentionAction !== false,
-  notifyMentionDone: config.notifyMentionDone !== false,
   ...(parseLarkQuietHours(config.notifyQuietHours) ? { notifyQuietHours: config.notifyQuietHours } : {}),
-  pinLongTasks: config.pinLongTasks === true,
-  ...(config.pinAfterMs !== undefined ? { pinAfterMs: config.pinAfterMs } : {}),
-  preInjectPrompt: config.preInjectPrompt,
-  listening: config.listening,
   activeListening: activeAppIds.has(config.appId),
-  groupToolsEnabled: config.groupToolsEnabled,
   groupToolsAllowSend: config.groupToolsAllowSend,
   memoryEnabled: larkMemoryEnabled(config),
-  memoryAutoExtract: config.memoryAutoExtract !== false,
-  busyTriage: config.busyTriage === true,
-  botLoopGuard: config.botLoopGuard === true,
-  groupMemoryScope: normalizeLarkGroupMemoryScope(config.groupMemoryScope),
-  claudeAutoMemory: normalizeLarkClaudeAutoMemory(config.claudeAutoMemory),
-  ...(config.memoryAgentId ? { memoryAgentId: config.memoryAgentId } : {}),
-  ...(config.memoryModel ? { memoryModel: config.memoryModel } : {}),
-  ...(config.decisionAgentId ? { decisionAgentId: config.decisionAgentId } : {}),
-  ...(config.decisionModel ? { decisionModel: config.decisionModel } : {}),
-  ...(config.responseAgentId ? { responseAgentId: config.responseAgentId } : {}),
-  ...(config.responseModel ? { responseModel: config.responseModel } : {}),
-  replyPolishEnabled: config.replyPolishEnabled === true,
-  replyPolishTimeoutMs: config.replyPolishTimeoutMs ?? 60_000,
-  ...(config.replyPolishAgentId ? { replyPolishAgentId: config.replyPolishAgentId } : {}),
   ...(config.replyPolishModel ? { replyPolishModel: config.replyPolishModel } : {}),
-  executionMode: config.executionMode === 'layered' ? 'layered' : 'single',
-  ...(config.leaderAgentId ? { leaderAgentId: config.leaderAgentId } : {}),
   workerAgentIds: config.workerAgentIds ?? [],
-  ...(config.leaderSkill ? { leaderSkill: config.leaderSkill } : {}),
-  structuredAskCards: config.structuredAskCards !== false,
-  groupCardMention: config.groupCardMention === true,
-  pushIntervalMs: config.pushIntervalMs,
-  traceLimit: config.traceLimit ?? defaultLarkTraceLimit,
-  hideTraceOnComplete: config.hideTraceOnComplete,
-  compactTrace: config.compactTrace !== false,
-  showAgentName: config.showAgentName === true,
-  completionReactionOnly: config.completionReactionOnly === true,
-  silentProgress: config.silentProgress === true,
-  adhdMode: config.adhdMode === true,
   allowedUsers: config.allowedUsers,
   allowedEmails: config.allowedEmails,
   allowedBots: config.allowedBots,
-  peerBotsAllowed: config.peerBotsAllowed,
   highRiskAllowedUsers: config.highRiskAllowedUsers,
   highRiskAllowedEmails: config.highRiskAllowedEmails,
   highRiskPattern: config.highRiskPattern,
@@ -542,10 +403,10 @@ async function saveLarkConfigUnlocked(repository: ConfigRepository | undefined, 
   if (input.defaultGroupParticipation !== undefined && !collaborationParticipationModes.includes(input.defaultGroupParticipation)) {
     throw new LarkServiceError('INVALID_LARK_CONFIG', '默认群参与模式无效。', 400);
   }
-  if (input.p2pMode !== undefined && !['chat', 'thread'].includes(input.p2pMode)) {
+  if (input.p2pMode !== undefined && !botSettingDescriptors.p2pMode.values.includes(input.p2pMode)) {
     throw new LarkServiceError('INVALID_LARK_CONFIG', '私聊模式必须为 chat 或 thread。', 400);
   }
-  if (input.groupReplyMode !== undefined && input.groupReplyMode !== null && !['chat', 'shared', 'new-topic', 'chat-topic'].includes(input.groupReplyMode)) {
+  if (input.groupReplyMode !== undefined && input.groupReplyMode !== null && !botSettingDescriptors.groupReplyMode.values.includes(input.groupReplyMode)) {
     throw new LarkServiceError('INVALID_LARK_CONFIG', '群回复模式无效；仅支持 chat、shared、new-topic、chat-topic，或 null 清除覆盖。', 400);
   }
   if (input.groupMemoryScope !== undefined && !isLarkGroupMemoryScope(input.groupMemoryScope)) {
@@ -554,10 +415,10 @@ async function saveLarkConfigUnlocked(repository: ConfigRepository | undefined, 
   if (input.claudeAutoMemory !== undefined && !isLarkClaudeAutoMemory(input.claudeAutoMemory)) {
     throw new LarkServiceError('INVALID_LARK_CONFIG', 'Claude 自带记忆必须为 inherit 或 off。', 400);
   }
-  if (input.brand !== undefined && !['feishu', 'lark'].includes(input.brand)) {
+  if (input.brand !== undefined && !botSettingDescriptors.brand.values.includes(input.brand)) {
     throw new LarkServiceError('INVALID_LARK_CONFIG', '飞书应用品牌必须为 feishu 或 lark。', 400);
   }
-  if (input.executionMode !== undefined && !['single', 'layered'].includes(input.executionMode)) {
+  if (input.executionMode !== undefined && !botSettingDescriptors.executionMode.values.includes(input.executionMode)) {
     throw new LarkServiceError('INVALID_LARK_CONFIG', '执行方式无效。', 400);
   }
   if (input.leaderSkill !== undefined && (typeof input.leaderSkill !== 'string' || input.leaderSkill.trim().length > maxLeaderSkillLength)) {
@@ -575,7 +436,10 @@ async function saveLarkConfigUnlocked(repository: ConfigRepository | undefined, 
   const appId = input.appId?.trim() || current?.appId;
   const appSecret = input.appSecret?.trim() || current?.appSecret;
   const name = input.name === undefined ? current?.name : input.name.trim() || undefined;
-  const workspace = input.workspace === undefined ? current?.workspace : input.workspace.trim() || undefined;
+  const workspaceSetting = mergeBotTextFields(input, current, 'workspace');
+  const scalars = mergeBotScalarFields(input, current);
+  const { fullTrustConfirmed, groupToolsEnabled, replyPolishEnabled, replyPolishAgentId, replyPolishTimeoutMs,
+    executionMode, pushIntervalMs, traceLimit, urgentThresholdMs, urgentMaxPerHourPerChat, pinAfterMs } = scalars;
   const cardLinks = input.cardLinks === undefined ? current?.cardLinks ?? [] : parseCardLinks(input.cardLinks);
   const workspaceAliases = input.workspaceAliases === undefined ? current?.workspaceAliases : normalizeWorkspaceAliases(input.workspaceAliases);
   // 同一套部署的机器人共用一个控制台。新建时没给地址（扫码一键创建、CLI 创建都不带）就沿用
@@ -591,31 +455,17 @@ async function saveLarkConfigUnlocked(repository: ConfigRepository | undefined, 
   const weightsResult = agentWeightsSchema.safeParse(input.defaultAgentWeights === undefined ? current?.defaultAgentWeights ?? [] : input.defaultAgentWeights);
   if (!weightsResult.success) throw new LarkServiceError('INVALID_LARK_CONFIG', 'Agent weights must contain distinct Agent IDs and finite positive weights.', 400);
   const defaultAgentWeights = weightsResult.data;
-  const listening = input.listening ?? current?.listening ?? false;
-  const groupToolsEnabled = input.groupToolsEnabled ?? current?.groupToolsEnabled ?? false;
-  const groupToolsAllowSend = groupToolsEnabled && (input.groupToolsAllowSend ?? current?.groupToolsAllowSend ?? false);
+  const groupToolsAllowSend = groupToolsEnabled && (input.groupToolsAllowSend ?? current?.groupToolsAllowSend ?? botSettingDescriptors.groupToolsAllowSend.default);
   const memoryEnabled = input.memoryEnabled ?? current?.memoryEnabled ?? (input.defaultGroupParticipation === 'selective' || input.defaultGroupParticipation === 'eager');
-  const memoryAutoExtract = input.memoryAutoExtract ?? current?.memoryAutoExtract ?? true;
-  const botLoopGuard = input.botLoopGuard ?? current?.botLoopGuard ?? false;
-  const groupMemoryScope = isLarkGroupMemoryScope(input.groupMemoryScope) ? input.groupMemoryScope : normalizeLarkGroupMemoryScope(current?.groupMemoryScope);
-  const claudeAutoMemory = isLarkClaudeAutoMemory(input.claudeAutoMemory) ? input.claudeAutoMemory : normalizeLarkClaudeAutoMemory(current?.claudeAutoMemory);
-  const memoryAgentId = input.memoryAgentId === undefined ? current?.memoryAgentId : input.memoryAgentId.trim() || undefined;
-  const memoryModel = input.memoryModel === undefined ? current?.memoryModel : input.memoryModel.trim() || undefined;
-  const decisionAgentId = input.decisionAgentId === undefined ? current?.decisionAgentId : input.decisionAgentId.trim() || undefined;
-  const decisionModel = input.decisionModel === undefined ? current?.decisionModel : input.decisionModel.trim() || undefined;
-  const responseAgentId = input.responseAgentId === undefined ? current?.responseAgentId : input.responseAgentId.trim() || undefined;
-  const responseModel = input.responseModel === undefined ? current?.responseModel : input.responseModel.trim() || undefined;
+  const agentOverrides = mergeBotTextFields(input, current, 'memoryAgentId', 'memoryModel', 'decisionAgentId', 'decisionModel', 'responseAgentId', 'responseModel');
   if (input.replyPolishEnabled !== undefined && typeof input.replyPolishEnabled !== 'boolean'
     || input.replyPolishAgentId !== undefined && typeof input.replyPolishAgentId !== 'string'
     || input.replyPolishModel !== undefined && typeof input.replyPolishModel !== 'string') {
     throw new LarkServiceError('INVALID_LARK_CONFIG', '文字优化的开关须为布尔值，Agent 和模型须为字符串。', 400);
   }
-  const replyPolishTimeoutMs = input.replyPolishTimeoutMs === null ? undefined : input.replyPolishTimeoutMs ?? current?.replyPolishTimeoutMs;
-  if (replyPolishTimeoutMs !== undefined && (!Number.isInteger(replyPolishTimeoutMs) || replyPolishTimeoutMs < 1 || replyPolishTimeoutMs > 2_147_483_647)) {
+  if (replyPolishTimeoutMs !== undefined && (!Number.isInteger(replyPolishTimeoutMs) || replyPolishTimeoutMs < 1 || replyPolishTimeoutMs > botSettingDescriptors.replyPolishTimeoutMs.max)) {
     throw new LarkServiceError('INVALID_LARK_CONFIG', '文字优化等待时间须为正整数毫秒，且在系统计时器可表示的范围内（1–2147483647 毫秒）。', 400);
   }
-  const replyPolishEnabled = input.replyPolishEnabled ?? current?.replyPolishEnabled ?? false;
-  const replyPolishAgentId = input.replyPolishAgentId === undefined ? current?.replyPolishAgentId : input.replyPolishAgentId.trim() || undefined;
   const replyPolishModel = input.replyPolishModel !== undefined ? input.replyPolishModel.trim() || undefined
     : replyPolishAgentId === current?.replyPolishAgentId ? current?.replyPolishModel : undefined;
   if (replyPolishEnabled) {
@@ -624,59 +474,31 @@ async function saveLarkConfigUnlocked(repository: ConfigRepository | undefined, 
     if (agents && !agent) throw new LarkServiceError('INVALID_LARK_CONFIG', `Unknown polishing Agent: ${replyPolishAgentId}`, 400);
     if (agent && agent.protocol !== 'acp') throw new LarkServiceError('INVALID_LARK_CONFIG', '文字优化需要支持只读执行的 ACP Agent，例如 TRAE (ACP)。', 400);
   }
-  const executionMode = input.executionMode ?? current?.executionMode ?? 'single';
-  const leaderAgentId = input.leaderAgentId === undefined ? current?.leaderAgentId : input.leaderAgentId.trim() || undefined;
+  const leader = mergeBotTextFields(input, current, 'leaderAgentId');
+  const { leaderAgentId } = leader;
   const workerAgentIds = input.workerAgentIds === undefined ? current?.workerAgentIds ?? [] : normalizeAgentIds(input.workerAgentIds);
-  const leaderSkill = input.leaderSkill === undefined ? current?.leaderSkill : input.leaderSkill.trim() || undefined;
-  const structuredAskCards = input.structuredAskCards ?? current?.structuredAskCards ?? true;
-  const groupCardMention = input.groupCardMention ?? current?.groupCardMention ?? true;
-  const pushIntervalMs = input.pushIntervalMs ?? current?.pushIntervalMs ?? defaultLarkPushIntervalMs;
-  const traceLimit = input.traceLimit === undefined ? current?.traceLimit ?? defaultLarkTraceLimit : input.traceLimit ?? defaultLarkTraceLimit;
-  const hideTraceOnComplete = input.hideTraceOnComplete ?? current?.hideTraceOnComplete ?? true;
-  const compactTrace = input.compactTrace ?? current?.compactTrace ?? true;
-  const showAgentName = input.showAgentName ?? current?.showAgentName ?? false;
-  const completionReactionOnly = input.completionReactionOnly ?? current?.completionReactionOnly ?? false;
-  const silentProgress = input.silentProgress ?? current?.silentProgress ?? false;
-  const adhdMode = input.adhdMode ?? current?.adhdMode ?? false;
-  const defaultModel = input.defaultModel === undefined ? current?.defaultModel : input.defaultModel.trim() || undefined;
-  const defaultReasoningEffort = input.defaultReasoningEffort === undefined ? current?.defaultReasoningEffort : input.defaultReasoningEffort.trim() || undefined;
-  const fullTrustConfirmed = input.fullTrustConfirmed ?? current?.fullTrustConfirmed ?? false;
+  const modelSettings = mergeBotTextFields(input, current, 'defaultModel', 'defaultReasoningEffort');
   const permissionMode = input.permissionMode ?? (current ? larkPermissionMode(current)
     : defaultLarkPermissionMode(defaultAgentId ? await agents?.get(defaultAgentId) : undefined));
   if (permissionMode !== 'ask' && permissionMode !== 'approve-reads' && permissionMode !== 'full-trust') throw new LarkServiceError('INVALID_LARK_CONFIG', 'Unsupported Lark permission mode', 400);
-  const p2pMode = input.p2pMode === undefined ? current?.p2pMode : normalizeP2pMode(input.p2pMode);
-  const groupReplyMode = input.groupReplyMode === undefined ? current?.groupReplyMode : normalizeGroupReplyMode(input.groupReplyMode);
   const env = input.env === undefined ? current?.env : normalizeEnv(input.env);
   const startupCommands = input.startupCommands === undefined ? current?.startupCommands : normalizeStartupCommands(input.startupCommands);
-  const brand = input.brand === undefined ? current?.brand : normalizeBrand(input.brand);
-  const displayName = input.displayName === undefined ? current?.displayName : normalizeTrimmedString(input.displayName);
-  const roleTitle = input.roleTitle === undefined ? current?.roleTitle : normalizeTrimmedString(input.roleTitle);
-  const roleScope = input.roleScope === undefined ? current?.roleScope : normalizeTrimmedString(input.roleScope);
-  const verificationCommand = input.verificationCommand === undefined ? current?.verificationCommand : input.verificationCommand.trim() || undefined;
-  const urgentEnabled = input.urgentEnabled ?? current?.urgentEnabled ?? false;
-  // 三个阈值都用 null 表示「清回模块默认」，与 traceLimit 同一口径；不传才是继承现值。
-  const urgentThresholdMs = input.urgentThresholdMs === undefined ? current?.urgentThresholdMs : input.urgentThresholdMs ?? undefined;
-  const urgentMaxPerHourPerChat = input.urgentMaxPerHourPerChat === undefined ? current?.urgentMaxPerHourPerChat : input.urgentMaxPerHourPerChat ?? undefined;
-  const notifyMentionAction = input.notifyMentionAction ?? current?.notifyMentionAction ?? true;
-  const notifyMentionDone = input.notifyMentionDone ?? current?.notifyMentionDone ?? true;
+  const verification = mergeBotTextFields(input, current, 'verificationCommand');
   const notifyQuietHours = input.notifyQuietHours === undefined ? current?.notifyQuietHours : input.notifyQuietHours.trim() || undefined;
-  const pinLongTasks = input.pinLongTasks ?? current?.pinLongTasks ?? false;
-  const pinAfterMs = input.pinAfterMs === undefined ? current?.pinAfterMs : input.pinAfterMs ?? undefined;
-  const preInjectPrompt = input.preInjectPrompt === undefined ? current?.preInjectPrompt ?? '' : input.preInjectPrompt.trim();
+  const prompt = mergeBotTextFields(input, current, 'preInjectPrompt');
   const allowedUsers = input.allowedUsers === undefined ? current?.allowedUsers ?? [] : normalizeAllowedUsers(input.allowedUsers);
   const allowedEmails = input.allowedEmails === undefined ? current?.allowedEmails ?? [] : normalizeEmails(input.allowedEmails);
   const allowedBots = input.allowedBots === undefined ? current?.allowedBots ?? [] : normalizeAllowedUsers(input.allowedBots);
-  const peerBotsAllowed = input.peerBotsAllowed === undefined ? current?.peerBotsAllowed ?? true : input.peerBotsAllowed;
   const highRiskAllowedUsers = input.highRiskAllowedUsers === undefined ? current?.highRiskAllowedUsers ?? [] : normalizeAllowedUsers(input.highRiskAllowedUsers);
   const highRiskAllowedEmails = input.highRiskAllowedEmails === undefined ? current?.highRiskAllowedEmails ?? [] : normalizeEmails(input.highRiskAllowedEmails);
   const highRiskPattern = input.highRiskPattern === undefined ? current?.highRiskPattern ?? defaultHighRiskPattern : input.highRiskPattern.trim() || defaultHighRiskPattern;
-  const riskControlMode = resolveRiskControlModeInput(input, current?.riskControlMode ?? 'off');
+  const riskControlMode = resolveRiskControlModeInput(input, current?.riskControlMode);
   if (!appId) throw new LarkServiceError('INVALID_LARK_CONFIG', 'App ID is required', 400);
   if (!appSecret) throw new LarkServiceError('INVALID_LARK_CONFIG', 'App Secret is required', 400);
   if (input.stage === 'agent' && !defaultAgentId) throw new LarkServiceError('INVALID_LARK_CONFIG', 'Default Agent is required', 400);
-  if (workspace && !isAbsolute(workspace)) throw new LarkServiceError('INVALID_LARK_CONFIG', 'Workspace must be an absolute path', 400);
-  if (!Number.isInteger(pushIntervalMs) || pushIntervalMs < 500 || pushIntervalMs > 20_000) throw new LarkServiceError('INVALID_LARK_CONFIG', 'Push interval must be an integer between 500 and 20000 milliseconds', 400);
-  if (!Number.isInteger(traceLimit) || traceLimit < 1) throw new LarkServiceError('INVALID_LARK_CONFIG', 'Trace limit must be a positive integer', 400);
+  if (workspaceSetting.workspace && !isAbsolute(workspaceSetting.workspace)) throw new LarkServiceError('INVALID_LARK_CONFIG', 'Workspace must be an absolute path', 400);
+  if (!Number.isInteger(pushIntervalMs) || pushIntervalMs < botSettingDescriptors.pushIntervalMs.min || pushIntervalMs > botSettingDescriptors.pushIntervalMs.max) throw new LarkServiceError('INVALID_LARK_CONFIG', 'Push interval must be an integer between 500 and 20000 milliseconds', 400);
+  if (!Number.isInteger(traceLimit) || traceLimit! < 1) throw new LarkServiceError('INVALID_LARK_CONFIG', 'Trace limit must be a positive integer', 400);
   if (urgentThresholdMs !== undefined && (!Number.isInteger(urgentThresholdMs) || urgentThresholdMs < minLarkUrgentThresholdMs)) throw new LarkServiceError('INVALID_LARK_CONFIG', `Urgent threshold must be an integer of at least ${minLarkUrgentThresholdMs} milliseconds`, 400);
   if (urgentMaxPerHourPerChat !== undefined && (!Number.isInteger(urgentMaxPerHourPerChat) || urgentMaxPerHourPerChat < 1)) throw new LarkServiceError('INVALID_LARK_CONFIG', 'Urgent hourly limit must be a positive integer', 400);
   if (notifyQuietHours !== undefined && !parseLarkQuietHours(notifyQuietHours)) throw new LarkServiceError('INVALID_LARK_CONFIG', 'Quiet hours must look like 22:00-08:00 (HH:MM-HH:MM, start and end differ)', 400);
@@ -711,18 +533,16 @@ async function saveLarkConfigUnlocked(repository: ConfigRepository | undefined, 
     throw new LarkServiceError('LARK_FULL_TRUST_CONFIRMATION_REQUIRED', '请先确认飞书任务将以完全信任模式无人值守运行。', 409);
   }
   const config: StoredLarkConfig = {
-    welcomeEnabled: input.welcomeEnabled ?? current?.welcomeEnabled ?? true,
+    ...scalars, ...workspaceSetting, ...agentOverrides, ...leader, ...modelSettings, ...verification, ...prompt,
     ...(eventHandlers ? { eventHandlers } : {}),
     ...(cardActionForwarding ? { cardActionForwarding } : {}),
     revision: (current?.revision ?? (current ? 1 : 0)) + 1,
     // 新建的 Bot 默认在自己接手的话题里免 @；已有 Bot 读出来时总带着自己的取值，这里不会改动它们。
     mentionPolicy: input.mentionPolicy ?? current?.mentionPolicy ?? NEW_BOT_MENTION_POLICY,
     ...(reactionTriggerEmoji ? { reactionTriggerEmoji } : {}),
-    defaultGroupParticipation: input.defaultGroupParticipation ?? current?.defaultGroupParticipation ?? 'off',
     appId,
     appSecret,
     ...(name ? { name } : {}),
-    ...(workspace ? { workspace } : {}),
     ...(workspaceAliases ? { workspaceAliases } : {}),
     cardLinks,
     ...(webBaseUrl ? { webBaseUrl } : {}),
@@ -731,67 +551,17 @@ async function saveLarkConfigUnlocked(repository: ConfigRepository | undefined, 
     ...(fallbackModel ? { fallbackModel } : {}),
     ...(defaultAgentId ? { defaultAgentId } : {}),
     ...(defaultAgentWeights.length ? { defaultAgentWeights } : {}),
-    ...(defaultModel ? { defaultModel } : {}),
-    ...(defaultReasoningEffort ? { defaultReasoningEffort } : {}),
-    fullTrustConfirmed,
     permissionMode,
-    ...(p2pMode ? { p2pMode } : {}),
-    ...(groupReplyMode ? { groupReplyMode } : {}),
     ...(env ? { env } : {}),
     ...(startupCommands ? { startupCommands } : {}),
-    ...(brand ? { brand } : {}),
-    ...(displayName ? { displayName } : {}),
-    ...(roleTitle ? { roleTitle } : {}),
-    ...(roleScope ? { roleScope } : {}),
-    idleCompactEnabled: input.idleCompactEnabled ?? current?.idleCompactEnabled ?? true,
-    idleCompactHours: input.idleCompactHours ?? current?.idleCompactHours ?? defaultLarkIdleCompactHours,
-    preInjectPrompt,
-    listening,
-    groupToolsEnabled,
     groupToolsAllowSend,
     memoryEnabled,
-    memoryAutoExtract,
-    busyTriage: input.busyTriage ?? current?.busyTriage ?? false,
-    botLoopGuard,
-    groupMemoryScope,
-    ...(claudeAutoMemory === 'off' ? { claudeAutoMemory } : {}),
-    ...(memoryAgentId ? { memoryAgentId } : {}),
-    ...(memoryModel ? { memoryModel } : {}),
-    ...(decisionAgentId ? { decisionAgentId } : {}),
-    ...(decisionModel ? { decisionModel } : {}),
-    ...(responseAgentId ? { responseAgentId } : {}),
-    ...(responseModel ? { responseModel } : {}),
-    replyPolishEnabled,
-    ...(replyPolishTimeoutMs !== undefined ? { replyPolishTimeoutMs } : {}),
-    ...(replyPolishAgentId ? { replyPolishAgentId } : {}),
     ...(replyPolishModel ? { replyPolishModel } : {}),
-    ...(executionMode === 'layered' ? { executionMode } : {}),
-    ...(leaderAgentId ? { leaderAgentId } : {}),
     ...(workerAgentIds.length ? { workerAgentIds } : {}),
-    ...(leaderSkill ? { leaderSkill } : {}),
-    structuredAskCards,
-    groupCardMention,
-    ...(verificationCommand ? { verificationCommand } : {}),
-    urgentEnabled,
-    ...(urgentThresholdMs !== undefined ? { urgentThresholdMs } : {}),
-    ...(urgentMaxPerHourPerChat !== undefined ? { urgentMaxPerHourPerChat } : {}),
-    notifyMentionAction,
-    notifyMentionDone,
     ...(notifyQuietHours ? { notifyQuietHours } : {}),
-    pinLongTasks,
-    ...(pinAfterMs !== undefined ? { pinAfterMs } : {}),
-    pushIntervalMs,
-    traceLimit,
-    hideTraceOnComplete,
-    compactTrace,
-    showAgentName,
-    completionReactionOnly,
-    silentProgress,
-    adhdMode,
     allowedUsers,
     allowedEmails,
     allowedBots,
-    peerBotsAllowed,
     highRiskAllowedUsers,
     highRiskAllowedEmails,
     highRiskPattern,

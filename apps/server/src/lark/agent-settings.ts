@@ -1,3 +1,4 @@
+import { botSettingDescriptors } from '@dutydeck/shared';
 import { z } from 'zod';
 import { botFields, parsePairs } from '../settings-cli.js';
 import { AgentCommandParamError } from './agent-command.js';
@@ -20,7 +21,7 @@ export function parseAgentSettings(pairs: string[]): SaveLarkConfigInput {
 }
 
 export function showAgentSettings(config: StoredLarkConfig): Record<string, unknown> {
-  return Object.fromEntries(agentSettingsKeys.map(key => [key, config[key] ?? (key === 'p2pMode' ? 'chat'
-    : key === 'groupReplyMode' ? null : key === 'busyTriage' || key === 'botLoopGuard' ? false : key === 'notifyMentionAction' || key === 'notifyMentionDone' ? true : '')]));
+  return Object.fromEntries(agentSettingsKeys.map(key => [key, config[key] ?? (key === 'groupReplyMode' ? null
+    : key === 'p2pMode' ? botSettingDescriptors[key].displayDefault : botSettingDescriptors[key].default ?? '')]));
 }
 export const agentSettingsConfirmKind = (appId: string) => `agent_settings.${appId}`;
