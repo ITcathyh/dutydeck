@@ -170,6 +170,8 @@ export interface AgentDriver {
    * 结果未知的一轮靠它判断 Agent 是否已经停下。
    */
   isIdle?(): boolean;
+  /** Positive idle or activity evidence, or why the driver cannot tell. */
+  quiescence?(): { state: 'idle' | 'busy' | 'unknown'; evidence: string };
   /** Native background work can outlive the submitted main turn. */
   hasBackgroundWork?(): boolean;
   /** 重连/恢复持久会话；受控驱动的新增资源使用本次显式许可。 */

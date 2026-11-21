@@ -1456,18 +1456,38 @@ export class PtyCliDriver implements AgentDriver {
    * 适配器认不出空输入框时返回 false。
    */
   isIdle(): boolean {
-    if (this.maintenanceUnknown) return this.recoverUnknownMaintenanceSync();
-    return !this.maintenanceActive && this.terminalIsIdle();
+    return this.quiescence().state === 'idle';
+  }
+
+  quiescence(): ReturnType<NonNullable<AgentDriver['quiescence']>> {
+    if (this.maintenanceActive) return { state: 'busy', evidence: 'maintenance_active' };
+    if (this.hasBackgroundWork()) return { state: 'busy', evidence: 'background_work' };
+    if (this.maintenanceUnknown) this.recoverUnknownMaintenanceSync();
+    const terminal = this.terminalQuiescence();
+    return terminal.state === 'idle' && this.maintenanceUnknown ? { state: 'unknown', evidence: 'maintenance_unconfirmed' } : terminal;
   }
 
   private terminalIsIdle(requireRawRecovery = true): boolean {
+    return this.terminalQuiescence(requireRawRecovery).state === 'idle';
+  }
+
+  private terminalQuiescence(requireRawRecovery = true): ReturnType<NonNullable<AgentDriver['quiescence']>> {
+    if (this.turnActive) return { state: 'busy', evidence: 'turn_active' };
+    if (this.activeSubmission) return { state: 'busy', evidence: 'submission_active' };
     const screen = this.snapshot?.viewportText({ preserveStructure: true });
-    if (this.stopped || this.turnActive || this.activeSubmission || (requireRawRecovery && !this.rawInputRecovered()) || !screen || !this.adapter.isIdleScreen) return false;
+    if (!screen) return { state: 'unknown', evidence: 'no_snapshot' };
     const { screenActivityPattern: activity, backgroundWaitPattern: background, completionPattern: completion, screenCancelledPattern: cancelled } = this.adapter;
-    const statusLine = screen.split('\n').reverse().find(line => activity?.test(line) || background?.test(line) || completion?.test(line) || cancelled?.test(line));
-    if (statusLine && (activity?.test(statusLine) || background?.test(statusLine))) return false;
-    if (this.adapter.screenBusyPattern?.test(screen.split('\n').slice(-6).join('\n')) || this.screenWaitsForHuman()) return false;
-    return this.adapter.isIdleScreen(screen);
+    const lines = screen.split('\n');
+    const footer = lines.slice(-6).join('\n');
+    const statusLine = lines.reverse().find(line => activity?.test(line) || background?.test(line) || completion?.test(line) || cancelled?.test(line));
+    if (statusLine && activity?.test(statusLine)) return { state: 'busy', evidence: 'status_activity' };
+    if (statusLine && background?.test(statusLine)) return { state: 'busy', evidence: 'background_wait' };
+    if (this.adapter.screenBusyPattern?.test(footer)) return { state: 'busy', evidence: 'screen_busy' };
+    if (this.screenWaitsForHuman()) return { state: 'busy', evidence: 'human_prompt' };
+    if (this.stopped) return { state: 'unknown', evidence: 'driver_stopped' };
+    if (requireRawRecovery && !this.rawInputRecovered()) return { state: 'unknown', evidence: 'raw_input_unconfirmed' };
+    if (!this.adapter.isIdleScreen) return { state: 'unknown', evidence: 'no_idle_screen_matcher' };
+    return this.adapter.isIdleScreen(screen) ? { state: 'idle', evidence: 'idle_composer' } : { state: 'unknown', evidence: 'composer_not_recognized' };
   }
 
   hasBackgroundWork(): boolean {

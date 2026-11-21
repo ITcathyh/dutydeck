@@ -396,7 +396,7 @@ export const api = {
   larkMemoryStatus: (appId: string) => json<LarkMemoryStatusResult>(`/api/lark/bots/${encodeURIComponent(appId)}/memory/status`, { cache: 'no-store' }),
   taskAuthorizations: (sessionId: string) => json<TaskAuthorization[]>(`/api/sessions/${encodeURIComponent(sessionId)}/task-authorizations`),
   unknownTasks: (sessionId: string) => json<UnknownTask[]>(`/api/sessions/${encodeURIComponent(sessionId)}/unknown-tasks`, { cache: 'no-store' }),
-  resolveUnknownTask: (sessionId: string, taskId: string, input: { target: string; action: UnknownTaskAction; allowDuplicateEffects?: true }) => send<{ replayed: boolean; status: string; decisionId: string }>('POST', `/api/sessions/${encodeURIComponent(sessionId)}/unknown-tasks/${encodeURIComponent(taskId)}`, input),
+  resolveUnknownTask: (sessionId: string, taskId: string, input: { target: string; action: UnknownTaskAction; allowDuplicateEffects?: true }) => send<{ replayed: boolean; status: string; decisionId: string; stoppedOriginal?: true }>('POST', `/api/sessions/${encodeURIComponent(sessionId)}/unknown-tasks/${encodeURIComponent(taskId)}`, input),
   memoryPool: (sessionId: string, q = '') => json<MemoryPoolView>(`/api/sessions/${encodeURIComponent(sessionId)}/memory-pool${q ? `?q=${encodeURIComponent(q)}` : ''}`),
   reviseMemoryPool: (sessionId: string, entryId: string, body: MemoryWrite) => send('PATCH', `/api/sessions/${encodeURIComponent(sessionId)}/memory-pool/${encodeURIComponent(entryId)}`, body),
   removeMemoryPool: (sessionId: string, entryId: string) => json(`/api/sessions/${encodeURIComponent(sessionId)}/memory-pool/${encodeURIComponent(entryId)}`, { method: 'DELETE' }),

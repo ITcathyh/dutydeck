@@ -1785,46 +1785,56 @@ export class DutydeckRuntime {
    * 人工处理结果未知的任务：重新执行（同一任务按原请求排回队列）、标为已完成、标为失败。
    * 用的是 `dutydeck recovery` 同一组账本原语（执行：retryAttempt / confirmAttemptRecovery；插话：confirmSteeringRecovery），
    * 决定写进 recovery_decisions，版本号保证并发点击、重启后的重复回调只有一个生效；同一 decisionId 再来只回放。
-   * 驱动还连着时只在它确认空闲后进行，资源按本会话可复用的驱动核对（同 settleIdleAttempt）；没有驱动时先观测上一个进程留下的资源，再严格核对。
+   * 驱动确认空闲时可以复用；状态不明时先停止并核实退出。没有驱动时严格核对原执行资源。
    */
   async resolveUnknownTask(id: string, raw: UnknownTaskResolution, actor: ExecutionActor) {
     this.assertReady(); this.requireRecoveryOwner(actor);
     const input = unknownTaskResolutionSchema.parse(raw);
-    return this.mutations.run(this.ownerOf(id), async () => {
+    const decisionOwner = this.ownerOf(id);
+    // Keep the physical exit observation even if a concurrent stop revokes the decision.
+    return this.mutations.run(undefined, () => this.mutations.write(id, async () => {
       const { session, driver } = await this.active(id);
       const facts = await this.inspectUnknownTask(id, input.taskId, input.target);
       const projection = this.repos.execution.getTaskExecution(input.taskId)!;
       if (facts.resolution?.decisionId === input.decisionId) return { replayed: true, task: this.publicTask(projection.task) };
       if (!facts.actionable) throw new RuntimeError('TASK_NOT_RESULT_UNKNOWN', 'This attempt is no longer waiting for a decision', 409);
       if (input.action === 'completed' && facts.kind === 'attempt' && input.verifiedOutputText === undefined) throw new RuntimeError('RECOVERY_OUTPUT_REQUIRED', 'Completed recovery requires verified output', 400);
-      if (this.recoveryInFlight(id)) throw new RuntimeError('RECOVERY_EXECUTION_ACTIVE', 'Original execution still has an in-flight owner', 409);
-      const reuseOwned = Boolean(driver);
-      if (driver) {
-        if (driver.isDetachedForShutdown?.() || !driver.isIdle?.()) throw new RuntimeError('RECOVERY_EXECUTION_ACTIVE', 'The agent has not confirmed it is idle', 409);
-        this.assertResources(id, true);
-      } else {
+      this.mutations.check(decisionOwner);
+      if (this.retiringDrivers.has(id) || this.recoveryInFlight(id)) throw new RuntimeError('RECOVERY_EXECUTION_ACTIVE', 'Original execution still has an in-flight owner', 409);
+      const state = driver?.quiescence?.().state ?? (driver?.isIdle?.() ? 'idle' : 'busy');
+      const reuseOwned = !!driver && state === 'idle';
+      const stoppedOriginal = !!driver && state === 'unknown';
+      if (driver && (driver.isDetachedForShutdown?.() || state === 'busy')) throw new RuntimeError('RECOVERY_EXECUTION_ACTIVE', 'The agent is still active', 409);
+      if (reuseOwned) this.assertResources(id, true);
+      else {
+        if (driver) {
+          this.nextSessionGeneration(id);
+          await this.stopDriver(id, driver);
+        }
         await this.observeAbandonedResources(session);
         await this.clearVerifiedStopBlock(session);
       }
       const resourceChecks = reuseOwned ? [] : (await this.inspectExecutionRecovery(id, actor)).resourceChecks;
-      const evidence = { decisionId: input.decisionId, actor, evidenceRefs: input.evidenceRefs, resourceChecks };
-      const result = await this.mutations.write(id, async () => {
-        if (facts.kind === 'steering') {
-          const operation = projection.steering!;
-          return this.wake(this.bound().confirmSteeringRecovery(this.fence(session), { runId: session.runId, taskId: input.taskId, operationId: operation.operationId,
-            expectedRevision: operation.revision, decisionId: input.decisionId, evidenceRefs: input.evidenceRefs, resourceChecks,
-            ...(input.action === 'retry' ? { action: 'not_delivered' as const, allowDuplicateEffects: true as const } : { action: input.action === 'completed' ? 'delivered' as const : 'abandon' as const }) }, actor, reuseOwned));
-        }
+      const evidenceRefs = stoppedOriginal ? [...input.evidenceRefs, 'stopped_original_driver'] : input.evidenceRefs;
+      const evidence = { decisionId: input.decisionId, actor, evidenceRefs, resourceChecks };
+      this.mutations.check(decisionOwner);
+      let result;
+      if (facts.kind === 'steering') {
+        const operation = projection.steering!;
+        result = this.wake(this.bound().confirmSteeringRecovery(this.fence(session), { runId: session.runId, taskId: input.taskId, operationId: operation.operationId,
+          expectedRevision: operation.revision, decisionId: input.decisionId, evidenceRefs, resourceChecks,
+          ...(input.action === 'retry' ? { action: 'not_delivered' as const, allowDuplicateEffects: true as const } : { action: input.action === 'completed' ? 'delivered' as const : 'abandon' as const }) }, actor, reuseOwned));
+      } else {
         const attempt = projection.currentAttempt!;
         const f = { sessionId: id, runId: session.runId, taskId: input.taskId, attemptId: attempt.attemptId, expectedRevision: attempt.revision };
-        return this.wake(input.action === 'retry'
+        result = this.wake(input.action === 'retry'
           ? this.bound().retryAttempt(f, { ...evidence, action: 'retry', allowDuplicateEffects: true }, resourceChecks, reuseOwned)
           : this.bound().confirmAttemptRecovery(f, `recovery:${input.decisionId}`, { kind: 'manual', outcome: input.action, decision: { ...evidence, action: 'confirm_result' } },
             input.action === 'completed' ? input.verifiedOutputText : undefined, reuseOwned));
-      });
+      }
       if (!result.replayed) { await clearTaskReportSafely(this.repos.config, input.taskId); await this.reopenQueue(id); }
-      return { replayed: result.replayed, task: this.publicTask(result.task!) };
-    });
+      return { replayed: result.replayed, task: this.publicTask(result.task!), ...(stoppedOriginal ? { stoppedOriginal: true as const } : {}) };
+    }));
   }
 
   async runVerification(id: string, input: VerificationCommandInput, actorId?: string): Promise<VerificationResponse> {
@@ -2958,7 +2968,8 @@ export class DutydeckRuntime {
       if (this.drivers.get(id) === driver) this.drivers.delete(id);
       return;
     }
-    const proven = await driver.isStopped?.() === true;
+    let proven = false;
+    try { proven = await driver.isStopped?.() === true; } catch (error) { stopError ??= error; }
     if (!proven) {
       const reason = stopError instanceof Error ? stopError.message : 'Driver physical resource exit is unverified';
       this.blockedDrivers.set(id, { driver, reason }); await this.retainStopBlock(id, reason);

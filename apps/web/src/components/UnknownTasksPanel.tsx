@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { unknownTaskActionLabels, unknownTaskRetryWarning, type UnknownTaskAction } from '@dutydeck/shared';
+import { unknownTaskActionLabels, unknownTaskRetryWarning, unknownTaskStoppedOriginalNotice, type UnknownTaskAction } from '@dutydeck/shared';
 import { api, ApiError, type Session, type Task, type UnknownTask } from '../api';
 import { currentInstance } from '../instance';
 import { toastStore } from '../useToasts';
@@ -22,9 +22,9 @@ export function UnknownTasksPanel({ session, tasks, taskId }: { session: Session
   const resolve = useMutation({
     mutationFn: ({ task, action }: { task: UnknownTask; action: UnknownTaskAction }) =>
       api.resolveUnknownTask(session.id, task.taskId, { target: task.target, action, ...(action === 'retry' ? { allowDuplicateEffects: true as const } : {}) }),
-    onSuccess: (_result, { task, action }) => {
+    onSuccess: (result, { task, action }) => {
       setConfirming(undefined);
-      toastStore.push({ kind: 'success', key: `unknown-task-${task.taskId}`, title: `已${unknownTaskActionLabels[action]}`, description: done[action] });
+      toastStore.push({ kind: 'success', key: `unknown-task-${task.taskId}`, title: `已${unknownTaskActionLabels[action]}`, description: result.stoppedOriginal ? done[action] + unknownTaskStoppedOriginalNotice : done[action] });
       void refresh();
     },
     onError: (error, { task }) => {

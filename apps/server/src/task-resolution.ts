@@ -6,7 +6,7 @@ import { RuntimeError, type ExecutionActor, type UnknownTaskAction, type Unknown
 export type UnknownTaskOperator = { channel: 'lark' | 'web'; id: string };
 export interface UnknownTaskRuntime {
   inspectUnknownTask(id: string, taskId: string, target?: string): Promise<UnknownTaskFacts>;
-  resolveUnknownTask(id: string, input: UnknownTaskResolution, actor: ExecutionActor): Promise<{ replayed: boolean; task: { id: string; status: string } }>;
+  resolveUnknownTask(id: string, input: UnknownTaskResolution, actor: ExecutionActor): Promise<{ replayed: boolean; stoppedOriginal?: true; task: { id: string; status: string } }>;
 }
 
 /** 账本里人工决定一律记为安装者（与 `dutydeck recovery` 同一身份），真正的操作人写进决定编号和证据。 */
@@ -81,7 +81,7 @@ export async function resolveUnknownTask(runtime: UnknownTaskRuntime, input: {
   };
   try {
     const result = await runtime.resolveUnknownTask(input.sessionId, resolution, installationOwner);
-    return { replayed: result.replayed, status: result.task.status, decisionId };
+    return { replayed: result.replayed, status: result.task.status, decisionId, ...(result.stoppedOriginal ? { stoppedOriginal: true as const } : {}) };
   } catch (error) {
     const code = (error as { code?: unknown }).code;
     if (typeof code === 'string' && settledCodes.has(code)) {
@@ -89,7 +89,7 @@ export async function resolveUnknownTask(runtime: UnknownTaskRuntime, input: {
       throw new RuntimeError('UNKNOWN_TASK_ALREADY_RESOLVED', facts?.resolution ? `这一轮已经处理过：${describeUnknownTaskResolution(facts.resolution)}。`
         : '这一轮已经不在结果未知状态，请刷新查看最新状态。', 409);
     }
-    if (code === 'RECOVERY_EXECUTION_ACTIVE') throw new RuntimeError(code, 'Agent 还在执行或没有确认已经停下，现在处理可能和它同时进行。等它停下后再试。', 409);
+    if (code === 'RECOVERY_EXECUTION_ACTIVE') throw new RuntimeError(code, 'Agent 还在执行，现在处理可能和它同时进行。等它停下后再试。', 409);
     if (typeof code === 'string' && blockedCodes.has(code)) {
       throw new RuntimeError('SESSION_RESOURCE_BLOCKED', '上一轮的执行进程还没确认停止，现在处理可能和它同时进行。请稍后再试；一直不行的话请管理员用 `dutydeck recovery` 核对。', 409);
     }

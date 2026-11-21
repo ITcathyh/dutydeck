@@ -24,10 +24,10 @@ function fixture() {
   const x = repos.execution.bind(claim);
   const git = (cwd:string,...args:string[]) => execFileSync('git',['-C',cwd,...args],{stdio:'pipe'});
   const repo = (name:string) => { const cwd=join(root,name);mkdirSync(cwd);git(cwd,'init','-q');git(cwd,'-c','user.name=Fixture','-c','user.email=fixture@example.invalid','commit','--allow-empty','-qm','baseline');return cwd; };
-  const session = (id:string,cwd:string) => { const f={sessionId:id,runId:'run-'+id};x.createSession({id,cwd,runId:f.runId,agentId:'fixture',state:'idle',createdAt:new Date().toISOString(),updatedAt:new Date().toISOString()});return f; };
-  const accept = (f:ReturnType<typeof session>,key='task') => {
-    const request:TaskRequestV1={version:1,namespace:'runtime',sessionId:f.sessionId,key,prompt:key,mode:'queue',actor:{kind:'unspecified'},skills:[],options:{},sources:[],sourcePayload:null};
-    const content={version:2 as const,prompt:key,executionOptions:{permissionMode:'ask' as const},executionContext:{agentPrompt:key},contentSources:[]};
+  const session = (id:string,cwd:string,source?:string) => { const f={sessionId:id,runId:'run-'+id};x.createSession({id,cwd,...(source ? {source} : {}),runId:f.runId,agentId:'fixture',state:'idle',createdAt:new Date().toISOString(),updatedAt:new Date().toISOString()});return f; };
+  const accept = (f:ReturnType<typeof session>,key='task',requestActor:TaskRequestV1['actor']={kind:'unspecified'}) => {
+    const request:TaskRequestV1={version:1,namespace:'runtime',sessionId:f.sessionId,key,prompt:key,mode:'queue',actor:requestActor,skills:[],options:{},sources:[],sourcePayload:null};
+    const content={version:2 as const,prompt:key,executionOptions:{permissionMode:'ask' as const},executionContext:{agentPrompt:key,...(requestActor.kind === 'unspecified' ? {} : {actorId:requestActor.id})},contentSources:[]};
     return x.acceptTask(f,request,{...content,digest:digest(content)} as AcceptedTaskInputV2,'back').task!;
   };
   return {root,path,repos,claim,x,git,repo,session,accept};
@@ -135,6 +135,66 @@ it('derives preexisting unknown ownership, keeps it through reopen and stop, and
   expect(reopened.execution.getTaskExecution(task.id)?.attempts[0]?.settlementId).toBe('manual-final');
   expect(()=>x.settleAttempt(af(a),'late-result',{kind:'driver_result',submissionId:'original-send',outcome:'completed',outputDigest:digest('late'),stopReason:'end_turn',complete:true})).toThrow();
   const integrity=new Database(h.path);expect(integrity.pragma('foreign_key_check')).toEqual([]);integrity.close();
+});
+it.each(['gone', 'one live', 'missing', 'preparing', 'active', 'steering unknown', 'stop block'] as const)(
+  'checks physical exit and remaining holds when another session claims: %s', async scenario => {
+    const h = fixture(), origin = h.session('origin', h.root), target = h.session('target', h.root);
+    h.accept(origin);
+    let attempt = h.x.claimNext(origin)!.attempt!;
+    const checks = [];
+    for (const id of scenario === 'missing' ? [] : ['first', 'second']) {
+      let r = h.x.beforeCreate(origin, { resourceId: id, kind: 'local_only' });
+      r = h.x.spawned(origin, id, r.revision, { identityId: id, kind: 'local_only', locator: { driver: id } });
+      r = h.x.creationFinished(origin, id, r.revision, 'created');
+      const live = scenario === 'one live' && id === 'second';
+      r = h.x.observed(origin, id, r.revision, { observationId: id, identityId: id, state: live ? 'live' : 'gone', observedAt: new Date().toISOString(), evidenceRef: 'fixture' });
+      if (live) checks.push({ resourceId: id, expectedRevision: r.revision, observationId: id });
+    }
+    if (scenario !== 'preparing') {
+      attempt = h.x.markSubmissionPending(af(attempt), { submissionId: 'send', inputDigest: digest('input'), resourceRefs: [], authorizationRefs: [] }).attempt!;
+      if (scenario === 'steering unknown') {
+        const task = h.accept(origin, 'steer');
+        h.x.beginQueuedSteering(origin, task.id, task.revision, { operationId: 'steer', actor, target: { taskId: attempt.taskId, attemptId: attempt.attemptId } });
+        h.x.resolveQueuedSteering(origin, 'steer', h.repos.execution.getTaskExecution(task.id)!.steering!.controller, 'unknown');
+      }
+      if (scenario !== 'active') h.x.markReconcileRequired(af(attempt), { reasonId: 'lost', code: 'DISCONNECTED', evidenceRefs: [] });
+    }
+    if (scenario === 'stop block') await h.repos.config.set('runtime_driver_stop_block:origin', '{}');
+    expect(h.x.canPrepareWorkspace(h.root)).toBe(scenario === 'gone');
+    h.accept(origin, 'next');
+    expect(h.x.canPrepareWorkspace(h.root)).toBe(false);
+    const task = h.accept(target);
+    if (scenario === 'gone') {
+      expect(() => h.x.claimNext(origin)).toThrow(expect.objectContaining({ code: 'SESSION_EXECUTION_BUSY' }));
+      expect(h.x.claimNext(target)?.task.id).toBe(task.id);
+      expect(h.repos.execution.getTaskExecution(attempt.taskId)?.task.status).toBe('reconcile_required');
+    } else {
+      expect(h.repos.execution.getTaskExecution(task.id, { claim: h.claim, idleResources: checks })?.blockers)
+        .toContainEqual(expect.objectContaining({ code: 'WORKSPACE_EXECUTION_BUSY', sessionId: origin.sessionId }));
+      expect(() => h.x.claimNext(target, checks)).toThrow(expect.objectContaining({ code: 'WORKSPACE_RESOURCE_BLOCKED' }));
+    }
+  }
+);
+it.each([
+  { blocker: 'work_item', claimant: 'web' },
+  { blocker: 'web', claimant: 'lark-leader' },
+])('keeps a $claimant claim behind a $blocker unknown result after verified exit', ({ blocker, claimant }) => {
+  const h = fixture(), origin = h.session('origin', h.root, blocker), target = h.session('target', h.root, claimant);
+  h.accept(origin, 'original', actor);
+  let attempt = h.x.claimNext(origin)!.attempt!;
+  let resource = h.x.beforeCreate(origin, { resourceId: 'driver', kind: 'local_only' });
+  resource = h.x.spawned(origin, resource.resourceId, resource.revision, { identityId: 'driver', kind: 'local_only', locator: { driver: 'fixture' } });
+  resource = h.x.creationFinished(origin, resource.resourceId, resource.revision, 'created');
+  resource = h.x.observed(origin, resource.resourceId, resource.revision, { observationId: 'ready', identityId: 'driver', state: 'live', observedAt: new Date().toISOString(), evidenceRef: 'fixture' });
+  attempt = h.x.markSubmissionPending(af(attempt), { submissionId: 'send', inputDigest: digest('input'), resourceRefs: [{ resourceId: resource.resourceId, identityId: 'driver' }], authorizationRefs: [] }).attempt!;
+  h.x.markReconcileRequired(af(attempt), { reasonId: 'lost', code: 'DISCONNECTED', evidenceRefs: [] });
+  h.x.observed(origin, resource.resourceId, resource.revision, { observationId: 'exit', identityId: 'driver', state: 'gone', observedAt: new Date().toISOString(), evidenceRef: 'fixture' });
+
+  const task = h.accept(target);
+  expect(h.repos.execution.getTaskExecution(task.id)?.blockers).toEqual([
+    { code: 'WORKSPACE_EXECUTION_BUSY', sessionId: origin.sessionId, taskId: attempt.taskId, attemptId: attempt.attemptId }
+  ]);
+  expect(() => h.x.claimNext(target)).toThrow(expect.objectContaining({ code: 'WORKSPACE_RESOURCE_BLOCKED' }));
 });
 it('only computes workspace admission for queued tasks while validating every read claim', () => {
   const h=fixture(),cwd=h.repo('repo'),target=h.session('target',cwd),foreign=h.session('foreign',cwd);

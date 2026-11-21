@@ -3,12 +3,12 @@ import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileS
 import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { createRepositories } from '@dutydeck/storage';
+import { childProcessIdentity, createRepositories, observeProcess } from '@dutydeck/storage';
 import { DutydeckRuntime } from '@dutydeck/runtime';
 import { createCliAdapter, pinnedSessionUuid } from '@dutydeck/cli-adapters';
 import { PtyCliDriver, createDutydeckPersistentBackend, dutydeckPtySessionName } from '@dutydeck/pty-driver';
 import { isTmuxAvailable } from '@dutydeck/session-backends';
-import type { AgentConfig } from '@dutydeck/shared';
+import { PromptNotWrittenError, type AgentConfig } from '@dutydeck/shared';
 
 const tmuxDescribe = await isTmuxAvailable() ? describe : describe.skip;
 const directories: string[] = [], sessions: string[] = [];
@@ -27,7 +27,7 @@ afterEach(async () => {
   for (const directory of directories.splice(0)) rmSync(directory, { recursive: true, force: true });
 });
 const submitted = (root: string) => existsSync(join(root, 'submissions.jsonl')) ? readFileSync(join(root, 'submissions.jsonl'), 'utf8').trim().split('\n').length : 0;
-function open(root: string) {
+function open(root: string, failAfterWrite = false) {
   const repos = createRepositories(join(root, 'state.db'), { newDatabaseAuthority: 'ledger_v1' });
   const runtime = new DutydeckRuntime(repos, { cleanupIntervalMs: 0, driverIdleTimeoutMs: 0, terminalBackend: async () => 'tmux',
     probe: () => ({ available: true, protocol: 'pty-cli', pause: false, resume: true }),
@@ -37,8 +37,12 @@ function open(root: string) {
       const transcript = join(root, 'projects', realpathSync(root).replace(/[^A-Za-z0-9-]/g, '-'), `${pinnedSessionUuid(sessionId)}.jsonl`);
       return new PtyCliDriver({ agent: { ...agent, env: { ...agent.env, receipt_fixture_transcript: transcript } },
         adapter: { ...builtin, buildArgs: () => [], prepareInput: undefined, injectSessionContext: () => '',
-          writeInput: (backend, prompt) => backend.write(JSON.stringify(prompt) + '\n'), completionPattern: /FIXTURE_DONE/ },
-        backend: createDutydeckPersistentBackend(sessionId), sessionId, onEvent, onExit });
+          async writeInput(backend, prompt) {
+            await backend.write(JSON.stringify(prompt) + '\n');
+            if (failAfterWrite) throw new PromptNotWrittenError('Composer could not be verified after the write');
+          }, completionPattern: /FIXTURE_DONE/ },
+        backend: createDutydeckPersistentBackend(sessionId), sessionId, onEvent, onExit,
+        ...(failAfterWrite ? { processProbe: { identify: childProcessIdentity, observe: observeProcess } } : {}) });
     },
   });
   const handle = { repos, runtime }; handles.push(handle); return handle;
@@ -52,6 +56,28 @@ const config = (root: string): AgentConfig => ({ id: 'claude-code', name: 'recei
   capabilities: { pause: false, resume: true }, builtin: false });
 
 tmuxDescribe('native receipt + real persistent PTY + reopened SQLite', () => {
+  it('verifies the original terminal process has exited before marking a post-write unknown result failed', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'dd-receipt-resolve-')); directories.push(root);
+    const h = open(root, true);
+    await h.runtime.initialize([config(root)]);
+    const session = await h.runtime.start({ agentId: 'claude-code', cwd: root });
+    sessions.push(dutydeckPtySessionName(session.id));
+    await vi.waitFor(() => expect(existsSync(join(root, 'ready'))).toBe(true), { timeout: 5_000 });
+    const pid = Number(readFileSync(join(root, 'ready'), 'utf8'));
+    const task = await h.runtime.send(session.id, 'original');
+    const attempt = h.repos.execution.getTaskExecution(task.id)!.currentAttempt!;
+    expect(attempt).toMatchObject({ state: 'reconcile_required', reconcileReason: { code: 'DRIVER_INPUT_UNCONFIRMED' } });
+    await vi.waitFor(() => expect(submitted(root)).toBe(1));
+    await vi.waitFor(() => expect(h.runtime.inspectAgentQuiescence(session.id)).toBe('unknown'));
+    expect(() => process.kill(pid, 0)).not.toThrow();
+    const result = await h.runtime.resolveUnknownTask(session.id, { taskId: task.id, target: attempt.attemptId, decisionId: 'mark-failed',
+      action: 'failed', evidenceRefs: ['operator:checked'] }, { kind: 'installation_owner', id: 'installation_owner' });
+    expect(result).toMatchObject({ stoppedOriginal: true, task: { status: 'failed' } });
+    expect(() => process.kill(pid, 0)).toThrow(expect.objectContaining({ code: 'ESRCH' }));
+    expect(h.repos.execution.getResources(session.id).find(r => r.kind === 'local_only')?.observations.at(-1)?.state).toBe('gone');
+    expect(submitted(root)).toBe(1);
+  }, 20_000);
+
   it('does not retype input or advance queued work after a daemon restart before receipt', async () => {
     const root = mkdtempSync(join(tmpdir(), 'dd-receipt-before-')); directories.push(root);
     const first = open(root); await first.runtime.initialize([config(root)]);

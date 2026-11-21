@@ -222,8 +222,8 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
     catch { return [{ code: 'WORKSPACE_RESOURCE_UNVERIFIABLE', sessionId }]; }
     const result: ExecutionBlocker[] = [];
     // 飞书记忆作业只写自己的记忆目录：不参与仓库互斥，只和在同一目录里执行的会话（包括其他记忆作业）互斥。
-    const memory = (id: string) => (cached('SELECT source FROM sessions WHERE id=?').get(id) as {source:string|null}|undefined)?.source === 'lark-memory';
-    const selfMemory = memory(sessionId);
+    const selfSource = (cached('SELECT source FROM sessions WHERE id=?').get(sessionId) as {source:string|null}|undefined)?.source;
+    const orchestrated = (source: string | null | undefined) => source === 'work_item' || source === 'lark-leader';
     // LIKE is ASCII case-insensitive and treats '_' as a wildcard. Preserve its candidates whenever
     // stop/verification evidence could make a LIKE-only orphan produce a blocker.
     const requiresLikeCandidates = cached("SELECT 1 FROM configs WHERE key GLOB 'runtime_verification:*' LIMIT 1").get()
@@ -253,12 +253,13 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
       if (!ids.length) continue;
       const placeholders = ids.map(() => '?').join(','), idValues = ids.map(() => '(?)').join(',');
       const sources = new Map((cached(`SELECT id,source FROM sessions WHERE id IN (${placeholders})`).all(...ids) as Array<{id:string;source:string|null}>).map(row => [row.id,row.source]));
-      const unresolvedBySession = new Map<string,{taskId:string;attemptId:string}>();
+      const unresolvedBySession = new Map<string,{taskId:string;attemptId:string;state:string}>();
       for (const row of cached(`WITH ids(session_id) AS (VALUES ${idValues})
-        SELECT a.session_id,a.task_id AS taskId,a.id AS attemptId FROM ids JOIN task_attempts a ON a.rowid=(
-          SELECT rowid FROM task_attempts WHERE session_id=ids.session_id AND state IN ('preparing','active','reconcile_required','legacy_unresolved') LIMIT 1
-        )`).all(...ids) as Array<{session_id:string;taskId:string;attemptId:string}>) {
-        unresolvedBySession.set(row.session_id,{taskId:row.taskId,attemptId:row.attemptId});
+        SELECT a.session_id,a.task_id AS taskId,a.id AS attemptId,a.state FROM ids JOIN task_attempts a ON a.rowid=(
+          SELECT rowid FROM task_attempts WHERE session_id=ids.session_id AND state IN ('preparing','active','reconcile_required','legacy_unresolved')
+            ORDER BY state LIMIT 1
+        )`).all(...ids) as Array<{session_id:string;taskId:string;attemptId:string;state:string}>) {
+        unresolvedBySession.set(row.session_id,row);
       }
       const queuedBySession = new Map<string,{id:string}>(), unknownBySession = new Map<string,{id:string}>();
       const taskRows = cached(`WITH ids(session_id) AS (VALUES ${idValues})
@@ -297,12 +298,15 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
       }
       for (const otherId of chunk) {
         if (otherId === sessionId) continue;
-        const directoryOnly = selfMemory || sources.get(otherId) === 'lark-memory';
+        const otherSource = sources.get(otherId);
+        const directoryOnly = selfSource === 'lark-memory' || otherSource === 'lark-memory';
         const unresolved = unresolvedBySession.get(otherId);
         const queued = preparation ? queuedBySession.get(otherId) : undefined;
         const unknown = unknownBySession.get(otherId);
         const steering = steeringBySession.get(otherId) ?? [];
-        const unsafe = resources(otherId,resourcesBySession.get(otherId) ?? []).filter(r => !resourceSafe(r) && !retiredLegacyResourceSafe(r) && !idleResourceSafe(r,checks,owner));
+        const recorded = resources(otherId,resourcesBySession.get(otherId) ?? []);
+        const notExited = recorded.filter(r => !resourceSafe(r) && !retiredLegacyResourceSafe(r));
+        const unsafe = notExited.filter(r => !idleResourceSafe(r,checks,owner));
         const storedConfigs = configsBySession.get(otherId) ?? [];
         const configuration = storedConfigs.find(row => row.key === `runtime_driver_configuration:${otherId}`);
         const externalRows = storedConfigs.filter(row => row.key === `runtime_driver_stop_block:${otherId}` || row.key === `runtime_workspace:${otherId}` || row.key.startsWith(`runtime_verification:${otherId}:`));
@@ -318,6 +322,10 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
           result.push({code:'WORKSPACE_RESOURCE_UNVERIFIABLE',sessionId:otherId});continue;
         }
         if (directoryOnly ? other.cwd.path !== identity.cwd.path : other.key !== identity.key) continue;
+        // ORDER BY state selects active, legacy_unresolved and preparing before reconcile_required.
+        const onlyUnknown = unresolved ? unresolved.state === 'reconcile_required' : Boolean(unknown);
+        if (onlyUnknown && !orchestrated(selfSource) && !orchestrated(otherSource)
+          && recorded.length && !notExited.length && !external.length && !steering.length && !queued) continue;
         if (unresolved || queued || unknown || steering.length) result.push({code:'WORKSPACE_EXECUTION_BUSY',sessionId:otherId,...(unresolved ? {taskId:unresolved.taskId,attemptId:unresolved.attemptId} : unknown ? {taskId:unknown.id} : queued ? {taskId:queued.id} : {taskId:steering[0]!.taskId})});
         result.push(...unsafe.map(r => ({code:'WORKSPACE_PHYSICAL_RESOURCE_UNSAFE',sessionId:otherId,resourceId:r.resourceId})),...external);
       }
