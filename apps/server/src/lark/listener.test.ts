@@ -1339,52 +1339,75 @@ describe('Lark message coordinator', () => {
     expect(service.addReaction).toHaveBeenCalledWith('om_2', expect.any(String));
   });
 
-  it('中断后原卡就地收敛，重试用一张全新的进度卡且不回头改写上一轮', async () => {
-    let subscriber: ((event: AgentEvent) => void) | undefined;
-    let finishFirst!: () => void;
+  async function interruptFixture() {
+    const workspace = await mkdtemp(join(tmpdir(), 'lark-interrupt-'));
+    hookWorkspaces.push(workspace);
+    const bot = { ...config, workspace, pushIntervalMs: 60_000 };
+    let finishTurn!: () => void;
     let finishInterrupt!: () => void;
-    const firstTurn = new Promise<void>(resolve => { finishFirst = resolve; });
+    const firstTurn = new Promise<void>(resolve => { finishTurn = resolve; });
     const interrupting = new Promise<void>(resolve => { finishInterrupt = resolve; });
-    const runtime = {
-      start: vi.fn(async () => session), getSession: vi.fn(async () => session),
-      subscribe: vi.fn((_id: string, listener: (event: AgentEvent) => void) => { subscriber = listener; return vi.fn(); }),
-      send: vi.fn()
-        .mockImplementationOnce(async () => { subscriber?.(agentEvent(1, 'thinking', { text: '处理中' })); await firstTurn; })
-        .mockImplementationOnce(async () => { subscriber?.(agentEvent(2, 'text', { text: '重试成功' })); }),
-      interrupt: vi.fn(async () => interrupting)
-    };
+    const prompts: string[] = [];
+    const { runtime, store, cardMappings, close } = await createMemoryLarkRuntime(bot, [{
+      id: 'codex', name: 'Fixture', protocol: 'acp', command: 'fixture', args: [], env: {}, cwd: workspace,
+      permissionMode: 'full-trust', capabilities: { pause: false, resume: true }, builtin: false, timeout: 60
+    }], {
+      probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }),
+      driverFactory: (_agent, _protocol, emit) => ({
+        start: async () => {}, resume: async () => {}, stop: async () => finishTurn(),
+        interrupt: async () => interrupting,
+        send: async submission => {
+          prompts.push(typeof submission === 'string' ? submission : submission.prompt);
+          if (prompts.length === 1) {
+            await firstTurn;
+            emit({ type: 'completed', data: { stopReason: 'cancelled' } });
+          } else {
+            emit({ type: 'text', data: { text: '重试成功' } });
+            emit({ type: 'completed', data: { stopReason: 'end_turn' } });
+          }
+        }
+      })
+    });
+    const interrupt = vi.spyOn(runtime, 'interrupt');
     const service = {
-      addReaction: vi.fn(async () => ({ reactionId: 'reaction-1' })),
-      send: vi.fn()
-        .mockResolvedValueOnce({ messageId: 'om_progress_1' })
-        .mockResolvedValueOnce({ messageId: 'om_result_1' })
-        .mockResolvedValueOnce({ messageId: 'om_progress_2' })
-        .mockResolvedValueOnce({ messageId: 'om_result_2' }),
-      deleteReaction: vi.fn(async () => {}),
+      addReaction: vi.fn(async () => ({ reactionId: 'reaction-1' })), deleteReaction: vi.fn(async () => {}),
+      send: vi.fn().mockResolvedValueOnce({ messageId: 'om_progress_1' }).mockResolvedValueOnce({ messageId: 'om_result_1' })
+        .mockResolvedValueOnce({ messageId: 'om_progress_2' }).mockResolvedValueOnce({ messageId: 'om_result_2' }),
       update: vi.fn(async (input: any) => ({ messageId: input.messageId }))
     };
-    const coordinator = new LarkMessageCoordinator(runtime as any, service as any, { info: vi.fn(), warn: vi.fn(), error: vi.fn() }, Math.random, 'ou_bot');
-    coordinator.handle({ messageId: 'om_task', chatId: 'oc_p2p', chatType: 'p2p', messageType: 'text', content: '{"text":"执行任务"}', senderOpenId: 'ou_operator', mentions: [] }, config);
-    await vi.waitFor(() => expect(runtime.send).toHaveBeenCalledOnce());
+    const coordinator = new LarkMessageCoordinator(runtime, service as any, { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+      Math.random, 'ou_bot', undefined, cardMappings, undefined, undefined, undefined, { store });
+    onTestFinished(async () => { finishInterrupt(); finishTurn(); coordinator.stop(); await close(); });
+    const event = { messageId: 'om_task', chatId: 'oc_p2p', chatType: 'p2p', messageType: 'text', content: '{"text":"执行任务"}', senderOpenId: 'ou_operator', mentions: [] };
+    return { runtime, coordinator, event, bot, interrupt, service, finishInterrupt, finishTurn, prompts,
+      async start() {
+        await coordinator.handle(event, bot);
+        await vi.waitFor(() => expect(prompts).toHaveLength(1));
+        await vi.waitFor(() => expect(service.update).toHaveBeenCalledWith(expect.objectContaining({ state: 'running' })));
+        const [session] = await runtime.listSessions();
+        const accepted = runtime.getAcceptedTaskByKey('runtime', session!.id, 'lark:cli_test:om_task:1');
+        expect(accepted?.request?.prompt).toBe('执行任务');
+        return accepted!.task;
+      }
+    };
+  }
 
+  it('中断后原卡就地收敛，重试用一张全新的进度卡且不回头改写上一轮', async () => {
+    const h = await interruptFixture();
+    const accepted = await h.start();
+    const { coordinator, service } = h;
     await expect(coordinator.handleAction({ action: 'interrupt', task_id: 'om_task' }, 'ou_operator')).resolves.toEqual({ type: 'success', content: '正在取消任务' });
-    // P0-3：卡片操作者作为 actor 透传给 interrupt，落库 interrupted_by_actor；send 模式无 runtimeTaskId。
-    expect(runtime.interrupt).toHaveBeenCalledWith('ses_1', undefined, 'ou_operator');
+    expect(h.interrupt).toHaveBeenCalledWith(accepted.sessionId, accepted.id, 'ou_operator');
     expect(service.update).not.toHaveBeenCalledWith(expect.objectContaining({ state: 'interrupted' }));
-    finishInterrupt();
+    h.finishInterrupt();
     await vi.waitFor(() => expect(service.update).toHaveBeenCalledWith(expect.objectContaining({ statusLabel: '等待停止确认' })));
     expect(service.update).not.toHaveBeenCalledWith(expect.objectContaining({ state: 'interrupted' }));
-    finishFirst();
-    // 中断态就地写回第一张卡；它保留重试入口，不是零操作的只读收据。
+    h.finishTurn();
     await vi.waitFor(() => expect(service.update).toHaveBeenCalledWith(expect.objectContaining({ messageId: 'om_progress_1', state: 'interrupted' })));
-    const interruptedCall = service.update.mock.calls.find(([input]: any[]) => input.messageId === 'om_progress_1' && input.state === 'interrupted')?.[0];
-    expect(interruptedCall.readOnly).toBeFalsy();
-    expect(interruptedCall.capabilities).toMatchObject({ canRetry: true });
-    finishFirst();
-
+    const interruptedCard = service.update.mock.calls.find(([input]) => input.state === 'interrupted')![0];
+    expect(interruptedCard.readOnly).toBeFalsy();
+    expect(interruptedCard.capabilities).toMatchObject({ canRetry: true });
     await expect(coordinator.handleAction('{"action":"retry","task_id":"om_task"}', 'ou_operator')).resolves.toEqual({ type: 'success', content: '已开始重试' });
-    await vi.waitFor(() => expect(runtime.send).toHaveBeenCalledTimes(2));
-    // 重试的过程收敛在第二张进度卡，结论进入它自己的只读结果卡。
     await vi.waitFor(() => expect(service.update).toHaveBeenCalledWith(expect.objectContaining({
       messageId: 'om_progress_2', state: 'completed',
       elements: expect.not.arrayContaining([expect.objectContaining({ element_id: 'final_output' })])
@@ -1392,53 +1415,34 @@ describe('Lark message coordinator', () => {
     await vi.waitFor(() => expect(service.send).toHaveBeenCalledTimes(4));
     expect(service.send.mock.calls[3]?.[0]).toMatchObject({ state: 'completed', readOnly: true });
     expect(JSON.stringify(service.send.mock.calls[3]?.[0].elements)).toContain('重试成功');
-    // 上一轮那张卡是历史，重试不得把它改写成 completed。
-    expect(service.update.mock.calls.filter(([input]: any[]) => input.messageId === 'om_progress_1' && input.state === 'completed')).toHaveLength(0);
-    // 两轮各有过程和结果两条消息，消息 ID 不复用。
-    expect(service.send).toHaveBeenCalledTimes(4);
-    expect(runtime.send).toHaveBeenNthCalledWith(2, 'ses_1', '执行任务', expect.any(String));
-
+    expect(service.update.mock.calls.filter(([input]) => input.messageId === 'om_progress_1' && input.state === 'completed')).toHaveLength(0);
+    expect(h.runtime.getAcceptedTaskByKey('runtime', accepted.sessionId, 'lark:cli_test:om_task:2')?.request?.prompt).toBe('执行任务');
     await expect(coordinator.handleAction({ action: 'retry', task_id: 'om_task' }, 'ou_operator')).resolves.toEqual({ type: 'warning', content: '只有失败、已中断或已取消的任务可以重试' });
-    expect(runtime.send).toHaveBeenCalledTimes(2);
+    expect(h.prompts).toHaveLength(2);
     expect(service.send).toHaveBeenCalledTimes(4);
   });
 
-  // 首张卡的回调必须绑在**本轮**上。buildLarkCard 对缺省 turn 会渲染成 "0"，
-  // 而本轮 turn 从 1 起算——那样用户点第一张卡的取消会被轮次校验直接拒掉，
-  // 一直到某次心跳重绘才恢复。这里用真实 buildLarkCard 取出真实回调 value 来验。
   it('首张运行卡的回调带当前轮次，心跳之前点取消就能生效', async () => {
-    let subscriber: ((event: AgentEvent) => void) | undefined;
-    let finishTurn!: () => void;
-    const running = new Promise<void>(resolve => { finishTurn = resolve; });
-    const runtime = {
-      start: vi.fn(async () => session), getSession: vi.fn(async () => session),
-      subscribe: vi.fn((_id: string, listener: (event: AgentEvent) => void) => { subscriber = listener; return vi.fn(); }),
-      send: vi.fn(async () => { subscriber?.(agentEvent(1, 'thinking', { text: '处理中' })); await running; }),
-      interrupt: vi.fn(async () => {})
-    };
-    const service = {
-      addReaction: vi.fn(async () => ({ reactionId: 'reaction-1' })), deleteReaction: vi.fn(async () => {}),
-      send: vi.fn()
-        .mockResolvedValueOnce({ messageId: 'om_card' })
-        .mockResolvedValueOnce({ messageId: 'om_result' }), update: vi.fn(async (input: any) => ({ messageId: input.messageId }))
-    };
-    const coordinator = new LarkMessageCoordinator(runtime as any, service as any, { info: vi.fn(), warn: vi.fn(), error: vi.fn() }, Math.random, 'ou_bot');
-    coordinator.handle({ messageId: 'om_task', chatId: 'oc_p2p', chatType: 'p2p', messageType: 'text', content: '{"text":"执行任务"}', senderOpenId: 'ou_operator', mentions: [] }, config);
-    await vi.waitFor(() => expect(service.send).toHaveBeenCalledOnce());
+    const h = await interruptFixture();
+    const accepted = await h.start();
+    const firstRunning = h.service.update.mock.calls.find(([input]) => input.state === 'running')![0];
+    expect(firstRunning.messageId).toBe('om_progress_1');
+    const card = buildLarkCard(firstRunning);
+    const button = cardElements([card.body]).find(element => element?.element_id === 'interrupt');
+    expect(button).toBeTruthy();
+    const value = button.behaviors[0].value;
+    expect(value).toMatchObject({ action: 'interrupt', turn: '1' });
+    await expect(h.coordinator.handleAction(value, 'ou_operator')).resolves.toEqual({ type: 'success', content: '正在取消任务' });
+    expect(h.interrupt).toHaveBeenCalledWith(accepted.sessionId, accepted.id, 'ou_operator');
+  });
 
-    // 从真实渲染出来的首张卡里取真实的中断回调 value，不自己拼一个。
-    const firstCard = buildLarkCard(service.send.mock.calls[0]?.[0] as any);
-    const interruptButton = cardElements([(firstCard as any).body]).find((element: any) => element?.element_id === 'interrupt') as any;
-    expect(interruptButton).toBeTruthy();
-    const callbackValue = interruptButton.behaviors?.[0]?.value;
-    expect(callbackValue).toMatchObject({ action: 'interrupt', turn: '1' });
-
-    // 心跳一次都还没发生，直接拿这个 value 点：必须被接受。
-    expect(service.update).not.toHaveBeenCalled();
-    await expect(coordinator.handleAction(callbackValue, 'ou_operator')).resolves.toEqual({ type: 'success', content: '正在取消任务' });
-    expect(runtime.interrupt).toHaveBeenCalledWith('ses_1', undefined, 'ou_operator');
-    finishTurn();
-    coordinator.stop();
+  it('受理前的运行卡中断提示稍后再试，不向运行时发出中断', async () => {
+    const h = await interruptFixture();
+    (h.coordinator as any).tasks.set('om_task', { id: 'om_task', config: h.bot, event: h.event,
+      sessionId: 'ses_pending', state: 'running', turn: 1, group: { tail: Promise.resolve() } });
+    await expect(h.coordinator.handleAction({ action: 'interrupt', task_id: 'om_task', turn: '1' }, 'ou_operator'))
+      .resolves.toEqual({ type: 'warning', content: '任务尚未完成接收，请稍后再试' });
+    expect(h.interrupt).not.toHaveBeenCalled();
   });
 
   it('过期轮次的回调被拒绝，遗留的无 turn 回调仍然兼容', async () => {
