@@ -8,6 +8,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import '../../../tests/support/short-acpx-reply-drain.js';
 import { agentConfigSchema, canonicalExecutionJson, installationOwnerTaskActor, RuntimeError, validateScenarioPack, type AgentDriver } from '@dutydeck/shared';
 import { createRepositories } from '@dutydeck/storage';
+import { scheduleWriterLeaseKey } from '@dutydeck/storage/helpers';
 import { sampleOutput, settlementSample } from './task-results.test-helpers.js';
 import { DutydeckRuntime, type RuntimeOptions } from '@dutydeck/runtime';
 import { createAutomationIntegration } from './automation-integration.js';
@@ -38,7 +39,7 @@ async function eventually(check: () => Promise<boolean>) {
   for (let count = 0; count < 100; count++) { if (await check()) return; await new Promise(resolve => setTimeout(resolve, 10)); }
   throw new Error('Condition did not converge');
 }
-async function fixture(options: { realAcp?: boolean; scenarios?: ScenarioRegistry; admitTask?: RuntimeOptions['admitTask']; members?: string[]; stopDriver?(sessionId: string): Promise<void>; controlWait?(): Promise<void> } = {}) {
+async function fixture(options: { realAcp?: boolean; scenarios?: ScenarioRegistry; sessionPrompt?: RuntimeOptions['sessionPrompt']; admitTask?: RuntimeOptions['admitTask']; members?: string[]; stopDriver?(sessionId: string): Promise<void>; controlWait?(): Promise<void> } = {}) {
   const directory = await mkdtemp(join(tmpdir(), 'collaboration-wiring-'));
   const repos = createRepositories(join(directory, 'test.db'), { newDatabaseAuthority: 'ledger_v1' });
   const agent = agentConfigSchema.parse({ id: 'agent', name: 'Agent', command: options.realAcp ? process.execPath : 'fake', ...(options.realAcp ? { args: [resolve('tests/fixtures/mock-acp-agent.mjs')], timeout: 2 } : {}), protocol: 'acp', cwd: directory, permissionMode: 'full-trust' });
@@ -76,6 +77,7 @@ async function fixture(options: { realAcp?: boolean; scenarios?: ScenarioRegistr
     authorizeControl: async (id, actor) => { await collaboration.background.authorizeControl(id, actor); await options.controlWait?.(); },
     resolveRiskPolicy: async (id, fallback) => (await collaboration.riskPolicy(id, fallback))?.policy,
     admitTask: options.admitTask,
+    sessionPrompt: options.sessionPrompt,
     driverFactory: options.realAcp ? undefined : (_agent, _protocol, onEvent, _exit, sessionId) => {
       let end: (() => void) | undefined;
       return {
@@ -99,6 +101,101 @@ async function fixture(options: { realAcp?: boolean; scenarios?: ScenarioRegistr
   return { database: join(directory, 'test.db'), repos, runtime, collaboration, groups, client, group, calls, stopped, create,
     advance(ms = 60_000) { clock = new Date(clock.getTime() + ms); }, revoke() { members = []; }, allow() { members = options.members ?? ['ou_alice']; } };
 }
+
+describe('scheduled delegation validity', () => {
+  it('skips a due mandate cancelled before the scheduler claims it', async () => {
+    const f = await fixture();
+    const { mandate } = await f.create();
+    f.advance();
+    await f.collaboration.service.updateMandate(scope, 'ou_alice', mandate.id, { expectedRevision: mandate.revision, status: 'cancelled' });
+
+    await expect(f.collaboration.scheduler.tick()).resolves.toBeUndefined();
+    expect((await f.repos.collaboration.getMandate(scope, mandate.id))?.status).toBe('cancelled');
+    expect(await f.repos.scheduleOccurrences.listByDefinition(mandate.scheduleDefinitionId)).toEqual([]);
+    expect(f.calls).toHaveLength(0);
+    expect(f.client.send).not.toHaveBeenCalled();
+  });
+
+  it.each(['pause mandate', 'tighten bot send ceiling'] as const)('suppresses the completed output at dispatch after %s', async change => {
+    const f = await fixture();
+    const { mandate } = await f.create();
+    f.advance();
+    await f.collaboration.scheduler.tick();
+    await eventually(async () => f.calls.length === 1);
+    const call = f.calls[0]!;
+    call.finish('Frozen summary');
+    await eventually(async () => (await f.runtime.getTasks(call.sessionId))[0]?.status === 'completed');
+
+    const { scheduler } = f.collaboration;
+    const deliver = scheduler.options.deliver;
+    const dispatch = vi.fn(deliver);
+    scheduler.options.deliver = async input => {
+      if (change === 'pause mandate') {
+        await f.collaboration.service.updateMandate(scope, 'ou_alice', mandate.id, { expectedRevision: mandate.revision, status: 'paused' });
+      } else {
+        await saveLarkConfig(f.repos.config, f.repos.agents, { originalAppId: scope.appId, groupToolsAllowSend: false });
+      }
+      return dispatch(input);
+    };
+
+    await scheduler.tick();
+    expect(dispatch).toHaveBeenCalledOnce();
+    await expect(dispatch.mock.results[0]!.value).rejects.toMatchObject({ code: 'COLLABORATION_EXECUTION_STALE' });
+    expect((await f.runtime.getTasks(call.sessionId))[0]?.status).toBe('completed');
+    expect(await f.repos.scheduleOccurrences.listByDefinition(mandate.scheduleDefinitionId)).toMatchObject([{ state: 'suppressed' }]);
+    expect(await f.repos.collaboration.listActions(scope)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: 'schedule_delivery', status: 'suppressed', payload: expect.objectContaining({ text: 'Frozen summary' }) })
+    ]));
+    expect(f.calls).toHaveLength(1);
+    expect(f.client.send).not.toHaveBeenCalled();
+  });
+
+  it('rejects an expired writer at Runtime submission after preparation', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      const f = await fixture({ sessionPrompt: (_session, prompt) => {
+        // Model preparation finishing just after the schedule writer lease expires.
+        f.advance(61_000);
+        vi.setSystemTime(f.collaboration.scheduler.options.now!());
+        return prompt;
+      } });
+      const check = vi.spyOn(f.collaboration.background, 'authorizeTask');
+      const { mandate } = await f.collaboration.service.createMandate(scope, 'ou_alice', { id: 'slow-preparation', goal: 'Summary',
+        mode: 'agent', prompt: 'Summarize', trigger: { kind: 'interval', everySeconds: 600, anchorAt: new Date().toISOString() }, timezone: 'UTC' });
+      f.runtime.setQueueHeld(true);
+      f.advance(600_000);
+      vi.setSystemTime(f.collaboration.scheduler.options.now!());
+      await f.collaboration.scheduler.tick();
+      const child = (await f.repos.collaboration.listActions(scope)).find(action => action.kind === 'agent_execution')!;
+      const definition = (await f.repos.scheduleDefinitions.get(mandate.scheduleDefinitionId))!;
+      const leaseKey = scheduleWriterLeaseKey(definition.channelBotId);
+      const lease = (await f.repos.scheduleLeases.getByKey(leaseKey))!;
+      expect(lease.holderId).toBe(f.collaboration.scheduler.holderId);
+      expect(Date.parse(lease.expiresAt!)).toBeGreaterThan(Date.now());
+
+      f.runtime.setQueueHeld(false);
+      await eventually(async () => f.calls.length > 0 || (await f.runtime.getTasks(child.id))[0]?.status === 'failed');
+      expect(await f.repos.scheduleLeases.getByKey(leaseKey)).toEqual(lease);
+      expect(Date.parse(lease.expiresAt!)).toBeLessThan(Date.now());
+      expect(f.client.send).not.toHaveBeenCalled();
+      if (f.calls.length) f.calls[0]!.finish('Frozen summary');
+      await eventually(async () => ['completed', 'failed'].includes((await f.runtime.getTasks(child.id))[0]!.status));
+      await f.collaboration.scheduler.tick();
+
+      const currentLease = (await f.repos.scheduleLeases.getByKey(leaseKey))!;
+      expect(currentLease.fenceToken).toBeGreaterThan(lease.fenceToken);
+      const lastCheck = check.mock.results.at(-1)!;
+      const errorCode = await lastCheck.value.then(() => null, (error: RuntimeError) => error.code);
+      const outcome = {
+        driverWrites: f.calls.length, deliveries: f.client.send.mock.calls.length,
+        task: (await f.runtime.getTasks(child.id))[0]?.status,
+        occurrence: (await f.repos.scheduleOccurrences.listByDefinition(mandate.scheduleDefinitionId))[0]?.state,
+        errorCode
+      };
+      expect(outcome, JSON.stringify(outcome)).toMatchObject({ driverWrites: 0, deliveries: 0 });
+    } finally { vi.useRealTimers(); }
+  });
+});
 
 it('delivers a verified capacity successor once and continues future schedule occurrences', async () => {
   const f = await fixture();
