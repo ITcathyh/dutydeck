@@ -8,11 +8,7 @@ const alias = {
   'drizzle-orm/better-sqlite3': fileURLToPath(new URL('./packages/storage/node_modules/drizzle-orm/better-sqlite3/index.cjs', import.meta.url)),
   'drizzle-orm/sqlite-core': fileURLToPath(new URL('./packages/storage/node_modules/drizzle-orm/sqlite-core/index.cjs', import.meta.url)),
   'drizzle-orm': fileURLToPath(new URL('./packages/storage/node_modules/drizzle-orm/index.cjs', import.meta.url)),
-  '@dutydeck/shared/child-environment': fileURLToPath(new URL('./packages/shared/runtime/child-environment.mjs', import.meta.url)),
-  '@dutydeck/shared/secret-guard': fileURLToPath(new URL('./packages/shared/runtime/secret-guard.mjs', import.meta.url)),
-  '@dutydeck/shared/safe-git': fileURLToPath(new URL('./packages/shared/runtime/safe-git.mjs', import.meta.url)),
-  ...vitestAliases,
-  '@dutydeck/secret-provider': fileURLToPath(new URL('./packages/secret-provider/src/index.ts', import.meta.url))
+  ...vitestAliases
 };
 
 // 两个 project：

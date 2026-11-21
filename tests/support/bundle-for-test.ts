@@ -4,8 +4,10 @@ import { createRequire } from 'node:module';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { build, transform } from 'esbuild';
+import { loadWorkspaceEntries } from '../../scripts/workspace-entries.mjs';
 
 const workspaceRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
+const workspaceEntries = loadWorkspaceEntries();
 // Native addons, and acpx/runtime (which the server build also keeps external), stay outside the bundle. They are
 // imported by the absolute path the importing source resolves to, so the bundle loads them wherever it lives.
 const externalModules = new Set(['better-sqlite3', 'node-pty', 'acpx/runtime']);
@@ -42,13 +44,8 @@ export async function bundleForTest(label: string, entry: string): Promise<{ pat
           loader: 'js'
         }));
         builder.onResolve({ filter: /^@dutydeck\// }, ({ path: specifier }) => {
-          const name = specifier.slice('@dutydeck/'.length);
-          const [packageName, subpath] = name.split('/') as [string, string | undefined];
-          const packageDirectory = packageName === 'runtime' ? 'agent-runtime' : packageName;
-          const source = packageName === 'shared' && subpath
-            ? `packages/shared/runtime/${subpath}.mjs`
-            : `packages/${packageDirectory}/src/${subpath ?? 'index'}.ts`;
-          return { path: join(workspaceRoot, source) };
+          const path = workspaceEntries[specifier];
+          return path ? { path } : undefined;
         });
         builder.onResolve({ filter: /^[^./]/ }, ({ path: specifier, resolveDir }) => {
           if (!externalModules.has(specifier)) return undefined;

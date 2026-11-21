@@ -14,7 +14,7 @@ import { fileURLToPath } from 'node:url';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const stampPath = join(root, 'apps/server/dist/.build-inputs');
-const inputs = ['apps', 'packages', 'builtin-plugins', 'patches', 'package.json', 'pnpm-lock.yaml', 'pnpm-workspace.yaml', 'tsconfig.base.json', 'THIRD_PARTY_NOTICES.md', 'scripts/build-workspace.mjs'];
+const inputs = ['apps', 'packages', 'builtin-plugins', 'patches', 'package.json', 'pnpm-lock.yaml', 'pnpm-workspace.yaml', 'tsconfig.base.json', 'THIRD_PARTY_NOTICES.md', 'scripts/build-workspace.mjs', 'scripts/workspace-entries.mjs'];
 const steps = [
   ['pnpm', ['build:packages']],
   ['pnpm', ['--filter', '@dutydeck/web', 'build']],

@@ -8,14 +8,17 @@
   "exports": {
     "./child-environment": {
       "types": "./runtime/child-environment.d.mts",
+      "development": "./runtime/child-environment.mjs",
       "import": "./runtime/child-environment.mjs"
     },
     "./secret-guard": {
       "types": "./runtime/secret-guard.d.mts",
+      "development": "./runtime/secret-guard.mjs",
       "import": "./runtime/secret-guard.mjs"
     },
     "./safe-git": {
       "types": "./runtime/safe-git.d.mts",
+      "development": "./runtime/safe-git.mjs",
       "import": "./runtime/safe-git.mjs"
     },
     ".": {
