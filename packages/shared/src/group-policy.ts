@@ -697,3 +697,10 @@ export interface GroupPolicyTransactionContext {
 export interface GroupPolicyRepository { transact<T>(work: (repositories: GroupPolicyTransactionContext) => T): Promise<T> }
 export interface RemoteFactTransactionContext { remoteChatFacts: GroupPolicyTransactionContext['remoteChatFacts']; remoteIdentityFacts: GroupPolicyTransactionContext['remoteIdentityFacts'] }
 export interface RemoteFactRepository { transact<T>(work: (repositories: RemoteFactTransactionContext) => T): Promise<T> }
+
+export interface ManagedGroupBot {
+  appId: string; channelBotId?: string; binding?: GroupBinding; effective?: EffectiveGroupConfig;
+  roles: RoleAssignment[]; membership: 'member' | 'not_member' | 'inaccessible' | 'unknown';
+  validity: string; checkedAt?: string; applied: boolean; error?: string;
+}
+export interface ManagedGroup { key: string; chatId: string; name: string; bots: ManagedGroupBot[] }

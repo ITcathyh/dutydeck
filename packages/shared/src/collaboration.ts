@@ -112,6 +112,21 @@ export const updateCollaborationSettingsInputSchema = z.object({
 });
 export type UpdateCollaborationSettingsInput = z.infer<typeof updateCollaborationSettingsInputSchema>;
 
+// The settings endpoint accepts the same patch as the repository.
+export const updateCollaborationSettingsRequestSchema = updateCollaborationSettingsInputSchema;
+export type UpdateCollaborationSettingsRequest = z.infer<typeof updateCollaborationSettingsRequestSchema>;
+
+/**
+ * 接话人只能设成本 Bot（self）或清掉（null）。场景包按包 id 改开关和参数，null 删掉绑定；
+ * 确认人和包版本只能由群里的确认卡写入，Web 带上就拒绝。参数按包的声明在服务端校验。
+ */
+export const updateCollaborationDutyRequestSchema = z.object({
+  expectedRevision: z.number().int().min(0),
+  responder: z.literal('self').nullable().optional(),
+  scenarios: z.record(z.string().min(1).max(64), z.object({ enabled: z.boolean(), params: z.record(z.unknown()).optional() }).strict().nullable()).optional()
+}).strict();
+export type UpdateCollaborationDutyRequest = z.infer<typeof updateCollaborationDutyRequestSchema>;
+
 /** 接话人：多 Bot 群里没 @ 任何 Bot 的消息只由它判定和回复。since 是生效时间，收到更早的声明时不回退。 */
 export const groupResponderSchema = z.object({
   appId: z.string().trim().min(1).max(128),

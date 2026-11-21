@@ -1,20 +1,12 @@
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
-import { botAppIdOfSession, RuntimeError, supportsAgentModelService, type AgentConfig, type RepositoryBundle, type Session } from '@dutydeck/shared';
+import { agentModelSettingsPatchSchema, botAppIdOfSession, RuntimeError, supportsAgentModelService, type AgentConfig, type RepositoryBundle, type Session } from '@dutydeck/shared';
 import { LocalFileAgentApiKeyResolver, type LocalFileSecretProvider } from '@dutydeck/secret-provider';
 
-const text = z.string().trim().max(512);
-const baseUrl = text.refine(value => {
-  if (!value) return true;
-  try { const url = new URL(value); return ['http:', 'https:'].includes(url.protocol) && !url.username && !url.password && !url.search && !url.hash; }
-  catch { return false; }
-}, '服务地址必须是 HTTP(S) URL，不能包含账号、查询参数或片段');
-export const agentModelSettingsPatchSchema = z.object({
-  model: text.optional(), baseUrl: baseUrl.optional(), authMode: z.enum(['bearer', 'api-key']).optional(),
-  apiKey: z.string().trim().min(1).max(4096).refine(value => !/[\s\x00-\x1f\x7f]/.test(value), 'API Key 不能包含空白或控制字符').optional(), clearApiKey: z.boolean().optional()
-}).strict().refine(value => !(value.apiKey && value.clearApiKey), '不能同时设置和清除 API Key');
-export type AgentModelSettingsPatch = z.infer<typeof agentModelSettingsPatchSchema>;
-const storedSchema = z.object({ model: text.optional(), baseUrl: baseUrl.optional(), authMode: z.enum(['bearer', 'api-key']).optional(), referenceKey: z.string().optional() }).strict();
+export { agentModelSettingsPatchSchema } from '@dutydeck/shared';
+export type { AgentModelSettingsPatch } from '@dutydeck/shared';
+
+const storedSchema = agentModelSettingsPatchSchema.innerType().pick({ model: true, baseUrl: true, authMode: true }).extend({ referenceKey: z.string().optional() });
 const scopePart = (value: string) => encodeURIComponent(value).replaceAll('.', '%2E');
 const botScopePrefix = (appId: string) => `dutydeck.bot_agent_model.${scopePart(appId)}.`;
 const key = (id: string, appId?: string) => appId ? `${botScopePrefix(appId)}${scopePart(id)}` : `dutydeck.agent_model.${id}`;

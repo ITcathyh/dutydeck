@@ -1,3 +1,4 @@
+import type { PermissionRequestData } from './index.js';
 import { z } from 'zod';
 import type { AttemptResultV1 } from './task-execution.js';
 import { parseLarkSourceId } from './lark-source-id.js';
@@ -209,4 +210,17 @@ export interface WorkTemplate { id: string; parentSessionId: string; name: strin
  */
 export function workPlanConfirmationRequired(session: { source?: string | null; sourceId?: string | null }): boolean {
   return session.source === 'lark' && parseLarkSourceId(session.sourceId).chatType === 'group';
+}
+
+export interface WorkItemRequest {
+  stepId: string;
+  sessionId: string;
+  taskId: string;
+  requestId: string;
+  kind: 'permission' | 'question';
+  text: string;
+  /** 工具授权的操作摘要（已脱敏、有长度上限），给代判的 Leader 看。 */
+  operation?: PermissionRequestData['operation'];
+  /** Leader 模式里交给用户的请求：Leader 写的问题、建议、不回复时会怎样，或没能代判的原因。 */
+  leader?: { problem?: string; suggestion?: string; ifNoReply?: string; reason?: string };
 }

@@ -4,8 +4,10 @@ import { constants } from 'node:fs';
 import { chmod, copyFile, lstat, mkdir, mkdtemp, readdir, rename, rm, stat, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { ConfigRepository, Session } from '@dutydeck/shared';
+import type { TurnDiffSummary, TurnDiffFile, TurnDiffHunk, ConfigRepository, Session } from '@dutydeck/shared';
 import { SAFE_GIT_CONFIG, safeGitConfigFor, safeGitEnvironment } from '@dutydeck/shared/safe-git';
+
+export type { TurnDiffSummary, TurnDiffLine, TurnDiffFile, TurnDiffHunk, TurnDiffView } from '@dutydeck/shared';
 
 /**
  * 一轮任务的改动范围（手机上「查看改动」）。
@@ -33,26 +35,11 @@ export const TURN_DIFF_LINK_TTL_MS = 14 * 24 * 3_600_000;
 export const TURN_DIFF_FILE_LIMIT_BYTES = 200 * 1024;
 export const TURN_DIFF_TOTAL_LIMIT_BYTES = 1024 * 1024;
 
-export type TurnDiffSummary = { files: number; additions: number; deletions: number };
 export type TurnDiffRecord = {
   version: 1; sessionId: string; taskId: string;
   /** 仓库的公共 git 目录：worktree 删掉以后对象还在这里。 */
   gitDir: string; before: string; after?: string; summary?: TurnDiffSummary; startedAt: string; finishedAt?: string;
 };
-export type TurnDiffLine = { kind: 'context' | 'add' | 'del'; oldLine?: number; newLine?: number; text: string };
-export type TurnDiffHunk = { header: string; lines: TurnDiffLine[] };
-export type TurnDiffFile = {
-  path: string; oldPath?: string; status: 'added' | 'deleted' | 'modified' | 'renamed';
-  additions: number; deletions: number;
-  /**
-   * binary：二进制文件；too_large：单个文件超过上限；omitted：整页超过上限后没有展开的文件；
-   * folded_lockfile / folded_generated：锁文件、.gitattributes 标了 linguist-generated 的文件默认折叠，只给统计，
-   * 不读正文、不占整页预算；要看时按文件单独读（readTurnDiffFile）。
-   */
-  placeholder?: 'binary' | 'too_large' | 'omitted' | 'folded_lockfile' | 'folded_generated';
-  hunks: TurnDiffHunk[];
-};
-export type TurnDiffView = { sessionId: string; taskId: string; summary: TurnDiffSummary; files: TurnDiffFile[]; truncated: boolean; finishedAt?: string };
 
 const turnDiffKey = (sessionId: string, taskId: string) => `turn_diff.${sessionId}.${taskId}`;
 

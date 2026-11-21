@@ -2,7 +2,6 @@ import type { ReplyPolish } from './reply-polish.js';
 import { queryDispositions } from './disposition.js';
 import { unrecordedPromptUsages, promptHistory, promptVersion, promptLineDiff } from './prompt-versions.js';
 import { isAbsolute } from 'node:path';
-import { z } from 'zod';
 import { createWorkbenchFetch } from '../workbench-fetch.js';
 import type { LarkGroupParticipation } from './group-participation.js';
 import { LarkAppCreationJobManager } from './app-creation.js';
@@ -10,7 +9,7 @@ import { registerLarkAppCreationRoutes } from './app-creation-routes.js';
 import type { RelayAskBroker } from '@dutydeck/relay';
 import { registerLarkGroupManagementRoutes, type LarkGroupManager } from './group-management.js';
 import type { FastifyInstance, FastifyReply } from 'fastify';
-import { agentWeightsSchema, validateHighRiskPattern, type AgentRepository, type ChannelMappingRepository, type ConfigRepository, type PolicyAction, type PolicyDecision } from '@dutydeck/shared';
+import { type LarkHookDraft, agentWeightsSchema, larkHookDraftSchema, validateHighRiskPattern, type AgentRepository, type ChannelMappingRepository, type ConfigRepository, type PolicyAction, type PolicyDecision } from '@dutydeck/shared';
 import type { DutydeckRuntime } from '@dutydeck/runtime';
 import { createLarkCardService, LarkServiceError, larkConfigurationStatus, type LarkBotConfigInput, type LarkCardService, type LarkSendInput, type LarkUpdateInput } from './service.js';
 import { detectUnusableOwnerEntries, type ContactLookup } from './owner-identity.js';
@@ -25,10 +24,10 @@ import { OpenPlatformConfigurationJobManager } from './open-platform-jobs.js';
 import { isValidLarkAppId, larkSlashCommandDefinitions } from './open-platform-configurator.js';
 import type { LoginLinkStore } from '../auth/auth.js';
 
+export type { LarkHookDraft } from '@dutydeck/shared';
+
 type LarkSendRequest = LarkSendInput & { bot?: LarkBotConfigInput; botAppId?: string };
 type LarkUpdateRequest = LarkUpdateInput & { bot?: LarkBotConfigInput; botAppId?: string };
-const hookDraftSchema = z.object({ workspace: z.string().optional(), defaultAgentId: z.string().optional(), fallbackAgentId: z.string().optional(), defaultAgentWeights: agentWeightsSchema.optional() }).strict();
-export type LarkHookDraft = z.infer<typeof hookDraftSchema>;
 export type SaveLarkConfigRequest = SaveLarkConfigInput & { promptSource?: 'cli' | 'agent'; allowedUserNames?: string[]; allowedBotNames?: string[]; highRiskAllowedUserNames?: string[] };
 
 /** LarkServiceError 按其状态码回给调用方，其他错误原样抛出。 */
@@ -272,7 +271,7 @@ export async function registerLarkRoutes(app: FastifyInstance, options: LarkRout
       const pattern = request.body?.highRiskPattern === undefined ? config.highRiskPattern : request.body.highRiskPattern.trim() || defaultHighRiskPattern;
       const patternValidation = validateHighRiskPattern(pattern);
       if (!patternValidation.valid) throw new LarkServiceError('INVALID_HIGH_RISK_PATTERN', patternValidation.error, 400);
-      const parsedDraft = hookDraftSchema.safeParse(request.body?.draft === undefined ? {} : request.body.draft);
+      const parsedDraft = larkHookDraftSchema.safeParse(request.body?.draft === undefined ? {} : request.body.draft);
       if (!parsedDraft.success) throw new LarkServiceError('INVALID_LARK_CONFIG', 'Hook 准备参数无效，请检查工作区和 Agent 分流权重。', 400);
       const draft = parsedDraft.data;
       const workspace = draft.workspace === undefined ? config.workspace : draft.workspace.trim() || undefined;

@@ -5,7 +5,7 @@ import { larkMessageAnchor } from './message-anchor.js';
 import { RuntimeError, serialByKey, COLLABORATION_LIST_LIMIT, DECISION_BUDGET_GATE, DECISION_WINDOW_LIMIT, USAGE_CAP_GATE, countDecisionUsage, listWindowIncomplete, type ListedItems } from '@dutydeck/shared';
 import { BOT_LOOP_DEPTH_LIMIT, BOT_LOOP_GATE, BOT_TURN_RECORD } from '@dutydeck/shared';
 import { DECIDER_META_KEY, INTRUSIVE_FEEDBACK_PREFIX, MISSED_FEEDBACK_PREFIX, deciderMetaOf, isDecisionGate, participationLevelBehaviors, participationLevelLabels, participationLevelPhraseHint, participationLevelPhrases, participationLevels, resolveParticipation } from '@dutydeck/shared';
-import { resolveScenarioParams, scenarioBindingStatus, scenarioMajorVersion, scenarioRecordOf, scenarioSourceBots, scenarioTriggerSources, type ScenarioPreviewInput, type ScenarioPreview, type CollaborationDuty, type ResponderAnnouncement, type ScenarioBinding, type ScenarioBotRef, type ScenarioMessage, type ScenarioPack } from '@dutydeck/shared';
+import { resolveScenarioParams, scenarioBindingStatus, scenarioMajorVersion, scenarioRecordOf, scenarioSourceBots, scenarioTriggerSources, type UpdateCollaborationDutyRequest, type ScenarioPreviewInput, type ScenarioPreview, type CollaborationDuty, type ResponderAnnouncement, type ScenarioBinding, type ScenarioBotRef, type ScenarioMessage, type ScenarioPack } from '@dutydeck/shared';
 import { jsonSha256 as digest } from '../hash.js';
 import type { CollaborationRepository, CollaborationScope, CollaborationFollowup, CollaborationSnapshot, CollaborationObservation, CollaborationDecision, CollaborationAction, CollaborationTeamContext, CollaborationDeciderMeta, CollaborationScenarioSnapshot, CollaborationSettings, ParticipationLevel } from '@dutydeck/shared';
 import { larkMemoryEnabled, type StoredLarkConfig } from './config.js';
@@ -1106,7 +1106,7 @@ export class LarkGroupParticipation {
    * 其他实例据此同步。场景包绑定按包合并，null 删掉那个绑定；确认人和包版本只能由群里的确认卡写入，这里沿用已有的。
    * direct 包从没在群里确认过的不能开启（任务要以确认过的人的名义发起），大版本过期的要先在群里重新确认。
    */
-  async updateDuty(scope: CollaborationScope, patch: { expectedRevision: number; responder?: 'self' | null; scenarios?: Record<string, { enabled: boolean; params?: Record<string, unknown> } | null> }, actorId: string): Promise<{ duty: CollaborationDuty; announced?: boolean }> {
+  async updateDuty(scope: CollaborationScope, patch: UpdateCollaborationDutyRequest, actorId: string): Promise<{ duty: CollaborationDuty; announced?: boolean }> {
     const repo = this.options.repository;
     const current = await repo.getDuty(scope);
     if (current.revision !== patch.expectedRevision) throw new RuntimeError('COLLABORATION_REVISION_CONFLICT', '群分工已变化，请刷新后再改。', 409);

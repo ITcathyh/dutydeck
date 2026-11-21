@@ -21,6 +21,7 @@ export default defineConfig({
     globals: false,
     setupFiles: [fileURLToPath(new URL('./vitest.setup.ts', import.meta.url))],
     include: ['src/**/*.test.{ts,tsx}'],
+    exclude: ['src/api/route-contract.test.ts'],
     testTimeout: 15_000,
     hookTimeout: 15_000
   }

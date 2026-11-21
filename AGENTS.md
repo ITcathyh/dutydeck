@@ -6,7 +6,7 @@
 |---|---|
 | 服务与命令行 | `apps/server/src/cli-program.ts` 定义命令；`cli.ts` 处理调用；`service.ts` 组装服务；`daemon/` 管重启、部署和实例寻址 |
 | 飞书与插件宿主 | `apps/server/src/lark/` 管消息、卡片和机器人；`apps/server/src/plugins/` 管插件加载、绑定和工具 |
-| Web 工作台 | `apps/web/src/`；API 客户端在 `api.ts`，实时流在 `sse.ts`、`useSessionStream.ts` |
+| Web 工作台 | `apps/web/src/`；API 客户端按领域放在 `api/`，统一从 `api.ts` 导出，实时流在 `sse.ts`、`useSessionStream.ts` |
 | 执行与恢复 | `packages/agent-runtime/`（包名 `@dutydeck/runtime`）管任务调度、执行账本、权限和恢复 |
 | Agent 与终端 | `packages/acp-client/` 管 ACP/ACPX；`transports/` 管子进程与 PTY 驱动（JSONL/Pipe/Pty）和 Agent 探测；`cli-adapters/` 管 CLI 差异；`pty-driver/` 管终端驱动，`terminal-renderer/` 把终端输出渲染成快照；`session-backends/` 管 tmux/Herdr；`relay/` 是与 IM 无关的会话回传（send/ask） |
 | 契约与持久化 | `packages/shared/` 管跨端类型与校验；`config/` 管环境配置与 Agent 发现；`storage/` 管 SQLite、仓储和迁移；`secret-provider/` 管密钥；`legacy-importer/` 支撑 `dutydeck migrate` 从旧 botmux 导入 |

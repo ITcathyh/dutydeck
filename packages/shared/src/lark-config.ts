@@ -1,4 +1,5 @@
-import type { AgentWeight, RiskControlMode } from './configuration-primitives.js';
+import { z } from 'zod';
+import { agentWeightsSchema, type AgentWeight, type RiskControlMode } from './configuration-primitives.js';
 
 /** 飞书机器人配置的跨端契约：服务端存储形态、保存请求体与对外投影。 */
 
@@ -327,3 +328,27 @@ export interface PublicLarkConfigCollection {
   bots: PublicLarkConfig[];
   listeningDisabled: boolean;
 }
+
+export const botPromptVersionSchema = z.object({
+  schemaVersion: z.literal(1), appId: z.string().min(1), version: z.number().int().positive(),
+  text: z.string(), sha256: z.string().regex(/^[a-f0-9]{64}$/), savedAt: z.string().datetime(),
+  savedBy: z.string().optional(), source: z.enum(['web', 'cli', 'agent', 'backfill', 'rollback']),
+  configRevision: z.number().int().positive().optional(),
+  rollbackFrom: z.number().int().positive().optional()
+}).strict();
+export type BotPromptVersion = z.infer<typeof botPromptVersionSchema>;
+
+export interface LarkHookStatus {
+  agentId?: string;
+  supported: boolean;
+  installed: boolean;
+  nativeReady?: boolean;
+  writable: boolean;
+  trustRequired: boolean;
+  hooksPath?: string;
+  reason?: string;
+  trustInstructions?: string;
+}
+
+export const larkHookDraftSchema = z.object({ workspace: z.string().optional(), defaultAgentId: z.string().optional(), fallbackAgentId: z.string().optional(), defaultAgentWeights: agentWeightsSchema.optional() }).strict();
+export type LarkHookDraft = z.infer<typeof larkHookDraftSchema>;

@@ -1,16 +1,11 @@
 import { z } from 'zod';
-import type { ConfigRepository } from '@dutydeck/shared';
+import { botPromptVersionSchema, type BotPromptVersion, type ConfigRepository } from '@dutydeck/shared';
 import { sha256Hex } from '../hash.js';
 import { LarkServiceError } from './service.js';
 
-export const botPromptVersionSchema = z.object({
-  schemaVersion: z.literal(1), appId: z.string().min(1), version: z.number().int().positive(),
-  text: z.string(), sha256: z.string().regex(/^[a-f0-9]{64}$/), savedAt: z.string().datetime(),
-  savedBy: z.string().optional(), source: z.enum(['web', 'cli', 'agent', 'backfill', 'rollback']),
-  configRevision: z.number().int().positive().optional(),
-  rollbackFrom: z.number().int().positive().optional()
-}).strict();
-export type BotPromptVersion = z.infer<typeof botPromptVersionSchema>;
+export { botPromptVersionSchema } from '@dutydeck/shared';
+export type { BotPromptVersion } from '@dutydeck/shared';
+
 export type PromptSaveOrigin = { source: BotPromptVersion['source']; appId?: string; savedBy?: string; rollbackFrom?: number };
 export const botPromptUsageSchema = z.object({
   schemaVersion: z.literal(1), taskId: z.string().min(1), appId: z.string().min(1),
