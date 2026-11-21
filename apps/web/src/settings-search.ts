@@ -1,3 +1,4 @@
+import type { BotSettingKey } from '@dutydeck/shared';
 import type { Agent } from './api';
 import { supportsModelServiceSettings } from './agent-model-support';
 import type { CommandAction } from './components/CommandPalette';
@@ -11,6 +12,13 @@ export const modelSettingFields = {
   apiKey: { label: 'API Key', botKey: 'modelApiKey' }
 } as const;
 export const modelSettingAnchor = (agentId: string, key: keyof typeof modelSettingFields) => `model-${encodeURIComponent(agentId)}-${key}`;
+// Search also has destinations for credentials, compound inputs and model service settings.
+type SecondsKey<K extends BotSettingKey> = K extends `${infer N}Ms` ? `${N}Seconds` : never;
+type SearchKey = BotSettingKey | 'appId' | 'appSecret' | 'defaultAgentWeights' | 'highRiskPattern'
+  | 'workspaceAliases' | 'allowedUserNames' | 'allowedBotNames' | 'highRiskAllowedUserNames' | 'workerAgentIds'
+  | 'modelBaseUrl' | 'modelAuthMode' | 'modelApiKey' | 'participationLevel'
+  | SecondsKey<'urgentThresholdMs' | 'pinAfterMs'>;
+type SearchEntry = { label: string; anchor: string; parent?: BotSettingKey; keywords?: string; step?: 1 | 2 };
 export const botSettingFields = {
   modelBaseUrl: { label: modelSettingFields.baseUrl.label, step: 2, anchor: 'bot-setting-modelBaseUrl', parent: 'defaultAgentId' },
   modelAuthMode: { label: modelSettingFields.authMode.label, step: 2, anchor: 'bot-setting-modelAuthMode', parent: 'defaultAgentId' },
@@ -73,7 +81,7 @@ export const botSettingFields = {
   highRiskAllowedUserNames: {label: '允许执行高危操作的成员', step: 2, anchor: 'bot-setting-highRiskAllowedUserNames', parent: 'riskControlMode'},
   fallbackModel: {label: '兜底模型', step: 2, anchor: 'setup-fallback-model', parent: 'fallbackAgentId'},
   fullTrustConfirmed: {label: '确认飞书任务以 full-trust 运行', step: 2, anchor: 'bot-setting-fullTrustConfirmed', parent: 'permissionMode'},
-} as const;
+} as const satisfies Partial<Record<SearchKey, SearchEntry>>;
 export type BotSettingField = keyof typeof botSettingFields;
 
 export const globalSettingFields = {
@@ -97,7 +105,7 @@ export const botDetailFields = {
   adhdMode: { label: 'ADHD 友好输出', anchor: 'bot-adhd-mode', keywords: '回复方式' },
   roleTitle: { label: '角色名称', anchor: 'bot-role-title' },
   roleScope: { label: '负责范围', anchor: 'bot-role-scope' }
-} as const;
+} as const satisfies Partial<Record<SearchKey, SearchEntry>>;
 export type SettingsDestination = OverlayRoute | { kind: 'bot-settings'; appId: string; field: string };
 
 export function settingsSearchActions(bots: Array<{ appId: string; name: string }>, navigate: (route: SettingsDestination) => void, agents: Agent[] = []): CommandAction[] {

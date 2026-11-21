@@ -1,4 +1,5 @@
-import { ReplyPolishSettings, replyPolishTimeoutValue } from './ReplyPolishSettings';
+import { draftFromBot, saveBodyFromDraft } from '../bot-settings-form';
+import { ReplyPolishSettings } from './ReplyPolishSettings';
 import { ReactionTriggerSetting } from './ReactionTriggerSetting';
 import { InboxDispositions } from './InboxDispositions';
 import { botDetailFields, focusSettingField } from '../settings-search';
@@ -6,7 +7,7 @@ import { AgentModelSettings } from './AgentModelSettings';
 import { OptionalModelOverrides } from './OptionalModelOverrides';
 import type { LarkSetupTarget } from '../app-route';
 import { useState, useMemo, useEffect, useRef } from 'react';
-import { participationLevelBehaviors, participationLevelFields, participationLevelLabels, participationLevels, resolveParticipation, type ParticipationLevel } from '@dutydeck/shared';
+import { botSettingDescriptors as fields, participationLevelBehaviors, participationLevelFields, participationLevelLabels, participationLevels, resolveParticipation, type ParticipationLevel } from '@dutydeck/shared';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   Bot,
@@ -49,50 +50,22 @@ export type BotManagementProps = {
 
 function initialDraft(bot: LarkBotConfig): BotDraft {
   return {
+    ...draftFromBot(bot),
     // 记下编辑起点的版本，保存时用它做 CAS（不用刷新后的 activeBot.revision）。
     baseRevision: bot.revision,
-    workspace: bot.workspace ?? '',
-    defaultAgentId: bot.defaultAgentId ?? '',
-    fallbackAgentId: bot.fallbackAgentId ?? '',
-    fallbackModel: bot.fallbackModel ?? '',
-    defaultModel: bot.defaultModel ?? '',
-    defaultReasoningEffort: bot.defaultReasoningEffort ?? '',
-    p2pMode: bot.p2pMode ?? 'chat',
-    idleCompactEnabled: bot.idleCompactEnabled ?? true,
-    idleCompactHours: String(bot.idleCompactHours ?? 24),
+    p2pMode: bot.p2pMode ?? fields.p2pMode.displayDefault,
+    idleCompactEnabled: bot.idleCompactEnabled ?? fields.idleCompactEnabled.default,
+    idleCompactHours: String(bot.idleCompactHours ?? fields.idleCompactHours.default),
     groupReplyMode: bot.groupReplyMode ?? '',
     mentionPolicy: resolveParticipation({ mentionPolicy: bot.mentionPolicy }).mentionPolicy,
-    defaultGroupParticipation: bot.defaultGroupParticipation ?? 'off',
+    defaultGroupParticipation: bot.defaultGroupParticipation ?? fields.defaultGroupParticipation.default,
     roleTitle: bot.roleTitle ?? '',
     roleScope: bot.roleScope ?? '',
-    preInjectPrompt: bot.preInjectPrompt ?? '',
-    adhdMode: bot.adhdMode ?? false,
-    replyPolishEnabled: bot.replyPolishEnabled ?? false,
-    replyPolishAgentId: bot.replyPolishAgentId ?? '',
-    replyPolishModel: bot.replyPolishModel ?? '',
-    replyPolishTimeoutSeconds: String((bot.replyPolishTimeoutMs ?? 60_000) / 1000),
-    listening: bot.listening ?? true,
-    reactionTriggerEmoji: bot.reactionTriggerEmoji ?? '',
-    groupToolsEnabled: bot.groupToolsEnabled ?? false,
-    groupToolsAllowSend: bot.groupToolsAllowSend ?? false,
-    memoryEnabled: bot.memoryEnabled ?? (bot.defaultGroupParticipation === 'selective'),
-    memoryAutoExtract: bot.memoryAutoExtract ?? true,
-    groupMemoryScope: bot.groupMemoryScope ?? 'shared',
-    claudeAutoMemory: bot.claudeAutoMemory ?? 'inherit',
-    memoryAgentId: bot.memoryAgentId ?? '',
-    memoryModel: bot.memoryModel ?? '',
-    decisionAgentId: bot.decisionAgentId ?? '',
-    decisionModel: bot.decisionModel ?? '',
-    busyTriage: bot.busyTriage === true,
-    botLoopGuard: bot.botLoopGuard === true,
-    responseAgentId: bot.responseAgentId ?? '',
-    responseModel: bot.responseModel ?? '',
-    executionMode: bot.executionMode ?? 'single',
+    adhdMode: bot.adhdMode ?? fields.adhdMode.default,
+    executionMode: bot.executionMode ?? fields.executionMode.displayDefault,
     leaderAgentId: bot.leaderAgentId ?? '',
     workerAgentIds: bot.workerAgentIds ?? [],
-    leaderSkill: bot.leaderSkill ?? '',
-    riskControlMode: bot.riskControlMode ?? 'off',
-    highRiskPattern: bot.highRiskPattern ?? ''
+    leaderSkill: bot.leaderSkill ?? ''
   };
 }
 
@@ -312,12 +285,7 @@ export function BotManagement({
       stage: 'agent',
       originalAppId: appId,
       appId,
-      defaultAgentId: draft.defaultAgentId,
-      fallbackAgentId: draft.fallbackAgentId,
-      fallbackModel: draft.fallbackModel,
-      defaultModel: draft.defaultModel,
-      defaultReasoningEffort: draft.defaultReasoningEffort,
-      workspace: draft.workspace,
+      ...saveBodyFromDraft(draft, 'detail'),
       p2pMode: draft.p2pMode,
       idleCompactEnabled: draft.idleCompactEnabled,
       idleCompactHours: Number(draft.idleCompactHours),
@@ -326,34 +294,11 @@ export function BotManagement({
       defaultGroupParticipation: draft.defaultGroupParticipation,
       roleTitle: draft.roleTitle,
       roleScope: draft.roleScope,
-      preInjectPrompt: draft.preInjectPrompt,
       adhdMode: draft.adhdMode,
-      replyPolishEnabled: draft.replyPolishEnabled,
-      replyPolishAgentId: draft.replyPolishAgentId,
-      replyPolishModel: draft.replyPolishModel,
-      replyPolishTimeoutMs: replyPolishTimeoutValue(draft.replyPolishTimeoutSeconds),
-      listening: draft.listening,
-      reactionTriggerEmoji: draft.reactionTriggerEmoji,
-      groupToolsEnabled: draft.groupToolsEnabled,
-      groupToolsAllowSend: draft.groupToolsAllowSend,
-      memoryEnabled: draft.memoryEnabled,
-      memoryAutoExtract: draft.memoryAutoExtract,
-      groupMemoryScope: draft.groupMemoryScope,
-      claudeAutoMemory: draft.claudeAutoMemory,
-      memoryAgentId: draft.memoryAgentId,
-      memoryModel: draft.memoryModel,
-      decisionAgentId: draft.decisionAgentId,
-      decisionModel: draft.decisionModel,
-      busyTriage: draft.busyTriage,
-      botLoopGuard: draft.botLoopGuard,
-      responseAgentId: draft.responseAgentId,
-      responseModel: draft.responseModel,
       executionMode: draft.executionMode,
       leaderAgentId: draft.leaderAgentId,
       workerAgentIds: draft.workerAgentIds,
       leaderSkill: draft.leaderSkill,
-      riskControlMode: draft.riskControlMode,
-      highRiskPattern: draft.highRiskPattern,
       fullTrustConfirmed,
       // 用编辑起点的版本，不是当下 activeBot.revision：后者可能已被后台刷新
       // 成别人保存后的新版本，拿它提交会让 CAS 放行并静默覆盖对方的修改。

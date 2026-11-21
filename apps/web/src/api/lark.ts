@@ -1,3 +1,4 @@
+import type { LegacyOptionalBotSetting } from '@dutydeck/shared';
 import type {
   BotPromptVersion,
   GroupBinding,
@@ -16,9 +17,7 @@ import { json, send } from './client';
  * 旧服务端可能不返回的字段：读取方按各自默认处理（记忆、自动提取、精简过程卡、问答卡、群内 @ 与提醒两档缺省开启，
  * 其余开关缺省关闭；群记忆范围按 shared、执行方式按 single）。
  */
-type LarkBotConfigLegacyOptional = 'welcomeEnabled' | 'revision' | 'memoryEnabled' | 'memoryAutoExtract' | 'groupMemoryScope' | 'claudeAutoMemory' | 'botLoopGuard'
-  | 'executionMode' | 'workerAgentIds' | 'structuredAskCards' | 'groupCardMention' | 'completionReactionOnly' | 'silentProgress' | 'adhdMode'
-  | 'urgentEnabled' | 'notifyMentionAction' | 'notifyMentionDone' | 'pinLongTasks' | 'compactTrace' | 'showAgentName';
+type LarkBotConfigLegacyOptional = LegacyOptionalBotSetting | 'revision' | 'workerAgentIds';
 export type LarkBotConfig = Omit<PublicLarkConfig, LarkBotConfigLegacyOptional> & Partial<Pick<PublicLarkConfig, LarkBotConfigLegacyOptional>>;
 export type LarkConfig = Omit<PublicLarkConfigCollection, 'bots'> & { bots: LarkBotConfig[] };
 /** 保存请求体；成员按姓名提交，由服务端解析为 open_id。 */
