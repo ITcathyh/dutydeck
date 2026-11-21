@@ -28,7 +28,6 @@ import { isLarkGroupMemoryPool, larkMemoryScope, type LarkMemoryEntry, type Lark
 import { relevantMemoryBudget, renderLarkMemoryInjection, renderMemoryIndex } from './memory-view.js';
 import type { AgentEvent, PolicyAction, Session, TaskRecord, ToolRiskPolicy } from '@dutydeck/shared';
 import { deferredConfirmationId, isBackgroundFollowup, RuntimeError, supportsRemoteApproval } from '@dutydeck/shared';
-import { executionTaskId } from '@dutydeck/storage/helpers';
 import { isBotSenderType } from './card-mentions.js';
 import { defaultHighRiskPattern, defaultLarkIdleCompactHours, defaultLarkTraceLimit, larkMemoryEnabled, larkPermissionMode, readLarkConfigs, type StoredLarkConfig } from './config.js';
 import { boundLarkCardElements, larkIdentityPermissionHelp, LarkServiceError } from './service.js';
@@ -75,10 +74,6 @@ import { LarkCoordinatorRecovery } from './coordinator-recovery.js';
 
 /** 入站消息某一轮派发给 runtime 的幂等键；重放同一轮必须用同一个键。 */
 export const larkTurnRequestKey = (appId: string, messageId: string, turn: number) => `lark:${appId}:${messageId}:${turn}`;
-/** 这一轮被 runtime 接收后在执行账本里的任务 id（dispatch 的旧参数形式落在 runtime 命名空间）。 */
-export const larkTurnRuntimeTaskId = (sessionId: string, appId: string, messageId: string, turn: number) =>
-  executionTaskId('runtime', sessionId, larkTurnRequestKey(appId, messageId, turn));
-
 export function larkTurnRequest(sessionId: string, appId: string, event: LarkMessageEvent, turn: number, prompt: string): TaskRequestV1 {
   return { version: 1, namespace: 'runtime', sessionId, key: larkTurnRequestKey(appId, event.messageId, turn),
     actor: event.senderOpenId ? { kind: 'channel', appId, id: event.senderOpenId } : { kind: 'unspecified' },
@@ -688,9 +683,12 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
     return preparing.length;
   }
 
-  protected readAcceptedTurn(taskId: string, request: TaskRequestV1) {
+  protected readAcceptedTurn(request: TaskRequestV1, taskId?: string) {
     let accepted;
-    try { accepted = this.runtime.getAcceptedTask!(taskId); }
+    try {
+      accepted = taskId ? this.runtime.getAcceptedTask!(taskId)
+        : this.runtime.getAcceptedTaskByKey(request.namespace, request.sessionId, request.key);
+    }
     catch (error) {
       if (error instanceof RuntimeError && ['TASK_ACCEPTANCE_CONFLICT', 'TASK_ACCEPTANCE_UNVERIFIABLE'].includes(error.code)) {
         return { mismatch: error.code };
@@ -1255,13 +1253,12 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
     }
     const canDispatch = this.runtime.dispatch || (task.inbox && this.runtime.dispatchRequest);
     const request = task.inbox && canDispatch ? larkTurnRequest(session.id, config.appId, event, currentTurn, prompt) : undefined;
-    const acceptedId = request && larkTurnRuntimeTaskId(session.id, config.appId, event.messageId, currentTurn);
     let accepted: ReturnType<typeof this.readAcceptedTurn> | undefined;
-    if (acceptedId && request) {
+    if (request) {
       for (let attempt = 1; ; attempt++) {
-        try { accepted = this.readAcceptedTurn(acceptedId, request); break; }
+        try { accepted = this.readAcceptedTurn(request); break; }
         catch (error) {
-          this.log.warn({ error, taskId: acceptedId, attempt }, '执行记录暂时无法核验，保留入站记录');
+          this.log.warn({ error, requestKey: request.key, attempt }, '执行记录暂时无法核验，保留入站记录');
           if (resumeTask) throw error; // The accepted-card reconciler already schedules its own retries.
           if (attempt === 3) {
             if (!await this.inbox!.release(task.inbox!)) return;
@@ -1272,7 +1269,7 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
             await clearAcknowledgement();
             await sendTaskCard(this.service, event, { ...cardContext, state: 'reconcile_required', taskName: taskTitle,
               readOnly: true, markdown: '请求结果未知', idempotencyKey: `acceptance_read_${event.messageId}_${currentTurn}`.slice(0, 50) }, this.log)
-              .catch(noticeError => this.log.warn({ error: noticeError, taskId: acceptedId }, '入站认领已交还，核对提示未送达'));
+              .catch(noticeError => this.log.warn({ error: noticeError, requestKey: request.key }, '入站认领已交还，核对提示未送达'));
             return;
           }
           await sleep(250 * attempt);
@@ -1282,7 +1279,7 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
     }
     if (accepted?.mismatch) {
       const error = larkTurnIdentityError;
-      this.log.warn({ appId: config.appId, messageId: event.messageId, turn: currentTurn, taskId: acceptedId, mismatch: accepted.mismatch }, error);
+      this.log.warn({ appId: config.appId, messageId: event.messageId, turn: currentTurn, taskId: accepted.task?.id, mismatch: accepted.mismatch }, error);
       task.state = 'failed';
       task.retryable = false;
       await this.inbox!.update(task.inbox!, { state: 'failed', error });

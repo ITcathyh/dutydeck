@@ -1,3 +1,4 @@
+import { readTestAcceptanceByKey } from './runtime-test-fixture.js';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
@@ -44,7 +45,7 @@ async function harness(firstCardFailures: number) {
   const runtime = {
     start: vi.fn(async () => session), getSession: vi.fn(async () => session),
     subscribe: vi.fn((_id: string, listener: (event: AgentEvent) => void) => { listeners.push(listener); return vi.fn(); }),
-    getAcceptedTask: vi.fn(), dispatchRequest: vi.fn(async (_request: import('@dutydeck/shared').TaskRequestV1, _material: import('@dutydeck/runtime').TaskRequestMaterial) => ({ id: 'task_runtime', sessionId: session.id, status: 'queued', queuedAhead: 0 })),
+    getAcceptedTaskByKey: readTestAcceptanceByKey, getAcceptedTask: vi.fn(), dispatchRequest: vi.fn(async (_request: import('@dutydeck/shared').TaskRequestV1, _material: import('@dutydeck/runtime').TaskRequestMaterial) => ({ id: 'task_runtime', sessionId: session.id, status: 'queued', queuedAhead: 0 })),
     send: vi.fn(), interrupt: vi.fn(), stop: vi.fn(async (..._args: unknown[]) => {})
   };
   let failures = firstCardFailures;

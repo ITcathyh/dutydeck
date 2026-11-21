@@ -1,3 +1,5 @@
+import { executionTaskId } from '@dutydeck/storage/helpers';
+import { readTestAcceptanceByKey } from './runtime-test-fixture.js';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -11,7 +13,7 @@ import type { ConfigRepository } from '@dutydeck/shared';
 import { larkBotsConfigKey, type StoredLarkConfig } from './config.js';
 import { LarkLongConnectionListener, type LarkMessageEvent } from './listener.js';
 import { LarkMessageCoordinator } from './coordinator.js';
-import { larkTurnRequest, larkTurnRuntimeTaskId } from './coordinator-dispatch.js';
+import { larkTurnRequest, larkTurnRequestKey } from './coordinator-dispatch.js';
 import { LarkTaskInbox } from './task-inbox.js';
 import { LarkGroupParticipation } from './group-participation.js';
 import type { LarkScenarioAdoption } from './scenario-direct.js';
@@ -79,7 +81,7 @@ async function harness(existing?: { directory: string; exit: Promise<ChildExit> 
   if (!existing) await repositories.config.set(larkBotsConfigKey, JSON.stringify([config]));
   const session = { id: 'ses_durable', agentId: 'codex', state: 'idle', cwd: directory, protocol: 'acp', permissionMode: 'ask', createdAt: '', updatedAt: '' };
   const runtime = { start: vi.fn(async () => session), getSession: vi.fn(async () => session), subscribe: vi.fn(() => vi.fn()),
-    getAcceptedTask: vi.fn(), dispatchRequest: vi.fn(async (_request: import('@dutydeck/shared').TaskRequestV1, _material: import('@dutydeck/runtime').TaskRequestMaterial) => ({ id: 'task_durable', sessionId: session.id, status: 'queued', queuedAhead: 0 })) };
+    getAcceptedTaskByKey: readTestAcceptanceByKey, getAcceptedTask: vi.fn(), dispatchRequest: vi.fn(async (_request: import('@dutydeck/shared').TaskRequestV1, _material: import('@dutydeck/runtime').TaskRequestMaterial) => ({ id: 'task_durable', sessionId: session.id, status: 'queued', queuedAhead: 0 })) };
   const service = { send: vi.fn(async () => ({ messageId: 'om_card' })), reply: vi.fn(async () => ({ messageId: 'om_card' })),
     update: vi.fn(async () => ({ messageId: 'om_card' })), addReaction: vi.fn(async () => ({ reactionId: 'reaction' })), deleteReaction: vi.fn(async () => {}),
     listChatMessages: vi.fn(async () => ({ items: [], hasMore: false })), getMessageItems: vi.fn(async () => []) };
@@ -284,7 +286,7 @@ it('silently terminates expired unrouted observations while received expiry reta
 const seedSubmittedReceived = async (h: Awaited<ReturnType<typeof harness>>, messageId: string, receivedAt = new Date().toISOString()) => {
   const claimed = (await new LarkTaskInbox(h.repositories.config).claim(config.appId, message({ messageId })))!;
   await h.repositories.config.set(`lark.inbox.${config.appId}.${messageId}`, JSON.stringify({ ...claimed, receivedAt, sessionId: 'ses_durable', cardId: 'om_card', turn: 1 }));
-  return larkTurnRuntimeTaskId('ses_durable', config.appId, messageId, 1);
+  return executionTaskId('runtime', 'ses_durable', larkTurnRequestKey(config.appId, messageId, 1));
 };
 const acceptedTask = (id: string, status: string) => ({ id, sessionId: 'ses_durable', prompt: 'original', status, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() });
 const allowAll = () => ({ resolved: vi.fn(async () => config), authorize: vi.fn(async () => ({ allowed: true })) });

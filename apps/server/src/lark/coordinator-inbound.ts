@@ -73,7 +73,7 @@ import type { LarkMessageEvent } from './listener.js';
 import type { LarkGroup, LarkTask, PersistedLarkCardTask } from './coordinator.js';
 import { parseCardTask, parseOptionalCardTask } from './persisted-card-task.js';
 import { type LarkCommandPrompt, larkCardChannel, larkHumanTaskAllowed, type LarkRelaunchClaim, larkTaskTitle, sendTaskCard } from './coordinator-core.js';
-import { LarkCoordinatorDispatch, larkCancelledBeforeSubmit, larkTurnRequest, larkTurnRuntimeTaskId } from './coordinator-dispatch.js';
+import { LarkCoordinatorDispatch, larkCancelledBeforeSubmit, larkTurnRequest, larkTurnRequestKey } from './coordinator-dispatch.js';
 import { planPrompt } from '../plan-mode.js';
 import { planReplyAction } from './plan-flow.js';
 import { AgentCommandParamError, agentCommandConfirmSummary, agentCommandPlan, larkAgentCommandKind, type LarkAgentCommandRequest, type LarkAgentViewRequest, type LarkAgentSettingsRequest } from './agent-command.js';
@@ -218,7 +218,7 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
       && (!saved.card_message_id || !record.cardId || saved.card_message_id === record.cardId);
     if (mappingMatches && saved?.runtime_task_id === taskId && (live || terminalTaskStates.has(saved.state))) return;
     const request = larkTurnRequest(sessionId, config.appId, event, turn, prompt);
-    const accepted = this.readAcceptedTurn(taskId, request);
+    const accepted = this.readAcceptedTurn(request, taskId);
     const runtimeTask = accepted.task;
     if (runtimeTask && !['running', 'queued'].includes(runtimeTask.status)) return;
     if (!mappingMatches) {
@@ -230,7 +230,7 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
     const chat = parseLarkSourceId(source?.sourceId);
     if (accepted.mismatch || record.appId !== config.appId || source?.source !== 'lark'
       || chat.appId !== config.appId || chat.chatId !== event.chatId || chat.chatType !== event.chatType
-      || taskId !== larkTurnRuntimeTaskId(sessionId, config.appId, id, turn)) {
+      || taskId !== this.runtime.getAcceptedTaskByKey(request.namespace, sessionId, request.key)?.task.id) {
       this.log.warn({ appId: config.appId, messageId: id, turn, taskId, mismatch: accepted.mismatch }, '飞书入站记录与执行归属不符，等待核对');
       return false;
     }
@@ -355,8 +355,8 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
     if (!this.runtime.getAcceptedTask) return undefined;
     try {
       if (!await this.runtime.getSession(sessionId)) return undefined;
-      const taskId = larkTurnRuntimeTaskId(sessionId, config.appId, record.event.messageId, turn);
-      return Boolean(this.runtime.getAcceptedTask(taskId));
+      const key = larkTurnRequestKey(config.appId, record.event.messageId, turn);
+      return Boolean(this.runtime.getAcceptedTaskByKey('runtime', sessionId, key));
     } catch (error) {
       this.log.warn({ error, messageId: record.event.messageId }, '重启后查询入站请求的执行记录失败，按结果未知处理');
       return undefined;

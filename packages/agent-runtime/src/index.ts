@@ -3338,6 +3338,10 @@ export class DutydeckRuntime {
     return this.repos.execution.getAcceptedTask(taskId);
   }
 
+  getAcceptedTaskByKey(namespace: TaskRequestV1['namespace'], sessionId: string, key: string) {
+    return this.getAcceptedTask(executionTaskId(namespace, sessionId, key));
+  }
+
   lookupAcceptedTask(request: TaskRequestV1): AcceptedTask | undefined {
     this.assertReady();
     const accepted = this.repos.execution.lookupAccepted(request);
