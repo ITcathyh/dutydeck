@@ -235,8 +235,8 @@ export { configuredRootsForSession, createInsightResolver };
 
 /** Production PTY-CLI policy: persistent tmux or a hard failure, never an
  * implicit downgrade to the in-process PtyBackend. */
-export function createProductionPtyBackend(sessionId: string) {
-  return createDutydeckPersistentBackend(sessionId);
+export function createProductionPtyBackend(sessionId: string, log?: import('@dutydeck/shared').DiagnosticLog) {
+  return createDutydeckPersistentBackend(sessionId, log);
 }
 
 export async function startLocalServer(options: StartLocalServerOptions = {}): Promise<LocalServer> {
@@ -424,7 +424,7 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
   });
   const primaryHerdrBackend = (sessionId: string) => new HerdrBackend(herdr.nameFor(`primary:${sessionId}`), {
     binary: primaryHerdrBinary(env), stateFile: join(dirname(config.databaseUrl), 'terminal-sessions', `${herdr.nameFor(`primary:${sessionId}`)}.json`),
-    ownerId: `dutydeck:${sessionId}`, processProbe: { identify: childProcessIdentity, observe: observeProcess }, env,
+    ownerId: `dutydeck:${sessionId}`, processProbe: { identify: childProcessIdentity, observe: observeProcess }, env, log,
   });
   const terminalSettings = new TerminalSettings(repos.config, env);
   // pty-cli 协议驱动工厂：protocol='pty-cli' 的会话路由到 Dutydeck 的 PtyCliDriver。
@@ -434,7 +434,8 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
     return createPtyCliDriver({
       agent,
       adapter,
-      backend: agent.env.dutydeck_terminal_backend === 'herdr' ? primaryHerdrBackend(sessionId) : createProductionPtyBackend(sessionId),
+      backend: agent.env.dutydeck_terminal_backend === 'herdr' ? primaryHerdrBackend(sessionId) : createProductionPtyBackend(sessionId, log),
+      log,
       processProbe: { identify: childProcessIdentity, observe: observeProcess },
       onEvent,
       onExit,

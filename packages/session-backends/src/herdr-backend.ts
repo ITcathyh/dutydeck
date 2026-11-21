@@ -11,7 +11,7 @@ import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSy
 import { dirname, isAbsolute } from 'node:path';
 import type { SessionBackend, SpawnOptions } from './types.js';
 import { exitedWithin, type PhysicalProcessIdentity, type ProcessProbe } from './owned-tmux.js';
-import { parseProcStat, procStatExited, type ProcStat } from '@dutydeck/shared';
+import { parseProcStat, procStatExited, warnCaught, type DiagnosticLog, type ProcStat } from '@dutydeck/shared';
 
 type Pane = { pane_id: string; terminal_id: string };
 interface State {
@@ -22,6 +22,7 @@ interface State {
 export interface HerdrBackendOptions {
   binary: string; stateFile: string; ownerId: string; processProbe: ProcessProbe;
   env?: NodeJS.ProcessEnv;
+  log?: DiagnosticLog;
 }
 
 export function herdrControlEnvironment(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
@@ -79,6 +80,10 @@ export class HerdrBackend implements SessionBackend {
   }
   hasState(): boolean { return !!this.state; }
   fork(): HerdrBackend { return new HerdrBackend(this.sessionName, this.options); }
+  private warnCaught(location: string, error: unknown) {
+    const sessionId = this.ownerId.startsWith('dutydeck:') ? this.ownerId.slice('dutydeck:'.length) : this.sessionName;
+    warnCaught(this.options.log, 'HerdrBackend', location, sessionId, error);
+  }
   private async cli(args: string[]): Promise<string> {
     try { return await runCommand(this.options.binary, ['--session', this.sessionName, ...args], { env: this.environment }); }
     catch (error) { throw new Error(`Herdr request failed; no backend fallback: ${String((error as { stderr?: Buffer }).stderr ?? (error as Error).message)}`); }
@@ -179,6 +184,7 @@ export class HerdrBackend implements SessionBackend {
   async cancelPending(): Promise<void> {
     this.lifecycle++;
     (await this.detach());
+    // best-effort: wait for creation to settle; its caller receives any launch error.
     await this.creation?.catch(() => {});
   }
   spawn(bin: string, args: string[], opts: SpawnOptions): Promise<void> {
@@ -360,7 +366,7 @@ export class HerdrBackend implements SessionBackend {
                     try { this.persist(); } catch (error) { this.state.identities = identities; throw error; }
                   }
                   if (this.terminalFrameGeneration === frameGeneration) this.identityCaptureDirty = false;
-                } catch { /* Unknown observations never prove exit. */ }
+                } catch (error) { this.warnCaught('attach.observeExecution', error); }
                 finally { polling = false; }
               }, 500); this.executionTimer.unref();
               resolve();
@@ -461,7 +467,7 @@ export class HerdrBackend implements SessionBackend {
         if (this.state !== state) return;
         this.state.identities = snapshot.identities;
         this.persist();
-      } catch { /* Never treat a failed capture as proof that execution is gone. */ }
+      } catch (error) { this.warnCaught('detach.captureOwnedIdentity', error); }
     }
     const child = this.stream;
     this.stream = undefined;
@@ -555,7 +561,7 @@ export class HerdrBackend implements SessionBackend {
               if (after.start === originalStart && procStatExited(after)) continue;
               if (after.start === originalStart && login && original?.startsWith(login[1]!)
                 && original !== login[1]! + login[2]! && !original.startsWith(login[1]! + login[2]! + '/')) continue;
-            } catch { /* Unknown membership or identity remains unresolved. */ }
+            } catch (error) { this.warnCaught('ownedProcesses.retryIdentity', error); }
           }
         }
         try { comm = readFileSync(`/proc/${entry}/comm`, 'utf8').trim(); } catch { /* Diagnostic metadata only. */ }
@@ -617,7 +623,7 @@ export class HerdrBackend implements SessionBackend {
       const callbacks = [...this.exitCallbacks]; (await this.detach());
       for (const callback of callbacks) callback(null, null);
       return true;
-    } catch { return false; }
+    } catch (error) { this.warnCaught('finishNaturalExitOnce', error); return false; }
   }
   async captureOwnedIdentity(): Promise<unknown> {
     const original = this.state, generation = this.lifecycle;
@@ -667,8 +673,12 @@ export class HerdrBackend implements SessionBackend {
         if (stat.dev !== snapshot.dev || stat.ino !== snapshot.ino) return false;
         const panes: Pane[] = JSON.parse((await this.cli(['pane', 'list']))).result.panes;
         return snapshot.launching ? false : !panes.some(pane => pane.terminal_id === snapshot.pane!.terminal_id);
-      } catch { return this.options.processProbe.observe(snapshot.server) === 'dead'; }
-    } catch { return false; }
+      } catch (error) {
+        const gone = this.options.processProbe.observe(snapshot.server) === 'dead';
+        if (!gone) this.warnCaught('verifyOwnedIdentity.listPanes', error);
+        return gone;
+      }
+    } catch (error) { this.warnCaught('verifyOwnedIdentity', error); return false; }
   }
   /** A server that never published its socket has no panes yet; retire it by its recorded process identity. */
   private async retireUnreadyServer(): Promise<boolean> {

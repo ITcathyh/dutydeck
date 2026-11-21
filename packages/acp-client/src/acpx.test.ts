@@ -5,7 +5,7 @@ import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { createRuntimeStore } from 'acpx/runtime';
+import { createRuntimeStore, type AcpRuntime } from 'acpx/runtime';
 import { AcpxAdapter, buildAcpxSessionOptions, normalizeAcpxEvent, renderAgentCommand } from './index.js';
 import '../../../tests/support/short-acpx-reply-drain.js';
 
@@ -13,6 +13,26 @@ const dirs: string[] = [];
 afterEach(async () => Promise.all(dirs.splice(0).map(path => rm(path, { recursive: true, force: true }))));
 
 describe('acpx ACP boundary', () => {
+  it('warns once when turn status cannot be read and still completes real ACP turns', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'dutydeck-acp-status-warning-')); dirs.push(cwd);
+    const sessionKey = 'turn-status-warning';
+    const warn = vi.fn(), onEvent = vi.fn();
+    const adapter = new AcpxAdapter({
+      ...agentConfig(), cwd, args: [resolve('tests/fixtures/mock-acp-agent.mjs')], permissionMode: 'deny-all',
+    }, { sessionKey, onEvent, log: { warn } });
+    try {
+      await adapter.start();
+      const { runtime } = adapter as unknown as { runtime: AcpRuntime };
+      vi.spyOn(runtime, 'getStatus').mockRejectedValue(new Error('turn status unavailable'));
+      await expect(adapter.send('first turn')).resolves.toBeUndefined();
+      await expect(adapter.send('second turn')).resolves.toBeUndefined();
+      expect(onEvent.mock.calls.filter(([event]) => event.type === 'completed')).toHaveLength(2);
+      expect(warn).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+        component: 'AcpxAdapter', location: 'turnUsage', sessionId: sessionKey, error: 'turn status unavailable',
+      }), expect.any(String));
+    } finally { await adapter.stop(); }
+  });
+
   it('initializes a custom Mock ACP agent and streams normalized events', async () => {
     const cwd = await mkdtemp(join(tmpdir(), 'dutydeck-acp-')); dirs.push(cwd);
     const fixture = resolve(process.cwd(), 'tests/fixtures/mock-acp-agent.mjs');

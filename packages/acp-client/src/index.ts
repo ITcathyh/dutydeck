@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { assertNativeContextRecord, createAcpRuntime, createAgentRegistry, createRuntimeStore, type AcpPermissionDecision, type AcpPermissionRequest, type AcpRuntime, type AcpRuntimeResourceScope, type AcpRuntimeHandle, type AcpRuntimeProcessEvent, type AcpRuntimeStatus, type AcpRuntimeTurn, type AcpSessionStore } from 'acpx/runtime';
 import type { AgentConfig, AgentDriver, DriverSteeringOutcome, DriverTranscriptSourceObservation, InsightClient, NormalizedDriverEvent, PermissionMode, ToolRiskPolicy, DriverSubmission, DriverSubmissionInput, NativeContextIdentity, NativeContextExpected, NativeConfigurationRequest, NativeConfigurationProof, OperationPermit, ChildPermit } from '@dutydeck/shared';
 import { RuntimeError, errorMessage, agentCommandApprovalReason, isAgentCommandAutoApproval, AGENT_IDLE_TIMEOUT, PromptNotWrittenError, claudeRateLimits, permissionDisplayText, taskExecutionSchemas, canonicalExecutionJson, type AgentIdleTimeoutData } from '@dutydeck/shared';
+import { warnCaught, type DiagnosticLog } from '@dutydeck/shared';
 import { eventContentText, eventHasContent, normalizeEventContent, shellQuote } from '@dutydeck/shared';
 import { childEnvironment } from '@dutydeck/shared/child-environment';
 import { testRegexWithTimeout } from './regex-timeout.js';
@@ -81,7 +82,7 @@ export function acpxAgentEnvironment(agent: AgentConfig): Record<string, string>
         accessSync(path, constants.X_OK);
         executable = path;
         break;
-      } catch {}
+      } catch { /* best-effort: keep searching PATH for an executable Codex. */ }
     }
     if (executable) break;
   }
@@ -327,7 +328,7 @@ export function buildAcpxSessionOptions(agent: AgentConfig) {
   };
 }
 
-export interface AcpxAdapterOptions { context?: import('@dutydeck/shared').DriverContext; resolveRiskPolicy?: (fallback?: ToolRiskPolicy) => Promise<ToolRiskPolicy | undefined>; sessionKey?: string; /** True while this session's Agent is waiting for a user's answer. */ awaitingAnswer?: () => boolean; onEvent(event: NormalizedDriverEvent): void; onExit?(code: number | null, signal: NodeJS.Signals | null): void }
+export interface AcpxAdapterOptions { context?: import('@dutydeck/shared').DriverContext; resolveRiskPolicy?: (fallback?: ToolRiskPolicy) => Promise<ToolRiskPolicy | undefined>; sessionKey?: string; log?: DiagnosticLog; /** True while this session's Agent is waiting for a user's answer. */ awaitingAnswer?: () => boolean; onEvent(event: NormalizedDriverEvent): void; onExit?(code: number | null, signal: NodeJS.Signals | null): void }
 type SessionAgentConfig = AgentConfig & { reasoningEffort?: string };
 
 export class AgentIdleTimeoutError extends Error {
@@ -462,6 +463,10 @@ export class AcpxAdapter implements AgentDriver {
   private permissionActive(turn: AcpRuntimeTurn | undefined, interruptVersion: number) {
     return !this.stopped && !this.turnCancelling && this.turn === turn && this.interruptVersion === interruptVersion;
   }
+  private warnCaught(location: string, error: unknown) {
+    const sessionId = this.options.context?.sessionId ?? this.options.sessionKey ?? this.agent.env.dutydeck_session_id;
+    warnCaught(this.options.log, 'AcpxAdapter', location, sessionId, error);
+  }
   private async permissionDecision(request: AcpPermissionRequest): Promise<AcpPermissionDecision> {
     const turn = this.turn, interruptVersion = this.interruptVersion;
     try { return await this.decidePermission(request, turn, interruptVersion); }
@@ -470,7 +475,7 @@ export class AcpxAdapter implements AgentDriver {
         try {
           const toolCallId = (request.raw as any)?.toolCall?.toolCallId;
           this.options.onEvent({ type: 'permission_request', data: { id: toolCallId ?? `permission-${Date.now()}`, toolCallId, title: `权限检查异常，已拒绝操作：${errorMessage(error)}`, options: [], status: 'rejected' } });
-        } catch { /* The decision stays a rejection. */ }
+        } catch (failure) { this.warnCaught('permissionDecision.publishRejection', failure); }
       }
       return { outcome: 'reject_once' };
     }
@@ -485,7 +490,7 @@ export class AcpxAdapter implements AgentDriver {
     let riskPolicy = this.riskPolicy;
     if (this.options.resolveRiskPolicy) {
       try { riskPolicy = await this.whileActive(() => this.options.resolveRiskPolicy!(riskPolicy)); }
-      catch { return { outcome: 'reject_once' }; }
+      catch (error) { this.warnCaught('decidePermission.resolveRiskPolicy', error); return { outcome: 'reject_once' }; }
     }
     if (!active()) return { outcome: 'reject_once' };
     if (riskPolicy?.enabled && !riskPolicy.authorized) {
@@ -525,7 +530,8 @@ export class AcpxAdapter implements AgentDriver {
       this.idleWatch?.refresh();
       try {
         this.options.onEvent({ type: 'permission_request', data: { id, toolCallId: raw.toolCall?.toolCallId, ...facts, options: (raw.options ?? []).map((option: any) => ({ id: option.optionId, label: permissionDisplayText(option.name, secrets, 100), kind: option.kind })), status: 'pending' } });
-      } catch {
+      } catch (error) {
+        this.warnCaught('decidePermission.publishRequest', error);
         if (this.pendingPermissions.get(id) === pending) this.pendingPermissions.delete(id);
         this.idleWatch?.refresh();
         resolve({ outcome: 'reject_once' });
@@ -869,6 +875,7 @@ export class AcpxAdapter implements AgentDriver {
       this.turnCancelling = false;
       // result can reject before its event stream closes. Observe it immediately.
       const result = turn.result;
+      // best-effort: observe rejection before the turn result is awaited.
       void result.catch(() => undefined);
       const idleTimeoutMs = Math.round(this.agent.timeout * 1_000);
       // 时限不到两个最短采样窗口时不看 CPU，照旧到点取消。
@@ -901,12 +908,12 @@ export class AcpxAdapter implements AgentDriver {
         const error = new AgentIdleTimeoutError(silentMs);
         // Keep consuming the same stream: ACPX finalizes resources before it
         // closes the iterator, but after it resolves turn.result.
-        void this.resourceOperation(() => turn.cancel({ reason: error.message })).catch(() => undefined);
+        void this.resourceOperation(() => turn.cancel({ reason: error.message })).catch(failure => this.warnCaught('sendTurn.cancelTimedOutTurn', failure));
         // A cancel RPC only requests termination. Give the original stream a
         // bounded chance to return an authoritative cancelled prompt result.
         cancellationDeadline = setTimeout(() => {
           cancellationExpired = true;
-          try { reportIdleTimeout(); } catch { /* 投递失败不影响按超时收尾 */ }
+          try { reportIdleTimeout(); } catch (failure) { this.warnCaught('sendTurn.publishIdleTimeout', failure); }
           rejectIdle(error);
         }, 2_000);
         // An Agent that never answers the cancel keeps this stream, the session's idle state and every later
@@ -1031,7 +1038,7 @@ export class AcpxAdapter implements AgentDriver {
       const status = await this.runtime.getStatus?.({ handle });
       usage = status?.usage;
       runtimeModel = status?.models?.currentModelId?.trim() || undefined;
-    } catch { return; }
+    } catch (error) { this.warnCaught('turnUsage', error); return; }
     const latest = Object.entries(usage?.perRequest ?? {}).at(-1);
     const cost = usage?.cost?.amount;
     if (!latest && cost === undefined && !runtimeModel) return;
@@ -1266,5 +1273,5 @@ export class AcpxAdapter implements AgentDriver {
   setRiskPolicy(policy?: ToolRiskPolicy) { this.riskPolicy = policy; }
   /** 本实例直接拉起、仍在运行的进程（Agent 与宿主终端），它们的后代构成受管进程树。 */
   processIds() { return [...this.processes.keys()].flatMap(child => child.pid ? [child.pid] : []); }
-  killActive() { void this.interrupt().catch(() => undefined); }
+  killActive() { void this.interrupt().catch(error => this.warnCaught('killActive.interrupt', error)); }
 }

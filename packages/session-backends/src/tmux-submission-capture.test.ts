@@ -13,6 +13,18 @@ beforeEach(() => { mockedRunCommand.mockReset(); });
 const cursor = '\x1b[7m \x1b[0m';
 
 describe('tmux submission cursor capture', () => {
+  it('warns once per session when capture fails and still returns no screen proof', async () => {
+    mockedRunCommand.mockRejectedValue(new Error('screen unavailable'));
+    const warn = vi.fn();
+    for (const sessionId of ['ses_capture_warning_1', 'ses_capture_warning_2']) {
+      const backend = new TmuxBackend(`tmux-${sessionId}`, { ownerId: `dutydeck:${sessionId}`, log: { warn } });
+      await expect(backend.captureInputSubmissionScreen()).resolves.toBeNull();
+      await expect(backend.captureInputSubmissionScreen()).resolves.toBeNull();
+    }
+    expect(warn.mock.calls.map(([data]) => data)).toEqual(['ses_capture_warning_1', 'ses_capture_warning_2'].map(sessionId =>
+      expect.objectContaining({ component: 'TmuxBackend', location: 'captureSubmissionScreen', sessionId, error: expect.stringContaining('screen unavailable') })));
+  });
+
   it('removes only the cursor and padding, preserving semantic trailing spaces', () => {
     expect(cleanTmuxSubmissionCapture(`❯ draft${cursor}\n`, '❯ draft   \n──────────\nfooter\n'))
       .toBe('❯ draft\n──────────\nfooter\n');

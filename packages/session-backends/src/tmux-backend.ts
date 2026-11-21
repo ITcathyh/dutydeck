@@ -1,4 +1,5 @@
 import { programStatusCommand } from './program-status-launch.js';
+import { warnCaught, type DiagnosticLog } from '@dutydeck/shared';
 /**
  * TmuxBackend — session backend backed by a detached tmux session.
  *
@@ -381,6 +382,11 @@ export interface TmuxBackendOptions {
    * the production driver from adopting external or unrelated user tmux panes.
    */
   ownerId?: string;
+  log?: DiagnosticLog;
+}
+
+function dutydeckSessionId(ownerId: string | undefined, sessionName: string): string {
+  return ownerId?.startsWith('dutydeck:') ? ownerId.slice('dutydeck:'.length) : sessionName;
 }
 
 /**
@@ -427,9 +433,13 @@ export class TmuxBackend implements SessionBackend {
   private exitTimer: PaneWatch | null = null;
   initialScreen?: { data: string; cols: number; rows: number };
 
-  constructor(sessionName: string, options: TmuxBackendOptions = {}) {
+  constructor(sessionName: string, private readonly options: TmuxBackendOptions = {}) {
     this.sessionName = sessionName;
     this.ownerId = options.ownerId;
+  }
+
+  private warnCaught(location: string, error: unknown) {
+    warnCaught(this.options.log, 'TmuxBackend', location, dutydeckSessionId(this.ownerId, this.sessionName), error);
   }
 
   // ─── SessionBackend implementation ──────────────────────────────────────
@@ -443,6 +453,7 @@ export class TmuxBackend implements SessionBackend {
   async cancelPending(): Promise<void> {
     this.lifecycle++;
     this.inputGeneration++;
+    // best-effort: wait for creation to settle; its caller receives any launch error.
     await this.creation?.catch(() => {});
   }
 
@@ -462,7 +473,7 @@ export class TmuxBackend implements SessionBackend {
     //    name is free again.
     const existing = await TmuxBackend.hasSession(this.sessionName);
     if (existing.orphanedSocket !== undefined) throw new TmuxServerError(orphanedTmuxSocketMessage(existing.orphanedSocket));
-    if (existing.probe === 'exists') await TmuxBackend.reapDeadOwnedSession(this.sessionName, this.ownerId);
+    if (existing.probe === 'exists') await TmuxBackend.reapDeadOwnedSession(this.sessionName, this.ownerId, this.options.log);
     check();
 
     // 1. Detached session running a bare shell. The CLI is launched by
@@ -519,7 +530,7 @@ export class TmuxBackend implements SessionBackend {
     } catch (err) {
       this.exited = true; // spawn failed — the instance is inert
       this.cleanup();
-      try { (await runTmux(['kill-session', '-t', this.sessionName], { timeout: 3000 })); } catch { /* best effort */ }
+      try { (await runTmux(['kill-session', '-t', this.sessionName], { timeout: 3000 })); } catch (error) { this.warnCaught('launch.killFailedSession', error); }
       throw err;
     }
   }
@@ -565,14 +576,14 @@ export class TmuxBackend implements SessionBackend {
   async interrupt(): Promise<void> {
     this.inputGeneration++;
     if (this.exited) return;
-    try { (await runTmux(['send-keys', '-t', this.sessionName, 'C-c'])); } catch { /* best effort */ }
+    try { (await runTmux(['send-keys', '-t', this.sessionName, 'C-c'])); } catch (error) { this.warnCaught('interrupt.sendKeys', error); }
   }
 
   async resize(cols: number, rows: number): Promise<void> {
     if (this.exited) return;
     try {
       (await runTmux(['resize-window', '-t', this.sessionName, '-x', String(cols), '-y', String(rows)]));
-    } catch { /* best effort */ }
+    } catch { /* best-effort: a pane may close during resize. */ }
   }
 
   /** Safe to call before spawn() — callbacks are buffered and survive the
@@ -611,7 +622,7 @@ export class TmuxBackend implements SessionBackend {
     // If its name now points at an unmarked/foreign pane, cleanup after a
     // failed attach must never destroy that pane (preserving external session history).
     if (this.ownerId !== undefined && (await TmuxBackend.sessionOwner(this.sessionName)) !== this.ownerId) return;
-    try { await runTmux(['kill-session', '-t', this.sessionName], { timeout: 3000 }); } catch { /* already gone */ }
+    try { await runTmux(['kill-session', '-t', this.sessionName], { timeout: 3000 }); } catch (error) { if (!(error instanceof TmuxSessionMissingError)) this.warnCaught('kill.killSession', error); }
   }
 
   /**
@@ -626,7 +637,7 @@ export class TmuxBackend implements SessionBackend {
     if (this.exited) return;
     this.exited = true;
     this.stopExitWatcher();
-    try { (await runTmux(['pipe-pane', '-t', this.sessionName])); } catch { /* best effort */ }
+    try { (await runTmux(['pipe-pane', '-t', this.sessionName])); } catch { /* best-effort: capture cleanup still closes the local socket. */ }
     this.cleanup();
   }
 
@@ -650,7 +661,9 @@ export class TmuxBackend implements SessionBackend {
       // local socket reader is gone. Replace that stale capture before arming
       // ours; the higher-level lease/fencing layer is responsible for
       // preventing two live daemons from attaching concurrently.
-      const oldCapture = await runTmux(['show-options', '-v', '-t', this.sessionName, '@dutydeck_capture_directory']).catch(() => '');
+      const oldCapture = await runTmux(['show-options', '-v', '-t', this.sessionName, '@dutydeck_capture_directory'])
+        // best-effort: the old capture directory is only needed for cleanup.
+        .catch(() => '');
       check();
       await runTmux(['pipe-pane', '-t', this.sessionName]);
       check();
@@ -681,7 +694,8 @@ export class TmuxBackend implements SessionBackend {
     if (includeScrollback) return this.captureSubmissionScreen(false);
     try {
       return await runTmux(['capture-pane', '-p', '-J', '-t', this.sessionName]);
-    } catch {
+    } catch (error) {
+      this.warnCaught('captureCurrentScreen', error);
       return null;
     }
   }
@@ -706,7 +720,8 @@ export class TmuxBackend implements SessionBackend {
       const boundary = captured.indexOf(separator);
       if (boundary < 0) return null;
       return cleanTmuxSubmissionCapture(captured.slice(0, boundary + 1), captured.slice(boundary + separator.length), requireCursor);
-    } catch {
+    } catch (error) {
+      this.warnCaught('captureSubmissionScreen', error);
       return null;
     }
   }
@@ -726,6 +741,7 @@ export class TmuxBackend implements SessionBackend {
       }
       return null;
     } catch {
+      // best-effort: pane dimensions are optional display metadata.
       return null;
     }
   }
@@ -739,7 +755,8 @@ export class TmuxBackend implements SessionBackend {
       )).trim();
       const pid = parseInt(out, 10);
       return pid > 0 ? pid : null;
-    } catch {
+    } catch (error) {
+      this.warnCaught('getPid', error);
       return null;
     }
   }
@@ -753,6 +770,7 @@ export class TmuxBackend implements SessionBackend {
       ], { timeout: 2000 })).trim();
       return value || undefined;
     } catch {
+      // best-effort: recovery markers may be absent on older sessions.
       return undefined;
     }
   }
@@ -817,7 +835,7 @@ export class TmuxBackend implements SessionBackend {
    * owner, a live pane, an unreadable state or any tmux error leaves the
    * session untouched. Returns whether a session was removed.
    */
-  static async reapDeadOwnedSession(name: string, ownerId: string | undefined): Promise<boolean> {
+  static async reapDeadOwnedSession(name: string, ownerId: string | undefined, log?: DiagnosticLog): Promise<boolean> {
     if (ownerId === undefined) return false;
     const sessionId = async () => (await runTmux(['display-message', '-p', '-t', name, '#{session_id}'], { timeout: 2000 })).trim();
     try {
@@ -832,7 +850,8 @@ export class TmuxBackend implements SessionBackend {
       if (!(await reapable()) || !(await reapable())) return false;
       await runTmux(['kill-session', '-t', id], { timeout: 3000 });
       return true;
-    } catch {
+    } catch (error) {
+      warnCaught(log, 'TmuxBackend', 'reapDeadOwnedSession', dutydeckSessionId(ownerId, name), error);
       return false;
     }
   }
@@ -848,6 +867,7 @@ export class TmuxBackend implements SessionBackend {
       const owner = (await runTmux(['show-options', '-v', '-t', name, OWNER_OPTION], { timeout: 2000 })).trim();
       return owner || undefined;
     } catch {
+      // best-effort: an external or missing pane may have no owner marker.
       return undefined;
     }
   }
@@ -985,7 +1005,7 @@ export class TmuxBackend implements SessionBackend {
       loaded = false;
     } finally {
       if (loaded) {
-        try { (await runTmux(['delete-buffer', '-b', bufferName], { timeout: 1000 })); } catch { /* best effort */ }
+        try { (await runTmux(['delete-buffer', '-b', bufferName], { timeout: 1000 })); } catch { /* best-effort: the paste buffer may already have been deleted. */ }
       }
     }
   }

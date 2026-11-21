@@ -3,6 +3,7 @@ import { childProcessIdentity } from '@dutydeck/storage/helpers';
 import { makeId, now, RuntimeError, taskExecutionSchemas, type BoundExecutionRepository, type ChildPermit, type DriverContext, type DriverResource, type DriverSubmission, type DriverSubmissionInput, type ExecutionRepository, type NativeContextIdentity, type NativeContextExpected, type NativeContextRef, type OperationPermit, type ResourceOperationScope, type SessionFence } from '@dutydeck/shared';
 import { canonicalExecutionJson } from '@dutydeck/shared';
 import { digest } from './ledger.js';
+import type { RevocationReason } from './ownership.js';
 
 type Permit = OperationPermit | ChildPermit;
 interface Entry { resourceId: string; operation: boolean; scope: ResourceOperationScope; child?: ChildProcess; exited: boolean; valid?: () => boolean; tail?: Promise<void>; finishTail?: () => void; finished?: boolean; exit?: Promise<void>; }
@@ -13,7 +14,7 @@ export class ControlledDriverResources {
   readonly rootOperation: OperationPermit;
   readonly context: DriverContext;
   private readonly permits = new Map<Permit, Entry>();
-  private revoked = false;
+  private revokedBy?: RevocationReason;
   private startupSettled = false;
   private nativeRef?: NativeContextRef;
   private nativeProof?: string;
@@ -92,7 +93,7 @@ export class ControlledDriverResources {
     if (!r) throw new RuntimeError('DRIVER_RESOURCE_MISSING','Original resource record is missing',409);return r;
   }
   private assertScope(scope:ResourceOperationScope) {
-    if (scope.kind!=='cleanup'&&(this.revoked||!this.valid()||!this.startupSettled&&!this.startupValid())) throw new RuntimeError('RESOURCE_OWNER_REVOKED','Original driver owner was revoked',409);
+    if (scope.kind!=='cleanup'&&(this.revokedBy||!this.valid()||!this.startupSettled&&!this.startupValid())) throw new RuntimeError('RESOURCE_OWNER_REVOKED','Original driver owner was revoked',409);
   }
   private assertEntry(entry:Entry) {
     this.assertScope(entry.scope);
@@ -145,7 +146,7 @@ export class ControlledDriverResources {
     this.execution().observed(this.fence,r.resourceId,r.revision,{observationId:makeId('observation'),...(r.identity?{identityId:r.identity.identityId}:{}),state:'gone',evidenceRef:'original-child-exit',observedAt:now()});
   }
   ready(){this.finish(this.rootOperation,'created');this.startupSettled=true;}
-  revoke(){this.revoked=true;}
+  revoke(reason:RevocationReason){this.revokedBy??=reason;}
   refs(){return [...this.permits.values()].filter(e=>!e.operation).map(e=>this.row(e)).filter(r=>r.stage==='created'&&r.identity&&r.observations.at(-1)?.state==='live').map(r=>({resourceId:r.resourceId,identityId:r.identity!.identityId}));}
   reusableIds(){return new Set(this.refs().map(ref=>ref.resourceId));}
   private prepare(input:DriverSubmissionInput):Omit<DriverSubmission,'operation'|'onAccepted'> {
@@ -171,7 +172,7 @@ export class ControlledDriverResources {
     return this.factoryCleanup;
   }
   private async abortFactoryOnce() {
-    this.revoke();this.factoryAborting=true;
+    this.revoke({code:'driver_factory_failed',by:'ControlledDriverResources.abortFactoryOnce'});this.factoryAborting=true;
     const failures:unknown[]=[];
     const captureFailure=(work:()=>void)=>{try{work();}catch(error){failures.push(error);}};
     captureFailure(()=>this.ready());
