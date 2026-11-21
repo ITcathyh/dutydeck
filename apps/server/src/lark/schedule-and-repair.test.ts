@@ -269,7 +269,7 @@ describe('F2-14: 没配白名单时禁止执行 /repair', () => {
 describe('/schedule every 遇到同名计划', () => {
   it('不新建也不更新，回复中文说明、当前状态、启停命令和 Web 编辑入口', async () => {
     const h = await testHarness({ configPatch: { allowedUsers: [{ openId: 'ou_alice', name: 'Alice' }] } });
-    const session = await h.runtime.startSession({ agentId: 'mock', cwd: h.cwd, source: 'lark', sourceId: `${h.config.appId}:oc_group:group` });
+    const session = await h.runtime.start({ agentId: 'mock', cwd: h.cwd, source: 'lark', sourceId: `${h.config.appId}:oc_group:group` });
     const config = { ...h.config, webBaseUrl: 'https://dutydeck.example.com/' };
     const run = (id: string, text: string) => executeScheduleCommand(h.automation, h.repos.config, session.id, text, event(id, `/schedule ${text}`), config);
     expect(await run('om_first', 'every 30 巡检构建')).toContain('已保存「巡检构建」，每 30 分钟在新会话里执行一次');
@@ -301,7 +301,7 @@ describe('F2-5: 定时结果卡「停用此计划」按钮与标题', () => {
       }
     });
     // 建立一个 session 和对应的 schedule
-    const session = await h.runtime.startSession({
+    const session = await h.runtime.start({
       agentId: 'mock',
       cwd: h.cwd,
       source: 'lark',
@@ -356,7 +356,7 @@ describe('F2-5: 定时结果卡「停用此计划」按钮与标题', () => {
         allowedUsers: [{ openId: 'ou_alice', name: 'Alice' }, { openId: 'ou_bob', name: 'Bob' }]
       }
     });
-    const session = await h.runtime.startSession({
+    const session = await h.runtime.start({
       agentId: 'mock',
       cwd: h.cwd,
       source: 'lark',
@@ -405,7 +405,7 @@ describe('F2-5: 定时结果卡「停用此计划」按钮与标题', () => {
         allowedUsers: [{ openId: 'ou_alice', name: 'Alice' }]
       }
     });
-    const session = await h.runtime.startSession({
+    const session = await h.runtime.start({
       agentId: 'mock',
       cwd: h.cwd,
       source: 'lark',
@@ -464,7 +464,7 @@ describe('F2-5: 定时结果卡「停用此计划」按钮与标题', () => {
 
 describe('Agent 代建计划的确认卡：启用与停用', () => {
   async function pendingSchedule(h: Awaited<ReturnType<typeof testHarness>>) {
-    const session = await h.runtime.startSession({ agentId: 'mock', cwd: h.cwd, source: 'lark', sourceId: `${h.config.appId}:oc_group:group` });
+    const session = await h.runtime.start({ agentId: 'mock', cwd: h.cwd, source: 'lark', sourceId: `${h.config.appId}:oc_group:group` });
     const sched = await h.automation.createSchedule(session.id, {
       name: '盯结论', prompt: '看看这个话题有没有排查结论', trigger: { kind: 'interval', everySeconds: 900, anchorAt: new Date().toISOString() },
       timezone: 'Asia/Shanghai', dstPolicy: { gap: 'skip', overlap: 'first' }, condition: { kind: 'always' }

@@ -1,10 +1,14 @@
-import { expect, it, vi } from 'vitest';
+import { WorkspaceManager } from './workspace.js';
+import { VerificationManager } from './verification.js';
+import { afterEach, expect, it, vi } from 'vitest';
 import { createRepositories } from '@dutydeck/storage';
 import { DutydeckRuntime } from './index.js';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { AgentConfig, AgentDriver, DriverFactory } from '@dutydeck/shared';
+
+afterEach(() => vi.restoreAllMocks());
 
 it('rejects a second Runtime before recovery or config writes', async () => {
   const repos = createRepositories(':memory:', { newDatabaseAuthority: 'ledger_v1' });
@@ -83,7 +87,7 @@ it('does not release its binding on shutdown failure while initialization recove
   const gate = new Promise<void>(resolve => { release = resolve; });
   const list = repos.config.list!.bind(repos.config);
   vi.spyOn(repos.config as { list: typeof list }, 'list').mockImplementation(async prefix => { entered(); await gate; return list(prefix); });
-  vi.spyOn((runtime as any).verifications, 'stop').mockRejectedValue(new Error('stop failed'));
+  vi.spyOn(VerificationManager.prototype, 'stop').mockRejectedValue(new Error('stop failed'));
   const initializing = runtime.initialize([]).catch(error => error);
   await enteredPromise;
   const stopping = runtime.shutdown().catch(error => error);
@@ -116,7 +120,7 @@ it.each((['prepare', 'commit', 'start'] as const).flatMap(stage => [
     await seedRuntime.initialize([agent]);
     sessionAId = (await seedRuntime.start({ agentId: agent.id, cwd: directory })).id;
     sessionBId = (await seedRuntime.start({ agentId: agent.id, cwd: directory })).id;
-    vi.spyOn(seedRuntime as unknown as { scheduleQueue(id: string): void }, 'scheduleQueue').mockImplementation(() => {});
+    seedRuntime.setQueueHeld(true);
     taskAId = (await seedRuntime.dispatch(sessionAId, 'work')).id;
     expect(seed.execution.getTaskExecution(taskAId)!.attempts).toEqual([]);
   } finally { await seedRuntime.shutdown(); seed.close(); }
@@ -149,12 +153,11 @@ it.each((['prepare', 'commit', 'start'] as const).flatMap(stage => [
     const rows = await rawList();
     return [rows.find(row => row.id === sessionAId)!, rows.find(row => row.id === sessionBId)!];
   });
-  const manager = (runtime as unknown as { workspaces: { get(id: string): Promise<unknown> } }).workspaces;
-  const get = manager.get.bind(manager);
+  const get = WorkspaceManager.prototype.get;
   let observedCloseError: unknown;
   const recoveryFailure = new Error('session B recovery failed');
-  vi.spyOn(manager, 'get').mockImplementation(async id => {
-    if (id !== sessionBId) return get(id);
+  vi.spyOn(WorkspaceManager.prototype, 'get').mockImplementation(async function (this: WorkspaceManager, id, recoverCleaning) {
+    if (id !== sessionBId) return get.call(this, id, recoverCleaning);
     await entered.promise;
     if (shutdownFirst) {
       stopping = runtime.shutdown();
@@ -239,11 +242,10 @@ it('waits for cleanup created after shutdown has already entered its initializat
   const repos = createRepositories(':memory:', { newDatabaseAuthority: 'ledger_v1' });
   const runtime = new DutydeckRuntime(repos, { driverIdleTimeoutMs: 0 });
   const initEntered = deferred(), initGate = deferred(), barrierEntered = deferred(), cleanupEntered = deferred(), cleanupGate = deferred();
-  const verifications = (runtime as any).verifications;
   runtime.getDriver('historical-session');
-  vi.spyOn(verifications, 'interruptRunning').mockImplementation(async () => { initEntered.resolve(); await initGate.promise; throw new Error('late recovery failure'); });
+  vi.spyOn(VerificationManager.prototype, 'interruptRunning').mockImplementationOnce(async () => { initEntered.resolve(); await initGate.promise; throw new Error('late recovery failure'); });
   let cleanupCalls = 0, cleanupFinished = false;
-  vi.spyOn(verifications, 'stopSession').mockImplementation(async () => {
+  vi.spyOn(VerificationManager.prototype, 'stopSession').mockImplementation(async () => {
     if (++cleanupCalls === 2) { cleanupEntered.resolve(); await cleanupGate.promise; cleanupFinished = true; }
   });
   const initializing = runtime.initialize([]);
@@ -273,7 +275,7 @@ it('waits for cleanup created after shutdown has already entered its initializat
     try { await next.initialize([]); } finally { await next.shutdown(); }
   } finally {
     initGate.resolve(); cleanupGate.resolve();
-    await stopping; await (runtime as any).initializationCleanup;
+    await stopping;
     subscription.mockRestore(); repos.close();
   }
 });

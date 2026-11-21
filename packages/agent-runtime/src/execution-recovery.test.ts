@@ -1,10 +1,11 @@
+import { captureBoundExecution } from '../../../tests/support/bound-execution.js';
 import { readTaskReport, writeTaskReport } from '@dutydeck/shared';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createRepositories } from '@dutydeck/storage';
-import type { AgentConfig, DriverFactory, ExecutionRecoveryDecision, BoundExecutionRepository } from '@dutydeck/shared';
+import type { AgentConfig, DriverFactory, ExecutionRecoveryDecision } from '@dutydeck/shared';
 import { DutydeckRuntime, type RuntimeOptions, type PtyRetirementControl } from './index.js';
 const owner = { kind: 'installation_owner', id: 'installation_owner' } as const;
 const cleanups: Array<() => Promise<void>> = [];
@@ -12,6 +13,7 @@ afterEach(async () => { for (const close of cleanups.splice(0).reverse()) await 
 async function fixture(options: RuntimeOptions = {}, isStopped = true, deferFailure = false) {
   const cwd = await mkdtemp(join(tmpdir(), 'dutydeck-recovery-'));
   const repos = createRepositories(':memory:', { newDatabaseAuthority: 'ledger_v1' });
+  const bound = captureBoundExecution(repos);
   const prompts: string[] = [];
   let fail = true, releaseFailure!:()=>void;
   const failureGate=new Promise<void>(done=>{releaseFailure=done;});
@@ -36,7 +38,7 @@ async function fixture(options: RuntimeOptions = {}, isStopped = true, deferFail
     return { runId: snapshot.runId, taskId: first.id, attemptId: attempt.attemptId, expectedRevision: attempt.revision,
       decisionId, action: 'confirm_result', outcome: 'unknown', evidenceRefs: ['operator:original-result-unknown'], resourceChecks: snapshot.resourceChecks };
   };
-  return { repos, session, first, second, prompts, decision, releaseFailure, get runtime() { return runtime; },
+  return { repos, bound, session, first, second, prompts, decision, releaseFailure, get runtime() { return runtime; },
     reopen: async () => { await runtime.shutdown(); fail = false; runtime = new DutydeckRuntime(repos, { ...options, driverFactory: factory, cleanupIntervalMs: 0 }); await runtime.initialize([agent]); } };
 }
 describe('owner execution recovery', () => {
@@ -74,7 +76,7 @@ describe('owner execution recovery', () => {
 
   it('retains completed steered tasks without attempts and their session resource blockers in bulk recovery', async () => {
     const h = await fixture({},true,true);
-    const bound = (h.runtime as any).bound() as BoundExecutionRepository;
+    const bound = h.bound();
     const fence = { sessionId: h.session.id, runId: h.session.runId };
     const target = h.repos.execution.getTaskExecution(h.first.id)!.currentAttempt!;
     const queued = h.repos.execution.getTaskExecution(h.second.id)!.task;
@@ -182,7 +184,7 @@ describe('owner execution recovery', () => {
 
 describe('trusted explicit PTY retirement', () => {
   const inputFor = async (h: Awaited<ReturnType<typeof fixture>>, decisionId = 'retire') => {
-    await vi.waitFor(() => expect((h.runtime as any).drains.size).toBe(0));
+    await vi.waitFor(() => expect(h.runtime.inspectAgentQuiescence(h.session.id)).not.toBe('busy'));
     const r = (await h.runtime.inspectExecutionRecovery(h.session.id, owner)).resources.find(r => r.kind === 'local_only')!;
     return { runId: h.session.runId, resourceId: r.resourceId, expectedRevision: r.revision, decisionId, evidenceRefs: ['operator:exact-owner-reviewed'] };
   };
@@ -205,7 +207,7 @@ describe('trusted explicit PTY retirement', () => {
     expect(repeat.replayed).toBe(true); expect(stop).toHaveBeenCalledTimes(1); expect(capture).toHaveBeenCalledTimes(1);
     const resource = repeat.recovery.resources.find(r => r.resourceId === input.resourceId)!;
     expect(resource.observations.filter(o => o.state === 'gone')).toHaveLength(1);
-    const bound = (h.runtime as any).bound() as BoundExecutionRepository, fence = { sessionId: h.session.id, runId: input.runId };
+    const bound = h.bound(), fence = { sessionId: h.session.id, runId: input.runId };
     let next = bound.beforeCreate(fence, { resourceId: 'new-generation', kind: 'local_only' });
     next = bound.spawned(fence, next.resourceId, next.revision, { identityId: 'new-identity', kind: 'local_only', locator: { owner: 'runtime-adapter' } });
     next = bound.creationFinished(fence, next.resourceId, next.revision, 'created');
@@ -223,7 +225,7 @@ describe('trusted explicit PTY retirement', () => {
   it('rejects a historical gone resource and ambiguous live resources without touching the current PTY', async () => {
     const capture = vi.fn(() => ({ original: true })), stop = vi.fn<PtyRetirementControl['stop']>(async (_s, snapshot) => snapshot);
     const h = await fixture({ ptyRetirement: { capture, stop, verify: () => false } }, false);
-    const input = await inputFor(h), bound = (h.runtime as any).bound() as BoundExecutionRepository;
+    const input = await inputFor(h), bound = h.bound();
     const fence = { sessionId: h.session.id, runId: h.session.runId };
     let second = bound.beforeCreate(fence, { resourceId: 'second-pty', kind: 'local_only' });
     second = bound.spawned(fence, second.resourceId, second.revision, { identityId: 'second-generation', kind: 'local_only', locator: { owner: 'runtime-adapter' } });

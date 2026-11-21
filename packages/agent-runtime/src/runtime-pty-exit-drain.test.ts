@@ -118,7 +118,7 @@ async function runCase(mode: 'natural' | 'stop_during_drain' | 'hold_attempt_con
     }
 
     observeEndGate.resolve();
-    await until(() => !(runtime as any).attempts.has(session.id), 'Runtime error cleanup complete');
+    await until(() => runtime.getActiveTaskContext(session.id) === undefined, 'Runtime error cleanup complete');
     expect(repos.execution.getTaskExecution(task.id)?.task.status).toBe('reconcile_required');
     return { task, attemptId, persistedTail, attemptTail };
   } finally {

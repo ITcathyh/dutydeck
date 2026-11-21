@@ -1,3 +1,4 @@
+import { captureBoundExecution } from '../../../tests/support/bound-execution.js';
 import { expect, it, vi } from 'vitest';
 import { createRepositories } from '@dutydeck/storage';
 import type { AgentConfig, AgentDriver, NormalizedDriverEvent } from '@dutydeck/shared';
@@ -28,14 +29,14 @@ it('an event that fails to record after the turn was flushed does not fail the n
       return driver;
     },
   });
-  const internal = runtime as unknown as { emit: (...args: unknown[]) => Promise<unknown> };
-  const original = internal.emit.bind(runtime);
-  vi.spyOn(internal, 'emit').mockImplementation(async (...args: unknown[]) => {
-    if ((args[2] as { text?: string } | undefined)?.text === 'late') throw new Error('late event write failed');
-    return original(...args);
-  });
+  const bound = captureBoundExecution(repos);
   try {
     await runtime.initialize([agent]);
+    const append = bound().appendEvent.bind(bound());
+    vi.spyOn(bound(), 'appendEvent').mockImplementation((scope, event) => {
+      if (event.type === 'text' && (event.data as { text?: string }).text === 'late') throw new Error('late event write failed');
+      return append(scope, event);
+    });
     const session = await runtime.start({ agentId: agent.id });
     expect((await runtime.send(session.id, 'first')).status).toBe('completed');
     expect((await runtime.send(session.id, 'second')).status).toBe('completed');

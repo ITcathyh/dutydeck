@@ -1,3 +1,4 @@
+import { runtimeInputs } from '../../../tests/support/runtime-construction.js';
 import { backgroundKindCases } from '../../../tests/support/background-kind-cases.js';
 import { classifyUsage } from './usage-ledger.js';
 import { PluginRuntimeHooks } from './plugins/integration.js';
@@ -11,7 +12,6 @@ import { Writable } from 'node:stream';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { createRepositories } from '@dutydeck/storage';
-import type { RuntimeOptions } from '@dutydeck/runtime';
 import { botAppIdOfSession, type Session } from '@dutydeck/shared';
 import { LarkAgentToolsService } from './lark/agent-tools.js';
 import { HerdrSessions } from './herdr.js';
@@ -53,7 +53,7 @@ it('composes frozen collaboration prompts without tool, plugin-result or Herdr d
     DUTYDECK_DEFAULT_CWD: root, DUTYDECK_DATABASE_URL: database, DUTYDECK_AUTH: 'false',
     DUTYDECK_DISABLE_LARK_LISTENER: 'true', DUTYDECK_AGENTS_JSON: '[]'
   } });
-  const options = (service.runtime as unknown as { options: RuntimeOptions }).options;
+  const options = runtimeInputs(service.runtime).options;
   const tools = vi.spyOn(LarkAgentToolsService.prototype, 'promptForSession').mockImplementation(async (_session, prompt) => `TOOLS\n\n${prompt}`);
   const herdr = vi.spyOn(HerdrSessions.prototype, 'prompt').mockReturnValue('HERDR');
   const active = vi.spyOn(service.runtime, 'getActiveTaskContext');
@@ -100,7 +100,7 @@ it('preserves usage, Claude settings, hook permissions and host injection for pe
     DUTYDECK_DEFAULT_CWD: root, DUTYDECK_DATABASE_URL: join(root, 'dutydeck.db'),
     DUTYDECK_DISABLE_LARK_LISTENER: 'true', DUTYDECK_AGENTS_JSON: '[]'
   } });
-  const options = (service.runtime as unknown as { options: RuntimeOptions }).options;
+  const options = runtimeInputs(service.runtime).options;
   const hooks = new PluginRuntimeHooks(new PluginHookBus([{
     kind: 'handler', plugin: 'fixture', scope: 'global', event: 'task.beforeRun', timeout: 1_000,
     handler: () => ({ updatedPrompt: 'rewritten' })
@@ -137,7 +137,7 @@ it('marks only group Claude sessions of a memory-enabled bot that turned claudeA
     DUTYDECK_DEFAULT_CWD: root, DUTYDECK_DATABASE_URL: database, DUTYDECK_AUTH: 'false',
     DUTYDECK_DISABLE_LARK_LISTENER: 'true', DUTYDECK_AGENTS_JSON: '[]'
   } });
-  const options = (service.runtime as unknown as { options: RuntimeOptions }).options;
+  const options = runtimeInputs(service.runtime).options;
   const terminal = { id: 'claude-code', name: 'Claude Code', command: 'claude', args: [], protocol: 'pty-cli' as const, adapterId: 'claude-code', cwd: root, env: { USER_KEY: 'kept' },
     permissionMode: 'ask' as const, timeout: 60, capabilities: { pause: false, resume: true }, builtin: true };
   const builtinAcp = { ...terminal, id: 'claude', protocol: 'acp' as const, adapterId: undefined, command: process.execPath, args: [join(root, 'agents', 'claude-acp.mjs')] };

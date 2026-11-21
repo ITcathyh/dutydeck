@@ -1,3 +1,4 @@
+import { captureBoundExecution } from './support/bound-execution.js';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { once } from 'node:events';
 import { tmpdir } from 'node:os';
@@ -38,6 +39,7 @@ describe('JSONL/Pipe runtime turn integration', () => {
     it(`[${protocol}] isolates a timed-out process while the next queued task is preparing`, async () => {
       const dir = await mkdtemp(join(tmpdir(), 'dutydeck-turn-retired-')); dirs.push(dir);
       const repos = createTestRepos(join(dir, 'test.sqlite'));
+      const bound = captureBoundExecution(repos);
       const log = join(dir, 'submitted.jsonl'), terminateGate = join(dir, 'terminate');
       let entered!: () => void, release!: () => void;
       const enteredPromise = new Promise<void>(resolve => { entered = resolve; });
@@ -66,7 +68,7 @@ describe('JSONL/Pipe runtime turn integration', () => {
       const exited = once(original, 'exit');
       try {
         const first = await runtime.dispatch(session.id, 'hang-forever');
-        const second = await runtime.dispatch(session.id, 'second');
+        const second = await runtime.dispatch(session.id, 'second', 'queue', 'second', undefined, undefined, 'queued-second');
         const third = await runtime.dispatch(session.id, 'third');
         await vi.waitFor(async () => {
           expect((await repos.tasks.get!(first.id))?.status).toBe('reconcile_required');
@@ -74,14 +76,13 @@ describe('JSONL/Pipe runtime turn integration', () => {
         const exec = repos.execution.getTaskExecution(first.id)!;
         const attempt = exec.attempts[0]!;
         const fence = { sessionId: session.id, runId: session.runId, taskId: first.id, attemptId: attempt.attemptId, expectedRevision: attempt.revision };
-        (runtime as any).bound().settleAttempt(fence, `settle:${first.id}`, {
+        bound().settleAttempt(fence, `settle:${first.id}`, {
           kind: 'manual',
           outcome: 'failed',
           decision: { decisionId: `dec:${first.id}`, action: 'confirm_result', actor: { kind: 'installation_owner', id: 'installation_owner' }, evidenceRefs: ['manual_resolution'], resourceChecks: [] }
         });
-        (runtime as any).queueBlocked.delete(session.id);
-        await (runtime as any).projectQueue(session.id);
-        (runtime as any).scheduleQueue(session.id);
+        const replay = await runtime.dispatch(session.id, 'second', 'queue', 'second', undefined, undefined, 'queued-second');
+        expect(replay).toMatchObject({ id: second.id, replayed: true });
         await enteredPromise;
         expect((await repos.tasks.get!(first.id))?.status).toBe('failed');
         expect((await readFile(log, 'utf8')).trim().split('\n').map(line => JSON.parse(line))).toEqual(['hang-forever']);
@@ -260,6 +261,7 @@ describe('JSONL/Pipe runtime turn integration', () => {
     const dir = await mkdtemp(join(tmpdir(), 'dutydeck-turn-nonzero-'));
     dirs.push(dir);
     const repos = createTestRepos(join(dir, 'test.sqlite'));
+    const bound = captureBoundExecution(repos);
     const runtime = new DutydeckRuntime(repos, {
       driverIdleTimeoutMs: 0,
       driverFactory: (agent, _proto, onEvent, onExit) => {
@@ -305,7 +307,7 @@ describe('JSONL/Pipe runtime turn integration', () => {
     const exec = repos.execution.getTaskExecution(failedTask.id)!;
     const attempt = exec.attempts[0]!;
     const fence = { sessionId: session.id, runId: session.runId, taskId: failedTask.id, attemptId: attempt.attemptId, expectedRevision: attempt.revision };
-    (runtime as any).bound().settleAttempt(fence, `settle:${failedTask.id}`, {
+    bound().settleAttempt(fence, `settle:${failedTask.id}`, {
       kind: 'manual',
       outcome: 'failed',
       decision: { decisionId: `dec:${failedTask.id}`, action: 'confirm_result', actor: { kind: 'installation_owner', id: 'installation_owner' }, evidenceRefs: ['manual_resolution'], resourceChecks: [] }

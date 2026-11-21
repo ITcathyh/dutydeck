@@ -1,3 +1,4 @@
+import { captureBoundExecution } from '../../../tests/support/bound-execution.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { execFileSync } from 'node:child_process';
 import { createRequire } from 'node:module';
@@ -18,8 +19,11 @@ async function fixture(options: RuntimeOptions = {}) {
   const cwd = await mkdtemp(join(tmpdir(), 'runtime-stuck-'));
   execFileSync('git', ['-C', cwd, 'init', '-q']);
   const repos = createRepositories(join(cwd, 'state.db'), { newDatabaseAuthority: 'ledger_v1' });
+  const bound = captureBoundExecution(repos);
   const sent: string[] = [], failures = new Map<string, Error>(), gates = new Map<string, ReturnType<typeof deferred>>();
-  const factory: DriverFactory = (_agent, _protocol, emit) => {
+  const emitters = new Map<string, Parameters<DriverFactory>[2]>();
+  const factory: DriverFactory = (_agent, _protocol, emit, _exit, sessionId) => {
+    emitters.set(sessionId, emit);
     let busy = false;
     return { start: async () => {}, stop: async () => {}, isStopped: async () => false, interrupt: async () => {}, resume: async () => {},
       isIdle: () => !busy, hasBackgroundWork: () => false,
@@ -39,7 +43,7 @@ async function fixture(options: RuntimeOptions = {}) {
   let runtime = open();
   cleanups.push(async () => { for (const gate of gates.values()) gate.resolve(); await runtime.shutdown(); repos.close(); await rm(cwd, { recursive: true, force: true }); });
   await runtime.initialize([agent]);
-  return { repos, cwd, sent, failures, gates, warn, notices, get runtime() { return runtime; },
+  return { repos, bound, cwd, sent, emitters, failures, gates, warn, notices, get runtime() { return runtime; },
     reopen: async (extra: RuntimeOptions = {}) => { await runtime.shutdown(); runtime = open(extra); await runtime.initialize([agent]); } };
 }
 const blockedLogs = (warn: ReturnType<typeof vi.fn>) => warn.mock.calls.filter(([, message]) => message === 'Queued task is blocked by another session in the same workspace');
@@ -57,7 +61,7 @@ describe('a task held back by its repository is visible', () => {
     const h = await fixture();
     const session = await h.runtime.start({ agentId: 'fixture', cwd: h.cwd });
     const blockers = [{ sessionId: 'other', code: 'DRIVER_STOP_BLOCKED' }];
-    vi.spyOn((h.runtime as any).bound(), 'claimNext').mockImplementation(() => {
+    vi.spyOn(h.bound(), 'claimNext').mockImplementation(() => {
       throw new RuntimeError('WORKSPACE_RESOURCE_BLOCKED', 'Workspace is held by another session', 409, blockers);
     });
     const queued = await h.runtime.dispatch(session.id, 'waiting');
@@ -97,7 +101,12 @@ describe('a task held back by its repository is visible', () => {
     expect(blockedLogs(h.warn)[0]![0]).toMatchObject({ blockers: expect.arrayContaining([expect.objectContaining({ code: 'WORKSPACE_EXECUTION_BUSY', sessionId: one.id, taskId: unknown.id })]) });
     expect(await noticeEvents(h, two.id)).toHaveLength(1);
     // Repeated admission retries stay quiet.
-    for (let retry = 0; retry < 3; retry++) { (h.runtime as any).wakeResourceQueues(); await new Promise(resolve => setTimeout(resolve, 20)); }
+    const claim = vi.spyOn(h.bound(), 'claimNext');
+    for (let retry = 0; retry < 3; retry++) {
+      claim.mockClear();
+      h.emitters.get(one.id)!({ type: 'status', data: { state: 'program_status', programState: 'idle' } });
+      await vi.waitFor(() => expect(claim.mock.calls.some(([fence]) => fence.sessionId === two.id)).toBe(true));
+    }
     expect(h.notices).toHaveBeenCalledTimes(1); expect(blockedLogs(h.warn)).toHaveLength(1);
     expect(h.repos.execution.getTaskExecution(queued.id)?.task.status).toBe('queued');
     await h.runtime.settleIdleAttempt(one.id, { taskId: unknown.id, decisionId: 'operator-failed', outcome: 'failed', evidenceRefs: ['operator:checked'] }, owner);

@@ -2014,17 +2014,18 @@ it('exposes only the matching active attempt and preserves currentAttemptId thro
   await h.runtime.initialize([agent]);
   const session = await h.runtime.start({ agentId: 'mock' });
   expect(h.runtime.getActiveTaskContext(session.id)).toBeUndefined();
+  const claim = vi.spyOn(h.bound(), 'claimNext');
   const sending = h.runtime.send(session.id, 'answer');
   await vi.waitFor(() => expect(h.runtime.getActiveTaskContext(session.id)?.attemptId).toBeTruthy());
   const active = h.runtime.getActiveTaskContext(session.id)!;
   expect((await h.repos.tasks.get!(active.taskId))?.currentAttemptId).toBe(active.attemptId);
   expect((await h.runtime.getTasks(session.id))[0]?.currentAttemptId).toBe(active.attemptId);
-  const owner = (h.runtime as any).attempts.get(session.id);
-  const ref = (h.runtime as any).attemptRefs.get(owner);
-  (h.runtime as any).attemptRefs.set(owner, { ...ref, taskId: 'another-task' });
-  expect(h.runtime.getActiveTaskContext(session.id)).toMatchObject({ taskId: active.taskId });
-  expect(h.runtime.getActiveTaskContext(session.id)?.attemptId).toBeUndefined();
-  (h.runtime as any).attemptRefs.set(owner, ref);
+  const task = claim.mock.results.find(result => result.type === 'return' && result.value?.task?.id === active.taskId)!.value!.task!;
+  task.id = 'another-task';
+  try {
+    expect(h.runtime.getActiveTaskContext(session.id)).toMatchObject({ taskId: 'another-task' });
+    expect(h.runtime.getActiveTaskContext(session.id)?.attemptId).toBeUndefined();
+  } finally { task.id = active.taskId; }
   gate.resolve(); await sending; await h.runtime.shutdown();
   const restarted = new DutydeckRuntime(h.repos);
   try {

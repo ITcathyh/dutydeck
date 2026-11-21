@@ -1,10 +1,10 @@
+import { configureRuntime, runtimeInputs } from '../../../tests/support/runtime-construction.js';
 import { expect, it, vi } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createServer } from 'node:net';
 import { createRepositories } from '@dutydeck/storage';
-import type { DriverFactory, RuntimeOptions } from '@dutydeck/runtime';
 import { agentConfigSchema } from '@dutydeck/shared';
 import { startLocalServer } from './service.js';
 import { ProjectMemoryService } from './project-memory.js';
@@ -16,14 +16,16 @@ it('wires owner APIs and per-turn project memory through the real service and wa
     const server = createServer(); server.once('error', reject); server.listen(0, '127.0.0.1', () => { const address = server.address(); if (!address || typeof address === 'string') throw new Error('TCP port missing'); server.close(() => resolve(address.port)); });
   });
   const seed = createRepositories(database, { newDatabaseAuthority: 'ledger_v1' }); seed.close();
+  const prompts: string[] = []; let starts = 0;
+  configureRuntime.mockImplementationOnce(options => {
+    options.probe = () => ({ protocol: 'acp', available: true, pause: false, resume: true });
+    options.driverFactory = (_agent, _protocol, emit) => ({ isIdle: () => true, hasBackgroundWork: () => false, resume: async () => {}, start: async () => { starts++; }, stop: async () => {}, isStopped: async () => true, interrupt: async () => {}, send: async prompt => { prompts.push(typeof prompt === 'string' ? prompt : prompt.prompt); emit({ type: 'text', data: { text: '完成' } }); emit({ type: 'completed', data: { stopReason: 'end_turn' } }); } });
+  });
   const service = await startLocalServer({ webRoot: root, env: { PATH: process.env.PATH, HOME: root, NODE_ENV: 'test', DUTYDECK_HOST: '127.0.0.1', DUTYDECK_PORT: String(port), DUTYDECK_DEFAULT_CWD: root, DUTYDECK_DATABASE_URL: database, DUTYDECK_DAEMON_DIR: join(root, 'daemon'), DUTYDECK_AUTH: 'false', DUTYDECK_DISABLE_LARK_LISTENER: 'true', DUTYDECK_AGENTS_JSON: '[]' } });
   const repos = createRepositories(database);
   try {
-    const runtime = service.runtime as unknown as { factory: DriverFactory; options: RuntimeOptions };
-    const prompts: string[] = []; let starts = 0;
-    const promptHook = vi.fn(runtime.options.sessionPrompt!); runtime.options.sessionPrompt = promptHook;
-    runtime.options.probe = () => ({ protocol: 'acp', available: true, pause: false, resume: true });
-    runtime.factory = (_agent, _protocol, emit) => ({ isIdle: () => true, hasBackgroundWork: () => false, start: async () => { starts++; }, stop: async () => {}, isStopped: async () => true, interrupt: async () => {}, send: async prompt => { prompts.push(prompt); emit({ type: 'text', data: { text: '完成' } }); emit({ type: 'completed', data: { stopReason: 'end_turn' } }); } });
+    const { options } = runtimeInputs(service.runtime);
+    const promptHook = vi.fn(options.sessionPrompt!); options.sessionPrompt = promptHook;
     await repos.agents.save(agentConfigSchema.parse({ id: 'fake', name: 'Fake', command: 'fake', protocol: 'acp', cwd: root }));
     const first = await service.runtime.start({ agentId: 'fake' }); const second = await service.runtime.start({ agentId: 'fake' });
     const request = async (endpoint: string, method = 'GET', body?: unknown) => {

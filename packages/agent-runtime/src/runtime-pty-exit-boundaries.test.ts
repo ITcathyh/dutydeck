@@ -30,7 +30,7 @@ async function runCase(mode: Mode) {
   let exitWork: Promise<void> | undefined;
   let stream: ReturnType<PtyCliDriver['createTerminalStream']> | undefined;
   let terminal = '', killCalls = 0;
-  const emittedTail: Array<Record<string, unknown>> = [];
+  const emittedTail: string[] = [];
   const runtimeExits: Array<number | null> = [];
   const warnings: Array<Record<string, unknown>> = [];
   const runtime = new DutydeckRuntime(repos, {
@@ -47,10 +47,7 @@ async function runCase(mode: Mode) {
           injectSessionContext: () => '', completionPattern: /THIS_FIXTURE_NEVER_COMPLETES/,
           writeInput: target => { target.write('go\r'); } },
         onEvent: event => {
-          if (event.type === 'raw_terminal' && String(event.data.text).includes(tail)) emittedTail.push({
-            activeAttempt: (runtime as any).attempts.has(id), generation: (runtime as any).sessionGenerations.get(id), shuttingDown: (runtime as any).shuttingDown,
-            lifecycleValid: (runtime as any).mutations.valid((runtime as any).lifecycles.get(id)),
-          });
+          if (event.type === 'raw_terminal' && String(event.data.text).includes(tail)) emittedTail.push(String(event.data.text));
           onEvent(event);
         },
         onExit,
@@ -108,7 +105,7 @@ async function runCase(mode: Mode) {
 
     if (mode === 'review_natural') {
       const startedAt = Date.now();
-      await until(() => !(runtime as any).attempts.has(session.id)
+      await until(() => runtime.getActiveTaskContext(session.id) === undefined
         && repos.execution.getTaskExecution(task.id)?.task.status === 'reconcile_required'
         && warnings.some(warning => warning.code === 'DRIVER_EXIT_DRAIN_TIMEOUT'), 'bounded natural exit cleanup');
       expect(Date.now() - startedAt).toBeLessThan(8_000);
@@ -136,7 +133,7 @@ async function runCase(mode: Mode) {
         const nextAttempt = repos.execution.getTaskExecution(nextTask.id)?.attempts[0];
         if (!nextAttempt) return false;
         nextAttemptId = nextAttempt.attemptId;
-        return (runtime as any).attempts.has(session.id) && driver !== exitedDriver;
+        return runtime.getActiveTaskContext(session.id)?.attemptId === nextAttemptId && driver !== exitedDriver;
       }, 'replacement attempt after the late approval');
       expect((runtime as any).sessionGenerations.get(session.id)).toBeGreaterThan(generationBefore);
 
@@ -173,7 +170,7 @@ async function runCase(mode: Mode) {
       if (mode === 'shutdown') await expect(runtime.dispatch(session.id, 'new work must stay closed')).rejects.toMatchObject({ code: 'RUNTIME_SHUTTING_DOWN' });
       gate.resolve(); await exitWork; await control;
     }
-    await until(() => !(runtime as any).attempts.has(session.id), 'Runtime attempt cleanup');
+    await until(() => runtime.getActiveTaskContext(session.id) === undefined, 'Runtime attempt cleanup');
     while ((runtime as any).driverEventChains.size) await Promise.allSettled([...(runtime as any).driverEventChains.values()]);
     const sessionEvents = await runtime.getEvents(session.id);
     const persistedTail = sessionEvents.filter(event => event.sequence > beforeTaskSequence && event.type === 'raw_terminal' && String((event.data as any).text).includes(tail));

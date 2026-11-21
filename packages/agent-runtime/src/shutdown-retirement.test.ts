@@ -35,11 +35,11 @@ describe('runtime shutdown persistent PTY policy', () => {
   it('stops a safe idle driver, retains queued input, and executes it once after restart', async () => {
     const h = await setup('complete'); await h.runtime.send(h.session.id, 'first');
     await vi.waitFor(() => expect(h.runtime.getActiveTaskContext(h.session.id)).toBeUndefined());
-    await vi.waitFor(() => expect((h.runtime as any).recoveryInFlight(h.session.id)).toBe(false));
+    await vi.waitFor(() => expect(h.runtime.inspectAgentQuiescence(h.session.id)).not.toBe('busy'));
     // A scheduling check can leave accepted work queued while an otherwise idle driver exists.
-    const scheduler = vi.spyOn(h.runtime as any, 'scheduleQueue').mockImplementation(() => {});
+    h.runtime.setQueueHeld(true);
     const queued = await h.runtime.dispatch(h.session.id, 'after restart');
-    expect(queued.status).toBe('queued'); scheduler.mockRestore(); await h.runtime.shutdown();
+    expect(queued.status).toBe('queued'); await h.runtime.shutdown();
     expect(h.prepares).toEqual([false]);
     expect(h.repos.execution.getTaskExecution(queued.id)?.task.status).toBe('queued');
     expect(h.repos.execution.getResources(h.session.id).find(r => r.kind === 'local_only')?.observations.at(-1)?.state).toBe('gone');

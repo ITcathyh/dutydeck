@@ -272,11 +272,11 @@ describe('managed Session workspaces', () => {
     writeFileSync(join(source, 'new-head.txt'), 'new head\n'); git(source, 'add', '.'); git(source, 'commit', '-qm', 'advance source');
 
     const recovered = open(database, { workspaceRoot }); await recovered.runtime.initialize([agent]);
-    const blockers = (recovered.runtime as any).resourceBlockers('ses_runtime_crash');
+    const blockers = (await recovered.runtime.inspectExecutionRecovery('ses_runtime_crash', { kind: 'installation_owner', id: 'installation_owner' })).blockers;
     expect(blockers.some((b: any) => b.code === 'WORKSPACE_RECOVERY_REQUIRED')).toBe(true);
     expect(await recovered.runtime.getSession('ses_runtime_crash')).toMatchObject({ state: 'created', archivedAt: null });
     // Assert the persisted preparing intent and its fixed baseline commit remain untouched.
-    const intentAfter = await (recovered.runtime as any).workspaces.get('ses_runtime_crash');
+    const intentAfter = await recovered.runtime.getWorkspace('ses_runtime_crash');
     expect(intentAfter?.state).toBe('preparing');
     expect(intentAfter?.baselineCommit).toBe(fixedBaseline);
     expect(existsSync(intentAfter!.repoRoot!)).toBe(true);

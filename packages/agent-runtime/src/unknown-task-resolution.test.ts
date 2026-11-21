@@ -1,9 +1,10 @@
+import { captureBoundExecution } from '../../../tests/support/bound-execution.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createRepositories } from '@dutydeck/storage';
-import type { AgentConfig, AgentDriver, BoundExecutionRepository, DriverFactory, UnknownTaskResolution } from '@dutydeck/shared';
+import type { AgentConfig, AgentDriver, DriverFactory, UnknownTaskResolution } from '@dutydeck/shared';
 import { readFileSync } from 'node:fs';
 import { createCliAdapter } from '@dutydeck/cli-adapters';
 import { TerminalSnapshot } from '@dutydeck/terminal-renderer';
@@ -18,6 +19,7 @@ afterEach(async () => { for (const close of cleanups.splice(0).reverse()) await 
 async function fixture(options: { idle?: boolean | (() => boolean); deferFailure?: boolean; driver?: Partial<AgentDriver>; onSend?: (prompt: string) => void } = {}) {
   const cwd = await mkdtemp(join(tmpdir(), 'dutydeck-unknown-task-'));
   const repos = createRepositories(':memory:', { newDatabaseAuthority: 'ledger_v1' });
+  const bound = captureBoundExecution(repos);
   const prompts: string[] = [];
   const emitters: Parameters<DriverFactory>[2][] = [];
   let fail = true, releaseFailure!: () => void;
@@ -46,7 +48,7 @@ async function fixture(options: { idle?: boolean | (() => boolean); deferFailure
       ...(action === 'completed' ? { verifiedOutputText: '已人工标为已完成' } : {}), ...(action === 'retry' ? { allowDuplicateEffects: true as const } : {}) };
   };
   const status = async (taskId: string) => (await runtime.getTasks(session.id)).find(task => task.id === taskId)?.status;
-  return { repos, session, first, second, prompts, emitters, resolution, status, releaseFailure, succeed: () => { fail = false; }, get runtime() { return runtime; },
+  return { repos, bound, session, first, second, prompts, emitters, resolution, status, releaseFailure, succeed: () => { fail = false; }, get runtime() { return runtime; },
     reopen: async () => { await runtime.shutdown(); fail = false; runtime = new DutydeckRuntime(repos, { driverFactory: factory, cleanupIntervalMs: 0 }); await runtime.initialize([agent]); } };
 }
 
@@ -129,7 +131,7 @@ describe('resolving result-unknown tasks', () => {
 
   it('resolves an unknown steering delivery through the steering ledger', async () => {
     const h = await fixture({ deferFailure: true });
-    const bound = (h.runtime as any).bound() as BoundExecutionRepository;
+    const bound = h.bound();
     const fence = { sessionId: h.session.id, runId: h.session.runId };
     const target = h.repos.execution.getTaskExecution(h.first.id)!.currentAttempt!;
     const queued = h.repos.execution.getTaskExecution(h.second.id)!.task;
