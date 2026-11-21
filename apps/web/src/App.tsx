@@ -88,6 +88,7 @@ type TaskView = { tab: DetailTab; inspector: boolean; inspectorChosen?: boolean;
 type MainQueryFailure = { label: string; message: string; hasData: boolean; retrying: boolean; retry(): Promise<void> };
 type QueueCancelOperation = { id: string; editDraftKey?: string; task?: Task };
 const queueCancelOperations = new Map<string, QueueCancelOperation>();
+const queueCancelKey = (sessionId: string, taskId: string) => JSON.stringify([currentInstance(), sessionId, taskId]);
 
 // 只有明确未投递的指令继续排队；结果未知时由人在执行记录下方选择重新执行、标为已完成或标为失败。
 const steeringSkipped: Record<string, string> = {
@@ -469,9 +470,18 @@ export default function App() {
     return () => window.removeEventListener('dutydeck:show-history-turn', showSource);
   }, [activeSessionId, inspectorOpen]);
   const queuedTasks = useMemo(() => tasks.data?.filter(task => task.status === 'queued') ?? [], [tasks.data]);
+  useEffect(() => {
+    if (!queueCancelOperations.size) return;
+    for (const task of tasks.data ?? []) {
+      if (task.status !== 'queued' && task.status !== 'cancelled') queueCancelOperations.delete(queueCancelKey(task.sessionId, task.id));
+    }
+  }, [tasks.data]);
   // A cancellation event can remove the queue row before the HTTP response arrives.
-  const retryQueuedEdits = Array.from(queueCancelOperations.values()).flatMap(({ task, editDraftKey }) =>
-    task && editDraftKey === composerDraft.key && !queuedTasks.some(queued => queued.id === task.id) ? [task] : []);
+  const retryQueuedEdits = Array.from(queueCancelOperations.values()).flatMap(({ task, editDraftKey }) => {
+    if (!task || editDraftKey !== composerDraft.key) return [];
+    const status = tasks.data?.find(current => current.id === task.id)?.status;
+    return status === undefined || status === 'cancelled' ? [task] : [];
+  });
   const blockingPermissionId = useMemo(() => active?.state === 'waiting_for_permission' ? pendingPermissionId(timeline) : undefined, [active?.state, timeline]);
   const latestUserIndex = useMemo(() => {
     for (let index = timeline.length - 1; index >= 0; index--) if (timeline[index].type === 'text' && timeline[index].data.role === 'user') return index;
@@ -573,13 +583,14 @@ export default function App() {
     const restorable = result.canEditQueued === false ? undefined : variables.prompt?.trim();
     toastStore.push({ kind: 'success', key: `cancel-queued-${variables.taskId}`, title: '已取消 1 条待执行指令', description: restorable ? '恢复会把这条指令重新排到队列末尾，不会回到原来的位置。' : undefined, action: restorable ? { label: '重新加入队尾', run: () => api.send(variables.sessionId, restorable, 'queue', result.skillRequests, requestId()).then(() => { void qc.invalidateQueries({ queryKey: ['tasks', variables.sessionId] }); }) } : undefined });
   }, onError: (error, { key, operation }) => {
-    if (queueCancelOperations.get(key) !== operation) return;
-    if (error instanceof ApiError && error.code === 'TASK_NOT_QUEUED') operation.task = undefined;
+    const current = queueCancelOperations.get(key);
+    if (current && current !== operation) return;
+    if (error instanceof ApiError && error.status === 409) operation.task = undefined;
     setActionError(error.message);
     toastStore.push({ kind: 'error', key: 'cancel-queued', title: '取消待执行指令失败', description: error.message });
   } });
   const cancelQueueTask = (sessionId: string, taskId: string, editDraftKey?: string) => {
-    const key = JSON.stringify([currentInstance(), sessionId, taskId]);
+    const key = queueCancelKey(sessionId, taskId);
     const operation = queueCancelOperations.get(key) ?? { id: requestId() };
     const task = qc.getQueryData<Task[]>(['tasks', sessionId])?.find(item => item.id === taskId);
     operation.editDraftKey = editDraftKey;
