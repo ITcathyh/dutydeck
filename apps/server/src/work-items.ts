@@ -1006,7 +1006,14 @@ export class WorkItemService {
       await this.write(state);
       return;
     }
-    if ('firstAttemptId' in read && !attempt.runtimeAttemptId) { attempt.runtimeAttemptId = read.firstAttemptId; attempt.updatedAt = time(); await this.write(state); }
+    if (('firstAttemptId' in read && !attempt.runtimeAttemptId) || (read.status === 'in_progress' && attempt.status !== 'accepted')) {
+      attempt.runtimeAttemptId = read.firstAttemptId;
+      if (read.status === 'in_progress') attempt.status = 'accepted';
+      attempt.updatedAt = time();
+      await this.write(state);
+      // A receipt can settle the task during this write. Observe the pinned attempt again before acting.
+      return this.observeAttempt(state, step);
+    }
     if (read.status === 'result_error' || (read.status === 'contradiction' && read.reason === 'attempt_scope_mismatch')) {
       const message = errorText(read.error);
       attempt.status = 'blocked'; attempt.blockReason = 'reconcile_required'; attempt.error = message; attempt.updatedAt = time();
@@ -1028,7 +1035,6 @@ export class WorkItemService {
       await this.blockAttempt(state, step, 'legacy_input_unresolved', 'Accepted task input options cannot be verified (INPUT_OPTIONS_UNVERIFIABLE)'); return;
     }
     if (read.status === 'in_progress') {
-      if (attempt.status !== 'accepted') { attempt.status = 'accepted'; attempt.updatedAt = time(); await this.write(state); }
       if (this.executionExpired(step)) {
         if (!record.actor) { await this.blockAttempt(state, step, 'reconcile_required', 'Execution timed out and its actor cannot be verified'); return; }
         try { if (await bounded(this.options.runtime.stopWorkItemSession(attempt.sessionId!, record.actor), 10_000)) record.stoppedAttempts.push(attempt.id); } catch { /* Preserve uncertainty. */ }

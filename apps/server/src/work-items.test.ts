@@ -274,6 +274,46 @@ describe('Work-item queue admission and execution deadlines', () => {
     }
   });
 
+  it.each(['first attempt ID', 'accepted status'] as const)('saves a result settled while persisting the %s at the deadline', async field => {
+    const f = await fixture();
+    f.runtime.setQueueHeld(true);
+    const item = await f.create(singlePlan);
+    await f.tick();
+    const state = await f.service['read'](item.id);
+    const step = state.value.item.steps[0]!;
+    const attempt = step.attempts[0]!;
+    expect(attempt.status).toBe('accepted');
+    expect(attempt.runtimeAttemptId).toBeUndefined();
+    f.runtime.setQueueHeld(false);
+    await eventually(async () => f.calls.length === 1);
+    const first = f.repos.execution.getTaskExecutionState(attempt.taskId!)!.attempts[0]!;
+    if (field === 'accepted status') {
+      attempt.runtimeAttemptId = first.attemptId;
+      attempt.status = 'preparing';
+      await f.service['write'](state);
+    }
+
+    const stop = vi.spyOn(f.runtime, 'stopWorkItemSession');
+    const cas = f.repos.config.compareAndSet!.bind(f.repos.config);
+    const write = vi.spyOn(f.repos.config, 'compareAndSet').mockImplementationOnce(async (key, expected, value) => {
+      expect(key).toBe('work_item:' + item.id);
+      expect(JSON.parse(value).item.steps[0].attempts[0]).toMatchObject({ status: 'accepted', runtimeAttemptId: first.attemptId });
+      const saved = await cas(key, expected, value);
+      expect(saved).toBe(true);
+      await f.finish(f.calls[0]!, 'done');
+      return saved;
+    });
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      vi.setSystemTime(Date.parse(first.createdAt) + 60 * 60_000);
+      await f.service['observeAttempt'](state, step);
+      expect(write).toHaveBeenCalled();
+      const saved = (await f.get(item.id)).steps[0]!;
+      expect({ status: saved.status, output: saved.attempts[0]!.result?.output.text, stops: stop.mock.calls.length })
+        .toEqual({ status: 'completed', output: 'done', stops: 0 });
+    } finally { write.mockRestore(); stop.mockRestore(); vi.useRealTimers(); }
+  });
+
   it('still expires actual execution one hour after the first Runtime attempt starts', async () => {
     const f = await fixture(); const item = await f.create(singlePlan); await f.tick(); await eventually(async () => f.calls.length === 1);
     const source = (await f.get(item.id)).steps[0]!.attempts[0]!;
