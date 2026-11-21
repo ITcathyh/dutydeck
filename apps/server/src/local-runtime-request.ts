@@ -1,3 +1,4 @@
+import { createConfigReader } from '@dutydeck/storage/helpers';
 import Database from 'better-sqlite3';
 import { networkInterfaces } from 'node:os';
 import { isIP } from 'node:net';
@@ -61,7 +62,7 @@ export async function executeLocalRuntimeRequest(
   const token = (dependencies.readToken ?? (path => {
     const db = new Database(path, { readonly: true, fileMustExist: true });
     try {
-      return (db.prepare('SELECT value FROM configs WHERE key=?').get('auth.accessToken') as { value?: string } | undefined)?.value?.trim();
+      return createConfigReader(db).get('auth.accessToken')?.trim();
     } finally {
       db.close();
     }

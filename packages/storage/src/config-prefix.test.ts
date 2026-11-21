@@ -1,33 +1,41 @@
+import { mkdtempSync, rmSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import Database from 'better-sqlite3';
 import { afterEach, expect, it, vi } from 'vitest';
-import { createRepositories } from './index.js';
+import { createConfigReader, createRepositories } from './index.js';
 import type { RepositoryBundle } from '@dutydeck/shared';
 
 const opened: Array<RepositoryBundle | Database.Database> = [];
 afterEach(() => { vi.restoreAllMocks(); for (const item of opened.splice(0)) item.close(); });
 
 it('preserves SQLite prefix semantics and binary order at Unicode and NUL boundaries', async () => {
-  const repos = createRepositories(':memory:'); opened.push(repos);
-  const reference = new Database(':memory:'); opened.push(reference);
-  reference.exec('CREATE TABLE configs(key TEXT PRIMARY KEY, value TEXT NOT NULL)');
-  const keys = ['', 'A', 'a', 'aa', 'a%', 'a_', 'a%tail', 'a_tail', 'ab', 'a\0', 'a\0tail', '\0', '\0tail',
-    '中文', '中文后', '中午', '😀', '😀尾', '😁', '\ud7ff', '\ud7ff尾', '\ue000', '\uffff', '\uffff😀',
-    '\u{10000}', '\u{10ffff}', '\u{10ffff}尾', '\u{10ffff}\u{10ffff}', '\u{10ffff}\u{10ffff}尾', 'a\u{10ffff}', 'a\u{10ffff}尾', '\ufffd'];
-  for (const [index, key] of keys.entries()) {
-    await repos.config.set(key, String(index));
-    reference.prepare('INSERT INTO configs VALUES (?,?)').run(key, String(index));
-  }
-  for (const prefix of [...keys, 'missing', 'a\0suffix', '\ud800', '\udfff']) {
-    expect(await repos.config.list(prefix), JSON.stringify(prefix)).toEqual(reference.prepare('SELECT key, value FROM configs WHERE substr(key, 1, length(?)) = ? ORDER BY key').all(prefix, prefix));
-  }
-  expect((await repos.config.list('a%')).map(row => row.key)).toEqual(['a%', 'a%tail']);
-  expect((await repos.config.list('😀')).map(row => row.key)).toEqual(['😀', '😀尾']);
+  const directory = mkdtempSync(join(tmpdir(), 'config-prefix-'));
+  const path = join(directory, 'state.db');
+  const repos = createRepositories(path);
+  const seed = new Database(path);
+  try {
+    const reference = new Database(':memory:'); opened.push(reference);
+    reference.exec('CREATE TABLE configs(key TEXT PRIMARY KEY, value TEXT NOT NULL)');
+    const keys = ['', 'A', 'a', 'aa', 'a%', 'a_', 'a%tail', 'a_tail', 'ab', 'a\0', 'a\0tail', '\0', '\0tail',
+      '中文', '中文后', '中午', '😀', '😀尾', '😁', '\ud7ff', '\ud7ff尾', '\ue000', '\uffff', '\uffff😀',
+      '\u{10000}', '\u{10ffff}', '\u{10ffff}尾', '\u{10ffff}\u{10ffff}', '\u{10ffff}\u{10ffff}尾', 'a\u{10ffff}', 'a\u{10ffff}尾', '\ufffd'];
+    for (const [index, key] of keys.entries()) {
+      seed.prepare('INSERT INTO configs VALUES (?,?)').run(key, String(index));
+      reference.prepare('INSERT INTO configs VALUES (?,?)').run(key, String(index));
+    }
+    for (const prefix of [...keys, 'missing', 'a\0suffix', '\ud800', '\udfff']) {
+      expect(await repos.config.list(prefix), JSON.stringify(prefix)).toEqual(reference.prepare('SELECT key, value FROM configs WHERE substr(key, 1, length(?)) = ? ORDER BY key').all(prefix, prefix));
+    }
+    expect((await repos.config.list('a%')).map(row => row.key)).toEqual(['a%', 'a%tail']);
+    expect((await repos.config.list('😀')).map(row => row.key)).toEqual(['😀', '😀尾']);
+  } finally { seed.close(); repos.close(); rmSync(directory, { recursive: true, force: true }); }
 });
 
 it('seeks a small prefix without evaluating unrelated config namespaces', async () => {
   const repos = createRepositories(':memory:'); opened.push(repos);
   // 库里不跑 ANALYZE，查询计划不随行数变化；全表扫描时 visits 会等于总行数，1000 行足以区分。
-  for (let index = 0; index < 1_000; index++) await repos.config.set(`unrelated.${index}`, 'history');
+  for (let index = 0; index < 1_000; index++) await repos.config.set(`session_name:${index}`, 'history');
   for (const key of ['relay.ask.1', 'relay.ask.2', 'relay.ask.3']) await repos.config.set(key, 'ask');
   const prepare = Database.prototype.prepare;
   let visits = 0;
@@ -50,4 +58,10 @@ it('seeks a small prefix without evaluating unrelated config namespaces', async 
   });
   expect((await repos.config.list('relay.ask.')).map(row => row.key)).toEqual(['relay.ask.1', 'relay.ask.2', 'relay.ask.3']);
   expect({ plan, visits }).toMatchObject({ plan: [expect.objectContaining({ detail: expect.stringMatching(/SEARCH configs USING INDEX .*key>\? AND key<\?/) })], visits: 3 });
+});
+
+it('preserves ASCII case-insensitive prefix reads used for backup and plugin checks', () => {
+  const db = new Database(':memory:'); opened.push(db);
+  db.exec("CREATE TABLE configs(key PRIMARY KEY, value); INSERT INTO configs VALUES ('PLUGIN.tools.action.older','pending'), ('plugin.tools.grant.other','saved')");
+  expect(createConfigReader(db).list('plugin.tools.action.', { ignoreAsciiCase: true })).toEqual([{ key: 'PLUGIN.tools.action.older', value: 'pending' }]);
 });

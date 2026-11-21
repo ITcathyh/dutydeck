@@ -32,7 +32,7 @@ it('retains database reservation through the full shared service close tail', as
   try {
     await enteredPromise;
     expect(() => createRepositories(database, { mode: 'runtime' })).toThrow('DATABASE_RUNTIME_BUSY');
-    const management = createRepositories(database); await management.config.set('close_tail', 'online'); management.close();
+    const management = createRepositories(database); await management.config.set('session_name:close_tail', 'online'); management.close();
   } finally { release(); await first; }
   createRepositories(database, { mode: 'runtime' }).close();
 });

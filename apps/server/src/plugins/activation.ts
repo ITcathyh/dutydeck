@@ -1,3 +1,4 @@
+import { createConfigReader } from '@dutydeck/storage/helpers';
 import { spawn } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { existsSync } from 'node:fs';
@@ -70,7 +71,7 @@ export async function pluginActivationBlockers(pluginsDir: string, plugin: strin
         }
       }
       if (tables.has('configs')) {
-        for (const row of db.prepare("SELECT key,value FROM configs WHERE key LIKE 'plugin.tools.action.%'").all() as Array<{ key: string; value: string }>) {
+        for (const row of createConfigReader(db).list('plugin.tools.action.', { ignoreAsciiCase: true })) {
           const action = JSON.parse(row.value) as { plugin?: string; status?: string };
           if (!action || typeof action.plugin !== 'string' || typeof action.status !== 'string') throw new Error('Invalid action');
           if (action.plugin === plugin && !['succeeded', 'failed', 'suppressed'].includes(action.status)) blockers.push({ kind: 'action', id: row.key, detail: `${plugin} 有 ${action.status} 动作；须由当前兼容 handler 核对后再切换。` });

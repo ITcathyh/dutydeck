@@ -6,8 +6,7 @@ import { join } from 'node:path';
 import { createServer } from 'node:net';
 import Database from 'better-sqlite3';
 import { afterAll, afterEach, beforeAll, expect, it } from 'vitest';
-import { createRepositories } from '@dutydeck/storage';
-import { migrations } from '../../../packages/storage/src/migrations.js';
+import { createRepositories, latestSchemaVersion } from '@dutydeck/storage';
 import { bundleCliForTest } from '../../../tests/support/bundle-for-test.js';
 
 let cli: string;
@@ -35,7 +34,7 @@ it('a future schema error prints an exact read-only command that reports the sam
   expect(opened.status, opened.stderr).not.toBe(0);
   expect(opened.stderr).toContain('DATABASE_SCHEMA_TOO_NEW');
   expect(opened.stderr).toContain('999');
-  expect(opened.stderr).toContain(String(migrations.at(-1)!.version));
+  expect(opened.stderr).toContain(String(latestSchemaVersion));
   const command = `dutydeck database execution-status --database ${database}`;
   expect(opened.stderr).toContain(command);
   expect(opened.stderr).toMatch(/backup.*discards|writes.*backup/i);

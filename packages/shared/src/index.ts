@@ -541,7 +541,14 @@ export interface FoundationRepository {
 /** 一次保留期清理的结果：清空内容的终端帧数，以及删除的状态快照、工具调用镜像和实体修订行数。 */
 export interface HistoryRetentionResult { terminalFrames: number; sessionStateCommands: number; toolCalls: number; entityVersions: number }
 
+export interface ConfigReader {
+  get(key: string): string | undefined;
+  list(prefix: string, options?: { ignoreAsciiCase: boolean }): Array<{ key: string; value: string }>;
+}
+
 export interface RepositoryBundle {
+  readonly configReader: ConfigReader;
+  transaction<T>(work: (tx: Pick<import('./group-policy.js').GroupPolicyTransactionContext, 'config'>) => T): T;
   matters?: import('./matters.js').MatterRepository;
   /** 按工作区记住的审批规则；内存仓储与旧测试替身可以不提供，此时不出现「本工作区允许」。 */
   workspaceApprovalRules?: import('./workspace-approval-rules.js').WorkspaceApprovalRuleRepository;

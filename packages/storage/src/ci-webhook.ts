@@ -1,3 +1,4 @@
+import { createConfigTransaction } from './config-transaction.js';
 import type Database from 'better-sqlite3';
 import { cachedStatement } from './statement-cache.js';
 import type { CiWebhookRepository } from '@dutydeck/shared';
@@ -33,7 +34,7 @@ export function createCiWebhookAdmissionSchema(db: Database.Database): void {
   `);
 }
 
-export function createCiWebhookRepository(sqlite: Database.Database): CiWebhookRepository {
+export function createCiWebhookRepository(sqlite: Database.Database, transaction = createConfigTransaction(sqlite)): CiWebhookRepository {
   const cleanup = (now: number) => cachedStatement(sqlite, `DELETE FROM ci_webhook_events WHERE expires_at <= ?
     AND NOT EXISTS (SELECT 1 FROM ci_webhook_event_targets WHERE event_key = ci_webhook_events.event_key AND state = 'pending')`).run(now);
   const accept = sqlite.transaction((input: Parameters<CiWebhookRepository['acceptEvent']>[0]) => {
@@ -44,12 +45,11 @@ export function createCiWebhookRepository(sqlite: Database.Database): CiWebhookR
     for (const target of new Set(input.targets)) cachedStatement(sqlite, "INSERT INTO ci_webhook_event_targets (event_key, subscription_id, state) VALUES (?, ?, 'pending')").run(input.eventKey, target);
     return 'accepted' as const;
   });
-  const commit = sqlite.transaction((input: Parameters<CiWebhookRepository['commitTarget']>[0]) => {
+  const commit = (input: Parameters<CiWebhookRepository['commitTarget']>[0]) => transaction(tx => {
     const target = cachedStatement(sqlite, "SELECT 1 FROM ci_webhook_event_targets WHERE event_key = ? AND subscription_id = ? AND state = 'pending'").get(input.eventKey, input.subscriptionId);
     if (!target) return false;
-    const config = cachedStatement(sqlite, 'SELECT value FROM configs WHERE key = ?').get(input.configKey) as { value: string } | undefined;
-    if (config?.value !== input.expectedConfig) return false;
-    if (input.nextConfig !== undefined) cachedStatement(sqlite, 'INSERT INTO configs (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value').run(input.configKey, input.nextConfig);
+    if (tx.config.get(input.configKey) !== input.expectedConfig) return false;
+    if (input.nextConfig !== undefined) tx.config.set(input.configKey, input.nextConfig);
     cachedStatement(sqlite, 'UPDATE ci_webhook_event_targets SET state = ? WHERE event_key = ? AND subscription_id = ?').run(input.state, input.eventKey, input.subscriptionId);
     return true;
   });
@@ -60,7 +60,7 @@ export function createCiWebhookRepository(sqlite: Database.Database): CiWebhookR
   });
   return {
     acceptEvent: input => accept.immediate(input),
-    commitTarget: input => commit.immediate(input),
+    commitTarget: commit,
     listPendingEvents() {
       const rows = cachedStatement(sqlite, `SELECT event_key, provider_id, payload_json, received_at FROM ci_webhook_events e
         WHERE payload_json IS NOT NULL AND EXISTS (SELECT 1 FROM ci_webhook_event_targets t WHERE t.event_key = e.event_key AND t.state = 'pending')

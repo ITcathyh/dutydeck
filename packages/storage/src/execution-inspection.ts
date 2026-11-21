@@ -1,7 +1,7 @@
 import Database from 'better-sqlite3';
 import { statSync } from 'node:fs';
 import { RuntimeError } from '@dutydeck/shared';
-import { migrations } from './migrations.js';
+import { readerVersions, latestSchemaVersion } from './migrations.js';
 
 export type ExecutionDatabaseStatus =
   | 'missing'
@@ -34,8 +34,6 @@ export interface ExecutionDatabaseInspection {
   unsupportedReason?: string;
 }
 
-/** Declared (supported) migration versions, derived from the single migrations manifest. */
-const SUPPORTED_MIGRATION_VERSIONS = new Set(migrations.map(migration => migration.version));
 const REQUIRED_LEDGER_TABLES = [
   'tasks',
   'sessions',
@@ -144,13 +142,9 @@ export function inspectExecutionDatabase(path: string): ExecutionDatabaseInspect
       // Read max schema version safely if schema_migrations exists.
       let schemaVersion: number | undefined;
       if (tables.has('schema_migrations')) {
-        const row = db.prepare('SELECT COALESCE(MAX(version), 0) AS max_version FROM schema_migrations').get() as
-          | { max_version: number }
-          | undefined;
-        schemaVersion = row?.max_version ?? 0;
-
-        const applied = (db.prepare('SELECT version FROM schema_migrations').all() as Array<{ version: number }>).map(r => r.version);
-        if (applied.some(version => !SUPPORTED_MIGRATION_VERSIONS.has(version) || version < 1)) {
+        const schema = readerVersions(db);
+        schemaVersion = schema.version;
+        if (schema.required > latestSchemaVersion || schema.invalid) {
           return {
             path,
             status: 'unsupported',

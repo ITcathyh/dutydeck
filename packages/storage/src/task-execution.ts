@@ -1,3 +1,4 @@
+import { assertConfigWrite } from './config-write.js';
 import type Database from 'better-sqlite3';
 import { createHash, randomUUID } from 'node:crypto';
 import {
@@ -171,7 +172,11 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
       const value = JSON.parse(workspace.value);
       if (value.gitCommonDir && current.key !== `git:${value.gitCommonDir}`) fail('WORKSPACE_RESOURCE_IDENTITY_CHANGED');
     }
-    if (!stored && freeze) cached('INSERT INTO configs(key,value) VALUES(?,?)').run(key,json(current));
+    if (!stored && freeze) {
+      const value = json(current);
+      assertConfigWrite(db, key, value);
+      cached('INSERT INTO configs(key,value) VALUES(?,?)').run(key, value);
+    }
     return current;
   };
   const idleResourceSafe = (r: DriverResource, checks: ResourceCheckRef[], owner?: ExecutionController): boolean => {
@@ -446,8 +451,10 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
     const value=row?Number(row.value):0;if(!Number.isSafeInteger(value)||value<0||value===Number.MAX_SAFE_INTEGER)fail('NATIVE_CONTEXT_REVISION_INVALID');return value+1;
   };
   const saveNativeSelection = (sessionId: string, selection: NativeContextSelection) => {
-    cached('INSERT INTO configs(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value').run(`${nativeKey(sessionId)}:revision`,String(selection.revision));
-    cached('INSERT INTO configs(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value').run(nativeKey(sessionId), stable(selection));
+    for (const [key, value] of [[`${nativeKey(sessionId)}:revision`, String(selection.revision)], [nativeKey(sessionId), stable(selection)]] as const) {
+      assertConfigWrite(db, key, value);
+      cached('INSERT INTO configs(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value').run(key, value);
+    }
   };
   const actorId = (actor: TaskRequestV1['actor']) => actor.kind === 'unspecified' ? undefined : actor.id;
   /** fresh 计划之前触发留下的会话：须有本计划某次触发的记录，且会话编号由该触发编号派生（与计划服务的 freshSessionId 同一算法）。 */
@@ -696,7 +703,9 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
         const updated = cached("UPDATE sessions SET state='stopped',archived_at=?,error=?,updated_at=? WHERE id=? AND run_id=? AND archived_at IS ?")
           .run(receipt.archivedAt, error, receipt.verifiedAt, s.id, s.runId, s.archivedAt ?? null);
         if (updated.changes !== 1) fail('LEGACY_RETIREMENT_SNAPSHOT_CONFLICT');
-        cached('INSERT INTO configs (key,value) VALUES (?,?)').run(retirementKey(s.id), stable(receipt));
+        const value = stable(receipt);
+        assertConfigWrite(db, retirementKey(s.id), value);
+        cached('INSERT INTO configs (key,value) VALUES (?,?)').run(retirementKey(s.id), value);
         return { session: session(s.id), receipt, replayed: false };
       }).immediate();
   };
@@ -960,7 +969,9 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
           if (replay) return { ...result(f, replay.task, replay.task.currentAttemptId ? attempt(replay.task.currentAttemptId) : undefined, [], true), accepted: replay };
           const s = session(f.sessionId);
           try { workspaceIdentity(f.sessionId,true); } catch {
-            cached('INSERT OR IGNORE INTO configs(key,value) VALUES(?,?)').run(`runtime_execution_workspace:${f.sessionId}`,json({version:1,unverifiable:true}));
+            const key = `runtime_execution_workspace:${f.sessionId}`, value = json({version:1,unverifiable:true});
+            assertConfigWrite(db, key, value);
+            cached('INSERT OR IGNORE INTO configs(key,value) VALUES(?,?)').run(key, value);
           }
           if (s.archivedAt || s.state === 'stopped') fail('SESSION_NOT_ACCEPTING');
           taskExecutionSchemas.position.parse(position);
@@ -1510,6 +1521,7 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
           if (unsafe.length) fail('SESSION_RESOURCE_BLOCKED', json(unsafe));
           const checks = resources(f.sessionId).map(r => ({ resourceId: r.resourceId, revision: r.revision, ...(r.observations.length ? { observation: r.observations.at(-1)! } : {}) }));
           command(`clear_stop:${randomUUID()}`, { ...f, expectedValue, checks }, () => {
+            assertConfigWrite(db, key, '');
             cached("UPDATE configs SET value='' WHERE key=? AND value=?").run(key, expectedValue);
             return { cleared: true };
           });
@@ -1570,7 +1582,10 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
             if (attempts(f.sessionId).some(a=>['active','preparing'].includes(a.state))) fail('SESSION_EXECUTION_BUSY');
             r.nativeReplacement=decision;r.revision++;saveResource(r);
             const selection=nativeSelection(f.sessionId);
-            if (selection?.context.resourceId===r.resourceId) cached('DELETE FROM configs WHERE key=?').run(nativeKey(f.sessionId));
+            if (selection?.context.resourceId === r.resourceId) {
+              assertConfigWrite(db, nativeKey(f.sessionId), '');
+              cached('DELETE FROM configs WHERE key=?').run(nativeKey(f.sessionId));
+            }
             return {replaced:r.resourceId};
           });
         }); },

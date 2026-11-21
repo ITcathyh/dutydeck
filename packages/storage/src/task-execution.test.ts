@@ -480,7 +480,7 @@ describe('task execution ledger',()=>{
   it('blocks old execution writes after conversion but preserves normal config changes',async()=>{
     const {repos,x}=ready();const t=accepted(x).task!;
     for(const work of [()=>repos.tasks.save(t),()=>repos.tasks.create!(t),()=>repos.tasks.enqueue!(t,'back'),()=>repos.tasks.promoteQueued!('s',t.id),()=>repos.events.append({id:'bypass',sessionId:'s',sequence:1,type:'text',timestamp:session().createdAt,data:{}}),()=>repos.sessions.save({...session(),runId:'new'})])await expect(work()).rejects.toMatchObject({code:'EXECUTION_LEDGER_REQUIRED'});
-    await repos.sessions.save({...session(),model:'changed',systemPrompt:'custom'});expect((await repos.sessions.get('s'))!.model).toBe('changed');await repos.config.set('ordinary.title','ok');expect(await repos.config.get('ordinary.title')).toBe('ok');
+    await repos.sessions.save({...session(),model:'changed',systemPrompt:'custom'});expect((await repos.sessions.get('s'))!.model).toBe('changed');await repos.config.set('session_name:s','ok');expect(await repos.config.get('session_name:s')).toBe('ok');
   });
   it('recovers a real SIGKILL preparing claim as the same unsubmitted Attempt',async()=>{
     const filename=disk();const fixture=resolve('packages/storage/tests/task-execution-child.mts');

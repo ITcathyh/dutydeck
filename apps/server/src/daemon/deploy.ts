@@ -1,5 +1,5 @@
 import { escapeRegExp } from '@dutydeck/shared';
-import { backupSqlite } from '@dutydeck/storage';
+import { backupSqlite, readerVersions } from '@dutydeck/storage';
 import type { ProcessIdentity } from '@dutydeck/storage';
 import { checkSqliteDriver, childProcessIdentity, describeSqliteDriverFailure, observeProcess } from '@dutydeck/storage/helpers';
 import Database from 'better-sqlite3';
@@ -17,7 +17,7 @@ import { missingRelativeImports } from './import-closure.mjs';
 
 /**
  * `dutydeck deploy`：把一个已构建好的检出目录做成不可变的发布目录，排空后切换 `current` 并重启，
- * 健康检查不过时，停服务并确认数据库 schema 未变才切回上一版；始终保留当前数据库。
+ * 健康检查不过时，停服务并确认数据库 schema 兼容才切回上一版；始终保留当前数据库。
  * unit 的 ExecStart 须运行 `<releases>/current/dist/cli.js`，
  * `--print-unit` 按现有 unit 生成这样一份。
  *
@@ -361,7 +361,7 @@ function pointCurrent(releases: string, release: string): void {
 const sha256 = (file: string) => createHash('sha256').update(readFileSync(file)).digest('hex');
 
 /** 比较持久 schema 和迁移集合，不比较任务、配置等运行数据；打不开或迁移记录非法时拒绝自动回滚。 */
-function databaseSchema(file: string): { version: number; fingerprint: string } | undefined {
+function databaseSchema(file: string): { version: number; required: number; fingerprint: string } | undefined {
   try {
     const db = new Database(file, { readonly: true, fileMustExist: true });
     try {
@@ -371,10 +371,14 @@ function databaseSchema(file: string): { version: number; fingerprint: string } 
           ? (db.prepare('SELECT version FROM schema_migrations ORDER BY version').all() as Array<{ version: number }>).map(row => row.version)
           : [];
         if (versions.some(version => !Number.isSafeInteger(version) || version < 0)) return undefined;
+        const compatibility = versions.length ? readerVersions(db) : { required: 0, invalid: 0 };
+        if (compatibility.invalid) return undefined;
+        const metadata = (db.pragma('table_info(schema_migrations)') as Array<{ name: string }>).some(col => col.name === 'compatible_reader_version')
+          ? db.prepare('SELECT * FROM schema_migrations ORDER BY version').all() : undefined;
         const userVersion = db.pragma('user_version', { simple: true });
         return {
-          version: versions.at(-1) ?? 0,
-          fingerprint: createHash('sha256').update(JSON.stringify({ schema, versions, userVersion })).digest('hex')
+          version: versions.at(-1) ?? 0, required: compatibility.required,
+          fingerprint: createHash('sha256').update(JSON.stringify({ schema, versions, userVersion, metadata })).digest('hex')
         };
       })();
     } finally {
@@ -692,9 +696,16 @@ async function confirmDrained(drain: DrainResult, renewing: ReturnType<typeof ke
   return undefined;
 }
 
+function releaseSupportsReader(release: string, required: number): boolean {
+  try {
+    const marker = JSON.parse(readFileSync(join(release, 'dist/schema-reader.json'), 'utf8'));
+    return marker.protocol === 1 && Number.isSafeInteger(marker.schemaVersion) && marker.schemaVersion >= required;
+  } catch { return false; }
+}
+
 /** 已确认停服后才调用；部署前快照只用于兼容检查和人工恢复，绝不覆盖当前数据库。 */
 async function checkDatabaseForRollback(
-  database: string, record: string, manifest: Record<string, unknown>, deps: DeployDeps
+  database: string, record: string, previousRelease: string, manifest: Record<string, unknown>, deps: DeployDeps
 ): Promise<string | undefined> {
   const current = databaseSchema(database);
   manifest.schema_version_at_rollback = current?.version ?? null;
@@ -704,7 +715,12 @@ async function checkDatabaseForRollback(
   let reason: string | undefined;
   if (!before || before.fingerprint !== manifest.schema_fingerprint_before) reason = `部署前的数据库 schema 无法核实（备份：${backup ?? '缺失'}）。`;
   else if (!current) reason = `读不出当前数据库 ${database} 的 schema。`;
-  else if (current.fingerprint !== before.fingerprint) reason = `数据库 schema 已变化（迁移版本 ${before.version} → ${current.version}）。`;
+  else if (current.fingerprint !== before.fingerprint) {
+    const changed = `数据库 schema 已变化（迁移版本 ${before.version} → ${current.version}）。`;
+    if (current.version <= before.version) reason = changed + '无法核实新增迁移的兼容读版本。';
+    else if (current.required > before.version) reason = changed + `兼容读版本 ${current.required} 超过部署前的 schema 版本。`;
+    else if (!releaseSupportsReader(previousRelease, current.required)) reason = changed + `无法核实上一版支持兼容读版本 ${current.required}。`;
+  }
   if (!reason) return undefined;
 
   // 另存供排障使用；失败也绝不恢复旧快照或启动旧版。
@@ -964,7 +980,7 @@ async function deployLocked(options: DeployCliOptions, deps: DeployDeps, target:
     if (!previousRelease) return finish('failed', { error: `新版本没有通过健康检查，服务已停止，也没有上一版可以切回。保留当前数据库，需要人工恢复。原因：${started.error}` });
 
     const databaseError = database && database !== ':memory:'
-      ? await checkDatabaseForRollback(database, record, manifest, deps)
+      ? await checkDatabaseForRollback(database, record, previousRelease, manifest, deps)
       : '无法验证目标数据库路径及其 schema，不能据此认定没有持久数据库。';
     if (databaseError) return blocked(databaseError);
 

@@ -90,12 +90,12 @@ describe('CI durable admission storage', () => {
 
   it('rolls back both subscription and target when a write fails in the transaction', async () => {
     const { store, repos, path } = open(); store.acceptEvent(event);
-    await repos.config.set('subscription', 'before');
+    await repos.config.set('ci_webhook/subscription/one', 'before');
     const writer = new Database(path);
     try {
       writer.exec("CREATE TRIGGER fail_target BEFORE UPDATE ON ci_webhook_event_targets BEGIN SELECT RAISE(ABORT, 'injected failure'); END");
-      expect(() => store.commitTarget({ eventKey: event.eventKey, subscriptionId: 'one', configKey: 'subscription', expectedConfig: 'before', nextConfig: 'after', state: 'admitted' })).toThrow('injected failure');
-      expect(await repos.config.get('subscription')).toBe('before');
+      expect(() => store.commitTarget({ eventKey: event.eventKey, subscriptionId: 'one', configKey: 'ci_webhook/subscription/one', expectedConfig: 'before', nextConfig: 'after', state: 'admitted' })).toThrow('injected failure');
+      expect(await repos.config.get('ci_webhook/subscription/one')).toBe('before');
       expect(store.listPendingEvents()[0]!.targets).toEqual(['one', 'two']);
     } finally { writer.close(); }
   });
@@ -117,14 +117,14 @@ describe('CI durable admission storage', () => {
     cleanups.push(() => other.close());
     expect(store.acceptEvent(event)).toBe('accepted');
     expect(other.ciWebhook.acceptEvent(event)).toBe('duplicate');
-    await repos.config.set('subscription', 'before');
-    const target = { eventKey: event.eventKey, subscriptionId: 'one', configKey: 'subscription', expectedConfig: 'before', nextConfig: 'running', state: 'admitted' as const };
+    await repos.config.set('ci_webhook/subscription/one', 'before');
+    const target = { eventKey: event.eventKey, subscriptionId: 'one', configKey: 'ci_webhook/subscription/one', expectedConfig: 'before', nextConfig: 'running', state: 'admitted' as const };
     expect(store.commitTarget(target)).toBe(true);
     expect(other.ciWebhook.commitTarget(target)).toBe(false);
     repos.close(); other.close();
     const reopened = createRepositories(path); cleanups.push(() => reopened.close());
     expect(reopened.ciWebhook.listPendingEvents()[0]!.targets).toEqual(['two']);
-    expect(await reopened.config.get('subscription')).toBe('running');
+    expect(await reopened.config.get('ci_webhook/subscription/one')).toBe('running');
   });
 
   it('upgrades old dedupe rows, reopens durable admissions, and enforces cascading foreign keys', () => {

@@ -56,9 +56,9 @@ it('the template only replaces migrations on an empty database and keeps file da
     for (let open = 0; open < 2; open++) {
       const repos = createRepositories(file, { newDatabaseAuthority: 'ledger_v1' });
       try {
-        await repos.config.set('probe', String(open));
+        await repos.config.set('session_name:probe', String(open));
         expect(repos.execution.authority()).toBe('ledger_v1');
-        expect(await repos.config.get('probe')).toBe(String(open));
+        expect(await repos.config.get('session_name:probe')).toBe(String(open));
       } finally { repos.close(); }
     }
   } finally { rmSync(directory, { recursive: true, force: true }); }

@@ -109,7 +109,7 @@ describe('Native context and controlled resource scopes',()=>{
       expect(()=>escaped.set(key,'{}')).toThrow('Native context selection requires a bound ledger command');
       expect(await repos.config.get(key)).toBeUndefined();
     }
-    for(const key of ['runtime_driver_configuration:session','work-item:one','lark.run-context.one']){
+    for(const key of ['runtime_driver_configuration:session','work_item:one','lark.run-context.one']){
       escaped.set(key,'normal');expect(await repos.config.get(key)).toBe('normal');
     }
   });

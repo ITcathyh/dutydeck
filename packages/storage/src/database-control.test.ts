@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { spawn, execFileSync, type ChildProcess } from 'node:child_process';
 import Database from 'better-sqlite3';
 import { createRepositories } from './index.js';
-import { migrations } from './migrations.js';
+import { latestSchemaVersion } from './migrations.js';
 import { openDatabaseControl } from './database-control.js';
 import { currentProcessIdentity, observeProcess } from './process-identity.js';
 import { lazyBundleForTest } from '../../../tests/support/bundle-for-test.js';
@@ -44,7 +44,7 @@ it('reserves runtime control before repository exposure, while allowing online m
   const path = file(), first = createRepositories(path, { mode: 'runtime' });
   const management = createRepositories(path);
   try {
-    await management.config.set('online', 'yes'); expect(await first.config.get('online')).toBe('yes');
+    await management.config.set('session_name:online', 'yes'); expect(await first.config.get('session_name:online')).toBe('yes');
     expect(() => createRepositories(path, { mode: 'runtime' })).toThrow('DATABASE_RUNTIME_BUSY');
     expect(() => management.control.attachRuntime('other')).toThrow('DATABASE_RUNTIME_BUSY');
     const claim = first.control.attachRuntime('first');
@@ -177,13 +177,13 @@ it('never upgrades on request and rejects incompatible control or future busines
   raw.prepare('UPDATE dutydeck_control SET protocol = 1').run();
   raw.prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (999, ?)').run(new Date().toISOString());
   raw.close();
-  const supported = migrations.at(-1)!.version;
+
   for (let attempt = 0; attempt < 2; attempt++) {
     let message = '';
     try { createRepositories(path); } catch (error) { message = (error as Error).message; }
     expect(message).toMatch(/^DATABASE_SCHEMA_TOO_NEW/);
     expect(message).toContain('999');
-    expect(message).toContain(String(supported));
+    expect(message).toContain(String(latestSchemaVersion));
     expect(message).toContain(`dutydeck database execution-status --database ${path}`);
     expect(message).toMatch(/backup.*(loses|discards)|writes.*backup/i);
     expect(message).toMatch(/older code.*not.*rollback/i);

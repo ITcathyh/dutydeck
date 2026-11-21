@@ -2,6 +2,8 @@
 
 > [← 返回 README](../../README.md) · [全部文档](../../README.md#docs) · [English](../en/upgrading.md)
 
+- 从数据库 schema 52 起，部署健康检查失败时，如果后续迁移只新增旧程序不使用的表或索引，部署可以自动切回旧程序并保留部署后的写入。当前库声明的最低兼容读版本须不高于部署前的 schema 和上一版构建声明支持的版本，部署前备份的 schema 指纹也须通过校验。首次从 51 升至 52 仍需前向修复或人工恢复。
+
 - **新版 Claude 粘贴不可见字符兼容与 NFC 影响**：Claude family 输入在写入终端前按 Claude 同一规则清理会触发人工复核的不可见码点，合法 emoji 组合和文字组合序列保留。Claude 专属 sanitizer 只作用于终端实际输入及对应原生回执，不改变任务保存的提示词或账本记录，也不在其他 Agent 上运行。另一方面，共享 `wrapUntrusted` 的伪造边界 visible-space 变化会影响所有保存/派发调用方，包括其他调用它的 Agent；它只处理“原文不是 marker、经 Claude 清理后才重建”的伪造 `UNTRUSTED_DATA` 边界。Dutydeck 自己原有 marker 和伪造边界之外的普通正文不被这条规则改写；未调用 `wrapUntrusted` 的 Agent 和正文不额外处理。Claude 原生 keyed 输入还可能把 NFD 规范化成 NFC，因此终端正文及回执的码点数量和 UTF-8 字节数可能变化；存储的原始任务正文不变，这条 NFC 路径也不影响其他 Agent，但不能承诺 NFD 文件名、哈希或精确码点匹配逐字不变。若已写入后仍出现 `Removed … invisible character · review and press Enter to send`，Dutydeck 不会自动再按 Enter 或重发，结果未知时会提示打开终端人工确认。
 
 - **Claude 业务正文写入前复核空输入框**：屏幕静止后、首个业务字节前会核对底部完整空框，普通提示符、原生占位提示、权限栏和最多两行 statusLine 不受影响。重启后残留的人工草稿、未提交 `/compact` 或 slash 菜单会让本轮按未写入失败，处理后可重发，不再把业务正文拼到草稿后。任何 chunk、软换行或 Enter 已尝试后的外来变化仍按结果未知处理，不自动清空、再按 Enter 或重发；无新持久字段或迁移。tmux 读屏与写入非原子，不承诺排除所有其他终端同时写入。

@@ -1154,7 +1154,7 @@ describe('storage migrations', () => {
     const filename = join(directory, 'dutydeck.db')
 
     const repositories = createRepositories(filename)
-    await repositories.config.set('credential', 'secret')
+    await repositories.config.set('auth.accessToken', 'secret')
 
     expect(await mode(parent)).toBe(0o755)
     expect(await mode(directory)).toBe(0o700)
@@ -1204,3 +1204,53 @@ describe('storage migrations', () => {
     repos.close()
   })
 })
+
+it.each(['fresh', 'upgrade'])('records the minimum reader for every migration on %s databases', kind => {
+  const db = new Database(':memory:');
+  const template = process.env.DUTYDECK_TEST_FRESH_SCHEMA_TEMPLATE;
+  try {
+    delete process.env.DUTYDECK_TEST_FRESH_SCHEMA_TEMPLATE;
+    if (kind === 'upgrade') {
+      db.exec('CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL, name TEXT)');
+      withMigrationTransaction(db, () => {
+        for (const m of migrations.filter(item => item.version < 52)) {
+          m.up(db);
+          db.prepare('INSERT INTO schema_migrations VALUES (?, ?, ?)').run(m.version, 'old', m.name);
+        }
+      });
+    }
+    runMigrations(db);
+    expect(db.prepare('SELECT version, compatible_reader_version AS reader FROM schema_migrations ORDER BY version').all())
+      .toEqual(migrations.map(m => ({ version: m.version, reader: m.compatibleReaderVersion ?? m.version })));
+    expect(db.pragma('foreign_key_check')).toEqual([]);
+  } finally {
+    if (template !== undefined) process.env.DUTYDECK_TEST_FRESH_SCHEMA_TEMPLATE = template;
+    db.close();
+  }
+});
+
+it('opens and inspects a compatible future schema without repairing or downgrading it', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'future-schema-')); temporaryDirectories.push(dir);
+  const file = join(dir, 'test.db');
+  createRepositories(file).close();
+  const db = new Database(file);
+  try {
+    const future = latestSchemaVersion + 1;
+    const reader = latestSchemaVersion - 1;
+    migrations.push({ version: future, name: 'new_table', compatibleReaderVersion: reader, up(db) { db.exec('CREATE TABLE future_data(id INTEGER)'); } });
+    try { runMigrations(db); } finally { migrations.pop(); }
+    expect(db.prepare('SELECT compatible_reader_version FROM schema_migrations WHERE version=?').pluck().get(future)).toBe(reader);
+    db.exec('UPDATE schema_migrations SET name=NULL WHERE version=1');
+    const snapshot = () => db.prepare('SELECT * FROM schema_migrations ORDER BY version').all();
+    const before = snapshot();
+    const { inspectExecutionDatabase } = await import('./execution-inspection.js');
+    expect(inspectExecutionDatabase(file)).toMatchObject({ status: 'legacy', schemaVersion: future });
+    const repos = createRepositories(file, { onMigrated: () => { throw Error('unexpected migration'); } });
+    repos.close();
+    runMigrations(db);
+    expect(snapshot()).toEqual(before);
+    db.prepare('UPDATE schema_migrations SET compatible_reader_version=? WHERE version=?').run(future, future);
+    expect(() => createRepositories(file)).toThrow(`DATABASE_SCHEMA_TOO_NEW: database schema version ${future}; this build supports schema version ${latestSchemaVersion}.`);
+    expect(inspectExecutionDatabase(file).unsupportedReason).toBe('DATABASE_SCHEMA_TOO_NEW');
+  } finally { db.close(); }
+});
