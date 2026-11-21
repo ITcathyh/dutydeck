@@ -8,7 +8,7 @@ import { createTranscriptSourceKeys } from '@dutydeck/runtime';
 import { SESSION_INSIGHT_LIMITS, type InsightClient } from '@dutydeck/shared';
 import { resolveSessionInsightEngine, executeEngineHandshake } from './session-insight-engine.js';
 import { bundleForTest } from '../../../tests/support/bundle-for-test.js';
-import { rememberSecretValues } from './lark/secret-redaction.js';
+import { rememberSecretValues } from './platform/secret-redaction.js';
 import { SessionInsightResolver } from './session-insight-resolver.js';
 import { SessionInsightService } from './session-insight-service.js';
 

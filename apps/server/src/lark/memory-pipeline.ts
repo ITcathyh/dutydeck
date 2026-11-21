@@ -19,12 +19,13 @@
  * 复用的记忆会话里若有未决任务（例如 daemon 在运行中途重启留下的 reconcile_required），
  * 本次运行须先确认旧执行已恢复，未知运行继续阻塞；不会读取旧输出。
  */
+import type { BackgroundRuntime } from '../background/run-once.js';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { sleep } from '../daemon/time.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { currentProcessIdentity, observeProcess } from '@dutydeck/storage/helpers';
 import { readTaskAttemptResult, type TaskResultRepositories } from '../task-results.js';
-import { installationOwnerTaskActor, isTerminalTaskStatus, RuntimeError, type AgentCapabilities, type AcceptedTask, type ConfigRepository, type ExecutionRepository, type MemoryJob, type MemoryJobRepository, type StartSessionInput, type TaskRequestV1, type AgentConfig, type AgentEvent, type ExecutionActor, type PermissionMode, type Session, type TaskRecord } from '@dutydeck/shared';
+import { backgroundSource, installationOwnerTaskActor, isTerminalTaskStatus, RuntimeError, type AgentCapabilities, type AcceptedTask, type ConfigRepository, type ExecutionRepository, type MemoryJob, type MemoryJobRepository, type StartSessionInput, type TaskRequestV1, type AgentConfig, type AgentEvent, type ExecutionActor, type Session, type TaskRecord } from '@dutydeck/shared';
 import { larkMemoryEnabled, type StoredLarkConfig } from './config.js';
 import {
   isLarkGroupChatMemoryPool,
@@ -87,11 +88,10 @@ export const larkMemoryPipelineRules = {
 const recoveryTaskStatuses = ['reconcile_required', 'legacy_unresolved'];
 
 
-export interface LarkMemoryPipelineRuntime {
+export interface LarkMemoryPipelineRuntime extends BackgroundRuntime {
   resolveMemorySessionInput?(input: StartSessionInput): Promise<StartSessionInput & { protocol: AgentCapabilities['protocol'] }>;
   startMemorySession?(input: StartSessionInput, stableSessionId: string, beforeStart: () => Promise<void>): Promise<Session>;
   lookupAcceptedTask?(request: TaskRequestV1): AcceptedTask | undefined;
-  start(input: { agentId: string; cwd?: string; model?: string; permissionMode?: PermissionMode; source?: string; sourceId?: string }): Promise<Session>;
   listAgents(): Promise<AgentConfig[]>;
   listSessions(): Promise<Session[]>;
   getSession(id: string): Promise<Session | undefined>;
@@ -104,7 +104,6 @@ export interface LarkMemoryPipelineRuntime {
   /** 隔离作业结算后归档会话，任务账本保留；只读决策器也使用此能力。 */
   archive?(id: string, actor?: ExecutionActor): Promise<unknown>;
   interrupt(id: string, expectedTaskId?: string, actorId?: string): Promise<unknown>;
-  subscribe(sessionId: string, listener: (event: AgentEvent) => void): () => void;
 }
 
 export interface LarkMemoryPipelineLog {
@@ -657,7 +656,7 @@ export class LarkMemoryPipeline {
       if (job?.receipt) return await this.finishJob(scope, job);
       if (!job) {
         // Every old session must be demonstrably terminal before admitting a migrated job.
-        const sessions = (await this.options.runtime.listSessions()).filter(session => session.source === 'lark-memory' && [`${scope.appId}:${scope.pool}`, `${scope.appId}:${scope.pool}:memory`].includes(session.sourceId ?? ''));
+        const sessions = (await this.options.runtime.listSessions()).filter(session => session.source === backgroundSource.memory && [`${scope.appId}:${scope.pool}`, `${scope.appId}:${scope.pool}:memory`].includes(session.sourceId ?? ''));
         for (const session of sessions) await this.assertMemorySessionReady(session);
         const versions = await this.options.store.jobVersions(scope);
         const allEntries = await this.options.store.listAll(scope);
@@ -673,7 +672,7 @@ export class LarkMemoryPipeline {
         const agent = await this.agent(agentId);
         const model = config.memoryModel ?? config.defaultModel ?? agent.model;
         if (!this.options.runtime.resolveMemorySessionInput) throw new LarkMemoryError('MEMORY_AGENT_UNSUPPORTED', '运行时缺少后台记忆能力预检。', 503);
-        const sessionInput = await this.options.runtime.resolveMemorySessionInput({ agentId, cwd: this.options.projection.directoryFor(scope), model, reasoningEffort: agent.reasoningEffort, source: 'lark-memory', sourceId: `${scope.appId}:${scope.pool}:memory` });
+        const sessionInput = await this.options.runtime.resolveMemorySessionInput({ agentId, cwd: this.options.projection.directoryFor(scope), model, reasoningEffort: agent.reasoningEffort, source: backgroundSource.memory, sourceId: `${scope.appId}:${scope.pool}:memory` });
         const permissionMode = sessionInput.permissionMode;
 
         const shared = isLarkGroupMemoryPool(scope);

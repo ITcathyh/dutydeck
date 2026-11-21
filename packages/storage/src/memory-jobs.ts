@@ -1,7 +1,7 @@
 import { createConfigTransaction } from './config-transaction.js';
 import type Database from 'better-sqlite3';
 import { cachedStatement } from './statement-cache.js';
-import { RuntimeError, type JsonValue, type MemoryJob, type MemoryJobRepository, type MemoryJobScope, type MemoryJobVersion } from '@dutydeck/shared';
+import { backgroundSource, RuntimeError, type JsonValue, type MemoryJob, type MemoryJobRepository, type MemoryJobScope, type MemoryJobVersion } from '@dutydeck/shared';
 import { assertBotProcessApp } from './bot-process.js';
 import { memoryJobVersionDigest } from './helpers.js';
 
@@ -72,7 +72,7 @@ export function createMemoryJobRepository(db: Database.Database, transaction = c
     async create(job) {
       scopeCheck(job.scope);
       if (!/^memory_[a-f0-9]{64}$/.test(job.id) || job.revision !== 0 || job.state !== 'prepared' || job.receipt) throw new RuntimeError('MEMORY_JOB_INVALID', 'Invalid memory job intention', 400);
-      if (job.sessionInput.source !== 'lark-memory' || job.sessionInput.sourceId !== `${job.scope.appId}:${job.scope.pool}:memory` || !['extraction','consolidation'].includes(job.kind) || !['compatible','isolated'].includes(job.mode)) throw new RuntimeError('MEMORY_JOB_INVALID', 'Memory job session outside scope', 400);
+      if (job.sessionInput.source !== backgroundSource.memory || job.sessionInput.sourceId !== `${job.scope.appId}:${job.scope.pool}:memory` || !['extraction','consolidation'].includes(job.kind) || !['compatible','isolated'].includes(job.mode)) throw new RuntimeError('MEMORY_JOB_INVALID', 'Memory job session outside scope', 400);
       const required = [`lark.memory.${job.scope.appId}.${job.scope.pool}`, `lark.memory.ignore.${job.scope.appId}.${job.scope.pool}`, 'lark.bots', 'lark.credentials'];
       if (required.some(key => !job.versions.some(version => version.key === key))) throw new RuntimeError('MEMORY_JOB_INVALID', 'Missing frozen memory and authorization versions', 400);
       if (job.versions.some(version => version.value !== undefined)) throw new RuntimeError('MEMORY_JOB_INVALID', 'Frozen versions must be digests, not config values', 400);

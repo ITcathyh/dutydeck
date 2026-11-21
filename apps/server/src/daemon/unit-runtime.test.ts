@@ -7,7 +7,8 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { registerAuthMiddleware } from '../auth/auth.js';
-import { createCliProgram, environmentFromCli, type CliOptions } from '../cli-program.js';
+import { environmentFromCli } from '../cli-environment.js';
+import { createCliProgram, type CliOptions } from '../cli-program.js';
 import { daemonRestart, unitRuntime } from './command.js';
 import { defaultDaemonDir, writeState } from './daemon.js';
 

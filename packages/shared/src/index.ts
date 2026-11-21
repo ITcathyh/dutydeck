@@ -635,6 +635,7 @@ export * from './usage.js';
 export * from './execution-recovery.js';
 
 export * from './session-name.js';
+export * from './background-kinds.js';
 export * from './lark-source-id.js';
 export type { LarkAppCreationJob } from './lark-app-creation.js';
 

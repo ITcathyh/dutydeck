@@ -2,11 +2,10 @@ import { randomBytes, createHash } from 'node:crypto';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { AgentRepository, ConfigRepository } from '@dutydeck/shared';
+import { backgroundSource, type AgentRepository, type ConfigRepository } from '@dutydeck/shared';
 import type { AttemptResultRepositories } from '../task-results.js';
 import type { StoredLarkConfig } from './config.js';
-import type { LarkMemoryPipelineRuntime } from './memory-pipeline.js';
-import { runReadonlyPrompt } from './readonly-decider.js';
+import { runReadonlyPrompt, type BackgroundRuntime } from '../background/run-once.js';
 
 export type ReplyPolish = (config: StoredLarkConfig, text: string, key: string, chatId?: string, cachedOnly?: boolean) => Promise<string>;
 
@@ -50,7 +49,7 @@ export class LarkReplyPolisher {
   private active = 0;
   private readonly flights = new Map<string, Promise<string>>();
   constructor(private readonly options: {
-    runtime: LarkMemoryPipelineRuntime;
+    runtime: BackgroundRuntime;
     repos: AttemptResultRepositories & { agents: Pick<AgentRepository, 'get'>; config: ConfigRepository };
     log?: { warn(details: unknown, message: string): void };
     timeoutMs?: number;
@@ -88,7 +87,7 @@ export class LarkReplyPolisher {
           const input = replyPolishInput(text);
           const output = await runReadonlyPrompt(this.options.runtime, repos, {
             agentId: agent.id, cwd: directory, model: config.replyPolishModel,
-            permissionMode: 'deny-all', source: 'lark-reply-polish', sourceId: `${config.appId}:${chatId ?? 'reply'}`,
+            permissionMode: 'deny-all', source: backgroundSource.replyPolish, sourceId: `${config.appId}:${chatId ?? 'reply'}`,
             prompt: input.prompt, timeoutMs: config.replyPolishTimeoutMs ?? this.options.timeoutMs ?? 60_000,
             onCleanup: pending => { cleanup = pending; }
           });

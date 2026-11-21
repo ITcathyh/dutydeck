@@ -5,7 +5,7 @@ import { basename, dirname, join, relative, resolve, sep } from 'node:path';
 import type { SqliteDriverCheck, SqliteDriverCheckOptions } from '@dutydeck/storage';
 import { checkSqliteDriver, describeSqliteDriverFailure } from '@dutydeck/storage/helpers';
 import { SUPERVISOR_ENV, SYSTEMD_UNIT_ENV, daemonPaths, defaultDaemonDir, resolveDaemonDir } from '../daemon/daemon.js';
-import { rotateLogFileSync } from '../resource-retention.js';
+import { rotateLogFileSync } from '../log-file.js';
 
 /**
  * Dutydeck 开机自启（boot hook）注册。

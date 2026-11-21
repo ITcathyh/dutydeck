@@ -2,10 +2,10 @@ import { execFile } from 'node:child_process';
 import { sha256Hex as hash } from './hash.js';
 import { promisify } from 'node:util';
 import { z } from 'zod';
-import { errorMessage as errorText, isTerminalTaskStatus, now as time, parseLarkSourceId, RuntimeError, timeLoop, workPlanSchema, type AgentConfig, type RepositoryBundle, type Session, type TaskAttempt, type WorkPlan } from '@dutydeck/shared';
+import { backgroundSource, errorMessage as errorText, isTerminalTaskStatus, now as time, parseLarkSourceId, RuntimeError, timeLoop, workPlanSchema, type AgentConfig, type RepositoryBundle, type Session, type TaskAttempt, type WorkPlan } from '@dutydeck/shared';
 import type { DutydeckRuntime } from '@dutydeck/runtime';
 import { larkPermissionMode, readLarkConfig } from './lark/config.js';
-import { runReadonlyPrompt } from './lark/readonly-decider.js';
+import { runReadonlyPrompt } from './background/run-once.js';
 import { readTaskAttemptResult } from './task-results.js';
 import { createLeaderModeRecord, leaderFormatRetryPrompt, leaderLedger, leaderRules, resolveLeaderGuide } from './leader-mode.js';
 import { workItemId, type WorkItemService } from './work-items.js';
@@ -170,7 +170,7 @@ export class LeaderDelegationService {
       // 过期的记录也要先核对：从未提交的旧规划会话得先停掉，否则它会在没人等结果时自己跑起来。
       let prior: Awaited<ReturnType<LeaderDelegationService['priorPlanning']>> | undefined;
       if (!record.plan) {
-        leaderSessions ??= (await this.options.repositories.sessions.list()).filter(session => session.source === 'lark-leader');
+        leaderSessions ??= (await this.options.repositories.sessions.list()).filter(session => session.source === backgroundSource.leader);
         prior = await this.priorPlanning(leaderSessions.filter(session => session.sourceId === record.id)).catch(error => {
           this.options.log?.warn({ error, delegationId: record.id }, '上一轮 Leader 规划核对失败，按结果未知处理');
           return { kind: 'unknown' } as const;
@@ -263,7 +263,7 @@ export class LeaderDelegationService {
   /** 规划会话归属的原话题与发起人：风险策略按它们取，与目标子会话一致。 */
   async parentForSession(sessionId: string): Promise<{ parentSessionId: string; actorId: string; parentTaskId: string } | undefined> {
     const session = await this.options.repositories.sessions.get(sessionId);
-    const record = session?.source === 'lark-leader' && session.sourceId ? await this.read(session.sourceId) : undefined;
+    const record = session?.source === backgroundSource.leader && session.sourceId ? await this.read(session.sourceId) : undefined;
     return record ? { parentSessionId: record.parentSessionId, actorId: record.actorId, parentTaskId: record.parentTaskId } : undefined;
   }
 
@@ -338,7 +338,7 @@ export class LeaderDelegationService {
         const timeoutMs = this.options.timeoutMs ?? PLANNING_TIMEOUT_MS;
         const run = (input: string) => runReadonlyPrompt(this.options.runtime, { execution: this.options.repositories.execution }, {
           // 终端模式 Leader 以完全信任规划（team() 已核对），「不改文件」只靠提示词约束。
-          agentId: leader.id, cwd: session.cwd, permissionMode: leader.protocol === 'pty-cli' ? 'full-trust' : 'deny-all', source: 'lark-leader', sourceId: current.id,
+          agentId: leader.id, cwd: session.cwd, permissionMode: leader.protocol === 'pty-cli' ? 'full-trust' : 'deny-all', source: backgroundSource.leader, sourceId: current.id,
           prompt: input, timeoutMs, signal: this.shutdown.signal, onCleanup: cleanup => this.holdCleanup(id, cleanup)
         });
         let text = adopted?.text ?? await run(await prompt());

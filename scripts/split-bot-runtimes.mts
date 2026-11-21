@@ -6,6 +6,7 @@ import { dirname, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { parseArgs, parseEnv } from 'node:util';
 import { createHash, randomUUID } from 'node:crypto';
+import { backgroundSource } from '../packages/shared/src/background-kinds.ts';
 import { runtimeStateKeys } from '../packages/shared/src/runtime-state-keys.ts';
 import { observeProcess } from '../packages/storage/src/process-identity.ts';
 
@@ -62,7 +63,7 @@ export function inspect(db: DatabaseSync, database: string) {
     const s = sessionById.get(id);
     if (!s || resolving.has(id)) return undefined;
     resolving.add(id);
-    let owner = s.source == null && s.source_id == null ? 'web' : ['lark', 'lark-memory'].includes(s.source) ? s.source_id?.split(':')[0] : undefined;
+    let owner = s.source == null && s.source_id == null ? 'web' : ['lark', backgroundSource.memory].includes(s.source) ? s.source_id?.split(':')[0] : undefined;
     if (s.source === 'schedule' && typeof s.source_id === 'string') {
       const schedule = parse(config.get(`session_automation/schedule/${s.source_id}`) ?? '');
       // A dedicated execution session belongs to its frozen origin, never the Web fallback.

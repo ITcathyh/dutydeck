@@ -1,7 +1,7 @@
 import type { AdapterSessionContext, CliAdapter, PtyLike } from '../types.js';
 import { pinnedSessionUuid } from '../resume-id.js';
 import { relayCommandFrom, relayEnabled, relayPermissionHookTimeoutSeconds } from '@dutydeck/relay';
-import { DriverRecoveryError, errorMessage, PromptNotWrittenError } from '@dutydeck/shared';
+import { backgroundKindFor, DriverRecoveryError, errorMessage, PromptNotWrittenError } from '@dutydeck/shared';
 import { probeClaudeHookFailureBlock, secretGuardHookCommand, secretGuardToolMatcher } from '@dutydeck/shared/secret-guard';
 import { delay, INPUT_ECHO_TIMEOUT_MS, waitForInputEcho, waitForQuietScreen } from './input-settle.js';
 import { createRequire } from 'node:module';
@@ -21,13 +21,6 @@ const require = createRequire(import.meta.url);
 const STARTUP_POLL_MS = 100;
 const STARTUP_TIMEOUT_MS = 30_000;
 const TRUST_KEY_RETRY_MS = 1_000;
-
-/**
- * Dutydeck 自己的后台作业（群记忆、群参与判断与回复生成）只加载用户级设置：它们的目录在 Dutydeck
- * 数据目录下，可能位于某个代码仓库里，不能继承那个仓库的 CLAUDE.md、项目设置和 .mcp.json，
- * 也就不会停在导入、MCP 启用这类只有人能回答的确认框上。--settings 仍然生效。
- */
-const USER_SETTINGS_ONLY_SOURCES = new Set(['lark-memory', 'lark-decision', 'lark-response']);
 
 /** Claude 2.1.316 启动时等人回答、Dutydeck 不代答的确认框：标题行与告诉用户的名称。 */
 const BLOCKING_STARTUP_DIALOGS: ReadonlyArray<readonly [RegExp, string]> = [
@@ -569,7 +562,7 @@ export function createClaudeFamilyAdapter(id: string): CliAdapter {
         if (index < 0) args.push('--settings', value);
         else args[index + 1] = value;
       }
-      if (id === 'claude-code' && USER_SETTINGS_ONLY_SOURCES.has(env?.dutydeck_session_source ?? '')) {
+      if (id === 'claude-code' && backgroundKindFor(env?.dutydeck_session_source)?.userSettingsOnly) {
         args.push('--setting-sources', 'user');
       }
       // PlanMode 的审批 TUI 在 IM 场景无法驱动，直接禁掉。

@@ -3,7 +3,7 @@ import { homedir } from 'node:os';
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, statSync, writeFileSync } from 'node:fs';
 import { spawn } from 'node:child_process';
 import Database from 'better-sqlite3';
-import { rotateLogFileSync } from '../resource-retention.js';
+import { rotateLogFileSync } from '../log-file.js';
 import { writeFileAtomicSync } from '../atomic-file.js';
 import { redactCredentialText } from '@dutydeck/shared';
 import type { ProcessIdentity } from '@dutydeck/storage';

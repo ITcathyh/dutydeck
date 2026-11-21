@@ -9,6 +9,7 @@
  */
 import { createHash } from 'node:crypto';
 import {
+  backgroundKindFor,
   analyzeFilesResultSchema,
   fileMetricsSchema,
   sessionInsightSummaryResponseSchema,
@@ -420,10 +421,6 @@ export interface SessionUsageEvidence {
   tasks?: Array<{ request?: TaskRequestV1; proactive?: boolean }>;
 }
 
-const BACKGROUND_ONLY_SOURCES = new Set([
-  'lark-decision', 'lark-response', 'lark-memory', 'lark-reply-polish', 'work_item', 'lark-leader'
-]);
-
 /**
  * 复用 usage-ledger.classifyUsage 与真实 TaskRequest。多个任务落入多类 → mixed；
  * proactive 证据缺失且该结论依赖 proactive 时 → unknown（不用 prompt 关键词或费用反推）。
@@ -441,7 +438,7 @@ export function deriveSessionUsage(evidence: SessionUsageEvidence): InsightUsage
     }
   }
   if (categories.size === 0) {
-    return session.source && BACKGROUND_ONLY_SOURCES.has(session.source) ? 'background' : 'unknown';
+    return session.source === 'work_item' || backgroundKindFor(session.source) ? 'background' : 'unknown';
   }
   // 任一任务证据不足时整个会话保守为 unknown，不能靠其余任务把它强行归成 mixed。
   if (categories.has('unknown')) return 'unknown';

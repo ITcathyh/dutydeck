@@ -1,4 +1,4 @@
-import { runtimeStateKeys, clearTaskReportSafely, isTerminalTaskStatus, readSessionTaskReportReference, readSessionTaskReport, SESSION_NAME_CONFIG_PREFIX, taskReportInputSchema, writeTaskReport, sameIdleCpuProof, type SessionWorkspace, type TaskReport, type TaskReportInput } from '@dutydeck/shared';
+import { backgroundSource, runtimeStateKeys, clearTaskReportSafely, isTerminalTaskStatus, readSessionTaskReportReference, readSessionTaskReport, SESSION_NAME_CONFIG_PREFIX, taskReportInputSchema, writeTaskReport, sameIdleCpuProof, type SessionWorkspace, type TaskReport, type TaskReportInput } from '@dutydeck/shared';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { createHash, randomUUID } from 'node:crypto';
 import type { AgentCapabilities, AgentConfig, AttemptActivity, AgentDriver, AgentEvent, DriverFactory, DriverTranscriptSourceObservation, EventType, EventWindowOptions, HistoryOutlineQuery, NormalizedDriverEvent, PermissionMode, PermissionRequestData, PromptAssemblyData, PromptPart, PromptSourceDiagnostics, PublicTaskRecord, RepositoryBundle, RuntimeControlClaim, Session, SkillDeliveryMetadata, StartSessionInput, TaskExecutionContext, TaskRecord, ToolCallData, ToolRiskPolicy, TranscriptSourceObservation, VerificationCommandInput, VerificationResponse, WorkspaceCleanupBlocker, WorkspaceCleanupPreview, WorkspaceCleanupResult, WorkspaceResponse } from '@dutydeck/shared';
@@ -2408,7 +2408,7 @@ export class DutydeckRuntime {
   /** Resolve auto transport before the memory job freezes its permission posture. */
   async resolveMemorySessionInput(input: StartSessionInput): Promise<StartSessionInput & { protocol: AgentCapabilities['protocol'] }> {
     this.assertReady();
-    if (input.source !== 'lark-memory' || !/^[A-Za-z0-9_-]+:[A-Za-z0-9_-]+:memory$/.test(input.sourceId ?? '')) throw new RuntimeError('INVALID_MEMORY_SESSION', 'Invalid memory session scope', 400);
+    if (input.source !== backgroundSource.memory || !/^[A-Za-z0-9_-]+:[A-Za-z0-9_-]+:memory$/.test(input.sourceId ?? '')) throw new RuntimeError('INVALID_MEMORY_SESSION', 'Invalid memory session scope', 400);
     const agent = await this.repos.agents.get(input.agentId);
     if (!agent) throw new RuntimeError('AGENT_NOT_FOUND', 'Memory Agent not found', 404);
     const { configured, capability } = await this.newSessionCapability(agent, input);
@@ -2419,7 +2419,7 @@ export class DutydeckRuntime {
 
   async startMemorySession(input: StartSessionInput, stableSessionId: string, beforeStart: () => Promise<void>): Promise<Session> {
     this.assertReady();
-    if (input.source !== 'lark-memory' || !/^[A-Za-z0-9_-]+:[A-Za-z0-9_-]+:memory$/.test(input.sourceId ?? '') || !/^ses_memory_[a-f0-9]{64}$/.test(stableSessionId) || input.workspaceMode === 'worktree') {
+    if (input.source !== backgroundSource.memory || !/^[A-Za-z0-9_-]+:[A-Za-z0-9_-]+:memory$/.test(input.sourceId ?? '') || !/^ses_memory_[a-f0-9]{64}$/.test(stableSessionId) || input.workspaceMode === 'worktree') {
       throw new RuntimeError('INVALID_MEMORY_SESSION', 'Memory sessions require a stable authorized Lark group scope and shared workspace', 400);
     }
     return this.startStable(input, stableSessionId, beforeStart, 'Memory', async (existing, agent) => {
@@ -3622,7 +3622,7 @@ export class DutydeckRuntime {
    */
   private async expireStaleQueued(session: Session, task: TaskRecord) {
     // 记忆管线管理自己的超时与重试；通用取消会被它当作失败并重新建作业。
-    if (session.source === 'lark-memory') return false;
+    if (session.source === backgroundSource.memory) return false;
     const now = Date.now();
     if (now - Date.parse(task.createdAt) <= QUEUED_TASK_EXPIRE_MS) return false;
     const current = this.repos.execution.getTaskExecution(task.id);

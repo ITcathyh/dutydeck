@@ -4,7 +4,7 @@ import { digest as hash } from '@dutydeck/runtime/digest';
 import { canonicalExecutionJson, previewNextSchedule, RuntimeError, type CollaborationAction, type CollaborationMandate, type CollaborationScope, type CollaborationSnapshot, type ScheduleDefinition, type ScheduleActionFence, type ScheduleExecutionFence, type ScheduleLease, type ScheduleOccurrence } from '@dutydeck/shared';
 import { scheduleWriterLeaseKey } from '@dutydeck/storage/helpers';
 import { CollaborationService, collaborationContextSignature, scheduleMatchesMandate, type CollaborationAuthorization, type CollaborationRepositories } from './collaboration-service.js';
-import { LarkServiceError } from './lark/service.js';
+import { DeliveryCircuitOpenError } from './delivery-error.js';
 
 export interface ScheduleExecutionInput {
   scope: CollaborationScope; actorId: string; mandate: CollaborationMandate; schedule: ScheduleDefinition;
@@ -311,9 +311,9 @@ export class ScheduleExecutor {
     } catch (error) {
       await this.assertWriter(schedule, lease);
       // Before the claim, an ordinary preparation/read error leaves a retryable intent.
-      if (!claimed && !invalidated(error) && !(error instanceof LarkServiceError && error.code === 'LARK_CIRCUIT_OPEN')) return;
+      if (!claimed && !invalidated(error) && !(error instanceof DeliveryCircuitOpenError)) return;
       const state = !claimed && invalidated(error) ? 'suppressed'
-        : error instanceof LarkServiceError && error.code === 'LARK_CIRCUIT_OPEN' ? 'failed' : 'unknown';
+        : error instanceof DeliveryCircuitOpenError ? 'failed' : 'unknown';
       await actionState(claimed ?? delivery, state, undefined, message(error));
       await this.advance(occurrence, state, lease, message(error));
     }

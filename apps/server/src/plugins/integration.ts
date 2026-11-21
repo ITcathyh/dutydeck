@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { realpath } from 'node:fs/promises';
 import {
+  backgroundKindFor, backgroundSource,
   botAppIdOfSession,
   installationOwnerTaskActor,
   parseLarkSourceId,
@@ -24,13 +25,10 @@ import { scopeApplies } from './scope.js';
 /** 触发器开的会话：sourceId 为 `<appId>:<chatId>:plugin:<插件>:<触发器>`。 */
 export const PLUGIN_TRIGGER_SOURCE = 'plugin_trigger';
 
-/** 群协作判定、回复生成、记忆整理与文字优化后台会话：hook 照常运行，但只能拒绝，不能改写 prompt，也不能代为批准工具调用。 */
-const backgroundSources = new Set(['lark-decision', 'lark-response', 'lark-memory', 'lark-reply-polish']);
-
 export function sessionHookContext(session: Pick<Session, 'id' | 'cwd' | 'source' | 'sourceId'>) {
   const appId = botAppIdOfSession(session);
   // 记忆会话 sourceId 的第二段是记忆池，不一定是群 id。
-  const chatId = appId && session.source !== 'lark-memory' ? parseLarkSourceId(session.sourceId).chatId : undefined;
+  const chatId = appId && session.source !== backgroundSource.memory ? parseLarkSourceId(session.sourceId).chatId : undefined;
   return { sessionId: session.id, ...(session.cwd ? { cwd: session.cwd } : {}), ...(appId ? { botAppId: appId } : {}), ...(chatId ? { chatId } : {}) };
 }
 
@@ -78,7 +76,7 @@ export class PluginRuntimeHooks {
     } }, session.source ?? 'web');
     if (result.decision === 'deny') throw denied(result.reason);
     if (!result.updatedPrompt && !result.additionalContext.length) return prepared;
-    if (backgroundSources.has(session.source ?? '')) {
+    if (backgroundKindFor(session.source)?.hookMode === 'deny-only') {
       this.log?.warn({ sessionId: session.id, source: session.source, plugins: result.outcomes.map(outcome => outcome.plugin) }, '插件对后台会话的改写已忽略');
       return prepared;
     }
@@ -101,7 +99,7 @@ export class PluginRuntimeHooks {
 
   async reviewPermission(session: Session, request: PermissionRequestData): Promise<'allow' | 'deny' | undefined> {
     const result = await this.hooks.run('permission.request', { eventId: this.eventId(), actor: actorOfSession(session), ...sessionHookContext(session), payload: { ...request } }, request.title ?? '');
-    if (result.decision === 'allow' && backgroundSources.has(session.source ?? '')) {
+    if (result.decision === 'allow' && backgroundKindFor(session.source)?.hookMode === 'deny-only') {
       this.log?.warn({ sessionId: session.id, source: session.source, plugins: result.outcomes.map(outcome => outcome.plugin) }, '插件对后台会话的批准已忽略');
       return undefined;
     }

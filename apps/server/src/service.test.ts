@@ -1,3 +1,7 @@
+import { backgroundKindCases } from '../../../tests/support/background-kind-cases.js';
+import { classifyUsage } from './usage-ledger.js';
+import { PluginRuntimeHooks } from './plugins/integration.js';
+import { PluginHookBus } from './plugins/hooks.js';
 import { taskReportHint } from '@dutydeck/relay';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createServer } from 'node:net';
@@ -8,14 +12,15 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { createRepositories } from '@dutydeck/storage';
 import type { RuntimeOptions } from '@dutydeck/runtime';
-import type { Session } from '@dutydeck/shared';
+import { botAppIdOfSession, type Session } from '@dutydeck/shared';
 import { LarkAgentToolsService } from './lark/agent-tools.js';
 import { HerdrSessions } from './herdr.js';
-import { claudePlanGuardMatcher } from '@dutydeck/cli-adapters';
+import { claudePlanGuardMatcher, createCliAdapter } from '@dutydeck/cli-adapters';
 import { secretGuardHookCommand, secretGuardToolMatcher } from '@dutydeck/shared/secret-guard';
 import { getAuthToken } from './auth/auth.js';
 import { createAppLogger } from './app.js';
-import { accessMode, createProductionPtyBackend, listenOptions, startLocalServer, unauthenticatedListenRefusal } from './service.js';
+import { accessMode, listenOptions, unauthenticatedListenRefusal } from './access-policy.js';
+import { createProductionPtyBackend, startLocalServer } from './service.js';
 
 const temporaryDirectories: string[] = [];
 const tmuxSessions: string[] = [];
@@ -83,6 +88,35 @@ it('composes frozen collaboration prompts without tool, plugin-result or Herdr d
       expect(typeof result === 'string' ? result : result.prompt).toBe(`TOOLS\n\n${taskReportHint('dutydeck')}\n\nHERDR\n\n${prompt}`);
       expect(result).toMatchObject({ diagnostics: { fallbackReason: 'configuration_unavailable' } });
       expect(options.sessionEnvironment!(session).dutydeck_frozen_materials).toBeUndefined();
+    }
+  } finally { await service.close(); }
+});
+
+it('preserves usage, Claude settings, hook permissions and host injection for persisted background sources', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'dutydeck-background-'));
+  temporaryDirectories.push(root);
+  const service = await startLocalServer({ webRoot: root, env: {
+    NODE_ENV: 'test', DUTYDECK_HOST: '127.0.0.1', DUTYDECK_PORT: String(await freePort()),
+    DUTYDECK_DEFAULT_CWD: root, DUTYDECK_DATABASE_URL: join(root, 'dutydeck.db'),
+    DUTYDECK_DISABLE_LARK_LISTENER: 'true', DUTYDECK_AGENTS_JSON: '[]'
+  } });
+  const options = (service.runtime as unknown as { options: RuntimeOptions }).options;
+  const hooks = new PluginRuntimeHooks(new PluginHookBus([{
+    kind: 'handler', plugin: 'fixture', scope: 'global', event: 'task.beforeRun', timeout: 1_000,
+    handler: () => ({ updatedPrompt: 'rewritten' })
+  }]));
+  try {
+    for (const row of backgroundKindCases) {
+      const session: Session = { id: row.source, source: row.source, sourceId: 'app:group', agentId: 'fixture',
+        cwd: root, state: 'idle', runId: 'fixture', createdAt: '', updatedAt: '', permissionMode: 'deny-all' };
+      const args = createCliAdapter('claude-code').buildArgs({ sessionId: session.id, env: { dutydeck_session_source: row.source } });
+      const result = await hooks.beforeRun(session, { agentPrompt: 'original', skillDeliveries: [] });
+      expect(classifyUsage(session, undefined, false), row.source).toEqual({ category: 'background', origin: row.usageOrigin });
+      expect(args.includes('--setting-sources'), row.source).toBe(row.userSettingsOnly);
+      if (row.userSettingsOnly) expect(args[args.indexOf('--setting-sources') + 1]).toBe('user');
+      expect(result.agentPrompt, row.source).toBe(row.hookMode === 'deny-only' ? 'original' : 'rewritten');
+      expect(Boolean(options.sessionEnvironment!(session).dutydeck_relay_token), row.source).toBe(row.injectHost);
+      expect(botAppIdOfSession(session), row.source).toBe(row.botScoped ? 'app' : undefined);
     }
   } finally { await service.close(); }
 });

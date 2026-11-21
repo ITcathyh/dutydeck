@@ -3,7 +3,8 @@ import { mkdir, rm, utimes, writeFile } from 'node:fs/promises';
 import { existsSync, mkdtempSync, readFileSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { pruneLarkResourceDirectories, rotateLogFileSync } from './resource-retention.js';
+import { rotateLogFileSync } from './log-file.js';
+import { pruneLarkResourceDirectories } from './resource-retention.js';
 
 const roots: string[] = [];
 afterEach(async () => { await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))); });

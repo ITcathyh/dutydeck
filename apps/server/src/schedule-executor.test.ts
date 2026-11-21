@@ -8,7 +8,7 @@ import { withMigrationTransaction } from '../../../packages/storage/src/migratio
 import { createScheduleExecutionSchema } from '../../../packages/storage/src/schedule-execution-migration.js';
 import { CollaborationService, collaborationContextSignature, scheduleMatchesMandate } from './collaboration-service.js';
 import { ScheduleExecutor, type ScheduleExecutorOptions } from './schedule-executor.js';
-import { LarkServiceError } from './lark/service.js';
+import { DeliveryCircuitOpenError } from './delivery-error.js';
 
 const cleanup: Array<() => void | Promise<void>> = [];
 afterEach(async () => { vi.useRealTimers(); vi.restoreAllMocks(); for (const close of cleanup.splice(0)) await close(); });
@@ -221,7 +221,7 @@ it('keeps a pre-commit cancellation crash disabled until the same request is ret
 
 it('settles a never-sent circuit rejection and permits the next authorized occurrence', async () => {
   const f = await fixture(); const { mandate } = await f.create();
-  f.deliver.mockRejectedValueOnce(new LarkServiceError('LARK_CIRCUIT_OPEN', 'Request not sent', 503));
+  f.deliver.mockRejectedValueOnce(new DeliveryCircuitOpenError('Request not sent'));
   const run = f.executor(); f.advance(); await run.tick();
   const [failed] = await f.repos.scheduleOccurrences.listByDefinition(mandate.scheduleDefinitionId);
   expect(failed).toMatchObject({ state: 'failed' });

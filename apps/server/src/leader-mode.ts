@@ -3,14 +3,15 @@ import { mkdir, open, realpath, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { basename, isAbsolute, join, resolve } from 'node:path';
 import { z } from 'zod';
-import { errorMessage as errorText, installationOwnerTaskActor, now as time, parseLarkSourceId, RuntimeError, type RepositoryBundle, type Session, type WorkItem, type WorkPlan, type TaskRecord } from '@dutydeck/shared';
+import { backgroundSource, errorMessage as errorText, installationOwnerTaskActor, now as time, parseLarkSourceId, RuntimeError, type RepositoryBundle, type Session, type WorkItem, type WorkPlan, type TaskRecord } from '@dutydeck/shared';
 import type { DutydeckRuntime } from '@dutydeck/runtime';
 import type { RelayAskBroker } from '@dutydeck/relay';
 import { testRegexWithTimeout } from '@dutydeck/acp-client/regex-timeout';
 import { readBoundedBytes } from './bounded-file.js';
 import { sha256Hex as hash } from './hash.js';
-import { defaultHighRiskPattern, larkPermissionMode, readLarkConfig, type StoredLarkConfig } from './lark/config.js';
-import { runReadonlyPrompt } from './lark/readonly-decider.js';
+import { defaultHighRiskPattern } from './policy/high-risk.js';
+import { larkPermissionMode, readLarkConfig, type StoredLarkConfig } from './lark/config.js';
+import { runReadonlyPrompt } from './background/run-once.js';
 import { discoverSkillCatalog, skillFrontmatter } from './skill-catalog.js';
 import { prepareSkillPrompt } from './skill-delivery.js';
 import type { WorkItemInteractions, WorkItemRequest, WorkItemRequestHooks } from './work-item-interactions.js';
@@ -416,7 +417,7 @@ export class LeaderModeService implements WorkItemRequestHooks {
         await mkdir(cwd, { recursive: true });
         return await runReadonlyPrompt(this.options.runtime, { execution: this.repos.execution }, {
           // 终端模式 Leader 只能以完全信任运行（team() 已核对），「不执行」只靠提示词约束。
-          agentId: team.leader.id, cwd, permissionMode: team.leader.protocol === 'pty-cli' ? 'full-trust' : 'deny-all', source: 'lark-leader', sourceId: record!.delegationId,
+          agentId: team.leader.id, cwd, permissionMode: team.leader.protocol === 'pty-cli' ? 'full-trust' : 'deny-all', source: backgroundSource.leader, sourceId: record!.delegationId,
           prompt: input, timeoutMs: this.options.timeoutMs ?? ARBITRATION_TIMEOUT_MS, signal: this.shutdown.signal, onCleanup: cleanup => this.holdCleanup(workId, cleanup)
         });
       } catch (error) {

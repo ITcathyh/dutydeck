@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import { backgroundKindCases } from '../../../tests/support/background-kind-cases';
 import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest';
 import { act, fireEvent, cleanup, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
@@ -70,6 +71,21 @@ afterEach(() => {
   window.localStorage.removeItem(EXPERIMENTAL_STORAGE_KEY);
   window.sessionStorage.removeItem(SEND_OPERATIONS_STORAGE_KEY);
   window.history.replaceState(null, '', '/');
+});
+
+it('preserves sidebar visibility for persisted background sources', async () => {
+  mockAppApi({
+    sessions: backgroundKindCases.map(({ source }) => ({ ...session(source), source })),
+    summaries: backgroundKindCases.map(({ source }) => summary(source, source))
+  });
+  renderApp();
+  const sidebar = within(screen.getByRole('complementary', { name: 'Dutydeck 工作台导航' }));
+  for (const { source } of backgroundKindCases.filter(row => !row.hidden)) {
+    expect((await sidebar.findAllByRole('button', { name: new RegExp(source) })).length).toBeGreaterThan(0);
+  }
+  for (const { source } of backgroundKindCases.filter(row => row.hidden)) {
+    expect(sidebar.queryByRole('button', { name: new RegExp(source) })).toBeNull();
+  }
 });
 
 describe('App summary updates', () => {

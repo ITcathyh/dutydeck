@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import { executionTaskId } from '@dutydeck/storage/helpers';
-import { errorMessage, isCapExcludedUsage, makeId, parseLarkSourceId, RuntimeError, type UsageBackgroundLimits, type UsageBackgroundBudget, type AttemptRef, type RepositoryBundle, type Session, type TaskRequestV1, type UsageCap, type UsageCapScope, type UsageCategory, type UsageGroup, type UsageLedgerEntry, type UsageTotals, type UsageFilter, type UsageReport, type UsageReportFilter, type UsageTaskPage, type JsonValue } from '@dutydeck/shared';
+import { backgroundKindFor, backgroundSource, errorMessage, isCapExcludedUsage, makeId, parseLarkSourceId, RuntimeError, type UsageBackgroundLimits, type UsageBackgroundBudget, type AttemptRef, type RepositoryBundle, type Session, type TaskRequestV1, type UsageCap, type UsageCapScope, type UsageCategory, type UsageGroup, type UsageLedgerEntry, type UsageTotals, type UsageFilter, type UsageReport, type UsageReportFilter, type UsageTaskPage, type JsonValue } from '@dutydeck/shared';
 import { isLarkPerGroupMemoryPool, larkMemoryScopeOfPool } from './lark/memory.js';
 
 const rateSchema = z.object({ inputPerMTok: z.number().nonnegative(), cachedInputPerMTok: z.number().nonnegative(), outputPerMTok: z.number().nonnegative(), cacheWritePerMTok: z.number().nonnegative().optional(), provider: z.string().trim().min(1).optional() }).strict();
@@ -196,10 +196,10 @@ export function usageScopeOf(session: Pick<Session, 'source' | 'sourceId'>): { a
   const { appId, chatId, chatType: kind } = parseLarkSourceId(session.sourceId);
   if (!appId || !chatId) return {};
   if (session.source === 'lark') return { appId, chatId, chatType: kind };
-  if (session.source === 'lark-reply-polish') return { appId, chatId };
-  if (session.source === 'lark-decision' || session.source === 'lark-response') return { appId, chatId, chatType: 'group' };
+  if (session.source === backgroundSource.replyPolish) return { appId, chatId };
+  if (session.source === backgroundSource.decision || session.source === backgroundSource.response) return { appId, chatId, chatType: 'group' };
   // 记忆会话按池划分：群聊共用 groups 池，按群独立的池归到那个群，私聊一人一池（池名即会话 id）。
-  if (session.source === 'lark-memory') {
+  if (session.source === backgroundSource.memory) {
     if (chatId === 'groups') return { appId };
     const pool = larkMemoryScopeOfPool({ appId, pool: chatId });
     return isLarkPerGroupMemoryPool(pool) ? { appId, chatId: pool.chatId, chatType: 'group' } : { appId, chatId, chatType: 'p2p' };
@@ -211,12 +211,9 @@ export function usageScopeOf(session: Pick<Session, 'source' | 'sourceId'>): { a
 export function classifyUsage(session: Pick<Session, 'source' | 'sourceId'>, request: TaskRequestV1 | undefined, proactive: boolean): { category: UsageCategory; origin: string } {
   if (request?.namespace === 'schedule') return { category: 'scheduled', origin: parseLarkSourceId(session.sourceId).scope[0] === 'collaboration' ? 'mandate' : 'schedule' };
   if (request?.namespace === 'automation') return { category: 'scheduled', origin: 'ci' };
-  if (session.source === 'lark-decision') return { category: 'background', origin: 'decision' };
-  if (session.source === 'lark-reply-polish') return { category: 'background', origin: 'reply_polish' };
-  if (session.source === 'lark-response') return { category: 'background', origin: 'response' };
-  if (session.source === 'lark-memory') return { category: 'background', origin: 'memory' };
+  const background = backgroundKindFor(session.source);
+  if (background) return { category: 'background', origin: background.usageOrigin };
   if (session.source === 'work_item') return { category: 'background', origin: 'work_item' };
-  if (session.source === 'lark-leader') return { category: 'background', origin: 'leader' };
   if (request?.actor.kind === 'installation_owner' || !session.source) return { category: 'explicit', origin: 'web' };
   if (session.source === 'lark') {
     if (proactive) return { category: 'proactive', origin: 'participation' };
@@ -301,7 +298,7 @@ export class UsageLedger {
   private async attribute(session: Session, taskId: string | undefined, depth = 0): Promise<Attribution> {
     const request = taskId ? this.repos.execution.getAcceptedTask(taskId)?.request : undefined;
     const actorId = request && request.actor.kind !== 'unspecified' ? request.actor.id : undefined;
-    if (depth < 4 && (session.source === 'work_item' || session.source === 'lark-leader')) {
+    if (depth < 4 && (session.source === 'work_item' || session.source === backgroundSource.leader)) {
       const parent = await this.options.parentOf?.(session);
       const parentSession = parent ? await this.repos.sessions.get(parent.parentSessionId) : undefined;
       if (parent && parentSession) {
@@ -362,7 +359,7 @@ export class UsageLedger {
 
   /** runtime 的 admitTask 钩子：本月已用满 Bot 或群上限时拒绝新任务。子步骤属于已派发的根任务，不在这里拦。 */
   async admit(session: Session, request: TaskRequestV1): Promise<void> {
-    if (request.namespace === 'work_item' || session.source === 'work_item' || session.source === 'lark-leader') return;
+    if (request.namespace === 'work_item' || session.source === 'work_item' || session.source === backgroundSource.leader) return;
     const scope = usageScopeOf(session);
     const appId = scope.appId ?? (request.actor.kind === 'channel' ? request.actor.appId : undefined);
     const reason = appId ? await this.refusal(appId, scope.chatId, request) : undefined;
