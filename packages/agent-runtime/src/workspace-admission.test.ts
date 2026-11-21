@@ -235,7 +235,7 @@ it('does not deadlock two accepted sibling sessions whose startup screens have n
   expect(h.stopped).toEqual([]);
 });
 
-it('does not reuse an initial control-channel proof after a never-submitted Herdr terminal is attached across restart',async()=>{
+it.each([undefined, ''])('reattaches the original idle Herdr terminal across restart without reusing its startup proof (model %j)',async model=>{
   const cwd=await mkdtemp(join(tmpdir(),'runtime-admission-attach-')),path=join(cwd,'state.db');
   const agent=agentConfigSchema.parse({id:'terminal',name:'Terminal',command:'fake',protocol:'pty-cli',cwd,permissionMode:'ask'});
   let repos=createRepositories(path,{newDatabaseAuthority:'ledger_v1'}),detached=false;
@@ -247,17 +247,21 @@ it('does not reuse an initial control-channel proof after a never-submitted Herd
   const close=deferred();let closing=false,attachedIdle=false;const sent:string[]=[];
   try {
     await runtime.initialize([agent]);
-    const original=await runtime.start({agentId:agent.id});
-    expect(await repos.config.get('runtime_idle_terminal:'+original.id)).toBeDefined();
+    const original=await runtime.start({agentId:agent.id,model});
+    const receipt = JSON.parse((await repos.config.get('runtime_idle_terminal:'+original.id))!);
+    expect(receipt.options.model).toBe(model);
+    const attachTerminal = vi.fn(async () => true);
     await runtime.shutdown();repos.close();repos=createRepositories(path);
     runtime=new DutydeckRuntime(repos,{cleanupIntervalMs:0,driverIdleTimeoutMs:0,probe:()=>({available:true,protocol:'pty-cli'}),
       driverFactory:(_agent,_protocol,emit,_exit,id)=>({
-        start:async()=>{},attachTerminal:async()=>true,interrupt:async()=>{},
+        start:async()=>{},attachTerminal,interrupt:async()=>{},
         isIdle:()=>id!==original.id||attachedIdle,hasBackgroundWork:()=>false,
         stop:async()=>{if(id===original.id){closing=true;await close.promise;}},isStopped:async()=>true,
         send:async prompt=>{sent.push(prompt);emit({type:'text',data:{text:'result'}});emit({type:'completed',data:{stopReason:'end_turn'}});}
       })});
     await runtime.initialize([agent]);
+    expect(attachTerminal).toHaveBeenCalledExactlyOnceWith({original:'admission-attach-fixture'});
+    expect(runtime.getDriver(original.id)).toBeDefined();
     const target=await runtime.start({agentId:agent.id});
     const task=await runtime.dispatch(target.id,'after-restart');
     await vi.waitFor(()=>expect(closing).toBe(true));

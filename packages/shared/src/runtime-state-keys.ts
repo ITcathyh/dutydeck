@@ -1,8 +1,5 @@
 import { z } from 'zod';
-import { ptyRetirementRecoverySchema } from './execution-recovery.js';
-import { executionActorSchema, executionJsonSchema, taskExecutionOptionsSchema, taskExecutionSchemas } from './task-execution.js';
-import { verificationStatuses } from './verification.js';
-import { workspaceModes, workspacePreparationStates } from './workspace.js';
+import { taskExecutionSchemas } from './task-execution.js';
 
 // CAS compares the stored JSON byte for byte. Zod's output may reorder object properties.
 function readRecord<Value extends z.ZodTypeAny>(schema: Value, raw: string): z.output<Value> {
@@ -34,49 +31,29 @@ function pair<Value extends z.ZodTypeAny>(prefix: string, value: Value) {
   };
 }
 
-const verification = pair('runtime_verification:', z.object({
-  schemaVersion: z.literal(1), revision: z.number(), id: z.string(), sessionId: z.string(),
-  command: z.string(), cwd: z.string(), status: z.enum(verificationStatuses),
-  startedAt: z.string(), output: z.string(), outputTruncated: z.boolean(),
-  taskId: z.string().optional(), actorId: z.string().optional(), completedAt: z.string().optional(),
-  exitCode: z.number().optional(), beforeFingerprint: z.string().optional(), afterFingerprint: z.string().optional(),
-  error: z.string().optional(), processStage: z.enum(['awaiting_process', 'command_started']).optional(),
-  processIdentity: z.object({ platform: z.literal('linux'), pid: z.number(), processGroupId: z.number(),
-    startTimeTicks: z.string(), marker: z.string() }).passthrough().optional()
-}).passthrough());
+// These readers interpret partial evidence in context (e.g. verification listing vs. workspace admission).
+// Only decode JSON here unless the original reader required a specific shape.
+const jsonValue = z.unknown();
+const verification = pair('runtime_verification:', jsonValue);
 const nativeContext = single('runtime_native_context:', taskExecutionSchemas.nativeSelectionSchema);
-const directory = z.object({ path: z.string(), device: z.number(), inode: z.number() });
+const present = z.unknown().refine(Boolean);
 
 export const runtimeStateKeys = {
   driverStopBlock: single('runtime_driver_stop_block:', z.object({
-    sessionId: z.string(), reason: z.string(), runId: z.string().optional()
+    sessionId: z.string(), reason: z.string()
   }).passthrough()),
-  driverConfiguration: single('runtime_driver_configuration:', z.object({
-    version: z.literal(1), sessionId: z.string(), operationId: z.string(), driverIdentity: z.string(),
-    state: z.enum(['pending', 'unknown']), target: taskExecutionOptionsSchema
-  }).passthrough()),
-  workspace: single('runtime_workspace:', z.object({
-    schemaVersion: z.literal(1), revision: z.number(), sessionId: z.string(), mode: z.enum(workspaceModes),
-    sourceCwd: z.string(), cwd: z.string(), state: z.enum(workspacePreparationStates),
-    createdAt: z.string(), updatedAt: z.string(), repoRoot: z.string().optional(), gitCommonDir: z.string().optional(),
-    relativeCwd: z.string().optional(), baselineCommit: z.string().optional(), branch: z.string().optional(),
-    error: z.string().optional(), cleanedAt: z.string().optional(), cleanupError: z.string().optional()
-  }).passthrough()),
+  driverConfiguration: single('runtime_driver_configuration:', jsonValue),
+  workspace: single('runtime_workspace:', jsonValue),
   verification: {
     ...verification,
     sessionPrefix: (id: string) => verification.key(id, ''),
     sessionUpperBound: (id: string) => verification.prefix + id + ';'
   },
   idleTerminal: single('runtime_idle_terminal:', z.object({
-    runId: z.string(), resourceId: z.string(), identityId: z.string(), options: taskExecutionOptionsSchema, identity: executionJsonSchema
+    options: present, identity: present
   }).passthrough()),
-  ptyRetirement: pair('runtime_pty_retirement:', z.object({
-    input: ptyRetirementRecoverySchema, actor: executionActorSchema, identity: executionJsonSchema, snapshot: executionJsonSchema, absent: z.literal(true).optional()
-  }).passthrough()),
-  executionWorkspace: single('runtime_execution_workspace:', z.union([
-    z.object({ version: z.literal(1), key: z.string(), cwd: directory, resource: directory }),
-    z.object({ version: z.literal(1), unverifiable: z.literal(true) })
-  ])),
+  ptyRetirement: pair('runtime_pty_retirement:', jsonValue),
+  executionWorkspace: single('runtime_execution_workspace:', jsonValue),
   nativeContext: {
     ...nativeContext,
     revisionKey: (id: string) => nativeContext.key(id) + ':revision',

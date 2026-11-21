@@ -19,8 +19,11 @@ import { compactTerminalScreens } from './retention.js';
 
 const { id, revision, fenceSchema, attemptFenceSchema, checksSchema, decisionSchema, identitySchema, observationSchema, intentSchema, sessionSchema } = taskExecutionSchemas;
 function fail(code: string, detail = code): never { throw new RuntimeError(code, detail, 409); }
-function workspaceBlocked(blockers: ExecutionBlocker[]): never {
-  throw new RuntimeError('WORKSPACE_RESOURCE_BLOCKED', 'Workspace is held by another session', 409, blockers);
+function workspaceBlocked(sessionId: string, blockers: ExecutionBlocker[]): never {
+  const message = blockers.some(blocker => blocker.sessionId !== sessionId)
+    ? 'Workspace is held by another session'
+    : "This session's workspace needs recovery";
+  throw new RuntimeError('WORKSPACE_RESOURCE_BLOCKED', message, 409, blockers);
 }
 function parse<T>(schema: { parse(value: unknown): T }, value: unknown): T {
   try { canonicalExecutionJson(value); return schema.parse(value); } catch { return fail('EXECUTION_INVALID_INPUT'); }
@@ -1016,7 +1019,7 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
           const t = task(row.id)!;
           parse(checksSchema,idleResources);
           const admission = workspaceBlockers(f.sessionId,idleResources,owner,true);
-          if (admission.length) workspaceBlocked(admission);
+          if (admission.length) workspaceBlocked(f.sessionId, admission);
           assertWorkItemCapacity(f.sessionId,idleResources,owner);
           requireInputOptions(t.id);
           let a = t.currentAttemptId ? attempt(t.currentAttemptId) : undefined;
@@ -1063,7 +1066,7 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
             if(getAcceptedTask(taskId)?.request?.namespace!==steerableTaskNamespace) fail('STEERING_TASK_OWNED');
             parse(checksSchema,idleResources);
             const admission=workspaceBlockers(f.sessionId,idleResources,owner,true);
-            if(admission.length)workspaceBlocked(admission);
+            if(admission.length)workspaceBlocked(f.sessionId, admission);
             const target=attempt(input.target.attemptId);
             if(!target || target.taskId!==input.target.taskId || target.sessionId!==f.sessionId || target.runId!==f.runId || target.state!=='active' || target.submissionState==='not_submitted') fail('STEERING_TARGET_CONFLICT');
             const value: SteeringOperation = {...f,...input,taskId,controller:owner,state:'pending',revision:1,createdAt:timestamp(),updatedAt:timestamp()};
