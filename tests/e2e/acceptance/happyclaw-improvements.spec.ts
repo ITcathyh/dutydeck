@@ -94,7 +94,8 @@ test.describe('Configuration evidence, explicit project memory and artifact snap
     await memory.getByRole('button', { name: '添加记忆', exact: true }).click();
     await memory.getByRole('textbox', { name: '记忆正文', exact: true }).fill(oldFact);
     await memory.getByRole('button', { name: '保存修订', exact: true }).click();
-    await expect(memory.getByText(oldFact, { exact: true })).toBeVisible();
+    await expect(memory.getByRole('textbox', { name: '记忆正文', exact: true })).toHaveCount(0);
+    await expect(memory.getByRole('listitem').getByText(oldFact, { exact: true })).toBeVisible();
     await sendTurn(page, first.id, 'HAPPYCLAW_MEMORY_UNBOUND');
     expect(receivedPrompt('HAPPYCLAW_MEMORY_UNBOUND')).not.toContain(oldFact);
     await memory.getByRole('button', { name: '绑定所选项目', exact: true }).click();

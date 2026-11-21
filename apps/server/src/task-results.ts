@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { RuntimeError, canonicalExecutionJson, attemptResultV1Schema, type AgentEvent, type AttemptResultV1, type ExecutionRepository, type TaskAttempt } from '@dutydeck/shared';
+import { RuntimeError, canonicalExecutionJson, attemptResultV1Schema, type AgentEvent, type AttemptResultV1, type ExecutionRepository, type TaskAttempt, type TaskAdmissionV1, type TaskRequestV1, type TaskStatus } from '@dutydeck/shared';
 
 export const TASK_RESULT_OUTPUT_BYTES = 512 * 1024;
 const EVENT_PAGE_LIMIT = 200;
@@ -23,7 +23,8 @@ export function readAttemptResult(repositories: AttemptResultRepositories, sessi
   return readResult(repositories, sessionId, taskId, attemptId);
 }
 
-export type TaskResultRepositories = AttemptResultRepositories & { execution: (Pick<ExecutionRepository, 'getAcceptedTask'> & Partial<Pick<ExecutionRepository, 'getRecoveryDecision'>>) };
+type RetryEvidence = Pick<ExecutionRepository, 'getAcceptedTask'> & Partial<Pick<ExecutionRepository, 'getRecoveryDecision'>>;
+export type TaskResultRepositories = AttemptResultRepositories & { execution: RetryEvidence };
 
 /** The admission stays pinned to its first attempt; verified automatic capacity or explicitly audited manual successors supply its result. */
 export function readTaskAttemptResult(repositories: TaskResultRepositories, sessionId: string, taskId: string, attemptId: string): AttemptResultRead {
@@ -36,12 +37,15 @@ export function readWorkAttemptResult(repositories: TaskResultRepositories, sess
 
 /** Verified result ownership for explicit-final lookups; output validation remains in the result reader. */
 export function resolveTaskResultAttemptId(repositories: TaskResultRepositories, sessionId: string, taskId: string, attemptId: string): string | undefined {
-  return resolveResultAttempt(repositories, sessionId, taskId, attemptId, repositories.execution)?.attemptId;
+  return resolveResultAttempt(repositories.execution, taskState(repositories.execution, taskId), sessionId, taskId, attemptId, repositories.execution)?.attemptId;
 }
 
-function resolveResultAttempt(repositories: AttemptResultRepositories, sessionId: string, taskId: string, attemptId: string, retryInput?: (Pick<ExecutionRepository, 'getAcceptedTask'> & Partial<Pick<ExecutionRepository, 'getRecoveryDecision'>>)): TaskAttempt | undefined {
-  const execution = repositories.execution;
-  const projection = execution.getTaskExecutionState ? execution.getTaskExecutionState(taskId) : execution.getTaskExecution(taskId);
+function taskState(execution: AttemptResultRepositories['execution'], taskId: string) {
+  return execution.getTaskExecutionState ? execution.getTaskExecutionState(taskId) : execution.getTaskExecution(taskId);
+}
+
+function resolveResultAttempt(execution: AttemptResultRepositories['execution'], projection: ReturnType<typeof taskState>,
+  sessionId: string, taskId: string, attemptId: string, retryInput?: RetryEvidence): TaskAttempt | undefined {
   if (!projection) return undefined;
   if (projection.task.sessionId !== sessionId) fail('TASK_RESULT_SCOPE_CONFLICT', `Task ${taskId} does not belong to session ${sessionId}`);
   let attempt = projection.attempts.find(item => item.attemptId === attemptId);
@@ -86,9 +90,9 @@ function resolveResultAttempt(repositories: AttemptResultRepositories, sessionId
   return attempt;
 }
 
-function readResult(repositories: AttemptResultRepositories, sessionId: string, taskId: string, attemptId: string, retryInput?: (Pick<ExecutionRepository, 'getAcceptedTask'> & Partial<Pick<ExecutionRepository, 'getRecoveryDecision'>>)): AttemptResultRead {
+function readResult(repositories: AttemptResultRepositories, sessionId: string, taskId: string, attemptId: string, retryInput?: RetryEvidence, projection = taskState(repositories.execution, taskId)): AttemptResultRead {
   const execution = repositories.execution;
-  const attempt = resolveResultAttempt(repositories, sessionId, taskId, attemptId, retryInput);
+  const attempt = resolveResultAttempt(execution, projection, sessionId, taskId, attemptId, retryInput);
   if (!attempt) return { status: 'blocked', reason: 'admission_conflict' };
 
   if (attempt.state === 'preparing' || attempt.state === 'active' || attempt.state === 'suspended') return { status: 'pending' };
@@ -109,6 +113,72 @@ function readResult(repositories: AttemptResultRepositories, sessionId: string, 
     version: 1, taskId, attemptId: attempt.attemptId, settlementId: attempt.settlementId, throughSequence, outcome: attempt.outcome, output
   });
   return { status: 'settled', result };
+}
+
+type AdmissionEvidence = TaskAdmissionV1
+  | { kind: 'work_attempt'; taskId?: string }
+  | { kind: 'request'; request: TaskRequestV1 };
+
+type AdmissionContradiction = 'task_id_changed' | 'task_missing' | 'session_mismatch'
+  | 'acceptance_missing' | 'acceptance_session_mismatch' | 'request_mismatch' | 'first_attempt_changed';
+
+type AdmittedTaskObservation =
+  | { status: 'not_claimed' }
+  | { status: 'legacy_input_unverifiable' }
+  | { status: 'cancelled_before_claim'; taskStatus: 'cancelled' | 'failed' | 'interrupted' }
+  | { status: 'contradiction'; reason: AdmissionContradiction }
+  | { status: 'contradiction'; reason: 'attempt_scope_mismatch'; firstAttemptId: string; error: RuntimeError }
+  | { status: 'contradiction'; reason: 'missing_first_attempt'; taskStatus: TaskStatus }
+  | { status: 'in_progress'; firstAttemptId: string }
+  | { status: 'result'; firstAttemptId: string; result: AttemptResultV1 }
+  | { status: 'result_blocked'; firstAttemptId: string; reason: BlockedAttemptResult['reason'] }
+  | { status: 'result_error'; firstAttemptId: string; error: unknown };
+
+/** Observe the frozen admission and its verified result in the same ledger snapshot. */
+export function observeAdmittedTask(execution: TaskResultRepositories['execution'] & Pick<ExecutionRepository, 'getTaskExecutionState' | 'readTransaction'>,
+  sessionId: string, taskId: string, firstAttemptId: string | undefined, evidence: AdmissionEvidence): AdmittedTaskObservation {
+  return execution.readTransaction((): AdmittedTaskObservation => {
+    if (evidence.kind !== 'request' && evidence.taskId !== taskId) return { status: 'contradiction', reason: 'task_id_changed' };
+    const state = execution.getTaskExecutionState(taskId);
+    if (!state) return { status: 'contradiction', reason: 'task_missing' };
+    if (state.task.sessionId !== sessionId) return { status: 'contradiction', reason: 'session_mismatch' };
+    const taskStatus = state.task.status;
+    const needsInput = evidence.kind !== 'request' && (taskStatus === 'queued' || taskStatus === 'running');
+    // Work items have already checked the admitted request at dispatch. A group request
+    // is itself the frozen credential, including for historical inputs without V2 options.
+    const accepted = needsInput || evidence.kind !== 'work_attempt' ? execution.getAcceptedTask(taskId) : undefined;
+    if (evidence.kind !== 'work_attempt') {
+      if (!accepted) return { status: 'contradiction', reason: 'acceptance_missing' };
+      if (accepted.task.sessionId !== sessionId) return { status: 'contradiction', reason: 'acceptance_session_mismatch' };
+      if (evidence.kind === 'request' && !accepted.request) return { status: 'legacy_input_unverifiable' };
+      const compareRequest = evidence.kind !== 'legacy_partial' || (accepted.request && evidence.request);
+      if (compareRequest && (!accepted.request || canonicalExecutionJson(accepted.request) !== canonicalExecutionJson(evidence.request))) {
+        return { status: 'contradiction', reason: 'request_mismatch' };
+      }
+    }
+    if (needsInput && accepted?.input?.version !== 2) return { status: 'legacy_input_unverifiable' };
+    const first = state.attempts.find(attempt => attempt.number === 1);
+    if (!first) {
+      if (!firstAttemptId && !state.task.currentAttemptId && state.attempts.length === 0) {
+        if (taskStatus === 'queued') return { status: 'not_claimed' };
+        if (taskStatus === 'cancelled' || taskStatus === 'failed' || taskStatus === 'interrupted') return { status: 'cancelled_before_claim', taskStatus };
+      }
+      return { status: 'contradiction', reason: 'missing_first_attempt', taskStatus };
+    }
+    if (firstAttemptId && firstAttemptId !== first.attemptId) return { status: 'contradiction', reason: 'first_attempt_changed' };
+    const pinned = first.attemptId;
+    try {
+      const read = readResult({ execution }, sessionId, taskId, pinned, execution, state);
+      if (read.status === 'pending') return { status: 'in_progress', firstAttemptId: pinned };
+      if (read.status === 'blocked') return { status: 'result_blocked', firstAttemptId: pinned, reason: read.reason };
+      return { status: 'result', firstAttemptId: pinned, result: read.result };
+    } catch (error) {
+      if (error instanceof RuntimeError && error.code === 'TASK_RESULT_SCOPE_CONFLICT') {
+        return { status: 'contradiction', reason: 'attempt_scope_mismatch', firstAttemptId: pinned, error };
+      }
+      return { status: 'result_error', firstAttemptId: pinned, error };
+    }
+  });
 }
 
 /** Best-effort final task text, including verified automatic retries; invalid or unavailable results have no output. */

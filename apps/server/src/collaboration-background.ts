@@ -2,7 +2,7 @@ import type { DutydeckRuntime } from '@dutydeck/runtime';
 import { digest as hash } from '@dutydeck/runtime/digest';
 import { canonicalExecutionJson, installationOwnerTaskActor, parseLarkSourceId, RuntimeError, scheduleTriggerPeriod, taskRequestV1Schema, type CollaborationAction, type CollaborationScope, type ExecutionActor, type RepositoryBundle, type ScheduleTrigger, type Session, type TaskRecord, type TaskRequestV1 } from '@dutydeck/shared';
 import { executionTaskId } from '@dutydeck/storage/helpers';
-import { readTaskAttemptResult } from './task-results.js';
+import { observeAdmittedTask } from './task-results.js';
 import { scheduleMatchesMandate, type CollaborationAuthorization } from './collaboration-service.js';
 import type { ScheduleAgentResult, ScheduleExecutionInput } from './schedule-executor.js';
 import type { StoredLarkConfig } from './lark/config.js';
@@ -119,8 +119,7 @@ export class CollaborationBackground {
     const request = taskRequestV1Schema.parse(record.payload.request), taskId = executionTaskId(request.namespace, request.sessionId, request.key);
     if (taskId !== record.payload.taskId || request.sessionId !== sessionId || canonicalExecutionJson(request.actor) !== canonicalExecutionJson(this.actor(scope, record.requesterId))) throw denied();
     if (!input.resume) { await this.assertRecord(record); await input.claimExecution(); }
-    let accepted = this.options.repositories.execution.getAcceptedTask(taskId);
-    if (!accepted) {
+    if (!this.options.repositories.execution.getAcceptedTask(taskId)) {
       if (record.status !== 'intent') return { status: 'unknown', error: '执行已提交但接受结果缺失，需要核对。' };
       await input.assertCurrent(); await this.assertRecord(record);
       const session = await this.options.runtime.startBackgroundSession({ agentId: String(record.payload.agentId), cwd: typeof record.payload.cwd === 'string' ? record.payload.cwd : undefined,
@@ -142,18 +141,18 @@ export class CollaborationBackground {
           return { status: 'unknown', error: '无法确认原任务是否被接收，需要核对。' };
         }
       }
-      accepted = this.options.repositories.execution.getAcceptedTask(taskId);
     }
-    if (!accepted?.request || canonicalExecutionJson(accepted.request) !== canonicalExecutionJson(request)) return { status: 'unknown', error: '后台任务与冻结请求不一致。' };
-    const execution = this.options.repositories.execution.getTaskExecutionState(taskId);
-    const attempt = execution?.attempts.find(item => item.number === 1);
-    if (!attempt) {
-      if (['cancelled', 'failed', 'interrupted'].includes(accepted.task.status)) return { status: 'failed', error: '任务未执行或已取消。' };
-      return { status: 'pending', receipt: taskId };
+    const result = observeAdmittedTask(this.options.repositories.execution, sessionId, taskId, undefined, { kind: 'request', request });
+    if (result.status === 'contradiction') {
+      const error = '后台任务记录不一致，需要核对。';
+      await this.finish(input, record, 'unknown', taskId, error);
+      return { status: 'unknown', error };
     }
-    const result = readTaskAttemptResult({ execution: this.options.repositories.execution }, sessionId, taskId, attempt.attemptId);
-    if (result.status === 'pending') return { status: 'pending', receipt: taskId };
-    if (result.status === 'blocked') { await this.finish(input, record, 'unknown', taskId, result.reason); return { status: 'unknown', receipt: taskId, error: result.reason }; }
+    if (result.status === 'legacy_input_unverifiable') return { status: 'unknown', error: '后台任务与冻结请求不一致。' };
+    if (result.status === 'cancelled_before_claim') return { status: 'failed', error: '任务未执行或已取消。' };
+    if (result.status === 'not_claimed' || result.status === 'in_progress') return { status: 'pending', receipt: taskId };
+    if (result.status === 'result_error') throw result.error;
+    if (result.status === 'result_blocked') { await this.finish(input, record, 'unknown', taskId, result.reason); return { status: 'unknown', receipt: taskId, error: result.reason }; }
     if (result.result.outcome !== 'completed') { await this.finish(input, record, 'failed', taskId); return { status: 'failed', receipt: taskId, error: result.result.outcome }; }
     await this.finish(input, record, 'succeeded', taskId);
     return { status: 'completed', text: result.result.output.text, receipt: taskId };
