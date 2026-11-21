@@ -10,7 +10,10 @@ function fixture() {
     getTaskExecution: vi.fn(), getUnresolvedTasks: vi.fn().mockReturnValue([]),
     hasQueuedOrRunningTasks: vi.fn().mockReturnValue(false)
   };
+  const unexpectedOperation = async () => { throw new Error('Admission invoked a driver operation'); };
   const driver = {
+    start: unexpectedOperation, send: unexpectedOperation, interrupt: unexpectedOperation,
+    resume: unexpectedOperation, stop: unexpectedOperation,
     isIdle: vi.fn(() => true), hasBackgroundWork: vi.fn(() => false), isDetachedForShutdown: vi.fn(() => false)
   };
   const r = new DutydeckRuntime({ execution } as unknown as RepositoryBundle, { cleanupIntervalMs: 0 }) as any;

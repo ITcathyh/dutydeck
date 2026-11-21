@@ -10,6 +10,6 @@ interface RuntimeComponents {
 }
 
 /** Internal probes used by the runtime's wiring and shutdown tests. */
-export function runtimeComponents(runtime: DutydeckRuntime): RuntimeComponents {
+export function runtimeComponents(runtime: Pick<DutydeckRuntime, keyof DutydeckRuntime>): RuntimeComponents {
   return runtime as unknown as RuntimeComponents;
 }
