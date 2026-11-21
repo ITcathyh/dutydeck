@@ -62,8 +62,8 @@ it('rechecks a workspace release that arrives while the rejected claim awaits co
   h.gates.set('original-workspace-turn',running);
   const first=h.runtime.send(one.id,'original-workspace-turn');
   await vi.waitFor(()=>expect(h.sent).toEqual(['original-workspace-turn']));
-  const runtime=h.runtime as any,inspect=runtime.closeUnprovenIdleCompetitors.bind(runtime);
-  vi.spyOn(runtime,'closeUnprovenIdleCompetitors').mockImplementationOnce(async(...args:unknown[])=>{
+  const scheduler=runtimeComponents(h.runtime).scheduler,inspect=scheduler.closeUnprovenIdleCompetitors.bind(scheduler);
+  vi.spyOn(scheduler,'closeUnprovenIdleCompetitors').mockImplementationOnce(async(...args)=>{
     const closed=await inspect(...args);
     inspected.resolve();await releaseInspection.promise;return closed;
   });
@@ -85,7 +85,7 @@ it('does not rerun blocked same-workspace admission for each event of the runnin
   await vi.waitFor(()=>expect(h.sent).toEqual(['long-turn']));
   let claims=0;h.onClaim(()=>{claims++;});
   const queued=[];for(const session of waiting)queued.push(await h.runtime.dispatch(session.id,`behind-${session.id}`));
-  await vi.waitFor(()=>{for(const session of waiting){expect(runtime.resourceQueueBlocked.has(session.id)).toBe(true);expect(runtimeComponents(runtime).mutations.drains.has(session.id)).toBe(false);}});
+  await vi.waitFor(()=>{for(const session of waiting){expect(runtimeComponents(runtime).scheduler.resourceQueueBlocked.has(session.id)).toBe(true);expect(runtimeComponents(runtime).mutations.drains.has(session.id)).toBe(false);}});
   const before=claims;
   for(let i=0;i<40;i++)h.emitters.get(one.id)!({type:'thinking',data:{text:`step ${i}`}});
   await vi.waitFor(async()=>expect((await h.runtime.getEvents(one.id)).filter(event=>event.type==='thinking')).toHaveLength(40));

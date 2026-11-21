@@ -537,8 +537,8 @@ it('does not let the delivery of an old promotion stop a new task', async () => 
   await h.runs[0]!.sent.promise;
   const queued = await h.runtime.dispatch(h.session.id, 'queued');
   const entered = deferred(), gate = deferred();
-  const internal = h.runtime as unknown as { applyQueueActions(session: import('@dutydeck/shared').Session): Promise<void> };
-  const deliver = internal.applyQueueActions.bind(h.runtime);
+  const internal = runtimeComponents(h.runtime).scheduler;
+  const deliver = internal.applyQueueActions.bind(internal);
   let paused = true, firstDelivery = true;
   internal.applyQueueActions = async session => {
     if (paused) {

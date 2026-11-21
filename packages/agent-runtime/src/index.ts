@@ -1,3 +1,4 @@
+import { Scheduler } from './runtime/scheduler.js';
 import { DriverSupervisor } from './runtime/driver-supervisor.js';
 import { SteeringService } from './runtime/steering-service.js';
 import { backgroundSource, runtimeStateKeys, clearTaskReportSafely, isTerminalTaskStatus, readSessionTaskReportReference, readSessionTaskReport, SESSION_NAME_CONFIG_PREFIX, taskReportInputSchema, writeTaskReport, type SessionWorkspace, type TaskReport, type TaskReportInput } from '@dutydeck/shared';
@@ -195,10 +196,6 @@ export interface SessionNotice {
   /** 能处理这件事的会话（Web 详情入口）。 */
   sessionIds: string[];
 }
-/** 排队超过这么久仍未开始的消息，轮到它时不再执行，改为取消。 */
-const QUEUED_TASK_EXPIRE_MS = 24 * 60 * 60_000;
-/** 同会话上一条任务由 Agent 跑完不到这么久，视为按顺序轮到排头，不按过期处理。 */
-const QUEUE_HANDOFF_MS = 15 * 60_000;
 /** 自更新的 CLI 原地替换可执行文件期间命令短暂不存在；找不到命令时等这么久再看一次。 */
 const COMMAND_SWAP_WAIT_MS = 3_000;
 const recoveryOwner: ExecutionActor = { kind: 'installation_owner', id: 'installation_owner' };
@@ -277,17 +274,11 @@ export class DutydeckRuntime {
   private readonly completedTurns = new Set<string>();
   private readonly attemptTools = new Map<string, AttemptTools>();
   private readonly sendWaiters = new Set<() => void>();
-  private readonly queueBlocked = new Set<string>();
-  private readonly resourceQueueBlocked = new Set<string>();
-  private resourceQueueRevision = 0;
-  private resourceQueueRetryPending = false;
   /** 按 Agent 记的不可用标记（没登录、凭据失效），只在进程内；见 checkAgentAvailability。 */
   private readonly agentUnavailable = new Map<string, AgentUnavailable>();
   private readonly agentChecks = new Map<string, Promise<AgentUnavailable | undefined>>();
   private readonly activeTurns = new Set<string>();
   private readonly activeTasks = new Map<string, TaskRecord>();
-  private readonly queues = new Map<string, TaskRecord[]>();
-  private readonly queueRuns = new Map<string, Promise<void>>();
   private readonly sessionGenerations = new Map<string, number>();
   private readonly exitedDriverGenerations = new Map<string, number>();
   private readonly driverEventChains = new Map<string, Promise<void>>();
@@ -299,15 +290,12 @@ export class DutydeckRuntime {
   private readonly eventFlushedAttempts = new Set<string>();
   private readonly driverStopReasons = new Map<string, string>();
   private readonly turnErrors = new Map<string, string>();
-  private readonly capacityTimers = new Map<string, { taskId: string; timer: ReturnType<typeof setTimeout> }>();
   private readonly exitListeners = new Map<string, Set<(code: number | null) => void>>();
   private readonly factory: DriverFactory;
   /** 当前一轮的开始时间，之后每个驱动事件（含 raw_terminal）刷新一次。 */
   private readonly turnProgressAt = new Map<string, number>();
   private readonly turnCpu = new Map<string, ProcessTreeCpu>();
   private shuttingDown = false;
-  /** Restart drain: accepted Tasks stay durable and queued; no new Attempt is claimed until released or the next process. */
-  private queueHeld = false;
   private readonly taskRuns = new Set<Promise<unknown>>();
   private readonly workspaces: WorkspaceManager;
   private readonly verifications: VerificationManager;
@@ -324,17 +312,13 @@ export class DutydeckRuntime {
   private readonly cleaningRuns = new Map<string, Promise<WorkspaceCleanupResult>>();
 
   private readonly gate: SessionGate = new SessionGate({
-    capacity_wait: id => {
-      const delayed = this.capacityTimers.get(id);
-      const current = delayed && this.repos.execution.getTaskExecution(delayed.taskId);
-      return current?.task.status === 'queued' && !!current.currentAttempt?.automaticRetry && Date.parse(current.currentAttempt.automaticRetry.dueAt) > Date.now();
-    },
+    capacity_wait: id => this.scheduler.capacityWaiting(id),
     pty_retirement: id => this.recovery.isRetiringPty(id),
     shutting_down: () => this.shuttingDown,
-    queue_held: () => this.queueHeld,
+    queue_held: () => this.scheduler.isQueueHeld(),
     initialization_failed: () => this.initializationFailed,
-    queue_blocked: id => this.queueBlocked.has(id),
-    resource_queue_blocked: id => this.resourceQueueBlocked.has(id),
+    queue_blocked: id => this.scheduler.queueBlocked.has(id),
+    resource_queue_blocked: id => this.scheduler.resourceQueueBlocked.has(id),
     driver_retiring: id => this.supervisor.retiringDrivers.has(id),
     stop_running: id => this.supervisor.stopRuns.has(id),
     lifecycle_invalid: id => !this.mutations.valid(this.lifecycle(id)),
@@ -344,7 +328,7 @@ export class DutydeckRuntime {
     verification_active: id => this.verifyingSessions.has(id),
     steering_active: id => this.steering.isActive(id),
     verification_blocked: id => this.blockedVerificationSessions.has(id),
-    queue_empty: id => !this.queues.get(id)?.length,
+    queue_empty: id => !this.scheduler.projected(id)?.length,
     turn_active: id => this.activeTurns.has(id),
     driver_replaced: (id, driver) => this.supervisor.drivers.get(id) !== driver,
     recovery_in_flight: id => this.recoveryInFlight(id),
@@ -356,6 +340,7 @@ export class DutydeckRuntime {
 
   private readonly steering: SteeringService;
   private readonly supervisor: DriverSupervisor;
+  private readonly scheduler: Scheduler;
   private readonly recovery: RecoveryService;
   private readonly maintenance: Maintenance;
   private readonly humanWaits: HumanWaits;
@@ -396,8 +381,8 @@ export class DutydeckRuntime {
       attemptFence: (...args) => this.attemptFence(...args),
       blockedVerificationSessions: this.blockedVerificationSessions,
       bound: (...args) => this.bound(...args),
-      cancelSessionQueue: (...args) => this.cancelSessionQueue(...args),
-      capacityTimers: this.capacityTimers,
+      cancelSessionQueue: (...args) => this.scheduler.cancelSessionQueue(...args),
+      cancelCapacityTimer: id => this.scheduler.cancelCapacityTimer(id),
       changeDriverConfiguration: (...args) => this.changeDriverConfiguration(...args),
       claim: () => this.binding,
       commandSwapWindow: (...args) => this.commandSwapWindow(...args),
@@ -421,7 +406,7 @@ export class DutydeckRuntime {
       reopenQueue: (...args) => this.reopenQueue(...args),
       repos,
       saveState: (...args) => this.saveState(...args),
-      scheduleQueue: (...args) => this.scheduleQueue(...args),
+      scheduleQueue: (...args) => this.scheduler.scheduleQueue(...args),
       sessionGenerations: this.sessionGenerations,
       settleExitedDriver: (...args) => this.settleExitedDriver(...args),
       shuttingDown: () => this.shuttingDown,
@@ -429,7 +414,7 @@ export class DutydeckRuntime {
       unsubscribeInsightSources: (...args) => this.unsubscribeInsightSources(...args),
       verifications: this.verifications,
       wake: (...args) => this.wake(...args),
-      wakeResourceQueues: (...args) => this.wakeResourceQueues(...args),
+      wakeResourceQueues: (...args) => this.scheduler.wakeResourceQueues(...args),
       warnCaught: (...args) => this.warnCaught(...args),
       workspaces: this.workspaces,
     });
@@ -442,6 +427,28 @@ export class DutydeckRuntime {
       consume: (...args) => this.consume(...args), warnCaught: (...args) => this.warnCaught(...args),
       active: id => this.active(id),
       driverOperation: (driver, operation) => this.supervisor.driverOperation(driver, operation), touch: id => this.supervisor.touch(id),
+    });
+    this.scheduler = new Scheduler(this.mutations, {
+      activeTasks: this.activeTasks,
+      attachedTerminals: this.attachedTerminals,
+      bound: (...args) => this.bound(...args),
+      fence: (...args) => this.fence(...args),
+      gate: this.gate,
+      hasBinding: () => !!this.binding,
+      humanWaits: this.humanWaits,
+      interruptOwnedAttempt: (...args) => this.interruptOwnedAttempt(...args),
+      localResources: this.localResources,
+      notices: this.notices,
+      options,
+      recoveryActor: recoveryOwner,
+      repos,
+      runTask: (...args) => this.runTask(...args),
+      shuttingDown: () => this.shuttingDown,
+      steeringActive: id => this.steering.isActive(id),
+      supervisor: this.supervisor,
+      verifyingSessions: this.verifyingSessions,
+      wake: (...args) => this.wake(...args),
+      warnCaught: (...args) => this.warnCaught(...args),
     });
     this.recovery = new RecoveryService(this.mutations, {
       adoptDriver: (id, driver) => this.supervisor.adopt(id, driver), clearRecoveredStop: id => this.supervisor.clearRecoveredStop(id),
@@ -456,14 +463,14 @@ export class DutydeckRuntime {
       acceptedOptions: task => this.acceptedInput(task).executionOptions,
       runRecoveredTurn: turn => this.runRecoveredTurn(turn),
       repos, options, gate: this.gate, localResources: this.localResources, configurations: this.configurations,
-      drivers: this.supervisor.drivers, queueBlocked: this.queueBlocked, runtimeInstanceId: this.runtimeInstanceId,
+      drivers: this.supervisor.drivers, queueBlocked: this.scheduler.queueBlocked, runtimeInstanceId: this.runtimeInstanceId,
       claim: () => this.binding, driverRetiring: id => this.supervisor.retiringDrivers.has(id),
       active: (...args) => this.active(...args),
       assertReady: (...args) => this.assertReady(...args),
       assertReplaceable: (...args) => this.supervisor.assertReplaceable(...args),
       assertResources: (...args) => this.assertResources(...args),
       resourceBlockers: (...args) => this.resourceBlockers(...args),
-      idleResourceChecks: (...args) => this.idleResourceChecks(...args),
+      idleResourceChecks: (...args) => this.scheduler.idleResourceChecks(...args),
       recoveryInFlight: (...args) => this.recoveryInFlight(...args),
       bound: (...args) => this.bound(...args),
       wake: (...args) => this.wake(...args),
@@ -471,7 +478,7 @@ export class DutydeckRuntime {
       attemptFence: (...args) => this.attemptFence(...args),
       publicTask: (...args) => this.publicTask(...args),
       emit: (...args) => this.emit(...args),
-      wakeResourceQueues: (...args) => this.wakeResourceQueues(...args),
+      wakeResourceQueues: (...args) => this.scheduler.wakeResourceQueues(...args),
       loadStopBlock: (...args) => this.supervisor.loadStopBlock(...args),
       retainStopBlock: (...args) => this.supervisor.retainStopBlock(...args),
       reopenQueue: (...args) => this.reopenQueue(...args),
@@ -492,7 +499,7 @@ export class DutydeckRuntime {
       recoveryActor: recoveryOwner, repos, options, drivers: this.supervisor.drivers, notices: this.notices, gate: this.gate,
       shuttingDown: () => this.shuttingDown,
       recoveryInFlight: (...args) => this.recoveryInFlight(...args),
-      queuedTasks: (...args) => this.queuedTasks(...args),
+      queuedTasks: (...args) => this.scheduler.queuedTasks(...args),
       active: (...args) => this.active(...args),
       observeAbandonedResources: (...args) => this.recovery.observeAbandonedResources(...args),
       retireDetachedPty: (...args) => this.recovery.retireDetachedPty(...args),
@@ -503,9 +510,8 @@ export class DutydeckRuntime {
     this.steering = new SteeringService(this.mutations, {
       acceptedInput: (...args) => this.acceptedInput(...args),
       active: (...args) => this.active(...args),
-      activeAttemptRef: id => { const token = this.mutations.attempts.get(id); return token && this.mutations.attemptRefs.get(token); },
       actor: (...args) => this.actor(...args),
-      applyQueueActions: (...args) => this.applyQueueActions(...args),
+      applyQueueActions: (...args) => this.scheduler.applyQueueActions(...args),
       assertReady: (...args) => this.assertReady(...args),
       authorize: (...args) => this.authorize(...args),
       bound: (...args) => this.bound(...args),
@@ -514,44 +520,30 @@ export class DutydeckRuntime {
       eventScope: this.eventScope,
       fence: (...args) => this.fence(...args),
       hasBinding: () => !!this.binding,
-      idleResourceChecks: (...args) => this.idleResourceChecks(...args),
+      idleResourceChecks: (...args) => this.scheduler.idleResourceChecks(...args),
       inspectRecovery: (id, actor) => this.inspectExecutionRecovery(id, actor),
       isQueueHeld: (...args) => this.isQueueHeld(...args),
       logTaskRejection: (...args) => this.logTaskRejection(...args),
       options,
-      projectQueue: (...args) => this.projectQueue(...args),
+      projectQueue: (...args) => this.scheduler.projectQueue(...args),
       publicTask: (...args) => this.publicTask(...args),
-      queueBlocked: this.queueBlocked,
+      unblockQueue: id => this.scheduler.unblockQueue(id),
       recordPrompt: (...args) => this.recordPrompt(...args),
       recoveryInFlight: (...args) => this.recoveryInFlight(...args),
       reopenQueue: (...args) => this.reopenQueue(...args),
       repos,
       requireRecoveryOwner: actor => this.recovery.requireRecoveryOwner(actor),
-      scheduleQueue: (...args) => this.scheduleQueue(...args),
+      scheduleQueue: (...args) => this.scheduler.scheduleQueue(...args),
       turnOutput: (...args) => this.turnOutput(...args),
       wake: (...args) => this.wake(...args),
-      wakeResourceQueues: (...args) => this.wakeResourceQueues(...args),
+      wakeResourceQueues: (...args) => this.scheduler.wakeResourceQueues(...args),
       warnTaskRejection: (...args) => this.warnTaskRejection(...args),
     });
     this.maintenance.startTimer(interval, () => this.initialized && !this.shuttingDown, () => this.cleanupIdleDrivers());
   }
 
   private bound() { this.assertBinding(); return this.execution!; }
-  private wake<T extends CommitResult>(result: T): T { this.publisher.wake(result.session.id); this.wakeResourceQueues(); return result; }
-  private wakeResourceQueues() {
-    this.resourceQueueRevision++;
-    this.retryResourceQueues();
-  }
-  /** One pending pass per burst: each pass re-runs full workspace admission for every blocked session. */
-  private retryResourceQueues() {
-    if (this.resourceQueueRetryPending || !this.resourceQueueBlocked.size) return;
-    this.resourceQueueRetryPending = true;
-    queueMicrotask(() => {
-      this.resourceQueueRetryPending = false;
-      const waiting = [...this.resourceQueueBlocked]; this.resourceQueueBlocked.clear();
-      if (!this.shuttingDown && this.binding) for (const id of waiting) this.mutations.run(undefined, () => this.scheduleQueue(id));
-    });
-  }
+  private wake<T extends CommitResult>(result: T): T { this.publisher.wake(result.session.id); this.scheduler.wakeResourceQueues(); return result; }
   private fence(session: Session): SessionFence { return { sessionId: session.id, runId: session.runId }; }
   private attemptFence(ref: AttemptRef & SessionFence): AttemptFence {
     const attempt = this.repos.execution.getAttempt(ref);
@@ -652,7 +644,7 @@ export class DutydeckRuntime {
         const committed = this.bound().patchSessionState(fence, makeId('session_state'), { state: patch.state ?? current.state, ...(Object.hasOwn(patch, 'error') ? { error: patch.error ?? null } : {}) });
         // Admission never reads Session state, and turn progress follows every driver event; only a real lifecycle change retries blocked queues.
         this.publisher.wake(id);
-        if (committed.events.length && !turnProgress) this.wakeResourceQueues();
+        if (committed.events.length && !turnProgress) this.scheduler.wakeResourceQueues();
         result = committed.session;
       }
       if (patch.archivedAt !== undefined) result = this.bound().patchSession(this.fence(result), { archivedAt: patch.archivedAt });
@@ -697,7 +689,7 @@ export class DutydeckRuntime {
     });
     this.driverEventChains.set(session.id, next);
     // A held session gives no idle proof; releasing the hold wakes the queues itself.
-    void next.finally(() => { if (this.driverEventChains.get(session.id) === next) this.driverEventChains.delete(session.id); if ((event.type === 'status' || event.type === 'completed') && !this.sessionHeld(session.id)) this.wakeResourceQueues(); });
+    void next.finally(() => { if (this.driverEventChains.get(session.id) === next) this.driverEventChains.delete(session.id); if ((event.type === 'status' || event.type === 'completed') && !this.scheduler.sessionHeld(session.id)) this.scheduler.wakeResourceQueues(); });
   }
   private async recordUsage(session: Session, ref: AttemptRef, event: NormalizedDriverEvent) {
     const usage = event.type === 'status' && event.data?.state === 'turn_usage';
@@ -882,8 +874,8 @@ export class DutydeckRuntime {
             workspace = await this.prepareWorkspace(session.id, workspace.sourceCwd, workspace.mode);
           }
           if (workspace?.state === 'ready') Object.assign(session, await this.finalizeWorkspace(session));
-          await this.projectQueue(session.id);
-          if (this.queues.get(session.id)?.length) this.scheduleQueue(session.id);
+          await this.scheduler.projectQueue(session.id);
+          if (this.scheduler.projected(session.id)?.length) this.scheduler.scheduleQueue(session.id);
         });
       } catch (error) {
         // 一个会话的工作目录不见了（比如 worktree 被删）只影响它自己：记下来、跳过它，别让整个实例起不来。
@@ -983,7 +975,7 @@ export class DutydeckRuntime {
         }
         token.revoke({ code: 'recovery_finished', by: 'DutydeckRuntime.recoverPersistentTurn' }); await this.forgetAttempt(attempt.attemptId);
         if (attached && !this.shuttingDown) await this.scoped(session.id, async () => {
-          await this.projectQueue(session.id); this.queueBlocked.delete(session.id); this.scheduleQueue(session.id);
+          await this.scheduler.projectQueue(session.id); this.scheduler.unblockQueue(session.id); this.scheduler.scheduleQueue(session.id);
         });
       }
       // Only the run that durably settled this attempt notifies; stop, failed handshakes and later restarts do not.
@@ -1041,7 +1033,7 @@ export class DutydeckRuntime {
   /** Avoid preparing redundant children; the later ledger claim still owns all execution limits. */
   canPrepareWorkItemWorkspace(cwd: string): boolean {
     this.assertReady();
-    return this.bound().canPrepareWorkspace(cwd, this.idleResourceChecks());
+    return this.bound().canPrepareWorkspace(cwd, this.scheduler.idleResourceChecks());
   }
   getWorkspaceCleanupPreview(sessionId: string): Promise<WorkspaceCleanupPreview> {
     return this.readWorkspace(sessionId, () => this.workspaceCleanupPreview(sessionId));
@@ -1123,7 +1115,7 @@ export class DutydeckRuntime {
           if (this.supervisor.drivers.has(other.id)) {
             runtimeBlockers.push({ code: 'SESSION_BUSY', message: `同工作目录存在活动驱动会话: ${other.id}` });
           }
-          if (this.activeTurns.has(other.id) || (this.queues.get(other.id)?.length ?? 0) > 0 || this.queueRuns.has(other.id)) {
+          if (this.activeTurns.has(other.id) || (this.scheduler.projected(other.id)?.length ?? 0) > 0 || this.scheduler.queueRuns.has(other.id)) {
             runtimeBlockers.push({ code: 'SESSION_BUSY', message: `同工作目录存在排队或执行中的任务: ${other.id}` });
           }
           if (this.verifyingSessions.has(other.id) || this.blockedVerificationSessions.has(other.id)) {
@@ -1138,7 +1130,7 @@ export class DutydeckRuntime {
     if (this.supervisor.drivers.has(sessionId)) {
       runtimeBlockers.push({ code: 'SESSION_BUSY', message: '当前会话仍有未断开的驱动连接' });
     }
-    if (this.activeTurns.has(sessionId) || (this.queues.get(sessionId)?.length ?? 0) > 0 || this.queueRuns.has(sessionId)) {
+    if (this.activeTurns.has(sessionId) || (this.scheduler.projected(sessionId)?.length ?? 0) > 0 || this.scheduler.queueRuns.has(sessionId)) {
       runtimeBlockers.push({ code: 'SESSION_BUSY', message: '当前会话仍有活跃任务' });
     }
     if (this.verifyingSessions.has(sessionId) || this.blockedVerificationSessions.has(sessionId)) {
@@ -1410,7 +1402,7 @@ export class DutydeckRuntime {
   }
   private async reopenQueue(id: string) {
     if (this.lifecycle(id).revoked) this.lifecycles.set(id, this.ownerOf(id));
-    this.queueBlocked.delete(id); await this.projectQueue(id); this.scheduleQueue(id);
+    this.scheduler.unblockQueue(id); await this.scheduler.projectQueue(id); this.scheduler.scheduleQueue(id);
   }
   inspectExecutionRecovery(id: string, actor: ExecutionActor) {
     return this.recovery.inspectExecutionRecovery(id, actor);
@@ -1449,8 +1441,8 @@ export class DutydeckRuntime {
       await this.authorize(id, actorId);
       const persistedTasks = await this.mutations.wait(() => this.repos.tasks.listBySession(id));
       const eligibleTasks = persistedTasks.filter(task => !deferredTasks.has(task.id));
-      const preexistingQueue = (this.queues.get(id) ?? []).some(task => !deferredTasks.has(task.id));
-      if (this.activeTurns.has(id) || this.queueRuns.has(id) || preexistingQueue
+      const preexistingQueue = (this.scheduler.projected(id) ?? []).some(task => !deferredTasks.has(task.id));
+      if (this.activeTurns.has(id) || this.scheduler.queueRuns.has(id) || preexistingQueue
         || eligibleTasks.some(task => task.status === 'running' || task.status === 'queued')) {
         throw new RuntimeError('SESSION_BUSY', 'Wait for Agent execution and its queue to finish before verification', 409);
       }
@@ -1473,9 +1465,9 @@ export class DutydeckRuntime {
     } finally {
       if (this.verificationDeferredTasks.get(id) === deferredTasks) {
         this.verifyingSessions.delete(id); this.verificationDeferredTasks.delete(id); this.verificationHolds.delete(id);
-        this.mutations.run(undefined, () => this.scheduleQueue(id));
+        this.mutations.run(undefined, () => this.scheduler.scheduleQueue(id));
         // Other Sessions in this directory waited on the running record; it has settled now.
-        this.wakeResourceQueues();
+        this.scheduler.wakeResourceQueues();
       }
     }
     });
@@ -1517,7 +1509,7 @@ export class DutydeckRuntime {
     if (this.supervisor.drivers.get(session.id)?.hasBackgroundWork?.()) {
       throw new RuntimeError('SESSION_BUSY', 'Native background work of this Session is still running; wait for it before verification', 409);
     }
-    const idleChecks = this.idleResourceChecks();
+    const idleChecks = this.scheduler.idleResourceChecks();
     const ownResourceBlock = this.verificationResourceBlock(session.id, true, idleChecks);
     if (ownResourceBlock) {
       throw new RuntimeError('SESSION_BUSY', `This Session has unconfirmed driver or workspace resources: ${ownResourceBlock}`, 409);
@@ -1792,12 +1784,8 @@ export class DutydeckRuntime {
   }
 
   /** Hold or release claiming of queued Tasks. Admission is unchanged; release reschedules every projected queue. */
-  setQueueHeld(held: boolean) {
-    if (this.queueHeld === held) return;
-    this.queueHeld = held;
-    if (!held) for (const id of [...this.queues.keys()]) this.mutations.run(undefined, () => this.scheduleQueue(id));
-  }
-  isQueueHeld() { return this.queueHeld; }
+  setQueueHeld(held: boolean) { return this.scheduler.setQueueHeld(held); }
+  isQueueHeld() { return this.scheduler.isQueueHeld(); }
 
   /**
    * 当前一轮是否可能卡住：后面有排队任务、驱动事件与终端输出都已静默超过阈值、受管进程树 CPU 不活跃，且没有在等审批或等人回答。
@@ -1807,7 +1795,7 @@ export class DutydeckRuntime {
     const task = this.activeTasks.get(id);
     const silentMs = Date.now() - (this.turnProgressAt.get(id) ?? Date.now());
     const queued = task && silentMs >= TURN_STALL_SILENCE_MS && !this.humanWaits.pendingPermissionCount(id) && !this.humanWaits.awaitingAnswer(id)
-      ? (await this.queuedTasks(id)).length : 0;
+      ? (await this.scheduler.queuedTasks(id)).length : 0;
     if (!task || !queued || this.activeTasks.get(id) !== task) { this.turnCpu.delete(id); return undefined; }
     let sampler = this.turnCpu.get(id);
     if (!sampler) { sampler = new ProcessTreeCpu(TURN_STALL_CPU_WINDOW_MS); this.turnCpu.set(id, sampler); }
@@ -1831,7 +1819,7 @@ export class DutydeckRuntime {
   /** Restart may detach only verified original turns while queue claiming stays held. */
   async getRestartActivity(excludeSessionId?: string): Promise<{ runningTasks: number; restartBlockers: number; recoverableTasks: number }> {
     const recoverable = new Map<string, () => boolean>();
-    if (this.queueHeld && !this.shuttingDown) for (const [id, task] of this.activeTasks) {
+    if (this.scheduler.isQueueHeld() && !this.shuttingDown) for (const [id, task] of this.activeTasks) {
       if (id === excludeSessionId || task.status !== 'running') continue;
       try {
         const session = await this.repos.sessions.get(id), driver = this.supervisor.drivers.get(id);
@@ -1842,7 +1830,7 @@ export class DutydeckRuntime {
           || task.interruptedByActor || this.acceptedInput(task).executionOptions.permissionMode !== 'full-trust') continue;
         const resource = this.recovery.recoverableResource(id, session.runId, submission.resourceRefs);
         if (!resource) continue;
-        const unchanged = () => this.queueHeld && !this.shuttingDown && this.activeTasks.get(id) === task && task.status === 'running'
+        const unchanged = () => this.scheduler.isQueueHeld() && !this.shuttingDown && this.activeTasks.get(id) === task && task.status === 'running'
           && this.supervisor.drivers.get(id) === driver && !this.gate.stops.block(id) && !this.verifyingSessions.has(id)
           && !this.steering.isActive(id) && !this.humanWaits.pendingPermissionCount(id)
           && !this.humanWaits.oscWaiting(attempt.attemptId)
@@ -2330,7 +2318,8 @@ export class DutydeckRuntime {
     });
   }
 
-  private runTask(id: string, task: TaskRecord, attempt: TaskAttempt, token: Owner) {
+  private runTask(id: string, task: TaskRecord, attempt: TaskAttempt) {
+    const token = this.mutations.current()!;
     this.mutations.attemptRefs.set(token, { sessionId: id, runId: attempt.runId, taskId: task.id, attemptId: attempt.attemptId });
     this.mutations.attempts.set(id, token); this.activeTasks.set(id, task); this.turnProgressAt.set(id, Date.now());
     const run = this.mutations.run(token, () => this.executeTask(id, task));
@@ -2584,7 +2573,7 @@ export class DutydeckRuntime {
   private async forgetAttempt(attemptId: string) {
     this.completedTurns.delete(attemptId); this.driverStopReasons.delete(attemptId); this.turnErrors.delete(attemptId); this.eventFlushedAttempts.delete(attemptId);
     this.attemptTools.delete(attemptId); this.humanWaits.clearOscWait(attemptId);
-    try { await this.humanWaits.dropAttemptPermissions(attemptId); } finally { this.wakeResourceQueues(); }
+    try { await this.humanWaits.dropAttemptPermissions(attemptId); } finally { this.scheduler.wakeResourceQueues(); }
   }
   private notifyTaskSettled(session: Session, settled: PublicTaskRecord) {
     if (this.options.onTaskSettled && isTerminalTaskStatus(settled.status)) {
@@ -2677,9 +2666,9 @@ export class DutydeckRuntime {
       try { await this.options.matterTracking?.accepted(stored, existing.task); } catch { console.warn('MATTER_LINK_FAILED'); }
       if (this.mutations.valid(this.lifecycle(id)) && !stored.archivedAt && stored.state !== 'stopped') {
         await this.logTaskRejection(id, this.scoped(id, async () => {
-          this.rememberQueued(existing.task); this.queueBlocked.delete(id);
-          try { await this.projectQueue(id); await this.applyQueueActions(stored); }
-          finally { this.scheduleQueue(id); }
+          this.scheduler.rememberQueued(existing.task); this.scheduler.unblockQueue(id);
+          try { await this.scheduler.projectQueue(id); await this.scheduler.applyQueueActions(stored); }
+          finally { this.scheduler.scheduleQueue(id); }
         }));
       }
       return { ...this.publicTask(existing.task), replayed: true, queuedAhead: 0 };
@@ -2709,7 +2698,7 @@ export class DutydeckRuntime {
       const content = { version: 2 as const, prompt, executionContext: context, contentSources: [], executionOptions };
       const accepted = await this.mutations.write(id, async () => {
         const committed = this.wake(this.bound().acceptTask(this.fence(session), request, { ...content, digest: digest(content) }, mode === 'interrupt' ? 'front' : 'back'));
-        if (committed.task) this.rememberQueued(committed.task);
+        if (committed.task) this.scheduler.rememberQueued(committed.task);
         return committed;
       });
       if (!accepted.task) throw new RuntimeError('TASK_ACCEPTANCE_MISSING', 'The committed task is missing', 500);
@@ -2717,205 +2706,16 @@ export class DutydeckRuntime {
       try { await this.options.matterTracking?.accepted(session, accepted.task); } catch { console.warn('MATTER_LINK_FAILED'); }
       this.verificationDeferredTasks.get(id)?.add(accepted.task.id);
       if (!accepted.replayed && accepted.task.id !== executionTaskId(request.namespace, id, request.key)) throw new RuntimeError('TASK_ID_MISMATCH', 'Accepted task identity differs from its request', 500);
-      this.queueBlocked.delete(id);
-      try { await this.projectQueue(id); await this.applyQueueActions(session); }
-      finally { this.scheduleQueue(id); }
-      return { ...this.publicTask(accepted.task), replayed: accepted.replayed, queuedAhead: Math.max(0, (this.queues.get(id)?.length ?? 1) - 1) };
+      this.scheduler.unblockQueue(id);
+      try { await this.scheduler.projectQueue(id); await this.scheduler.applyQueueActions(session); }
+      finally { this.scheduler.scheduleQueue(id); }
+      return { ...this.publicTask(accepted.task), replayed: accepted.replayed, queuedAhead: Math.max(0, (this.scheduler.projected(id)?.length ?? 1) - 1) };
     }));
   }
-
-  private rememberQueued(task: TaskRecord) {
-    // A committed Task keeps scheduling alive if the derived queue read fails. claimNext owns order.
-    if (task.status !== 'queued') return;
-    const queue = this.queues.get(task.sessionId) ?? [];
-    if (!queue.some(item => item.id === task.id)) this.queues.set(task.sessionId, [...queue, task]);
-  }
-  private async queuedTasks(id: string) {
-    return this.repos.tasks.listQueued ? this.repos.tasks.listQueued(id)
-      : (await this.repos.tasks.listBySession(id)).filter(task => task.status === 'queued');
-  }
-  private async projectQueue(id: string) {
-    const queue = await this.queuedTasks(id);
-    this.mutations.check();
-    if (queue.length) this.queues.set(id, queue); else this.queues.delete(id);
-  }
-  private scheduleQueue(id: string) {
-    const [block] = this.gate.reasons(id, 'drain', { firstOnly: true });
-    const delayed = this.capacityTimers.get(id);
-    if (delayed && block?.code !== 'capacity_wait') { clearTimeout(delayed.timer); this.capacityTimers.delete(id); }
-    if (block) return;
-    const token = owner(id, this.lifecycle(id)); this.mutations.drains.set(id, token);
-    const run = this.mutations.run(token, () => this.drainQueue(id)); this.queueRuns.set(id, run);
-    const finish = () => {
-      if (this.mutations.drains.get(id) !== token) return;
-      this.mutations.drains.delete(id); token.revoke({ code: 'queue_drain_finished', by: 'DutydeckRuntime.scheduleQueue' });
-      if (this.queueRuns.get(id) === run) this.queueRuns.delete(id);
-      this.mutations.run(undefined, () => this.scheduleQueue(id));
-    };
-    void run.then(finish, finish);
-  }
-  /** A turn, steering, verification, stop or driver retirement still owns the session. */
-  private sessionHeld(id: string): boolean {
-    return this.gate.reasons(id, 'held', { firstOnly: true }).length > 0;
-  }
-  /** Ephemeral proof from the original adapters; no idle evidence survives a runtime restart. */
-  private idleResourceChecks(): ResourceCheckRef[] {
-    const checks: ResourceCheckRef[] = [];
-    for (const [id, driver] of this.supervisor.drivers) {
-      if (this.sessionHeld(id) || this.supervisor.driverOperations.get(driver)?.size
-        || this.humanWaits.pendingPermissionCount(id) || driver.isDetachedForShutdown?.() || driver.hasBackgroundWork?.() !== false) continue;
-      if (driver.isIdle?.() !== true) {
-        const original = this.localResources.get(driver);
-        // A new control channel may not have a screen snapshot yet. Preserve its native
-        // context only if this original ready driver has never received any submission.
-        if (!original?.creationSettled || this.attachedTerminals.has(driver) || original.context.mode === 'attach'
-          || this.repos.execution.getSessionExecutions(id).some(value => value.steering
-            || value.task.status === 'reconcile_required' || value.attempts.some(attempt => attempt.submissionState !== 'not_submitted'))) continue;
-      }
-      const reusable = this.localResources.reusableIds(id);
-      for (const r of this.repos.execution.getResources(id)) {
-        const last = r.observations.at(-1);
-        if (reusable.has(r.resourceId) && last?.state === 'live') checks.push({resourceId:r.resourceId,expectedRevision:r.revision,observationId:last.observationId});
-      }
-    }
-    return checks;
-  }
-  private async closeUnprovenIdleCompetitors(id: string, taskId: string, allowProofRetry: boolean): Promise<boolean> {
-    const blockers = this.repos.execution.getTaskExecution(taskId)?.blockers ?? [];
-    let closed = false;
-    // Idle proof covers every driver, so one pass serves all competitors until the next await lets driver state move.
-    let fresh: ResourceCheckRef[] | undefined;
-    for (const otherId of new Set(blockers.filter(value => value.code === 'WORKSPACE_PHYSICAL_RESOURCE_UNSAFE').map(value => value.sessionId))) {
-      if (otherId === id || this.repos.execution.getUnresolvedTasks(otherId).length || this.sessionHeld(otherId)
-        || blockers.some(value => value.sessionId === otherId && value.code !== 'WORKSPACE_PHYSICAL_RESOURCE_UNSAFE')) continue;
-      const driver = this.supervisor.drivers.get(otherId);
-      if (!driver || driver.hasBackgroundWork?.() === true || this.supervisor.driverOperations.get(driver)?.size || this.humanWaits.pendingPermissionCount(otherId)) continue;
-      const proof = fresh ??= this.idleResourceChecks();
-      const resources = this.repos.execution.getResources(otherId);
-      const disputed = blockers.filter(value => value.sessionId === otherId && value.code === 'WORKSPACE_PHYSICAL_RESOURCE_UNSAFE');
-      if (disputed.every(block => {
-        const r = resources.find(value => value.resourceId === block.resourceId);
-        const parent = resources.find(value => value.resourceId === r?.parentResourceId);
-        return r && proof.some(check => check.resourceId === r.resourceId)
-          && (r.kind === 'local_only' || r.kind === 'process' && parent?.stage === 'created' && ['lifecycle','strict-context-restore'].includes(parent.operationScope?.kind ?? ''));
-      })) { if (allowProofRetry) closed = true; continue; }
-      fresh = undefined;
-      // Adapters without a reliable background-empty proof must prove physical stop on contention.
-      if (driver.prepareForIdleRetirement && !await driver.prepareForIdleRetirement()) continue;
-      try { await this.mutations.run(undefined, () => this.supervisor.stopDriver(otherId,driver)); closed = true; }
-      catch (error) { this.warnCaught('closeUnprovenIdleCompetitors.stopDriver', otherId, error); }
-    }
-    return closed;
-  }
-  private async drainQueue(id: string) {
-    let admissionRechecked = false;
-    while (this.mutations.valid() && !this.shuttingDown && !this.queueHeld && !this.supervisor.retiringDrivers.has(id) && !this.mutations.attempts.has(id) && !this.verifyingSessions.has(id) && !this.steering.isActive(id)) {
-      const session = await this.mutations.wait(() => this.repos.sessions.get(id));
-      if (!session) return;
-      let next: TaskRecord | undefined;
-      try { next = (await this.queuedTasks(id))[0]; }
-      catch (error) { this.warnCaught('drainQueue.readQueuedTasks', id, error); this.queueBlocked.add(id); return; }
-      if (next && this.repos.execution.getAcceptedTask(next.id)?.input?.version !== 2) { this.queueBlocked.add(id); return; }
-      const retry = next && this.repos.execution.getTaskExecution(next.id)?.currentAttempt?.automaticRetry;
-      if (next && retry && Date.parse(retry.dueAt) > Date.now()) {
-        const timer = setTimeout(() => {
-          this.capacityTimers.delete(id);
-          this.mutations.run(undefined, () => this.scheduleQueue(id));
-        }, Math.min(2_147_483_647, Date.parse(retry.dueAt) - Date.now()));
-        timer.unref(); this.capacityTimers.set(id, { taskId: next.id, timer }); return;
-      }
-      let expired = false;
-      try { expired = !!next && await this.expireStaleQueued(session, next); }
-      catch (error) {
-        // 取消没成功也不能把旧消息交给 Agent。
-        this.options.log?.warn({ sessionId: id, taskId: next!.id, error }, 'Expiring a stale queued task failed');
-        this.queueBlocked.add(id); return;
-      }
-      if (expired) continue;
-      let claimed: CommitResult | undefined;
-      let token: Owner | undefined;
-      const resourceRevision = this.resourceQueueRevision;
-      try {
-        await this.mutations.write(id, async () => {
-          if (this.supervisor.retiringDrivers.has(id)) throw new RuntimeError('WORKSPACE_RESOURCE_BLOCKED', 'The original idle driver is still closing', 409);
-          claimed = this.wakeOptional(this.bound().claimNext(this.fence(session),this.idleResourceChecks()));
-          if (claimed?.task && claimed.attempt) {
-            token = owner(id, this.lifecycle(id));
-            this.mutations.attemptRefs.set(token, { sessionId: id, runId: claimed.attempt.runId, taskId: claimed.task.id, attemptId: claimed.attempt.attemptId });
-            this.mutations.attempts.set(id, token); this.activeTasks.set(id, claimed.task);
-          }
-        });
-      } catch (error) {
-        if (error instanceof RuntimeError && error.code === 'WORK_ITEM_CAPACITY_BLOCKED') {
-          // A release may race the rejected claim's promise continuation. Recheck that wake once.
-          this.blockOnResources(id, resourceRevision);
-          return;
-        }
-        if (error instanceof RuntimeError && error.code === 'WORKSPACE_RESOURCE_BLOCKED') {
-          if (next && await this.closeUnprovenIdleCompetitors(id,next.id,!admissionRechecked)) { admissionRechecked = true; continue; }
-          if (next) await this.notices.noteWorkspaceBlocked(session, next.id, error.details)
-            .catch(noteError => this.options.log?.warn({ sessionId: id, taskId: next.id, error: String(noteError) }, 'Workspace blocked notice failed'));
-          this.blockOnResources(id, resourceRevision);
-          return;
-        }
-        this.queueBlocked.add(id); return;
-      }
-      this.notices.clearWorkspaceBlock(id);
-      if (!claimed?.task || !claimed.attempt || !token) { this.queues.delete(id); return; }
-      admissionRechecked = false;
-      // No await separates claiming the durable activity slot from registering its local owner.
-      const running = this.runTask(id, claimed.task, claimed.attempt, token);
-      await this.mutations.wait(() => running);
-      await this.projectQueue(id);
-      await this.applyQueueActions(session);
-    }
-  }
-  private wakeOptional(result: CommitResult | undefined) { return result ? this.wake(result) : undefined; }
-  /** A wake that landed while this claim was failing goes through the shared retry pass instead of an immediate re-drain. */
-  private blockOnResources(id: string, revision: number) {
-    this.resourceQueueBlocked.add(id);
-    if (revision !== this.resourceQueueRevision) this.retryResourceQueues();
-  }
-  /**
-   * 排头任务从未开始、已排队超过 24 小时，又不是同会话上一条任务刚由 Agent 跑完、按顺序轮到它：多半是被挡了很久的旧消息，
-   * 现在执行会出乎发送者意料。以安装所有者身份取消，并提醒需要时重发。
-   */
-  private async expireStaleQueued(session: Session, task: TaskRecord) {
-    // 记忆管线管理自己的超时与重试；通用取消会被它当作失败并重新建作业。
-    if (session.source === backgroundSource.memory) return false;
-    const now = Date.now();
-    if (now - Date.parse(task.createdAt) <= QUEUED_TASK_EXPIRE_MS) return false;
-    const current = this.repos.execution.getTaskExecution(task.id);
-    const attempt = current?.currentAttempt;
-    if (!current || attempt && (attempt.submissionState !== 'not_submitted' || attempt.automaticRetry || attempt.manualRetry)) return false;
-    const handedOff = (await this.repos.tasks.listBySession(session.id)).some(item => now - Date.parse(item.updatedAt) < QUEUE_HANDOFF_MS
-      && this.repos.execution.getTaskExecution(item.id)?.currentAttempt?.settlement?.kind === 'driver_result');
-    if (handedOff) return false;
-    await this.mutations.write(session.id, async () => this.wake(this.bound().cancelQueued(this.fence(session), task.id, current.task.revision,
-      { decisionId: `queue_expired:${task.id}`, actor: recoveryOwner, action: 'cancel', evidenceRefs: ['runtime:queue-expired', `task_created:${task.createdAt}`], resourceChecks: [] })));
-    await this.projectQueue(session.id);
-    this.options.log?.warn({ sessionId: session.id, taskId: task.id, createdAt: task.createdAt }, 'Cancelled a queued task that waited over 24 hours without starting');
-    await this.notices.sessionNotice(session, { id: `notice_${digest(['queue_expired', task.id])}`, kind: 'queue_expired', taskId: task.id, sessionIds: [session.id],
-      message: '排队超过 24 小时仍未开始，已取消、不会执行；需要的话请重发。' });
-    return true;
-  }
-  private async applyQueueActions(session: Session) {
-    for (const action of this.bound().getPendingQueueActions(this.fence(session))) {
-      const target = action.target;
-      if (!target) continue;
-      const targetAttempt = this.repos.execution.getTaskExecution(target.taskId)?.attempts.find(item => item.attemptId === target.attemptId);
-      const token = this.mutations.attempts.get(session.id);
-      const ref = token && this.mutations.attemptRefs.get(token);
-      if (targetAttempt?.state === 'settled') {
-        this.bound().settleQueueAction(this.fence(session), action.operationId, action.revision, { evidenceId: `queue_settled:${action.operationId}`, state: 'applied', reason: 'original_attempt_settled', resourceChecks: [] });
-      } else if (ref?.attemptId === target.attemptId && this.mutations.valid(token)) {
-        await this.interruptOwnedAttempt(ref, token!, action.operationId);
-      } else if (action.state === 'pending') this.bound().settleQueueAction(this.fence(session), action.operationId, action.revision, { evidenceId: `queue_blocked:${action.operationId}`, state: 'blocked', reason: 'original_attempt_not_owned', resourceChecks: [] });
-    }
-  }
-  private async interruptOwnedAttempt(ref: AttemptRef & SessionFence, token: Owner, operationId: string) {
+  private async interruptOwnedAttempt(ref: AttemptRef & SessionFence, operationId: string) {
+    const token = this.mutations.attempts.get(ref.sessionId);
     const current = this.repos.execution.getTaskExecution(ref.taskId)?.attempts.find(attempt => attempt.attemptId === ref.attemptId);
-    if (!current || current.state === 'settled' || this.mutations.attempts.get(ref.sessionId) !== token) return;
+    if (!current || current.state === 'settled' || !token || this.mutations.attemptRefs.get(token)?.attemptId !== ref.attemptId) return;
     const driver = this.supervisor.drivers.get(ref.sessionId);
     if (current.submissionState !== 'not_submitted') {
       if (driver) await this.supervisor.driverOperation(driver, () => driver.interrupt());
@@ -2931,7 +2731,7 @@ export class DutydeckRuntime {
     });
     if (!token.revoked) { if (driver) await this.supervisor.driverOperation(driver, () => driver.interrupt()); return; }
     if (driver) await this.supervisor.stopDriver(ref.sessionId, driver);
-    this.scheduleQueue(ref.sessionId);
+    this.scheduler.scheduleQueue(ref.sessionId);
   }
   private originalSkillRequests(taskId: string): string[] | undefined {
     try { return this.repos.execution.getAcceptedTask(taskId)?.request?.skills; }
@@ -2952,17 +2752,7 @@ export class DutydeckRuntime {
         if (this.steering.pendingTask(id) === taskId) throw new RuntimeError('STEERING_IN_PROGRESS', 'The queued task is being steered into the running turn', 409);
         return this.wake(this.bound().cancelQueued(this.fence(session), taskId, expectedRevision ?? task.revision, { decisionId, actor: this.actor(session, actorId), action: 'cancel', evidenceRefs: ['runtime:queue-cancel'], resourceChecks: [] }));
       });
-      const queue = this.queues.get(id);
-      if (queue) {
-        const next = queue.filter(item => item.id !== taskId);
-        if (next.length) this.queues.set(id, next);
-        else this.queues.delete(id);
-      }
-      try {
-        await this.projectQueue(id);
-      } catch {
-        this.queueBlocked.add(id);
-      }
+      await this.scheduler.removeCancelled(id, taskId);
       const task = this.publicTask(committed.task!);
       const skillRequests = this.originalSkillRequests(task.id);
       if (skillRequests?.length) return { ...task, skillRequests };
@@ -2973,18 +2763,6 @@ export class DutydeckRuntime {
   async steerQueued(id: string, taskId: string, actorId?: string, expectedRevision?: number, operationId = makeId('promote')) { return this.steering.steerQueued(id, taskId, actorId, expectedRevision, operationId); }
   /** 插话：先持久记录投递意图；没有明确回执时禁止普通队列重发。 */
   async injectQueued(id: string, taskId: string, actorId?: string, operationId = makeId('steering'), expectedTarget?: { taskId: string; attemptId?: string }): Promise<SteeringResult> { return this.steering.injectQueued(id, taskId, actorId, operationId, expectedTarget); }
-  private async cancelSessionQueue(id: string, suppliedActor?: ExecutionActor): Promise<boolean> {
-    const session = await this.repos.sessions.get(id);
-    if (!session) return true;
-    const queued = await this.queuedTasks(id);
-    const actor = executionActorSchema.parse(suppliedActor ?? { kind: 'unspecified' });
-    if (queued.length && actor.kind === 'unspecified') return false;
-    for (const task of queued) {
-      const current = this.repos.execution.getTaskExecution(task.id)!.task;
-      this.wake(this.bound().cancelQueued(this.fence(session), task.id, current.revision, { decisionId: `stop_cancel:${task.id}:${current.revision}`, actor, action: 'cancel', evidenceRefs: ['runtime:session-stop'], resourceChecks: [] }));
-    }
-    this.queues.delete(id); return true;
-  }
   /** Persist the confirmation handoff before returning it; ACK later cancels only this original turn. */
   async deferTurn(id: string, expectedTaskId: string, askId: string, stop: boolean, expectedAttemptId: string) { return this.steering.deferTurn(id, expectedTaskId, askId, stop, expectedAttemptId); }
   async interrupt(id: string, expectedTaskId?: string, actorId?: string, operationId = makeId('interrupt')) {
@@ -2994,7 +2772,7 @@ export class DutydeckRuntime {
       if (!ref) return { interrupted: false, reason: 'no_active_attempt', state: 'idle' as const };
       if (expectedTaskId && expectedTaskId !== ref.taskId) throw new RuntimeError('TASK_NOT_ACTIVE', 'The requested task is no longer active', 409);
       await this.mutations.write(id, async () => this.wake(this.bound().recordInterruptIntent(this.attemptFence(ref), { operationId, actor: this.actor(session, actorId) })));
-      if (this.mutations.attempts.get(id) === token) await this.interruptOwnedAttempt(ref, token!, operationId);
+      if (this.mutations.attempts.get(id) === token) await this.interruptOwnedAttempt(ref, operationId);
       await clearTaskReportSafely(this.repos.config, ref.taskId);
       const attempt = this.repos.execution.getTaskExecution(ref.taskId)?.attempts.find(attempt => attempt.attemptId === ref.attemptId);
       return { interrupted: true, state: attempt?.state === 'settled' && attempt.outcome !== 'unknown' ? 'interrupted' as const : 'interrupting' as const };
@@ -3070,7 +2848,7 @@ export class DutydeckRuntime {
       const target=owned?.options;
       if(owned?.controlled&&target&&driver.nativeConfiguration){owned.options={permissionMode:target.permissionMode,...driver.nativeConfiguration()};await this.changeDriverConfiguration(session,driver,()=>target,undefined,true);}
       await this.saveState(session, 'idle');
-      await this.projectQueue(id); this.queueBlocked.delete(id); this.scheduleQueue(id);
+      await this.scheduler.projectQueue(id); this.scheduler.unblockQueue(id); this.scheduler.scheduleQueue(id);
       return this.withSessionMetadata(session);
     });
   }
@@ -3081,7 +2859,7 @@ export class DutydeckRuntime {
     if (!session) throw new RuntimeError('SESSION_NOT_FOUND', `Unknown session: ${id}`, 404);
     // Validate every fallible identity check before signalling a process. A
     // rejected /new must not leave the current task stopped and its queue alive.
-    if ((await this.queuedTasks(id)).length && (!actor || actor.kind === 'unspecified')) {
+    if ((await this.scheduler.queuedTasks(id)).length && (!actor || actor.kind === 'unspecified')) {
       throw new RuntimeError('ACTOR_REQUIRED', 'A named actor is required to stop a session with queued tasks', 403);
     }
     if (actor && actor.kind !== 'unspecified') {
@@ -3232,14 +3010,14 @@ export class DutydeckRuntime {
       // continuation may escape this drain on either the success or failure path.
       await Promise.allSettled([this.initializationRun]);
       await Promise.allSettled([this.initializationCleanup, this.maintenance.currentRun]);
-      await Promise.allSettled([...this.taskRuns, ...this.queueRuns.values()]);
+      await Promise.allSettled([...this.taskRuns, ...this.scheduler.queueRuns.values()]);
       while (this.driverEventChains.size) await Promise.allSettled([...this.driverEventChains.values()]);
       while (this.workspacePreparations.size) await Promise.allSettled([...this.workspacePreparations]);
       while (this.cleaningRuns.size) await Promise.allSettled([...this.cleaningRuns.values()]);
       while (this.supervisor.factoryCleanups.size) await Promise.allSettled([...this.supervisor.factoryCleanups.values()]);
       await this.mutations.barrier();
       await this.publisher.close();
-      this.supervisor.clearDrivers(); this.queues.clear();
+      this.supervisor.clearDrivers(); this.scheduler.clearQueues();
       this.cleaningDirs.clear(); this.preparingWorkspaces.clear();
 
       this.binding?.release();

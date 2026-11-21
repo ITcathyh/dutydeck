@@ -30,7 +30,7 @@ interface DriverSupervisorDependencies {
   blockedVerificationSessions: Map<string, string>;
   bound: () => BoundExecutionRepository;
   cancelSessionQueue: (id: string, suppliedActor?: ExecutionActor) => Promise<boolean>;
-  capacityTimers: Map<string, { taskId: string; timer: ReturnType<typeof setTimeout>; }>;
+  cancelCapacityTimer(id: string): void;
   changeDriverConfiguration: (session: Session, driver: AgentDriver, targetOptions: (current: ExecutionOptions) => ExecutionOptions, defaults?: Partial<ExecutionOptions>, forceNativeProof?: boolean) => Promise<void>;
   claim(): RuntimeControlClaim | undefined;
   commandSwapWindow: () => Promise<void>;
@@ -294,8 +294,7 @@ export class DriverSupervisor {
     this.stops.setDriver(id); this.deps.wakeResourceQueues();
   }
   revokeSession(id: string, reason: RevocationReason, cancelQueue: boolean, state: 'stopped' | 'interrupted', shutdown = false, discardSession = false, beforeResourceCleanup?: Promise<void>, actor?: ExecutionActor): Promise<void> {
-    const delayed = this.deps.capacityTimers.get(id);
-    if (delayed) { clearTimeout(delayed.timer); this.deps.capacityTimers.delete(id); }
+    this.deps.cancelCapacityTimer(id);
     const pending = this.stopRuns.get(id);
     if (pending) { if (cancelQueue) this.stopIntents.get(id)!.cancelQueue = true; if (actor) this.stopIntents.get(id)!.actor = actor; return pending; }
     const intent = { cancelQueue, actor };  this.stopIntents.set(id, intent);

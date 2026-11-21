@@ -1,3 +1,4 @@
+import type { Scheduler } from '../src/runtime/scheduler.js';
 import type { AgentDriver } from '@dutydeck/shared';
 import type { RecoveryService } from '../src/runtime/recovery-service.js';
 import type { HumanWaits } from '../src/runtime/human-waits.js';
@@ -7,6 +8,11 @@ import type { RuntimeSessionMutations } from '../src/ownership.js';
 import type { Maintenance } from '../src/runtime/maintenance.js';
 
 interface RuntimeComponents {
+  scheduler: Pick<Scheduler, 'drainQueue' | 'queueBlocked' | 'resourceQueueBlocked' | 'sessionHeld' | 'scheduleQueue' | 'applyQueueActions'> & {
+    queues: Map<string, import('@dutydeck/shared').TaskRecord[]>;
+    capacityTimers: Map<string, { taskId: string; timer?: NodeJS.Timeout }>;
+    closeUnprovenIdleCompetitors(id: string, taskId: string, allowProofRetry: boolean): Promise<boolean>;
+  };
   steering: { steeringSessions: Map<string, string>; steeringReplies: Map<string, {sessionId: string; driver: AgentDriver}> };
   humanWaits: Pick<HumanWaits, 'pendingPermissionCount' | 'register'>;
   recovery: Pick<RecoveryService, 'reservePtyRetirement'>;

@@ -14,7 +14,6 @@ const STEERING_TIMEOUT_MS = 30_000;
 interface SteeringServiceDependencies {
   acceptedInput: (task: TaskRecord) => AcceptedTaskInputV2;
   active: (id: string) => Promise<{ session: Session; driver: AgentDriver | undefined; }>;
-  activeAttemptRef(id: string): (AttemptRef & SessionFence) | undefined;
   actor: (session: Session, actorId?: string) => ExecutionActor;
   applyQueueActions: (session: Session) => Promise<void>;
   assertReady: () => void;
@@ -32,7 +31,7 @@ interface SteeringServiceDependencies {
   options: Pick<RuntimeOptions, 'sessionPrompt' | 'authorizeTask'>;
   projectQueue: (id: string) => Promise<void>;
   publicTask: (task: TaskRecord) => PublicTaskRecord;
-  queueBlocked: Set<string>;
+  unblockQueue(id: string): void;
   recordPrompt: (sessionId: string, prompt: string, stage: "accepted_input" | "session_context", mode: "send" | "steer", inputTaskId: string, operationId?: string, sources?: PromptSourceDiagnostics) => Promise<void>;
   recoveryInFlight: (id: string, includeQueueDrain?: boolean) => boolean;
   reopenQueue: (id: string) => Promise<void>;
@@ -57,7 +56,7 @@ export class SteeringService {
       const task = this.deps.repos.execution.getTaskExecution(taskId)?.task;
       if (!task) throw new RuntimeError('QUEUED_TASK_NOT_FOUND', 'Queued task is missing', 404);
       const committed = await this.mutations.write(id, async () => this.deps.wake(this.deps.bound().promoteQueued(this.deps.fence(session), taskId, expectedRevision ?? task.revision, { operationId, actor: this.deps.actor(session, actorId), interrupt: true })));
-      await this.deps.projectQueue(id); await this.deps.applyQueueActions(session); this.deps.queueBlocked.delete(id); this.deps.scheduleQueue(id);
+      await this.deps.projectQueue(id); await this.deps.applyQueueActions(session); this.deps.unblockQueue(id); this.deps.scheduleQueue(id);
       return this.deps.publicTask(committed.task!);
     }));
   }
@@ -81,7 +80,8 @@ export class SteeringService {
       const skipped = (outcome: SteeringOutcome, error?: string): SteeringResult => result(this.deps.repos.execution.getTaskExecution(taskId)!, outcome, error);
       if (!driver?.steer || this.deps.repos.execution.getAcceptedTask(taskId)?.request?.namespace !== steerableTaskNamespace) return skipped('unsupported');
       const running = () => {
-        const ref = this.deps.activeAttemptRef(id);
+        const token = this.mutations.attempts.get(id);
+        const ref = token && this.mutations.attemptRefs.get(token);
         const execution = ref && this.deps.repos.execution.getTaskExecution(ref.taskId);
         const attempt = execution?.attempts.find(item => item.attemptId === ref!.attemptId);
         return ref && execution && attempt?.state === 'active' && attempt.submissionState !== 'not_submitted' ? {ref,task:execution.task} : undefined;
@@ -99,7 +99,7 @@ export class SteeringService {
         if (!operation || !this.deps.hasBinding()) return;
         const committed = await this.mutations.write(id, async () => this.deps.wake(this.deps.bound().resolveQueuedSteering({sessionId:id,runId:operation!.runId},operationId,operation!.controller,outcome)));
         await this.deps.projectQueue(id);
-        if (!committed.replayed) this.deps.queueBlocked.delete(id);
+        if (!committed.replayed) this.deps.unblockQueue(id);
         this.deps.scheduleQueue(id);
       });
       try {
@@ -158,14 +158,14 @@ export class SteeringService {
   async deferTurn(id: string, expectedTaskId: string, askId: string, stop: boolean, expectedAttemptId: string) {
     return this.mutations.scoped(id, async () => {
       const { driver } = await this.deps.active(id);
-      const ref = this.deps.activeAttemptRef(id);
+      const token = this.mutations.attempts.get(id), ref = token && this.mutations.attemptRefs.get(token);
       if (!ref || ref.taskId !== expectedTaskId || ref.attemptId !== expectedAttemptId) throw new RuntimeError('TASK_NOT_ACTIVE', 'The requested task is no longer active', 409);
       const confirmation = this.deps.turnOutput(ref).confirmation;
       if (confirmation && confirmation !== askId) throw new RuntimeError('DEFERRED_CONFIRMATION_CONFLICT', 'This turn already registered a confirmation', 409);
       if (!confirmation) await this.deps.eventScope.run(ref, () => this.deps.emit(id, 'status', { state: 'confirmation_deferred', askId }, undefined, `deferred:${ref.attemptId}`));
       // Cancellation is a host handoff, with no user interrupt intent or actor.
       // Settlement still waits for the driver's actual terminal result.
-      if (stop && driver && this.deps.activeAttemptRef(id) === ref) await this.deps.driverOperation(driver, () => driver.interrupt());
+      if (stop && driver && this.mutations.attempts.get(id) === token) await this.deps.driverOperation(driver, () => driver.interrupt());
     });
   }
   async confirmSteeringRecovery(id: string, raw: SteeringRecoveryDecision, actor: ExecutionActor) {
