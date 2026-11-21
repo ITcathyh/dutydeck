@@ -8,12 +8,13 @@ import { listAcpxBuiltinAgents, AcpxAdapter, testRegexWithTimeout, ProcessTreeCp
 import { commandExists, JsonlTransport, PipeTransport, probeAgent, PtyTransport } from '@dutydeck/transports';
 import { mkdir, realpath, rename, unlink, writeFile } from 'node:fs/promises';
 import { join, sep } from 'node:path';
-import type { UnknownTaskFacts, UnknownTaskResolution, SteeringRecoveryDecision, SteeringOperation, PtyRetirementRecovery, ExecutionRecoveryDecision, AcceptedTask, AcceptedTaskInputV2, AttemptFence, AttemptRef, BoundExecutionRepository, CommitResult, DriverSteeringOutcome, ExecutionActor, ExecutionBlocker, ResourceCheckRef, SessionFence, TaskAttempt, TaskExecutionProjection, TaskRequestV1 } from '@dutydeck/shared';
+import type { UnknownTaskFacts, UnknownTaskResolution, SteeringRecoveryDecision, SteeringOperation, PtyRetirementRecovery, ExecutionRecoveryDecision, AcceptedTask, AcceptedTaskInputV2, AttemptFence, AttemptRef, BoundExecutionRepository, CommitResult, DriverSteeringOutcome, ExecutionActor, ResourceCheckRef, SessionFence, TaskAttempt, TaskExecutionProjection, TaskRequestV1 } from '@dutydeck/shared';
 import { executionTaskId } from '@dutydeck/storage/helpers';
 import { PersistentEventPublisher, type SubscribeOptions, type EventListener } from './persistent-event-publisher.js';
 import { digest, eventJson, DriverConfigurationLedger, LocalDriverLedger, type ExecutionOptions } from './ledger.js';
 import { localOnlyDriverContext } from './driver-context.js';
 import { agentAuthFailure, agentLoginProblem, defaultAgentStatusCheck, type AgentStatusCheck, type AgentUnavailable } from './agent-availability.js';
+import { Notices } from './runtime/notices.js';
 import { SessionGate } from './session-gate.js';
 import { IdleCpuWindow, IDLE_CPU_MIN_IDLE_MS } from './idle-cpu.js';
 import { isNonGitWorkspace, WorkspaceManager } from './workspace.js';
@@ -221,12 +222,6 @@ const COMMAND_SWAP_WAIT_MS = 3_000;
 /** 轮次结束时执行端已自行拒掉、却没发终态事件的审批，补记的拒绝说明。 */
 const TURN_ENDED_PERMISSION_REASON = '本轮任务已结束，这次操作没有执行。';
 type PendingPermission = { request: PermissionRequestData; nativeId: string; fence: AttemptRef & SessionFence; generation: number; owner?: Owner };
-const workspaceBlockerStates: Record<string, string> = {
-  WORKSPACE_PHYSICAL_RESOURCE_UNSAFE: '它的终端或执行进程还没确认已退出（残留终端）',
-  DRIVER_STOP_BLOCKED: '它上次停止时没能确认进程已退出（残留终端）',
-  WORKSPACE_RESOURCE_UNVERIFIABLE: '它的工作目录身份无法核实',
-  DRIVER_CONFIGURATION_UNKNOWN: '它上次改模型或权限的结果不明，需要恢复配置',
-};
 const recoveryOwner: ExecutionActor = { kind: 'installation_owner', id: 'installation_owner' };
 
 /** 已确认投递的任务完成；明确未投递才回队列，failed 保留未知状态等待恢复。 */
@@ -310,8 +305,6 @@ export class DutydeckRuntime {
   private readonly resourceQueueBlocked = new Set<string>();
   private resourceQueueRevision = 0;
   private resourceQueueRetryPending = false;
-  /** 受阻期：排头任务被同仓库挡住后记下，认领成功或队列清空时删掉；noticed 表示这一期已留过会话提醒。 */
-  private readonly workspaceBlocks = new Map<string, { taskId: string; noticed: boolean }>();
   /** 自动结案没做成的结果未知执行，每个进程只记一次日志。 */
   private readonly unknownTaskFailures = new Set<string>();
   /** 自动结案条件还不满足（进程没证明退出、有排队）的执行，下次再核对的时间；只在进程内，避免每轮维护都去探测终端。 */
@@ -401,11 +394,15 @@ export class DutydeckRuntime {
     queued_or_running: id => this.repos.execution.hasQueuedOrRunningTasks(id)
   }, id => this.drivers.has(id), id => this.repos.execution.getTaskExecution(id)?.task.status);
 
+  private readonly notices: Notices;
+
   constructor(private readonly repos: RepositoryBundle, private readonly options: RuntimeOptions = {}) {
     const interval = options.cleanupIntervalMs ?? 5 * 60_000;
     if (!Number.isInteger(interval) || interval < 0 || interval > 2_147_483_647) {
       throw new RuntimeError('INVALID_CLEANUP_INTERVAL', 'cleanupIntervalMs must be 0 (disabled) or an integer between 1 and 2147483647', 400);
     }
+    this.notices = new Notices(repos.config, options, this.mutations, this.gate,
+      (id, data, eventId) => this.emit(id, 'status', data, undefined, eventId));
     this.configurations = new DriverConfigurationLedger(repos.config);
     this.localResources = new LocalDriverLedger(() => this.bound(), repos.execution);
     this.publisher = new PersistentEventPublisher({ highWaterMark: id => repos.events.highWaterMark(id), listWindow: (id, options) => repos.events.listWindow(id, options) }, undefined, options.log);
@@ -3593,14 +3590,14 @@ export class DutydeckRuntime {
         }
         if (error instanceof RuntimeError && error.code === 'WORKSPACE_RESOURCE_BLOCKED') {
           if (next && await this.closeUnprovenIdleCompetitors(id,next.id,!admissionRechecked)) { admissionRechecked = true; continue; }
-          if (next) await this.noteWorkspaceBlocked(session, next.id, error.details)
+          if (next) await this.notices.noteWorkspaceBlocked(session, next.id, error.details)
             .catch(noteError => this.options.log?.warn({ sessionId: id, taskId: next.id, error: String(noteError) }, 'Workspace blocked notice failed'));
           this.blockOnResources(id, resourceRevision);
           return;
         }
         this.queueBlocked.add(id); return;
       }
-      this.workspaceBlocks.delete(id);
+      this.notices.clearWorkspaceBlock(id);
       if (!claimed?.task || !claimed.attempt || !token) { this.queues.delete(id); return; }
       admissionRechecked = false;
       // No await separates claiming the durable activity slot from registering its local owner.
@@ -3635,53 +3632,9 @@ export class DutydeckRuntime {
       { decisionId: `queue_expired:${task.id}`, actor: recoveryOwner, action: 'cancel', evidenceRefs: ['runtime:queue-expired', `task_created:${task.createdAt}`], resourceChecks: [] })));
     await this.projectQueue(session.id);
     this.options.log?.warn({ sessionId: session.id, taskId: task.id, createdAt: task.createdAt }, 'Cancelled a queued task that waited over 24 hours without starting');
-    await this.sessionNotice(session, { id: `notice_${digest(['queue_expired', task.id])}`, kind: 'queue_expired', taskId: task.id, sessionIds: [session.id],
+    await this.notices.sessionNotice(session, { id: `notice_${digest(['queue_expired', task.id])}`, kind: 'queue_expired', taskId: task.id, sessionIds: [session.id],
       message: '排队超过 24 小时仍未开始，已取消、不会执行；需要的话请重发。' });
     return true;
-  }
-  /**
-   * 排头任务被同一仓库里别的会话挡住。每个受阻期（同一条排头任务）只写一次告警日志；挡它的会话里没有正在跑、
-   * 会自己结束的任务时，再在会话里留一条提醒，说明被谁挡住、怎么处理、处理后会自动继续。
-   */
-  private async noteWorkspaceBlocked(session: Session, taskId: string, details: unknown) {
-    const current = this.workspaceBlocks.get(session.id);
-    if (current?.taskId === taskId && current.noticed) return;
-    if (!Array.isArray(details) || !details.length || !details.every((block): block is ExecutionBlocker =>
-      typeof block?.sessionId === 'string' && typeof block.code === 'string')) return;
-    const blockers = details;
-    if (current?.taskId !== taskId) this.options.log?.warn({ sessionId: session.id, taskId, code: 'WORKSPACE_RESOURCE_BLOCKED',
-      blockers: blockers.map(block => ({ code: block.code, sessionId: block.sessionId, ...(block.taskId ? { taskId: block.taskId } : {}), ...(block.resourceId ? { resourceId: block.resourceId } : {}) })) },
-      'Queued task is blocked by another session in the same workspace');
-    const stuck = new Map<string, string>();
-    const kinds = new Set<string>();
-    for (const { block, unknown } of this.gate.stuckWorkspaceBlockers(blockers)) {
-      kinds.add(unknown ? 'unknown' : block.code);
-      const state = unknown ? '这一轮结果未知，需要有人确认' : workspaceBlockerStates[block.code] ?? '它的执行环境需要恢复检查';
-      stuck.set(block.sessionId, `- 会话 ${block.sessionId}${block.taskId ? ` 里的任务 ${block.taskId}` : ''}：${state}`);
-    }
-    this.workspaceBlocks.set(session.id, { taskId, noticed: stuck.size > 0 });
-    if (!stuck.size) return;
-    const labels = unknownTaskActionLabels;
-    const steps = [
-      ...(kinds.has('unknown') ? [`结果未知的任务：在 Web 打开那个会话，在执行记录下方选「${labels.retry}」「${labels.completed}」或「${labels.failed}」；它的原话题里如果有「结果未知」提醒卡，也可以直接点。`] : []),
-      ...(['WORKSPACE_PHYSICAL_RESOURCE_UNSAFE', 'DRIVER_STOP_BLOCKED'].some(code => kinds.has(code)) ? ['残留终端：用 `dutydeck recovery inspect <会话 ID>` 查看；确认进程已退出后用 `dutydeck recovery retire-pty` 回收。'] : []),
-      ...(kinds.has('DRIVER_CONFIGURATION_UNKNOWN') ? ['配置结果不明：用 `dutydeck recovery restore-configuration <会话 ID> --run-id <运行 ID>` 恢复配置。'] : []),
-    ];
-    await this.sessionNotice(session, { id: `notice_${digest(['workspace_blocked', session.id, taskId])}`, kind: 'workspace_blocked', taskId, sessionIds: [...stuck.keys()],
-      message: [`这条消息还没开始执行：同一仓库里有未结的任务或残留终端，为避免两边同时改同一份代码，要等它处理完。挡住它的是：\n${[...stuck.values()].join('\n')}`,
-        ...steps, '处理完之后这里会自动继续，不用重发；但排队超过 24 小时仍未开始的消息，到时会取消、不再执行。'].join('\n\n') }, { key: runtimeStateKeys.notice.key('workspace_blocked', session.id), value: taskId });
-  }
-  /**
-   * 会话提醒：once.key 已记成 once.value 就不再提醒（重启后也不重发）。先在会话里写一条 status=notice 事件
-   * （Web 时间线显示），再交给宿主投递（飞书会话转到原话题）；投递失败只记日志。
-   */
-  private async sessionNotice(session: Session, notice: SessionNotice, once?: { key: string; value: string }) {
-    if (once && await this.mutations.wait(() => this.repos.config.get(once.key)) === once.value) return;
-    await this.emit(session.id, 'status', { state: 'notice', kind: notice.kind, taskId: notice.taskId, message: notice.message }, undefined, `evt_${notice.id}`);
-    if (once) await this.mutations.wait(() => this.repos.config.set(once.key, once.value));
-    const deliver = this.options.onSessionNotice;
-    if (deliver) void Promise.resolve().then(() => deliver(session, notice))
-      .catch(error => this.options.log?.warn({ sessionId: session.id, taskId: notice.taskId, kind: notice.kind, error }, 'Session notice delivery failed'));
   }
   private async applyQueueActions(session: Session) {
     for (const action of this.bound().getPendingQueueActions(this.fence(session))) {
@@ -4352,7 +4305,7 @@ export class DutydeckRuntime {
       this.options.log?.warn({ sessionId: id, code: error instanceof RuntimeError ? error.code : 'DRIVER_STOP_UNVERIFIED', cause, blockedSince: since, unverifiable }, 'Driver exit is still unverified');
       const session = await this.repos.sessions.get(id);
       const kind = unverifiable ? 'stop_unverifiable' : 'stop_unverified';
-      if (session && this.gate.stops.driver(id)?.driver === driver) await this.mutations.run(undefined, () => this.sessionNotice(session, { id: `notice_${digest([kind, id, since])}`, kind: 'stop_unverified', taskId: '', sessionIds: [id],
+      if (session && this.gate.stops.driver(id)?.driver === driver) await this.mutations.run(undefined, () => this.notices.sessionNotice(session, { id: `notice_${digest([kind, id, since])}`, kind: 'stop_unverified', taskId: '', sessionIds: [id],
         message: unverifiable ? '这个会话的 Agent 进程没法确认是否已经退出，后台不会再自动复核。新消息会先排队，请管理员核对进程后在执行恢复里解除。'
           : cause === 'startup' ? '这个会话启动 Agent 失败后，没能确认启动到一半的进程已经退出，暂时不能接新消息。后台会定时复核，确认退出后自动恢复。'
           : '这个会话闲置关闭时，没能确认它的终端进程已经退出，暂时不能接新消息。后台会定时复核，确认退出后自动恢复。' },
@@ -4379,13 +4332,13 @@ export class DutydeckRuntime {
           const abandoned = due && await this.abandonUnknownAttempt(session, attempt);
           if (due && !abandoned) this.unknownTaskRecheckAt.set(attempt.attemptId, at + 60 * 60_000);
           if (abandoned) {
-            await this.sessionNotice(session, { id: `notice_${digest(['unknown_task_abandoned', attempt.attemptId])}`, kind: 'unknown_task_abandoned', taskId: attempt.taskId, attemptId: attempt.attemptId, sessionIds: [session.id],
+            await this.notices.sessionNotice(session, { id: `notice_${digest(['unknown_task_abandoned', attempt.attemptId])}`, kind: 'unknown_task_abandoned', taskId: attempt.taskId, attemptId: attempt.attemptId, sessionIds: [session.id],
               message: '这一轮的结果未知，超过 7 天没人处理，执行它的进程也已确认退出。Dutydeck 已按「结果未知、已放弃」结案：没有重做，也不算完成，不再挡住同一仓库的其他任务。\n\n还需要做的话，请重新发一条消息。' },
               { key: runtimeStateKeys.notice.key('unknown_task_abandoned', attempt.attemptId), value: 'sent' });
             return;
           }
           const labels = unknownTaskActionLabels;
-          await this.sessionNotice(session, { id: `notice_${digest(['unknown_task_overdue', attempt.attemptId])}`, kind: 'unknown_task_overdue', taskId: attempt.taskId, attemptId: attempt.attemptId, sessionIds: [session.id],
+          await this.notices.sessionNotice(session, { id: `notice_${digest(['unknown_task_overdue', attempt.attemptId])}`, kind: 'unknown_task_overdue', taskId: attempt.taskId, attemptId: attempt.attemptId, sessionIds: [session.id],
             message: ['这一轮的结果未知，已经超过 24 小时没人处理。它会挡住这个会话后面的消息，也会挡住同一仓库里其他会话的任务。',
               `处理方法：在 Web 打开这个会话，在执行记录下方选「${labels.retry}」「${labels.completed}」或「${labels.failed}」；原话题里如果有「结果未知」提醒卡，也可以直接点。`,
               '超过 7 天仍没人处理、且确认执行它的进程已退出时，Dutydeck 会自动按「结果未知、已放弃」结案，不会重做。'].join('\n\n') },
