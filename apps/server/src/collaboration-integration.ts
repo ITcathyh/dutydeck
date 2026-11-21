@@ -2,7 +2,7 @@ import { allowedHighRiskActor } from './policy/high-risk.js';
 import type { ReplyPolish } from './lark/reply-polish.js';
 import { CollaborationDelivery } from './collaboration-delivery.js';
 import { createHash } from 'node:crypto';
-import { canonicalExecutionJson, installationOwnerTaskActor, parseLarkSourceId, participationLevelFields, resolveParticipation, RuntimeError, type CollaborationRepository, type CollaborationScope, type ScheduleDelivery, type CollaborationSettings, type UpdateCollaborationSettingsInput, type PolicyAction, type RepositoryBundle, type ToolRiskPolicy } from '@dutydeck/shared';
+import { canonicalExecutionJson, installationOwnerTaskActor, participationLevelFields, resolveParticipation, RuntimeError, type CollaborationRepository, type CollaborationScope, type ScheduleDelivery, type CollaborationSettings, type UpdateCollaborationSettingsInput, type PolicyAction, type RepositoryBundle, type ToolRiskPolicy } from '@dutydeck/shared';
 import type { DutydeckRuntime } from '@dutydeck/runtime';
 import { digest } from '@dutydeck/runtime/digest';
 import { CollaborationService, type CollaborationAuthorization } from './collaboration-service.js';
@@ -77,10 +77,11 @@ export function createCollaborationIntegration(options: CollaborationIntegration
   };
   const authorize = async (scope: CollaborationScope, actorId: string, action: Parameters<CollaborationAuthorization>[2], readOnly = false, propagateRefreshErrors = false) => {
     try {
-      await known(scope, readOnly);
       // Local management identity is resolved by the existing server auth boundary.
-      if (actorId === installationOwnerTaskActor && ['read', 'write', 'manage'].includes(action)) return true;
-      if (action === 'manage') return false;
+      if (action === 'manage' || (actorId === installationOwnerTaskActor && (action === 'read' || action === 'write'))) {
+        await known(scope, readOnly);
+        return actorId === installationOwnerTaskActor;
+      }
       await live(scope, readOnly, propagateRefreshErrors);
       return policy(scope, actorId, action === 'read' ? 'group_tools.read' : action === 'deliver' ? 'group_tools.send' : 'task.create', readOnly, propagateRefreshErrors);
     } catch (error) {
@@ -192,12 +193,11 @@ export function createCollaborationIntegration(options: CollaborationIntegration
   const background = new CollaborationBackground({ repositories: repos, runtime, authorize: scheduleAuthorize, previewAuthorize, resolveConfig: async scope => (await live(scope, false, true)).config });
   const riskPolicy = async (sessionId: string, _fallback?: ToolRiskPolicy): Promise<{ policy?: ToolRiskPolicy } | undefined> => {
     const session = await runtime.getSession(sessionId);
-    const { appId, chatId, chatType: kind, scope: [origin] } = parseLarkSourceId(session?.sourceId);
-    if (session?.source !== 'lark' || kind !== 'group' || origin !== 'collaboration' || !appId || !chatId) return;
+    if (!session) return;
     try {
-      const context = await background.authorizeTool(sessionId, 'group_tools.read');
-      if (!context) throw new Error('后台任务身份缺失。');
-      const scope = { appId, chatId }, { config } = await live(scope);
+      const context = await background.authorizeTool(session, 'group_tools.read');
+      if (!context) return;
+      const { scope } = context, { config } = await live(scope);
       if (config.riskControlMode !== 'enforced') return { policy: undefined };
       const allowedByBot = await allowedHighRiskActor(config, context.actorId, id => client(config).getUserEmails(id), options.log, 'throw');
       return { policy: { enabled: true, authorized: allowedByBot && await policy(scope, context.actorId, 'high_risk.execute'), pattern: config.highRiskPattern, reason: '委托发起人没有此高风险操作授权。' } };

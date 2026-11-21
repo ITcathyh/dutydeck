@@ -3,7 +3,8 @@ import { digest as hash } from '@dutydeck/runtime/digest';
 import { canonicalExecutionJson, installationOwnerTaskActor, parseLarkSourceId, RuntimeError, scheduleTriggerPeriod, taskRequestV1Schema, type CollaborationAction, type CollaborationScope, type ExecutionActor, type RepositoryBundle, type ScheduleTrigger, type Session, type TaskRecord, type TaskRequestV1 } from '@dutydeck/shared';
 import { executionTaskId } from '@dutydeck/storage/helpers';
 import { observeAdmittedTask } from './task-results.js';
-import { scheduleMatchesMandate, type CollaborationAuthorization } from './collaboration-service.js';
+import { assertCollaborationDelegation, delegationRevoked as denied } from './collaboration-delegation.js';
+import type { CollaborationAuthorization } from './collaboration-service.js';
 import type { ScheduleAgentResult, ScheduleExecutionInput } from './schedule-executor.js';
 import type { StoredLarkConfig } from './lark/config.js';
 import { formatRolePrompt } from './lark/role-format.js';
@@ -15,7 +16,6 @@ const scopeOf = (session: Session): CollaborationScope | undefined => {
 };
 /** 定时产出聚焦变化；影响任务完成的材料缺口仍须披露。 */
 export const outputTemplate = (trigger: ScheduleTrigger) => `[产出要求] 聚焦新增和变化；最多 10 条要点，每条一两句话。不例行罗列材料范围；材料缺口影响结论或任务完成时，说明缺少什么、哪些目标未完成。只有材料足以判断且${scheduleTriggerPeriod(trigger)}确实没有新内容时，才回复一句「${scheduleTriggerPeriod(trigger)}没有新增」。`;
-const denied = () => new RuntimeError('COLLABORATION_EXECUTION_REVOKED', '该后台委托已变更、暂停或失去授权。', 403);
 export interface CollaborationBackgroundOptions {
   repositories: RepositoryBundle;
   runtime: DutydeckRuntime;
@@ -31,53 +31,42 @@ export class CollaborationBackground {
   private actor(scope: CollaborationScope, id: string): ExecutionActor {
     return id === installationOwnerTaskActor ? { kind: 'installation_owner', id: installationOwnerTaskActor } : { kind: 'channel', id, appId: scope.appId };
   }
-  private async record(session: Session) {
+  private async record(session: Session | undefined) {
+    if (!session) return;
     const scope = scopeOf(session); if (!scope) return;
     const record = await this.repo.getAction(scope, session.id);
     if (!record || record.kind !== 'agent_execution' || record.payload.sessionId !== session.id) throw denied();
     return record;
   }
-  private async assertRecord(record: CollaborationAction, readOnly = false) {
-    if (record.status === 'suppressed') throw denied();
-    const mandate = record.mandateId && await this.repo.getMandate(record.scope, record.mandateId);
-    if (!mandate || mandate.status !== 'active' || mandate.requesterId !== record.requesterId) throw denied();
-    const schedule = await this.options.repositories.scheduleDefinitions.get(mandate.scheduleDefinitionId);
-    if (!schedule || schedule.state !== 'enabled' || schedule.currentGeneration !== record.scheduleGeneration || !scheduleMatchesMandate(schedule, mandate)) throw denied();
-    const authorize = readOnly ? this.options.previewAuthorize : this.options.authorize;
-    if (!authorize || !await authorize(record.scope, record.requesterId, 'execute')) throw denied();
-    if (mandate.followupId) {
-      const followup = await this.repo.getFollowup(record.scope, mandate.followupId);
-      if (!followup || (record.followupRevision !== undefined && record.followupRevision !== followup.revision) || (mandate.condition !== 'always' && followup.status !== 'open')) throw denied();
-    }
-    const latest = await this.repo.getAction(record.scope, record.id);
-    if (!latest || latest.status === 'suppressed') throw denied();
+  private assertRecord(record: CollaborationAction, readOnly = false) {
+    return assertCollaborationDelegation(this.options.repositories, readOnly ? this.options.previewAuthorize : this.options.authorize, { phase: 'runtime', record });
   }
   async authorizeExecution(sessionId: string, actorId?: string): Promise<boolean> {
-    const session = await this.options.runtime.getSession(sessionId); if (!session || !scopeOf(session)) return false;
-    const record = await this.record(session); if (!record || actorId !== record.requesterId) throw denied();
+    const record = await this.record(await this.options.runtime.getSession(sessionId));
+    if (!record) return false;
+    if (actorId !== record.requesterId) throw denied();
     await this.assertRecord(record); return true;
   }
   async authorizeTask(session: Session, task: TaskRecord) {
-    if (!scopeOf(session)) return;
-    const record = await this.record(session);
-    if (!record || task.id !== record.payload.taskId || task.executionContext?.actorId !== record.requesterId) throw denied();
+    const record = await this.record(session); if (!record) return;
+    if (task.id !== record.payload.taskId || task.executionContext?.actorId !== record.requesterId) throw denied();
     const accepted = this.options.repositories.execution.getAcceptedTask(task.id);
     if (!accepted?.request || canonicalExecutionJson(accepted.request) !== canonicalExecutionJson(record.payload.request)) throw denied();
     await this.assertRecord(record);
   }
   async authorizeControl(sessionId: string, actor: ExecutionActor): Promise<boolean> {
-    const session = await this.options.runtime.getSession(sessionId); if (!session || !scopeOf(session)) return false;
-    const record = await this.record(session);
-    if (!record || canonicalExecutionJson(actor) !== canonicalExecutionJson(this.actor(record.scope, record.requesterId))) throw denied();
+    const record = await this.record(await this.options.runtime.getSession(sessionId));
+    if (!record) return false;
+    if (canonicalExecutionJson(actor) !== canonicalExecutionJson(this.actor(record.scope, record.requesterId))) throw denied();
     return true;
   }
-  async authorizeTool(sessionId: string, action: string, readOnly = false): Promise<{ actorId: string } | undefined> {
-    const session = await this.options.runtime.getSession(sessionId); if (!session || !scopeOf(session)) return;
-    const record = await this.record(session); if (!record) throw denied();
+  async authorizeTool(session: string | Session, action: string, readOnly = false) {
+    const record = await this.record(typeof session === 'string' ? await this.options.runtime.getSession(session) : session);
+    if (!record) return;
     await this.assertRecord(record, readOnly);
     // Delivery has one owner: the scheduler's durable delivery action.
     if (action === 'group_tools.send') throw new RuntimeError('COLLABORATION_MANAGED_DELIVERY', '此后台任务由调度器统一投递结果，请直接返回最终内容。', 403);
-    return { actorId: record.requesterId };
+    return { actorId: record.requesterId, scope: record.scope };
   }
   private async finish(input: ScheduleExecutionInput, record: CollaborationAction, status: 'succeeded' | 'failed' | 'unknown', receipt?: string, error?: string) {
     if (!['succeeded', 'failed', 'suppressed'].includes(record.status)) await this.repo.updateAction(record.scope, record.id, { expectedRevision: record.revision, status, receipt, error }, input.writerFence());
