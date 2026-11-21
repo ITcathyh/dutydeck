@@ -236,7 +236,7 @@ export const larkCommandRegistry: readonly LarkCommandDefinition[] = [
     unavailableReason: '当前 Dutydeck 运行时无法读取会话状态（缺少 getSession），/status 给不出真实状态，已停用。'
   },
   {
-    name: 'cancel',
+    name: 'cancel', execute: async ctx => (await import('./handlers/task-commands.js')).handleCancel(ctx),
     aliases: ['stop'],
     summary: '取消本会话正在执行或排队中的这一轮任务，并把进度卡收敛为取消收据',
     usage: '/cancel',
@@ -247,7 +247,7 @@ export const larkCommandRegistry: readonly LarkCommandDefinition[] = [
     unavailableReason: '当前 Dutydeck 运行时没有可用的停止手段（缺少 interrupt 与 cancelQueued），/cancel 无法真正取消任务，已停用。'
   },
   {
-    name: 'retry',
+    name: 'retry', execute: async ctx => (await import('./handlers/task-commands.js')).handleRetry(ctx),
     summary: '重新执行本会话最近一次失败或已取消的任务，并新建一张进度卡',
     usage: '/retry',
     mutating: true,
@@ -276,7 +276,7 @@ export const larkCommandRegistry: readonly LarkCommandDefinition[] = [
     unavailableReason: '当前 Dutydeck 运行时无法列出本机 Agent（缺少 listAgents），/agents 只能给出空承诺，已停用。'
   },
   {
-    name: 'queue',
+    name: 'queue', execute: async ctx => (await import('./handlers/task-commands.js')).handleQueue(ctx),
     // 列出队列本身只读，但取消与提到队首会改变待执行的内容：整条命令按改状态处理，
     // 与 /cancel 同一道白名单门，避免「只读入口带着写操作」两套口径。
     summary: '查看本会话待执行的指令，并取消其中一条、把它提到队首或立即插话',
@@ -286,7 +286,7 @@ export const larkCommandRegistry: readonly LarkCommandDefinition[] = [
     unavailableReason: '当前 Dutydeck 运行时读不到队列或无法操作队列（缺少 getTasks，且 cancelQueued 与 steerQueued 都不可用），/queue 已停用。'
   },
   {
-    name: 'steer',
+    name: 'steer', execute: async ctx => (await import('./handlers/task-commands.js')).handleSteer(ctx),
     // 诚实边界：只有支持插话的 ACP Agent 才能把内容送进正在执行的这一轮（injectQueued）；
     // 明确未投递时可把排队中的一轮提到队首（steerQueued）；投递未知时保留恢复状态，回执按实际结果写。
     summary: '把一条内容插进正在执行的这一轮；Agent 不支持插话时排到队首并中断这一轮',
@@ -296,7 +296,7 @@ export const larkCommandRegistry: readonly LarkCommandDefinition[] = [
     unavailableReason: '当前 Dutydeck 运行时无法把一条指令提到队首（缺少 dispatch 或 steerQueued），/steer 做不到任何插话效果，已停用。'
   },
   {
-    name: 'plan',
+    name: 'plan', execute: async ctx => (await import('./handlers/task-commands.js')).handlePlan(ctx),
     summary: '先让 Agent 只调研、出执行计划（不改文件），在计划卡上批准后再按计划执行；也可以提修改意见让它重出计划',
     usage: '/plan <任务>',
     mutating: true,
