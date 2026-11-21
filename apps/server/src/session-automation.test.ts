@@ -20,6 +20,7 @@ import {
   type WorkItem
 } from '@dutydeck/shared';
 import { createRepositories, executionTaskId } from '@dutydeck/storage';
+import { sampleOutput, settlementSample } from './task-results.test-helpers.js';
 import { afterAll, afterEach, describe, expect, it, vi } from 'vitest';
 import { ciProviders, ciStatus, TEST_CI_REMOTE, type StatusMock } from './ci-provider.test-helpers.js';
 import { workItemId, workItemProgressStatus } from './work-items.js';
@@ -3207,4 +3208,19 @@ describe('schedule pre-check command', () => {
     at(h, 1); await h.service.tick();
     expect(h.dispatches).toHaveLength(1);
   });
+});
+
+it.each([false, true])('observes the settlement sample with historical boundary missing=%s', async historical => {
+  const h = await fixture();
+  const schedule = await h.service.createSchedule(h.session.id, scheduleInput, 'ou_owner');
+  const occurrence = await h.service.runSchedule(h.session.id, schedule.id, { expectedRevision: schedule.revision, idempotencyKey: 'sample' }, 'ou_owner');
+  const taskId = h.dispatches[0]!.id;
+  h.settleTask(taskId, 'completed', sampleOutput);
+  const expected = settlementSample(h.repositories.execution, h.database, taskId, historical);
+  await h.service.tick();
+  const stored = JSON.parse((await h.repositories.config.get('session_automation/occurrence/' + occurrence.id))!);
+  expect(stored.runStatus).toBe(historical ? 'blocked' : 'completed');
+  expect(stored.runtimeAttemptId).toBe(expected.attemptId);
+  expect(stored.result).toEqual(historical ? undefined : expected);
+  expect(stored.blockReason).toBe(historical ? 'legacy_output_unresolved' : undefined);
 });

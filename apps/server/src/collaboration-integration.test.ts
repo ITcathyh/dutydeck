@@ -1,3 +1,4 @@
+import Database from 'better-sqlite3';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -5,6 +6,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import '../../../tests/support/short-acpx-reply-drain.js';
 import { agentConfigSchema, canonicalExecutionJson, installationOwnerTaskActor, RuntimeError, validateScenarioPack, type AgentDriver } from '@dutydeck/shared';
 import { createRepositories } from '@dutydeck/storage';
+import { sampleOutput, settlementSample } from './task-results.test-helpers.js';
 import { DutydeckRuntime, type RuntimeOptions } from '@dutydeck/runtime';
 import { createAutomationIntegration } from './automation-integration.js';
 import { CollaborationBackground } from './collaboration-background.js';
@@ -92,7 +94,7 @@ async function fixture(options: { realAcp?: boolean; scenarios?: ScenarioRegistr
   collaboration.service.options.now = () => clock;
   cleanups.push(async () => { await collaboration.close(); await runtime.shutdown(); repos.close(); await rm(directory, { recursive: true, force: true }); });
   const create = (id = 'review', prompt = '总结还缺的资料') => collaboration.service.createMandate(scope, 'ou_alice', { id, goal: '检查资料进展', mode: 'agent', prompt, condition: 'always', trigger: { kind: 'interval', everySeconds: 60, anchorAt: clock.toISOString() }, timezone: 'UTC' });
-  return { repos, runtime, collaboration, groups, client, group, calls, stopped, create,
+  return { database: join(directory, 'test.db'), repos, runtime, collaboration, groups, client, group, calls, stopped, create,
     advance(ms = 60_000) { clock = new Date(clock.getTime() + ms); }, revoke() { members = []; }, allow() { members = options.members ?? ['ou_alice']; } };
 }
 
@@ -1586,4 +1588,42 @@ it('does not use a durable receipt to bypass revoked delivery authorization', as
   await f.restored.scheduler.tick();
   expect(await f.repos.collaboration.getAction(scope, f.action.id)).toMatchObject({ status: 'succeeded' });
   expect(f.client.send).toHaveBeenCalledOnce();
+});
+
+it.each([false, true])('observes the settlement sample with historical boundary missing=%s', async historical => {
+  const f = await fixture();
+  await f.create(); f.advance(); await f.collaboration.scheduler.tick();
+  await eventually(async () => f.calls.length === 1);
+  const call = f.calls[0]!;
+  call.finish(sampleOutput);
+  await eventually(async () => (await f.runtime.getTasks(call.sessionId))[0]?.status === 'completed');
+  const taskId = (await f.runtime.getTasks(call.sessionId))[0]!.id;
+  const expected = settlementSample(f.repos.execution, f.database, taskId, historical);
+  const execute = vi.spyOn(f.collaboration.background, 'execute');
+  await f.collaboration.scheduler.tick();
+  await expect(execute.mock.results[0]!.value).resolves.toEqual(historical
+    ? { status: 'unknown', receipt: taskId, error: 'legacy_output_unresolved' }
+    : { status: 'completed', receipt: taskId, text: expected.output.text });
+  const action = await f.repos.collaboration.getAction(scope, call.sessionId);
+  expect(action?.status).toBe(historical ? 'unknown' : 'succeeded');
+  expect(action?.receipt).toBe(taskId);
+  expect(action?.error).toBe(historical ? 'legacy_output_unresolved' : undefined);
+});
+
+it('finishes a running background task with no attempt as unknown', async () => {
+  const f = await fixture();
+  f.runtime.setQueueHeld(true);
+  await f.create(); f.advance(); await f.collaboration.scheduler.tick();
+  const action = (await f.repos.collaboration.listActions(scope)).find(item => item.kind === 'agent_execution')!;
+  const taskId = String(action.payload.taskId);
+  expect(f.repos.execution.getTaskExecutionState(taskId)).toMatchObject({ task: { status: 'queued' }, attempts: [] });
+  const db = new Database(f.database);
+  try { db.prepare("UPDATE tasks SET status='running' WHERE id=?").run(taskId); }
+  finally { db.close(); }
+  const execute = vi.spyOn(f.collaboration.background, 'execute');
+  await f.collaboration.scheduler.tick();
+  const error = '后台任务记录不一致，需要核对。';
+  await expect(execute.mock.results[0]!.value).resolves.toEqual({ status: 'unknown', error });
+  expect(await f.repos.collaboration.getAction(scope, action.id)).toMatchObject({ status: 'unknown', receipt: taskId, error });
+  expect(f.calls).toHaveLength(0);
 });

@@ -3,7 +3,7 @@ import { sha256Hex as hash } from './hash.js';
 import { analyzeWorkPlanRevision, canonicalExecutionJson, errorMessage as errorText, now as time, canonicalPlanJson, createWorkItemSchema, reviseWorkPlanSchema, workRevisionConfirmationReasons, type ReviseWorkPlanInput, type WorkRevisionImpact, type WorkRevisionPreview, executionActorSchema, installationOwnerTaskActor, parseLarkSourceId, RuntimeError, serialByKey, timeLoop, type LoopTimingLog, taskAdmissionV1Schema, taskRequestV1Schema, workPlanSchema, workReviewVerdictSchema, type CreateWorkItemInput, type ExecutionActor, type PermissionMode, type RepositoryBundle, type Session, type TaskAdmissionV1, type TaskRecord, type TaskRequestV1, type ToolRiskPolicy, type PendingWorkRevision, type WorkItem, type WorkPlan, type WorkStep, type WorkTemplate } from '@dutydeck/shared';
 import { executionTaskId } from '@dutydeck/storage/helpers';
 import type { DutydeckRuntime } from '@dutydeck/runtime';
-import { readWorkAttemptResult } from './task-results.js';
+import { observeAdmittedTask, readWorkAttemptResult } from './task-results.js';
 
 const PREFIX = 'work_item:';
 const TEMPLATES = 'work_template:';
@@ -984,54 +984,50 @@ export class WorkItemService {
     if (attempt.output) { attempt.status = 'completed'; step.status = 'completed'; return; }
     const admission = record.admissions?.[attempt.id];
     if (!admission) { await this.blockAttempt(state, step, 'admission_conflict', 'Work attempt has no fixed task admission'); return; }
-    if (attempt.taskId !== admission.taskId) { await this.blockAttempt(state, step, 'admission_conflict', 'Attempt task id no longer matches its admission'); return; }
-    const projection = this.repos.execution.getTaskExecutionState(admission.taskId);
-    if (!projection) {
-      if (attempt.status === 'accepted') await this.blockAttempt(state, step, 'admission_conflict', 'Accepted work task is missing from the execution ledger');
-      return;
-    }
-    if (projection.task.sessionId !== attempt.sessionId) { await this.blockAttempt(state, step, 'admission_conflict', 'Task belongs to another work session'); return; }
-    // queued/preparing/suspended 的 V1 或缺冻结选项输入不能透明提交（含无 Attempt 的历史 queued）。
-    if (projection.task.status === 'queued' || projection.task.status === 'running') {
-      const accepted = this.repos.execution.getAcceptedTask(admission.taskId);
-      if (accepted?.input?.version !== 2) { await this.blockAttempt(state, step, 'legacy_input_unresolved', 'Accepted task input options cannot be verified (INPUT_OPTIONS_UNVERIFIABLE)'); return; }
-    }
-    const first = projection.attempts.find(item => item.number === 1);
-    if (!first) {
-      // 无 Attempt 且 Task 已取消：首次领取前取消，按取消收口且不造 Result。
-      if (projection.task.status === 'cancelled') {
-        attempt.status = 'cancelled'; attempt.updatedAt = time(); step.status = 'cancelled';
-        if (['cancelling', 'cancelled'].includes(record.item.status)) {
-          await this.write(state);
-          return;
-        }
-        attempt.error = 'Selected task was cancelled before execution';
-        record.item.status = 'blocked';
-        record.item.error = `Step ${step.id} task was cancelled before execution; workflow blocked`;
-        await this.haltBlocked(state);
+    const read = observeAdmittedTask(this.repos.execution, attempt.sessionId!, admission.taskId, attempt.runtimeAttemptId, { kind: 'work_attempt', taskId: attempt.taskId });
+    if (read.status === 'not_claimed' || read.status === 'cancelled_before_claim' || (read.status === 'contradiction' && read.reason === 'missing_first_attempt')) {
+      const status = read.status === 'not_claimed' ? 'queued' : read.taskStatus;
+      if (status === 'queued') {
+        if (attempt.status !== 'accepted') { attempt.status = 'accepted'; attempt.updatedAt = time(); await this.write(state); }
+        return;
+      }
+      if (status !== 'cancelled') {
+        await this.blockAttempt(state, step, 'reconcile_required', `Task ${status} has no recorded attempt`); return;
+      }
+      attempt.status = 'cancelled'; attempt.updatedAt = time(); step.status = 'cancelled';
+      if (['cancelling', 'cancelled'].includes(record.item.status)) {
         await this.write(state);
         return;
       }
-      // running 缺 Attempt 不是合法 claim 瞬态，claimNext 在同一事务创建二者；仅真正 queued 可等待，其余缺 Attempt 作为坏事实阻塞。
-      if (projection.task.status !== 'queued') {
-        await this.blockAttempt(state, step, 'reconcile_required', `Task ${projection.task.status} has no recorded attempt`); return;
-      }
-      if (attempt.status !== 'accepted') { attempt.status = 'accepted'; attempt.updatedAt = time(); await this.write(state); }
+      attempt.error = 'Selected task was cancelled before execution';
+      record.item.status = 'blocked';
+      record.item.error = `Step ${step.id} task was cancelled before execution; workflow blocked`;
+      await this.haltBlocked(state);
+      await this.write(state);
       return;
     }
-    if (!attempt.runtimeAttemptId) { attempt.runtimeAttemptId = first.attemptId; attempt.updatedAt = time(); await this.write(state); }
-    else if (attempt.runtimeAttemptId !== first.attemptId) { await this.blockAttempt(state, step, 'reconcile_required', 'Fixed number=1 attempt identity changed'); return; }
-
-    let read;
-    try { read = readWorkAttemptResult({ execution: this.repos.execution }, attempt.sessionId!, admission.taskId, attempt.runtimeAttemptId!); }
-    catch (error) {
-      const message = errorText(error);
+    if ('firstAttemptId' in read && !attempt.runtimeAttemptId) { attempt.runtimeAttemptId = read.firstAttemptId; attempt.updatedAt = time(); await this.write(state); }
+    if (read.status === 'result_error' || (read.status === 'contradiction' && read.reason === 'attempt_scope_mismatch')) {
+      const message = errorText(read.error);
       attempt.status = 'blocked'; attempt.blockReason = 'reconcile_required'; attempt.error = message; attempt.updatedAt = time();
       step.status = 'blocked';
       state.value.item.status = 'blocked'; state.value.item.error = message;
       await this.write(state); return;
     }
-    if (read.status === 'pending') {
+    if (read.status === 'contradiction') {
+      if (read.reason === 'task_missing') {
+        if (attempt.status === 'accepted') await this.blockAttempt(state, step, 'admission_conflict', 'Accepted work task is missing from the execution ledger');
+      } else if (read.reason === 'first_attempt_changed') {
+        await this.blockAttempt(state, step, 'reconcile_required', 'Fixed number=1 attempt identity changed');
+      } else {
+        await this.blockAttempt(state, step, 'admission_conflict', read.reason === 'task_id_changed' ? 'Attempt task id no longer matches its admission' : 'Task belongs to another work session');
+      }
+      return;
+    }
+    if (read.status === 'legacy_input_unverifiable') {
+      await this.blockAttempt(state, step, 'legacy_input_unresolved', 'Accepted task input options cannot be verified (INPUT_OPTIONS_UNVERIFIABLE)'); return;
+    }
+    if (read.status === 'in_progress') {
       if (attempt.status !== 'accepted') { attempt.status = 'accepted'; attempt.updatedAt = time(); await this.write(state); }
       if (this.executionExpired(step)) {
         if (!record.actor) { await this.blockAttempt(state, step, 'reconcile_required', 'Execution timed out and its actor cannot be verified'); return; }
@@ -1042,9 +1038,9 @@ export class WorkItemService {
       }
       return;
     }
-    if (read.status === 'blocked') {
+    if (read.status === 'result_blocked') {
       if (read.reason === 'legacy_output_unresolved') attempt.resultBoundary = 'legacy_output_unresolved';
-      await this.blockAttempt(state, step, read.reason === 'admission_conflict' ? 'admission_conflict' : read.reason, `Work attempt result is ${read.reason}`);
+      await this.blockAttempt(state, step, read.reason, `Work attempt result is ${read.reason}`);
       return;
     }
 

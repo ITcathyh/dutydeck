@@ -8,6 +8,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { agentConfigSchema, workPlanSchema, type AgentDriver, type WorkItem, type WorkPlan } from '@dutydeck/shared';
 import * as shared from '@dutydeck/shared';
 import { createRepositories } from '@dutydeck/storage';
+import { sampleOutput, settlementSample } from './task-results.test-helpers.js';
 import { DutydeckRuntime } from '@dutydeck/runtime';
 import { WorkItemService, readWorkItemStatus, workItemProgressStatus, workPlanDigest } from './work-items.js';
 
@@ -1317,4 +1318,21 @@ describe('Plan revision with real Runtime and SQLite', () => {
     expect(attempts[1]!.sessionId).not.toBe(attempts[0]!.sessionId);
     expect(new Set(f.calls.map(call => call.sessionId)).size).toBe(f.calls.length);
   });
+});
+
+it.each([false, true])('observes the settlement sample with historical boundary missing=%s', async historical => {
+  const f = await fixture();
+  const item = await f.create(singlePlan);
+  await f.tick();
+  await eventually(async () => f.calls.length === 1);
+  await f.finish(f.calls[0]!, sampleOutput);
+  const taskId = (await f.get(item.id)).steps[0]!.attempts[0]!.taskId!;
+  const expected = settlementSample(f.repos.execution, join(f.directory, 'test.db'), taskId, historical);
+  await f.tick();
+  const step = (await f.get(item.id)).steps[0]!;
+  const attempt = step.attempts[0]!;
+  expect(step.status).toBe(historical ? 'blocked' : 'completed');
+  expect(attempt.runtimeAttemptId).toBe(expected.attemptId);
+  expect(attempt.result).toEqual(historical ? undefined : expected);
+  expect(attempt.blockReason).toBe(historical ? 'legacy_output_unresolved' : undefined);
 });

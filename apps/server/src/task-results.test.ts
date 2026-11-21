@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import Database from 'better-sqlite3';
 import { createHash } from 'node:crypto';
 import { mkdtempSync, rmSync } from 'node:fs';
@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { canonicalExecutionJson, type BoundExecutionRepository, type RuntimeControlClaim, type TaskAttempt, type TaskRequestV1 } from '@dutydeck/shared';
 import * as storage from '@dutydeck/storage';
-import { readAttemptResult, readTaskAttemptResult, readWorkAttemptResult } from './task-results.js';
+import { observeAdmittedTask, readAttemptResult, readTaskAttemptResult, readWorkAttemptResult } from './task-results.js';
 
 const directories: string[] = [];
 const opened: Array<{ repos: ReturnType<typeof storage.createRepositories>; claim: RuntimeControlClaim; path: string }> = [];
@@ -63,6 +63,106 @@ function capacityRetry(repos: ReturnType<typeof storage.createRepositories>, x: 
   return current(repos, preparing.taskId);
 }
 const thrown = (fn: () => unknown) => { try { fn(); } catch (error) { return error; } throw new Error('Expected the function to throw'); };
+
+describe('observeAdmittedTask against the real execution ledger', () => {
+  it('distinguishes waiting, cancellation before claim, an active attempt and its verified result', () => {
+    const { repos, x } = open();
+    const task = accepted(x);
+    const observe = (attemptId?: string) => observeAdmittedTask(repos.execution, fence.sessionId, task.id, attemptId, { kind: 'request', request: request() });
+    expect(observe()).toEqual({ status: 'not_claimed' });
+    const first = x.claimNext(fence)!.attempt!;
+    expect(observe()).toEqual({ status: 'in_progress', firstAttemptId: first.attemptId });
+    expect(observe('different')).toEqual({ status: 'contradiction', reason: 'first_attempt_changed' });
+    textEvents(x, first, ['hello']);
+    const settled = settleDriver(repos, x, task.id, utf8Digest('hello'));
+    expect(observe(first.attemptId)).toMatchObject({ status: 'result', firstAttemptId: first.attemptId,
+      result: { attemptId: first.attemptId, settlementId: settled.settlementId, output: { text: 'hello', digest: utf8Digest('hello') } } });
+    const cancelled = accepted(x, 'cancel');
+    x.cancelQueued(fence, cancelled.id, cancelled.revision, { decisionId: 'cancel', action: 'cancel', actor: ownerActor, evidenceRefs: ['operator'], resourceChecks: [] });
+    expect(observeAdmittedTask(repos.execution, fence.sessionId, cancelled.id, undefined, { kind: 'request', request: request('cancel') }))
+      .toEqual({ status: 'cancelled_before_claim', taskStatus: 'cancelled' });
+  });
+
+  it('reports contradictions by reason and checks only the evidence frozen by the caller', () => {
+    const { repos, x, path } = open();
+    const task = accepted(x);
+    const admission = { version: 1, kind: 'canonical', taskIdVersion: 'v1', taskId: task.id, request: request() } as const;
+    const observe = () => observeAdmittedTask(repos.execution, fence.sessionId, task.id, undefined, admission);
+    expect(observeAdmittedTask(repos.execution, fence.sessionId, 'missing', undefined, { kind: 'work_attempt', taskId: 'missing' }))
+      .toEqual({ status: 'contradiction', reason: 'task_missing' });
+    expect(observeAdmittedTask(repos.execution, 'another', task.id, undefined, admission))
+      .toEqual({ status: 'contradiction', reason: 'session_mismatch' });
+    expect(observeAdmittedTask(repos.execution, fence.sessionId, task.id, undefined, { ...admission, request: request('another') }))
+      .toEqual({ status: 'contradiction', reason: 'request_mismatch' });
+    expect(observeAdmittedTask(repos.execution, fence.sessionId, task.id, 'previously-pinned', admission))
+      .toEqual({ status: 'contradiction', reason: 'missing_first_attempt', taskStatus: 'queued' });
+    const db = new Database(path);
+    try {
+      db.prepare("UPDATE tasks SET status='running' WHERE id=?").run(task.id);
+      expect(observe()).toEqual({ status: 'contradiction', reason: 'missing_first_attempt', taskStatus: 'running' });
+      const legacy = { version: 1, prompt: 'hello', executionContext: v2Input().executionContext, contentSources: [] };
+      db.prepare('UPDATE task_requests SET accepted_json=? WHERE task_id=?').run(JSON.stringify({ ...legacy, digest: stableHash(legacy) }), task.id);
+      expect(observe()).toEqual({ status: 'legacy_input_unverifiable' });
+    } finally { db.close(); }
+  });
+
+  it('keeps historical acceptance and frozen request checks distinct', () => {
+    const { repos, x, path } = open();
+    const first = claimed(repos, x);
+    const frozen = request();
+    const db = new Database(path);
+    try {
+      db.prepare("UPDATE tasks SET digest_version='legacy_unverifiable' WHERE id=?").run(first.taskId);
+      db.prepare('UPDATE task_requests SET request_json=NULL WHERE task_id=?').run(first.taskId);
+      const observe = (evidence: Parameters<typeof observeAdmittedTask>[4]) =>
+        observeAdmittedTask(repos.execution, fence.sessionId, first.taskId, first.attemptId, evidence);
+      expect(observe({ kind: 'request', request: frozen })).toEqual({ status: 'legacy_input_unverifiable' });
+      expect(observe({ kind: 'canonical', version: 1, taskIdVersion: 'v1', taskId: first.taskId, request: frozen }))
+        .toEqual({ status: 'contradiction', reason: 'request_mismatch' });
+      expect(observe({ kind: 'legacy_partial', version: 1, taskIdVersion: 'legacy', taskId: first.taskId, request: frozen }))
+        .toEqual({ status: 'in_progress', firstAttemptId: first.attemptId });
+    } finally { db.close(); }
+  });
+
+  it('flags an attempt whose stored owner differs from the admitted session', () => {
+    const { repos, x, path } = open();
+    const first = claimed(repos, x);
+    const db = new Database(path);
+    try {
+      db.prepare("UPDATE task_attempts SET json=json_set(json, '$.sessionId', 'another') WHERE id=?").run(first.attemptId);
+      expect(observeAdmittedTask(repos.execution, fence.sessionId, first.taskId, first.attemptId, { kind: 'request', request: request() }))
+        .toMatchObject({ status: 'contradiction', reason: 'attempt_scope_mismatch', firstAttemptId: first.attemptId, error: { code: 'TASK_RESULT_SCOPE_CONFLICT' } });
+    } finally { db.close(); }
+  });
+
+  it('retains the result reader error when the settlement digest conflicts', () => {
+    const { repos, x } = open();
+    const first = claimed(repos, x);
+    settleDriver(repos, x, first.taskId, utf8Digest('missing text'));
+    expect(observeAdmittedTask(repos.execution, fence.sessionId, first.taskId, first.attemptId, { kind: 'request', request: request() }))
+      .toMatchObject({ status: 'result_error', firstAttemptId: first.attemptId, error: { code: 'TASK_RESULT_DIGEST_CONFLICT' } });
+  });
+
+  it('reads settlement events from the same snapshot as the pinned attempt', () => {
+    const { repos, x, path } = open();
+    const first = claimed(repos, x);
+    textEvents(x, first, ['hello']);
+    settleDriver(repos, x, first.taskId, utf8Digest('hello'));
+    const db = new Database(path);
+    const readState = repos.execution.getTaskExecutionState;
+    const state = vi.spyOn(repos.execution, 'getTaskExecutionState').mockImplementationOnce(taskId => {
+      const before = readState(taskId);
+      db.prepare("DELETE FROM events WHERE attempt_id=? AND type='completed'").run(first.attemptId);
+      return before;
+    });
+    try {
+      const observe = () => observeAdmittedTask(repos.execution, fence.sessionId, first.taskId, first.attemptId, { kind: 'request', request: request() });
+      expect(observe()).toMatchObject({ status: 'result', result: { output: { text: 'hello' } } });
+      expect(state).toHaveBeenCalledTimes(1);
+      expect(observe()).toEqual({ status: 'result_blocked', firstAttemptId: first.attemptId, reason: 'legacy_output_unresolved' });
+    } finally { state.mockRestore(); db.close(); }
+  });
+});
 
 describe('readAttemptResult against the real execution ledger', () => {
   it('follows only verified capacity successors for work results and keeps the shared reader pinned to the first attempt', () => {

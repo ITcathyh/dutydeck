@@ -806,6 +806,7 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
     },
     getNativeContext(sessionId) { const selection = nativeSelection(sessionId); return selection ? {selection,resource:nativeResource(sessionId,selection.context)} : undefined; },
     getSessionResourceBlockers: sessionId => blockers(sessionId),
+    readTransaction: read => db.transaction(read).deferred(),
     getTaskExecutionState,
     getTaskExecution(taskId, context) { return db.transaction(() => {
       const owner = readController(context);

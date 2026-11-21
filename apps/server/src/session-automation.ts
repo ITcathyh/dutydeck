@@ -75,7 +75,7 @@ import { executionTaskId } from '@dutydeck/storage/helpers';
 import { CiProviderRegistry, ciProviderLabel, resolveCiHead, type CiHead } from './ci-providers.js';
 import type { CiWebhookService } from './ci-webhook.js';
 import type { PullRequestService } from './pull-requests.js';
-import { readTaskAttemptResult } from './task-results.js';
+import { observeAdmittedTask } from './task-results.js';
 import { workItemId } from './work-items.js';
 import { defaultHighRiskPattern } from './policy/high-risk.js';
 import { z } from 'zod';
@@ -167,7 +167,7 @@ const openRunStatuses = new Set(['pending', 'accepted', 'blocked']);
 /** CI 定义本身没有代际字段；binding 中的 generation 仅用于严格记录结构，取固定值。 */
 const CI_BINDING_GENERATION = 1;
 
-type ExecutionLedger = Pick<RepositoryBundle['execution'], 'getAcceptedTask' | 'getTaskExecution' | 'getTaskExecutionState' | 'getAttemptEvents' | 'lookupAccepted'>;
+type ExecutionLedger = Pick<RepositoryBundle['execution'], 'getAcceptedTask' | 'getTaskExecution' | 'getTaskExecutionState' | 'getAttemptEvents' | 'lookupAccepted' | 'readTransaction'>;
 type AutomationRepositories = Pick<RepositoryBundle, 'config' | 'sessions' | 'tasks' | 'matters'> & { execution: ExecutionLedger };
 type AuthorizationResult = boolean | PolicyDecision;
 
@@ -684,56 +684,34 @@ export class SessionAutomationService {
   private reconcileAdmission(sessionId: string, value: { admission?: SessionScheduleOccurrenceV2['admission']; runtimeAttemptId?: string }): ReconcileOutcome {
     const admission = value.admission;
     if (!admission) return { status: 'blocked', reason: 'admission_conflict', message: 'Source has no fixed task admission' };
-    let projection;
-    try { projection = this.execution.getTaskExecutionState(admission.taskId); }
+    let read;
+    try { read = observeAdmittedTask(this.execution, sessionId, admission.taskId, value.runtimeAttemptId, admission); }
     catch (error) {
       if (error instanceof RuntimeError && error.code === 'EXECUTION_AUTHORITY_LEGACY') {
         return { status: 'blocked', reason: 'reconcile_required', message: 'Execution ledger is unavailable' };
       }
       throw error;
     }
-    if (!projection) return { status: 'blocked', reason: 'admission_conflict', message: 'Accepted task is missing from the execution ledger' };
-    if (projection.task.sessionId !== sessionId) return { status: 'blocked', reason: 'admission_conflict', message: 'Task belongs to another session' };
-    const accepted = this.execution.getAcceptedTask(admission.taskId);
-    if (!accepted) return { status: 'blocked', reason: 'admission_conflict', message: 'Accepted task is missing' };
-    if (accepted.task.sessionId !== sessionId) return { status: 'blocked', reason: 'admission_conflict', message: 'Accepted task belongs to another session' };
-    if (admission.kind === 'canonical') {
-      if (!accepted.request || canonicalExecutionJson(accepted.request) !== canonicalExecutionJson(admission.request)) {
-        return { status: 'blocked', reason: 'admission_conflict', message: 'Accepted task request conflicts with source admission' };
-      }
-    } else if (admission.kind === 'legacy_partial') {
-      if (accepted.request && admission.request && canonicalExecutionJson(accepted.request) !== canonicalExecutionJson(admission.request)) {
-        return { status: 'blocked', reason: 'admission_conflict', message: 'Accepted task request conflicts with source admission' };
-      }
+    if (read.status === 'not_claimed' || read.status === 'cancelled_before_claim' || (read.status === 'contradiction' && read.reason === 'missing_first_attempt')) {
+      const status = read.status === 'not_claimed' ? 'queued' : read.taskStatus;
+      if (status === 'queued') return { status: 'pending' };
+      if (status === 'cancelled') return { status: 'cancelled' };
+      return { status: 'blocked', reason: 'reconcile_required', message: `Task ${status} has no recorded attempt` };
     }
-    // queued/running 缺冻结 V2 选项输入不能透明提交。
-    if (projection.task.status === 'queued' || projection.task.status === 'running') {
-      if (accepted?.input?.version !== 2) return { status: 'blocked', reason: 'legacy_input_unresolved', message: 'Accepted task input options cannot be verified (INPUT_OPTIONS_UNVERIFIABLE)' };
-    }
-    const first = projection.attempts.find(item => item.number === 1);
-    if (!first) {
-      if (projection.task.status === 'cancelled') return { status: 'cancelled' };
-      if (projection.task.status === 'queued') return { status: 'pending' };
-      return { status: 'blocked', reason: 'reconcile_required', message: `Task ${projection.task.status} has no recorded attempt` };
-    }
-    if (value.runtimeAttemptId && value.runtimeAttemptId !== first.attemptId) {
-      return { status: 'blocked', reason: 'reconcile_required', message: 'Fixed number=1 attempt identity changed' };
-    }
-    let read;
-    try { read = readTaskAttemptResult({ execution: this.execution }, sessionId, admission.taskId, first.attemptId); }
-    catch (error) {
-      return { status: 'blocked', reason: 'reconcile_required', message: errorMessage(error) };
-    }
-    if (read.status === 'pending') return { status: 'pending' };
-    if (read.status === 'blocked') {
-      return {
-        status: 'blocked',
-        reason: read.reason === 'admission_conflict' ? 'admission_conflict'
-          : read.reason === 'reconcile_required' ? 'reconcile_required'
-          : 'legacy_output_unresolved',
-        message: read.reason
+    if (read.status === 'contradiction') {
+      if (read.reason === 'attempt_scope_mismatch') return { status: 'blocked', reason: 'reconcile_required', message: errorMessage(read.error) };
+      if (read.reason === 'first_attempt_changed') return { status: 'blocked', reason: 'reconcile_required', message: 'Fixed number=1 attempt identity changed' };
+      const messages = {
+        task_missing: 'Accepted task is missing from the execution ledger', session_mismatch: 'Task belongs to another session',
+        acceptance_missing: 'Accepted task is missing', acceptance_session_mismatch: 'Accepted task belongs to another session',
+        request_mismatch: 'Accepted task request conflicts with source admission', task_id_changed: 'Accepted task request conflicts with source admission'
       };
+      return { status: 'blocked', reason: 'admission_conflict', message: messages[read.reason] };
     }
+    if (read.status === 'legacy_input_unverifiable') return { status: 'blocked', reason: 'legacy_input_unresolved', message: 'Accepted task input options cannot be verified (INPUT_OPTIONS_UNVERIFIABLE)' };
+    if (read.status === 'in_progress') return { status: 'pending' };
+    if (read.status === 'result_error') return { status: 'blocked', reason: 'reconcile_required', message: errorMessage(read.error) };
+    if (read.status === 'result_blocked') return { status: 'blocked', reason: read.reason, message: read.reason };
     return { status: 'settled', result: read.result };
   }
 
