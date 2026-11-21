@@ -656,7 +656,9 @@ export async function buildApp(runtime: DutydeckRuntime, options: BuildAppOption
   });
   app.delete<{ Params: { id: string; taskId: string } }>('/api/sessions/:id/queue/:taskId', async request => {
     const decision = await requireSessionExecution(request, request.params.id, 'session', 'queue.cancel');
-    return runtime.cancelQueued(request.params.id, request.params.taskId, decision?.source === 'owner' ? installationOwnerTaskActor : undefined);
+    const operationId = z.string().min(1).max(100).regex(/^[A-Za-z0-9_:-]+$/).optional().parse(request.headers['x-dutydeck-operation-id']);
+    return runtime.cancelQueued(request.params.id, request.params.taskId, decision?.source === 'owner' ? installationOwnerTaskActor : undefined,
+      undefined, operationId === undefined ? undefined : `queue_cancel:${operationId}`);
   });
   app.post<{ Params: { id: string; taskId: string } }>('/api/sessions/:id/queue/:taskId/steer', async request => {
     const decision = await requireSessionExecution(request, request.params.id, 'session', 'queue.promote');
