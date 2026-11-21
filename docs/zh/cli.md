@@ -228,7 +228,9 @@ dutydeck autostart disable  # 关闭自启
 
 Web 控制台里的机器人设置、群聊策略和用量上限，都可以用命令行改，方便脚本化和让 Agent 自己管理配置：
 
-用 `dutydeck --database <数据库路径> secret migrate-lark --dry-run` 列出待迁移机器人的 appId。去掉 `--dry-run` 后，命令逐个把 App Secret 写入数据库旁的 `secrets/` 目录，读回一致才从 `lark.bots` 移除明文。中断后可重跑，已完成的机器人会跳过。新建或重新保存某个机器人时，该机器人的 App Secret 仍写入 JSON，可再次执行迁移。
+用 `dutydeck --database <数据库路径> secret migrate-lark --dry-run` 列出待迁移机器人的 appId。迁移前先停用此数据库的服务，或先部署支持读取飞书密钥引用的新版。去掉 `--dry-run` 后，命令逐个把 App Secret 写入数据库旁的 `secrets/` 目录，读回一致才从 `lark.bots` 移除明文。中断后可重跑，已完成的机器人会跳过。新建或重新保存某个机器人时，该机器人的 App Secret 仍写入 JSON，可再次执行迁移。
+
+已迁移的密钥文件读不到时，用 `dutydeck setup` 为原 appId 补回 App Secret。机器人原有的白名单、提示词、风控和监听设置都会保留。
 
 绑定国际 Lark 应用时，用 `dutydeck settings bot add <app-id> brand=lark --app-secret-fd 0`。未通过 `LARK_OPEN_API_BASE_URL` 覆盖服务地址时，`brand=lark` 向国际 Lark 域校验凭据，省略品牌默认走飞书。`brand`、App Secret 和成员名单走同一校验步骤，与默认 Agent、权限或监听等设置分开提交。开启了飞书任务派发通道（`LARK_TASK_AGENT_ENABLED`）时，每轮拉取任务前，以及任务交给消息处理时，都会检查机器人当前保存的发起人名单（`allowedUsers` / `allowedEmails`）和监听开关。两项名单都清空或关闭监听后不再接单；交接时发现通道已关闭的在途任务退回待派，重新开放后可继续处理且不会重复派发。已经通过交接检查的任务不撤回；补上名单后不用重启即可接单。普通私聊里名单为空仍表示对所有人开放。
 

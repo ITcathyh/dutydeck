@@ -76,6 +76,8 @@ type Draft = SharedBotDraft & {
   name: string;
 };
 
+const initialBotStep = (bot?: LarkBotConfig) => bot && !bot.setupComplete && !bot.credentialUnavailable ? 2 : 1;
+
 const browserOrigin = () => typeof window !== 'undefined' ? window.location.origin : '';
 
 /** 读到配置、选定机器人之前的草稿。 */
@@ -238,7 +240,7 @@ export function LarkConfigModal({ agents, target, field, onLeaveGuardChange, onC
     if (!config.data || selectedAppId !== null) return;
     const initialBot = target && target !== 'new' ? config.data.bots.find(bot => bot.appId === target.appId) : target === 'new' ? undefined : config.data.bots[0];
     setSelectedAppId(target && target !== 'new' ? target.appId : initialBot?.appId ?? '');
-    setStep(destination?.step ?? (!target && initialBot && !initialBot.setupComplete ? 2 : 1));
+    setStep(destination?.step ?? (target ? 1 : initialBotStep(initialBot)));
   }, [config.data, selectedAppId, target]);
   useEffect(() => {
     if (!config.data || selectedAppId === null) return;
@@ -271,6 +273,7 @@ export function LarkConfigModal({ agents, target, field, onLeaveGuardChange, onC
       if (submitted.step === 1 && !current) enableListeningAfterNewBot.current = true;
       const savedId = submitted.appId;
       draftRevision.current = data.bots.find(bot => bot.appId === savedId)?.revision ?? 1;
+      if (current?.credentialUnavailable) { hydratedSelection.current = null; setReloadVersion(value => value + 1); }
       qc.setQueryData(['lark-config'], data); setSelectedAppId(savedId);
       if (submitted.step === 1) setField('appSecret', '');
       void qc.invalidateQueries({ queryKey: ['lark-hook-status', savedId] });
@@ -290,7 +293,7 @@ export function LarkConfigModal({ agents, target, field, onLeaveGuardChange, onC
     save.reset(); installHook.reset();
   } });
   const configurationBusy = save.isPending || installHook.isPending || reload.isPending;
-  const remove = useMutation({ mutationFn: () => api.deleteLarkConfig(current!.appId), onSuccess: data => { qc.setQueryData(['lark-config'], data); const firstBot = data.bots[0]; setSelectedAppId(firstBot?.appId ?? ''); setStep(firstBot && !firstBot.setupComplete ? 2 : 1); setConfirmation(undefined); } });
+  const remove = useMutation({ mutationFn: () => api.deleteLarkConfig(current!.appId), onSuccess: data => { qc.setQueryData(['lark-config'], data); const firstBot = data.bots[0]; setSelectedAppId(firstBot?.appId ?? ''); setStep(initialBotStep(firstBot)); setConfirmation(undefined); } });
   const pickWorkspace = useMutation({ mutationFn: api.selectDirectory, onSuccess: result => setField('workspace', result.path) });
   const agentCapabilitiesPending = step === 2 && Boolean(defaultAgentId) && !agentOptions.data && (agentOptions.isLoading || agentOptions.isFetching);
   const agentCapabilitiesReady = step !== 2 || Boolean(agentOptions.data);
@@ -312,7 +315,9 @@ export function LarkConfigModal({ agents, target, field, onLeaveGuardChange, onC
     notifyQuietHours.trim() && !validQuietHours(notifyQuietHours.trim()) ? '免打扰时段格式应为 22:00-08:00（24 小时制，起止不同），留空表示不启用。' : '',
     pinAfterSeconds.trim() && (pinAfterMs === undefined || pinAfterMs < minPinAfterSeconds * 1000) ? `置顶等待时间至少 ${minPinAfterSeconds} 秒，留空表示用默认的 10 分钟。` : ''
   ].filter(Boolean);
-  const canSave = !creationBusy && !configurationBusy && !modelSettingsPending && !missingTarget && (step === 1
+  const canSave = !creationBusy && !configurationBusy && !modelSettingsPending && !missingTarget && (current?.credentialUnavailable
+    ? step === 1 && appId.trim() === current.appId && Boolean(appSecret.trim())
+    : step === 1
     ? Boolean(appId.trim() && (current || appSecret.trim()) && (!restrictUsers || allowedUserNames.length) && !invalidWorkspaceAliases.length && !reminderErrors.length && Number.isInteger(pushIntervalMs) && pushIntervalMs >= 500 && pushIntervalMs <= 20000)
     : Boolean(current && defaultAgentId && agentWeightsSchema.safeParse(defaultAgentWeights).success && (permissionMode === 'full-trust' ? fullTrustConfirmed : remoteApprovalReady) && agentCapabilitiesReady && (riskControlMode === 'off' || highRiskPatternValidation.valid) && !legacyHighRiskNeedsMigration && (riskControlMode !== 'enforced' || enforcedHookReady)));
   const formError = reload.error ?? save.error ?? remove.error ?? pickWorkspace.error ?? inspect.error ?? startOpenPlatformSetup.error ?? openPlatformJob.error ?? (installHook.variables?.appId === current?.appId ? installHook.error : undefined) ?? (agentOptions.data ? undefined : agentOptions.error) ?? hookStatus.error ?? config.error;
@@ -335,7 +340,7 @@ export function LarkConfigModal({ agents, target, field, onLeaveGuardChange, onC
     requestLeave(onClose);
   }, [closeAfterSave, save.isPending, requestLeave, onClose]);
   useEffect(() => {
-    if (destination && current && hydratedVersion) setStep(destination.step);
+    if (destination && current && hydratedVersion) setStep(current.credentialUnavailable ? 1 : destination.step);
   }, [field, current?.appId, hydratedVersion]);
   useEffect(() => {
     if (!destination || !current || !hydratedVersion || step !== destination.step || !form.current) return;
@@ -349,7 +354,7 @@ export function LarkConfigModal({ agents, target, field, onLeaveGuardChange, onC
     return () => observer.disconnect();
   }, [field, current?.appId, hydratedVersion, step]);
   const requestClose = useCallback(() => {
-    const incompleteDraft = Boolean(current && !current.setupComplete);
+    const incompleteDraft = Boolean(current && !current.setupComplete && !current.credentialUnavailable);
     const unsavedNewBot = !current && selectedAppId === '' && Boolean(appId.trim() || appSecret.trim() || workspace.trim());
     if (incompleteDraft || unsavedNewBot) { setConfirmation(incompleteDraft ? 'incomplete' : 'discard'); return; }
     requestLeave(onClose);
@@ -386,13 +391,13 @@ export function LarkConfigModal({ agents, target, field, onLeaveGuardChange, onC
     <form ref={form} onSubmit={event => { event.preventDefault(); if (canSave) save.mutate({ step, values: draftValues, signature: draftSignature, appId: appId.trim(), restrictUsers }); }} className="flex min-h-0 flex-1 flex-col">
       <Dialog.Header className="flex-wrap"><div className="min-w-0 flex-1"><h2 className="text-body font-semibold text-primary">{current ? `更新飞书 Bot：${current.name}` : '绑定飞书 Bot'}</h2><p className="mt-0.5 text-caption text-subtle">Bot 负责收发消息，Agent 负责执行任务</p></div><div className="order-3 mt-2 flex w-full shrink-0 items-center justify-end gap-0.5 sm:order-none sm:ml-auto sm:mt-0 sm:w-auto"><a href="https://open.larkoffice.com/app" target="_blank" rel="noreferrer" className="flex min-h-10 items-center gap-1.5 whitespace-nowrap rounded-md px-2.5 text-caption font-medium text-subtle transition-colors duration-fast ease-out hover:bg-hover hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus-ring">飞书开发者后台<ExternalLink size={12}/></a><a href="https://open.larkoffice.com/page/launcher?from=backend_oneclick" target="_blank" rel="noreferrer" className="flex min-h-10 items-center gap-1.5 whitespace-nowrap rounded-md px-2.5 text-caption font-medium text-secondary transition-colors duration-fast ease-out hover:bg-hover hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus-ring">快速创建应用<ExternalLink size={12}/></a></div><IconButton label="关闭" onClick={requestClose}><X size={15}/></IconButton></Dialog.Header>
       <div className="flex shrink-0 gap-1 overflow-x-auto border-b border-subtle bg-muted px-3 py-2">
-        {config.data?.bots.map(bot => <button key={bot.appId} type="button" disabled={creationBusy || configurationBusy} onClick={() => requestLeave(() => { discardApproved.current = false; setSelectedAppId(bot.appId); setStep(bot.setupComplete ? 1 : 2); })} className={`flex h-10 max-w-[250px] shrink-0 items-center gap-1.5 rounded-md px-2.5 text-caption font-medium transition-colors duration-fast ease-out ${selectedAppId === bot.appId ? 'border border-default bg-surface text-primary shadow-card' : 'border border-transparent text-subtle hover:bg-hover hover:text-primary'}`}><Bot size={13} className="shrink-0"/><span title={bot.name} className="min-w-0 max-w-32 truncate">{bot.tabLabel}</span>{bot.setupComplete ? <span title="配置完成" className="shrink-0"><Badge tone="success"><Check size={9}/>已配置</Badge></span> : <span className="shrink-0"><Badge tone="warning">待配置</Badge></span>}{bot.activeListening && !config.data?.listeningDisabled && bot.listening && <span title="监听已启动" className="h-1.5 w-1.5 shrink-0 rounded-full bg-success-solid"/>}</button>)}
+        {config.data?.bots.map(bot => <button key={bot.appId} type="button" disabled={creationBusy || configurationBusy} onClick={() => requestLeave(() => { discardApproved.current = false; setSelectedAppId(bot.appId); setStep(initialBotStep(bot)); })} className={`flex h-10 max-w-[250px] shrink-0 items-center gap-1.5 rounded-md px-2.5 text-caption font-medium transition-colors duration-fast ease-out ${selectedAppId === bot.appId ? 'border border-default bg-surface text-primary shadow-card' : 'border border-transparent text-subtle hover:bg-hover hover:text-primary'}`}><Bot size={13} className="shrink-0"/><span title={bot.name} className="min-w-0 max-w-32 truncate">{bot.tabLabel}</span>{bot.setupComplete ? <span title="配置完成" className="shrink-0"><Badge tone="success"><Check size={9}/>已配置</Badge></span> : <span className="shrink-0"><Badge tone="warning">{bot.credentialUnavailable ? '凭据不可用' : '待配置'}</Badge></span>}{bot.activeListening && !config.data?.listeningDisabled && bot.listening && <span title="监听已启动" className="h-1.5 w-1.5 shrink-0 rounded-full bg-success-solid"/>}</button>)}
         <button type="button" disabled={creationBusy || configurationBusy} aria-pressed={selectedAppId === ''} onClick={() => selectedAppId === '' ? addBot() : requestLeave(addBot)} className={`flex h-10 shrink-0 items-center gap-1 rounded-md px-2.5 text-caption font-medium transition-colors duration-fast ease-out ${selectedAppId === '' ? 'border border-default bg-surface text-primary shadow-card' : 'border border-transparent text-subtle hover:bg-hover hover:text-primary'}`}><Plus size={13}/>新增机器人</button>
       </div>
       <Dialog.Body className="space-y-3.5">
         {destination && current && <p role="status" className="text-caption text-secondary">定位：{current.name} · {destination.label}{'parent' in destination ? `；若当前选项不可见，请先检查“${botSettingFields[destination.parent].label}”及 Agent 支持情况。` : ''}</p>}
         {config.isLoading ? <Skeleton variant="row" lines={3}/> : missingTarget ? <Banner tone="warning">找不到指定机器人。请选择已有机器人或点击新增机器人。</Banner> : <>
-          <div className="mb-1 grid grid-cols-2 rounded-md bg-muted p-1"><button type="button" disabled={configurationBusy} onClick={() => setStep(1)} className={`min-h-10 rounded-md px-3 text-caption font-medium transition-colors duration-fast ease-out ${step === 1 ? 'bg-surface text-primary shadow-card' : 'text-subtle'}`}><span className="mr-1.5 inline-grid h-5 w-5 place-items-center rounded-full bg-inverse text-meta text-on-inverse">1</span>连接飞书应用</button><button type="button" disabled={!current || configurationBusy} onClick={() => setStep(2)} className={`min-h-10 rounded-md px-3 text-caption font-medium transition-colors duration-fast ease-out disabled:opacity-40 ${step === 2 ? 'bg-surface text-primary shadow-card' : 'text-subtle'}`}><span className="mr-1.5 inline-grid h-5 w-5 place-items-center rounded-full bg-inverse text-meta text-on-inverse">2</span>选择 Agent 并启用</button></div>
+          <div className="mb-1 grid grid-cols-2 rounded-md bg-muted p-1"><button type="button" disabled={configurationBusy} onClick={() => setStep(1)} className={`min-h-10 rounded-md px-3 text-caption font-medium transition-colors duration-fast ease-out ${step === 1 ? 'bg-surface text-primary shadow-card' : 'text-subtle'}`}><span className="mr-1.5 inline-grid h-5 w-5 place-items-center rounded-full bg-inverse text-meta text-on-inverse">1</span>连接飞书应用</button><button type="button" disabled={!current || current.credentialUnavailable || configurationBusy} onClick={() => setStep(2)} className={`min-h-10 rounded-md px-3 text-caption font-medium transition-colors duration-fast ease-out disabled:opacity-40 ${step === 2 ? 'bg-surface text-primary shadow-card' : 'text-subtle'}`}><span className="mr-1.5 inline-grid h-5 w-5 place-items-center rounded-full bg-inverse text-meta text-on-inverse">2</span>选择 Agent 并启用</button></div>
           <p role={selectedAppId === '' ? 'status' : undefined} className="-mt-1 text-caption text-subtle">{step === 1 ? current ? '填写飞书应用凭据并配置必要能力；成员范围可以留空，稍后再收紧。' : '正在新增机器人。可以创建新应用，或填写已有应用的 App ID 和 App Secret，再点击“下一步”。' : '选择处理飞书消息的 Agent、确认工作方式并启用监听。'}</p>
           {agents.length === 0 && <Banner tone="warning" role="alert">当前没有可用 Agent。你可以先保存飞书应用，但完成绑定前需要安装并登录 Agent CLI，然后重启 Dutydeck。</Banner>}
           {current?.appId === creationPendingReview && <Banner tone="warning">应用已提交发布，正在等待飞书管理员审核。可以先保存 Agent 设置，审核通过后生效。</Banner>}
@@ -415,9 +420,9 @@ export function LarkConfigModal({ agents, target, field, onLeaveGuardChange, onC
             `...(appSecret.trim() ? { appSecret } : {})` 保证——键根本不进请求体。
             这套语义一行都不许改，测试有对应守卫。
           */}
-          <Field htmlFor={botSettingFields.appSecret.anchor} label={botSettingFields.appSecret.label} hint={current ? '留空不修改' : undefined}>
+          <Field htmlFor={botSettingFields.appSecret.anchor} label={botSettingFields.appSecret.label} hint={current?.credentialUnavailable ? '本次只补回 App Secret，其他设置保留。' : current ? '留空不修改' : undefined}>
             <span className="relative block">
-              <Input value={appSecret} onChange={event => setField('appSecret', event.target.value)} type={showSecret ? 'text' : 'password'} placeholder={current ? '已保存' : '输入 App Secret'} autoComplete="new-password" className="pr-10 font-mono"/>
+              <Input value={appSecret} onChange={event => setField('appSecret', event.target.value)} type={showSecret ? 'text' : 'password'} placeholder={current && !current.credentialUnavailable ? '已保存' : '输入 App Secret'} autoComplete="new-password" className="pr-10 font-mono"/>
               {/* IconButton 是 40×40，套进 40px 高的输入框会撑破它；这里保留手写按钮，
                   但命中区做到 40×40（契约 §9），输入框补 pr-10 让出位置。 */}
               <button type="button" onClick={() => setShowSecret(value => !value)} aria-label={showSecret ? '隐藏 Secret' : '显示 Secret'} className="absolute right-0 top-0 grid h-10 w-10 place-items-center rounded-md text-subtle hover:bg-hover hover:text-secondary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus-ring">{showSecret ? <EyeOff size={13}/> : <Eye size={13}/>}</button>

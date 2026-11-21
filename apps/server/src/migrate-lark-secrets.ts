@@ -27,13 +27,22 @@ export function migrateLarkSecrets(path: string, options: { dryRun?: boolean; re
     const bots = entries(db.prepare('SELECT value FROM configs WHERE key = ?').pluck().get(configKey) as string | undefined);
     ids = bots.filter(bot => selected(bot, options.revert)).map(bot => bot.appId);
   } finally { db.close(); }
-  if (options.dryRun || !ids.length) return { appIds: ids };
+  if (options.dryRun || (options.revert && !ids.length)) return { appIds: ids };
 
   const repos = createRepositories(database);
   const appIds: string[] = [];
+  const checkReader = () => {
+    if (options.revert) return;
+    const capabilities = repos.control.runtimeCapabilities();
+    if (capabilities && !capabilities.includes('lark_secret_refs')) throw new SecretCliError('LARK_SECRET_READER_REQUIRED',
+      'Cannot confirm the running service reads Lark secret references. Stop it or deploy a compatible service before migrating.');
+  };
   try {
+    if (!ids.length) checkReader();
     for (const id of ids) {
       const changed = repos.transaction(tx => {
+        // BEGIN IMMEDIATE also excludes runtime registrations until this bot has committed.
+        checkReader();
         const bots = entries(tx.config.get(configKey));
         const matches = bots.filter(bot => bot?.appId === id);
         if (matches.length > 1) throw new SecretCliError('INVALID_LARK_CONFIG', 'Duplicate bot identifier');

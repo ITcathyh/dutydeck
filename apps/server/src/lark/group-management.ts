@@ -12,7 +12,7 @@ import {
   type PolicyDecision, type PresentationSettings, type RepositoryBundle, type RemoteIdentityFact, type RoleAssignment, type Session, type ToolRiskPolicy
 } from '@dutydeck/shared';
 import { botPolicyFields, ownerKey, principalId, refreshBotProjection, type LiveOwner } from './bot-projection.js';
-import { defaultLarkTraceLimit, larkExecutionConfirmed, readLarkConfig, readLarkConfigs, resolveBotSecret, type StoredLarkConfig } from './config.js';
+import { defaultLarkTraceLimit, larkExecutionConfirmed, readLarkConfig, readLarkConfigs, readTransactionBot, type StoredLarkConfig } from './config.js';
 import { createLarkCardService, LarkServiceError, type LarkCardService, type LarkChat } from './service.js';
 import type { LarkMessageEvent } from './listener.js';
 import { larkSourceId } from './session-resolver.js';
@@ -66,8 +66,11 @@ export class LarkGroupManager {
     return config;
   }
   async isLiveManagedBot(channelBotId: string) {
-    for (const config of await readLarkConfigs(this.repos.config)) if ((await this.owner(config.appId))?.channelBotId === channelBotId) return true;
-    return false;
+    const bot = await this.repos.channelBots.get(channelBotId);
+    if (!bot?.externalAppId || (await this.owner(bot.externalAppId))?.channelBotId !== channelBotId) return false;
+    // Deleting or renaming a live configuration leaves its historical owner record behind.
+    const configs = parse<Array<{ appId?: string }>>(await this.repos.config.get('lark.bots'));
+    return configs?.some(config => typeof config?.appId === 'string' && config.appId.trim() === bot.externalAppId) ?? false;
   }
   async owner(appId: string) { return parse<LiveOwner>(await this.repos.config.get(ownerKey(appId))); }
 
@@ -117,7 +120,7 @@ export class LarkGroupManager {
     const id = hash(config.appId).slice(0, 24);
     let owner!: LiveOwner;
     await this.repos.config.compareAndSetBatch!([], [], tx => {
-      const saved = parse<StoredLarkConfig[]>(tx.config.get('lark.bots'))?.find(bot => bot.appId === config.appId);
+      const saved = readTransactionBot(tx.config.get('lark.bots'), config.appId, this.repos.config.databasePath);
       if (!saved || (saved.revision ?? 1) !== (config.revision ?? 1)) throw new RuntimeError('LARK_CONFIG_REVISION_CONFLICT', '保存期间 Bot 默认设置已变化，请比较后重试。', 409);
       const mapped = parse<LiveOwner>(tx.config.get(ownerKey(config.appId)));
       if (!mapped && tx.channelBots.getByAppId(config.appId)) throw new RuntimeError('LARK_IMPORTED_BOT_CONFLICT', '此 App 已有迁移草稿，请先处理草稿冲突；同步不会激活导入配置。', 409);
@@ -218,8 +221,8 @@ export class LarkGroupManager {
     // 退群比对要看全部在群的事实：按条数截断会漏掉超出部分的退群。
     const previousFacts = await this.repos.remoteChatFacts.listMembersByChannelBot(owner.channelBotId);
     await this.repos.groupPolicy.transact(tx => {
-      const liveConfig = parse<StoredLarkConfig[]>(tx.config.get('lark.bots'))?.find(bot => bot.appId === appId);
-      if (!liveConfig || fingerprint({ ...liveConfig, appSecret: resolveBotSecret(liveConfig, this.repos.config.databasePath) ?? '' }) !== fingerprint(config)) throw new RuntimeError('LARK_CREDENTIAL_CHANGED', '同步期间凭据已变更，请重试。', 409);
+      const liveConfig = readTransactionBot(tx.config.get('lark.bots'), appId, this.repos.config.databasePath);
+      if (!liveConfig || fingerprint(liveConfig) !== fingerprint(config)) throw new RuntimeError('LARK_CREDENTIAL_CHANGED', '同步期间凭据已变更，请重试。', 409);
       const live = parse<LiveOwner>(tx.config.get(ownerKey(appId)))!;
       live.fingerprint = fingerprint(config);
       tx.config.set(ownerKey(appId), JSON.stringify(live));
@@ -327,7 +330,7 @@ export class LarkGroupManager {
       }
     }
     await this.repos.groupPolicy.transact(tx => {
-      const liveConfig = parse<StoredLarkConfig[]>(tx.config.get('lark.bots'))?.find(bot => bot.appId === appId);
+      const liveConfig = readTransactionBot(tx.config.get('lark.bots'), appId, this.repos.config.databasePath);
       if (!liveConfig || (liveConfig.revision ?? 1) !== (config.revision ?? 1)) throw new RuntimeError('LARK_CONFIG_REVISION_CONFLICT', '保存期间 Bot 默认设置已变化，请比较后重试。', 409);
       const live = parse<LiveOwner>(tx.config.get(ownerKey(appId)));
       if (!live || !reducingAccess && live.fingerprint !== fingerprint(config)) throw new RuntimeError('LARK_CREDENTIAL_CHANGED', '凭据已变化，请重新同步。', 409);
