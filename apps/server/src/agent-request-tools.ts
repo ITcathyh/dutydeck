@@ -11,7 +11,8 @@ import { runAgentScheduleRequest } from './agent-schedule-request.js';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import { RuntimeError, resolveScheduleDeadline, type PublicSessionSchedule } from '@dutydeck/shared';
-import { agentGroupToolBearerToken, type LarkAgentToolsService } from './lark/agent-tools.js';
+import { resolveActorTurn } from './agent-host/turn-authority.js';
+import type { LarkAgentToolsService } from './lark/agent-tools.js';
 import { AgentCommandParamError, agentActionCommand, larkAgentViews, type LarkAgentViewName } from './lark/agent-command.js';
 import type { SessionAutomationService } from './session-automation.js';
 
@@ -26,7 +27,7 @@ export interface AgentRequestToolsOptions {
   runtime: { getActiveTaskContext(sessionId: string): { taskId: string; actorId?: string; attemptId?: string } | undefined };
   /** 定时或自动续作触发的一轮不能再代办，免得每次到点又建一个计划、又发一条命令。 */
   automatedTask(taskId: string): boolean;
-  tools: Pick<LarkAgentToolsService, 'requestContext' | 'assertWorkbenchTurn' | 'commands'>;
+  tools: Pick<LarkAgentToolsService, 'requestContext' | 'capabilities' | 'commands'>;
   automation: Pick<SessionAutomationService, 'requestSchedule'> & Partial<Pick<SessionAutomationService, 'requestScheduleStop' | 'listBySession' | 'updateSchedule'>>;
   /** 回报位置定为这一轮请求的那条消息，和用户在那里发 /schedule 一样。 */
   prepareDelivery(sessionId: string, taskId: string, scheduleId: string): Promise<void>;
@@ -36,13 +37,9 @@ export interface AgentRequestToolsOptions {
 
 export async function registerAgentRequestTools(app: FastifyInstance, options: AgentRequestToolsOptions) {
   const turnContext = async (request: FastifyRequest, allowAutomated = false) => {
-    const binding = await options.tools.requestContext(agentGroupToolBearerToken(request.headers.authorization));
-    const active = options.runtime.getActiveTaskContext(binding.sessionId);
-    if (!active?.actorId) throw new RuntimeError('AGENT_REQUEST_ACTOR_REQUIRED', '只能在正在执行的飞书指令里代办。', 403);
-    if (!allowAutomated && options.automatedTask(active.taskId)) throw new RuntimeError('AGENT_REQUEST_AUTOMATED', '定时任务或自动续作执行的这一轮不能代办。', 403);
-    const turn = request.headers['x-dutydeck-work-turn'];
-    options.tools.assertWorkbenchTurn(binding.sessionId, active.taskId, active.attemptId, typeof turn === 'string' ? turn : undefined);
-    return { appId: binding.appId, sessionId: binding.sessionId, taskId: active.taskId, actorId: active.actorId };
+    const { binding, sessionId, actorId, taskId } = await resolveActorTurn(request, 'request', options.runtime,
+      options.tools.capabilities, token => options.tools.requestContext(token), allowAutomated ? undefined : options.automatedTask);
+    return { appId: binding.appId, sessionId, actorId, taskId };
   };
   app.post('/api/lark/agent-tools/schedules/stop-self', async request => {
     z.object({}).strict().parse(request.body ?? {});

@@ -6,7 +6,8 @@ import type { DutydeckRuntime } from '@dutydeck/runtime';
 import type { CollaborationService } from './collaboration-service.js';
 import type { CollaborationEvaluation } from './collaboration-evaluation.js';
 import type { CollaborationExtensions } from './collaboration-extensions.js';
-import { agentGroupToolBearerToken, larkAgentSessionBinding, type LarkAgentToolsService } from './lark/agent-tools.js';
+import { resolveActorTurn, larkAgentSessionBinding } from './agent-host/turn-authority.js';
+import type { LarkAgentToolsService } from './lark/agent-tools.js';
 
 export interface CollaborationRouteOptions {
   service: CollaborationService;
@@ -48,14 +49,12 @@ export async function registerCollaborationRoutes(app: FastifyInstance, options:
     return { scope: parse(collaborationScopeSchema, { appId, chatId }), actorId };
   };
   const agentContext = async (request: FastifyRequest): Promise<Context> => {
-    const { sessionId } = await options.tools.workbenchContext(agentGroupToolBearerToken(request.headers.authorization));
-    const active = options.runtime.getActiveTaskContext(sessionId);
-    if (!active?.actorId) throw new RuntimeError('COLLABORATION_ACTIVE_ACTOR_REQUIRED', '协作工具只接受当前正在执行的群指令。', 403);
-    options.tools.assertWorkbenchTurn(sessionId, active.taskId, active.attemptId, typeof request.headers['x-dutydeck-work-turn'] === 'string' ? request.headers['x-dutydeck-work-turn'] : undefined);
+    const { sessionId, actorId, taskId } = await resolveActorTurn(request, 'collaboration', options.runtime,
+      options.tools.capabilities, token => options.tools.workbenchContext(token));
     const session = await options.runtime.getSession(sessionId);
     const binding = session && larkAgentSessionBinding(session);
     if (!binding || binding.chatType !== 'group' || parseLarkSourceId(session?.sourceId).scope[0] === 'collaboration') throw new RuntimeError('COLLABORATION_SCOPE_REQUIRED', '请在群内的当前指令中管理委托。', 403);
-    return { scope: { appId: binding.appId, chatId: binding.chatId }, actorId: active.actorId, taskId: active.taskId, origin: binding.threadRootMessageId ? { threadRootMessageId: binding.threadRootMessageId } : {} };
+    return { scope: { appId: binding.appId, chatId: binding.chatId }, actorId, taskId, origin: binding.threadRootMessageId ? { threadRootMessageId: binding.threadRootMessageId } : {} };
   };
   const createInput = (context: Context, body: unknown) => {
     const input = parse(z.object({ id: z.string().trim().min(1).max(128) }).passthrough(), body);

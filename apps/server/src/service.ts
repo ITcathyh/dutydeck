@@ -71,7 +71,9 @@ import { prepareSkillPrompt, type PrepareSkillPromptResult } from './skill-deliv
 import { readTokenEfficiencyPolicy } from './token-efficiency.js';
 import { assemblePrompt, isFrozenCollaborationSession, promptDigest, promptTemplateVersion } from './prompt-context.js';
 import { createRelayAskStore } from './relay-ask-store.js';
-import { LarkAgentToolCapabilityRegistry, LarkAgentToolsService, loadOrCreateGroupToolsSigningSecret } from './lark/agent-tools.js';
+import { LarkAgentToolsService } from './lark/agent-tools.js';
+import { TurnAuthority } from './agent-host/turn-authority.js';
+import { loadOrCreateGroupToolsSigningSecret } from './agent-host/turn-token.js';
 import { larkMemoryScope, LarkMemoryStore } from './lark/memory.js';
 import { LarkMemoryProjection } from './lark/memory-view.js';
 import { LarkMemoryPipeline } from './lark/memory-pipeline.js';
@@ -302,7 +304,7 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
   let relaySigningSecret: string;
   try { relaySigningSecret = await loadOrCreateRelaySigningSecret(repos.config); }
   catch (error) { throw error; }
-  const capabilities = new LarkAgentToolCapabilityRegistry(repos.sessions, localApiBaseUrl(config), groupToolsSigningSecret, options.groupToolsCommand ?? 'dutydeck');
+  const capabilities = new TurnAuthority(repos.sessions, localApiBaseUrl(config), groupToolsSigningSecret, options.groupToolsCommand ?? 'dutydeck');
   setupCleanup.push(() => capabilities.close());
   // 通用回传通道：与飞书无关，任何来源的会话（含 Web 工作台创建的 pty-cli）都注入凭证。
   // command 前缀复用 groupToolsCommand 算出的运行期绝对路径——静态文案拿不到它，

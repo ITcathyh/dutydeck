@@ -20,7 +20,7 @@ import { listPendingLarkDecisionCards } from './lark/workflow-interactions.js';
 import { z, ZodError } from 'zod';
 import { registerCollaborationRoutes, type CollaborationRouteOptions } from './collaboration-routes.js';
 import { AgentGroupToolError } from './lark/agent-tools.js';
-import { registerLarkAgentToolTurnGuard } from './lark/agent-tools-routes.js';
+import { registerLarkAgentToolTurnGuard } from './agent-host/turn-authority.js';
 import { AgentCommandParamError } from './lark/agent-command.js';
 import { LarkServiceError } from './lark/service.js';
 import Fastify, { type FastifyBaseLogger, type FastifyRequest } from 'fastify';

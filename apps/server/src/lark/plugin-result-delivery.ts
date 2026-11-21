@@ -82,11 +82,9 @@ export class LarkPluginResultAdapter implements PluginResultAdapter {
   async resolveRequester(token?:string,turn?:string): Promise<PluginResultAuthority> {
     try {
       if (!turn) throw new PluginResultError('RESULT_TURN_REQUIRED');
-      const binding=await this.options.capabilities.resolve(token);
-      const active=this.options.runtime.getActiveTaskContext(binding.sessionId);
-      const session=await this.options.repositories.sessions.get(binding.sessionId);
-      if (!active?.attemptId || !active.actorId || !session) throw new PluginResultError('RESULT_REQUESTER_REQUIRED');
-      this.options.capabilities.assertFinalTurn(binding.sessionId,active.taskId,active.attemptId,turn);
+      const active = await this.options.capabilities.resolveChannelTurn(token, turn, id => this.options.runtime.getActiveTaskContext(id));
+      const { session, channel: binding } = active;
+      if (!active.actorId) throw new PluginResultError('RESULT_REQUESTER_REQUIRED');
       const ref={taskId:active.taskId,attemptId:active.attemptId,actorId:active.actorId,runId:session.runId};
       const checked=await this.check(binding,ref,true);
       const target={...checked.scope,web_base:checked.redirect.replace('/api/plugin-results/oauth/callback',''),cwd:checked.session.cwd,

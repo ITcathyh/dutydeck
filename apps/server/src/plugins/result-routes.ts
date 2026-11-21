@@ -1,5 +1,5 @@
 import type { FastifyInstance } from 'fastify';
-import { agentGroupToolBearerToken } from '../lark/agent-tools.js';
+import { agentGroupToolBearerToken } from '../agent-host/turn-authority.js';
 import { PluginResultError, type PluginResultService } from './result-service.js';
 import { registerPluginResultViewer, type PluginResultViewerOptions } from './result-viewer-auth.js';
 export interface PluginResultRoutes { service: PluginResultService; viewer: PluginResultViewerOptions }

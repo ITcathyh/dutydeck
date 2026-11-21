@@ -14,7 +14,7 @@ it('exposes incomplete discovery and per-item diagnostics alongside the original
   await registerWorkItemTools(app, {
     runtime: { getActiveTaskContext: () => ({ actorId: 'alice', taskId: 'task', attemptId: 'attempt' }), getSession: async () => ({ cwd: '/project' }) } as any,
     work: { listBySession } as any,
-    tools: { workbenchContext: async (token: string) => { if (token !== 'session-token') throw Object.assign(new Error('Unauthorized'), { statusCode: 401 }); return { sessionId: 'session' }; }, assertWorkbenchTurn: (_session: string, _task: string, _attempt: string, turn: string) => { if (turn !== 'turn-token') throw Object.assign(new Error('Turn expired'), { statusCode: 403 }); } } as any
+    tools: { workbenchContext: async (token: string) => { if (token !== 'session-token') throw Object.assign(new Error('Unauthorized'), { statusCode: 401 }); return { sessionId: 'session' }; }, capabilities: { resolveTurn: (sessionId: string, active: object, turn: string) => { if (turn !== 'turn-token') throw Object.assign(new Error('Turn expired'), { statusCode: 403 }); return { sessionId, ...active }; } } } as any
   });
   try {
     const url = '/api/lark/agent-tools/work-items/skills';
@@ -34,7 +34,7 @@ it('routes Agent plan revisions as Agent-sourced, with dryRun returning only the
   await registerWorkItemTools(app, {
     runtime: { getActiveTaskContext: () => ({ actorId: 'alice', taskId: 'task', attemptId: 'attempt' }) } as any,
     work: { previewRevision, revise } as any,
-    tools: { workbenchContext: async () => ({ sessionId: 'session' }), assertWorkbenchTurn: () => {} } as any
+    tools: { workbenchContext: async () => ({ sessionId: 'session' }), capabilities: { resolveTurn: (sessionId: string, active: object) => ({ sessionId, ...active }) } } as any
   });
   try {
     const plan = { title: 'P', outputStepId: 'a', steps: [{ id: 'a', title: 'A', kind: 'agent', agentId: 'alpha', instruction: 'Do', dependsOn: [] }] };
