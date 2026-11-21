@@ -1,27 +1,29 @@
+import { toolsByName } from './agent-host/tool-table.js';
 import { open } from 'node:fs/promises';
-import { AgentGroupToolHttpClient } from './lark/agent-tools-cli.js';
+import { AgentGroupToolHttpClient } from './agent-host/http-client.js';
 
 export async function runWorkCommand(operation: string, args: string[], options: { file?: string; key?: string; turn?: string; dryRun?: boolean } = {}, clientOptions: { env?: NodeJS.ProcessEnv; fetcher?: typeof fetch } = {}): Promise<Record<string, unknown>> {
   const client = new AgentGroupToolHttpClient(clientOptions);
   if (!options.turn) throw new Error('编排工具需要本轮提示中提供的 --turn 凭证');
-  const request = (path: string, init: RequestInit = {}) => client.request(path, { ...init, headers: { 'x-dutydeck-work-turn': options.turn! } });
-  const path = '/work-items';
-  if (operation === 'list' || operation === 'templates') return request(path);
-  if (operation === 'agents' || operation === 'skills') return request(`${path}/${operation}`);
-  if (operation === 'show') return request(`${path}/${encodeURIComponent(args[0] ?? '')}`);
+  const tool = toolsByName.get('work.' + operation);
+  if (!tool) throw new Error(`不支持的 work 操作：${operation}`);
+  const request = (body?: string) => client.call(tool, [args[0] ?? ''], {
+    headers: { 'x-dutydeck-work-turn': options.turn! }, ...(body !== undefined ? { body } : {})
+  });
+  if (tool.method === 'GET') return request();
   if (operation === 'create' || operation === 'delegate') {
     if (!options.file) throw new Error(`work ${operation} 需要 --file JSON文件`);
-    return request(operation === 'create' ? path : `${path}/delegations`, { method: 'POST', body: await readPlanFile(options.file) });
+    return request(await readPlanFile(options.file));
   }
   if (operation === 'revise') {
     if (!options.file) throw new Error('work revise 需要 --file JSON文件');
     const body = JSON.parse(await readPlanFile(options.file)) as Record<string, unknown>;
-    return request(`${path}/${encodeURIComponent(args[0] ?? '')}/revise`, { method: 'POST', body: JSON.stringify(options.dryRun ? { ...body, dryRun: true } : body) });
+    return request(JSON.stringify(options.dryRun ? { ...body, dryRun: true } : body));
   }
-  if (operation === 'save') return request(`${path}/${encodeURIComponent(args[0] ?? '')}/template`, { method: 'POST', body: JSON.stringify({ name: args.slice(1).join(' ') }) });
+  if (operation === 'save') return request(JSON.stringify({ name: args.slice(1).join(' ') }));
   if (operation === 'run') {
     if (!options.key) throw new Error('work run 需要 --key 稳定请求键');
-    return request(`${path}/templates/${encodeURIComponent(args[0] ?? '')}/run`, { method: 'POST', body: JSON.stringify({ version: Number(args[1]), goal: args.slice(2).join(' '), idempotencyKey: options.key }) });
+    return request(JSON.stringify({ version: Number(args[1]), goal: args.slice(2).join(' '), idempotencyKey: options.key }));
   }
   throw new Error(`不支持的 work 操作：${operation}`);
 }

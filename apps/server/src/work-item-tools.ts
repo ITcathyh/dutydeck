@@ -1,3 +1,5 @@
+import { toolNeeds } from './agent-host/tool-table.js';
+import { registerToolFamily } from './agent-host/routes.js';
 import { createHash } from 'node:crypto';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { z } from 'zod';
@@ -18,52 +20,53 @@ export interface WorkItemToolsOptions { runtime: DutydeckRuntime; work: WorkItem
 export async function registerWorkItemTools(app: FastifyInstance, options: WorkItemToolsOptions) {
   const context = (request: FastifyRequest) => resolveActorTurn(request, 'work', options.runtime,
     options.tools.capabilities, token => options.tools.workbenchContext(token));
-  const base = '/api/lark/agent-tools/work-items';
-  app.get(`${base}/agents`, async request => {
-    const scope = await context(request);
-    await options.work.listBySession(scope.sessionId, scope.actorId);
-    return { agents: (await options.runtime.listAgents()).map(toPublicAgent), readiness: 'configured; execution checks availability, tools and credentials remain provider-specific' };
-  });
-  app.get(`${base}/skills`, async request => {
-    const scope = await context(request);
-    await options.work.listBySession(scope.sessionId, scope.actorId);
-    const session = await options.runtime.getSession(scope.sessionId);
-    return { ...(await discoverSkillCatalog(session!.cwd)), delivery: 'prompt snapshot at step acceptance; tool authorization is checked separately' };
-  });
-  app.get(base, async request => {
-    const scope = await context(request);
-    return { items: await options.work.listBySession(scope.sessionId, scope.actorId), templates: await options.work.listTemplates(scope.sessionId, scope.actorId) };
-  });
-  app.post(base, async request => {
-    const scope = await context(request);
-    const input = workInput(createWorkItemSchema, request.body);
-    return options.work.create(scope.sessionId, { ...input, idempotencyKey: requestKey(scope.taskId, input.idempotencyKey) }, scope.actorId);
-  });
-  app.post(`${base}/delegations`, async request => {
-    const scope = await context(request);
-    if (!options.delegations) throw new RuntimeError('LEADER_DELEGATION_DISABLED', '当前实例未启用 Leader 模式', 409);
-    const input = workInput(delegationBriefSchema, request.body);
-    return options.delegations.delegate(scope.sessionId, scope.actorId, scope.taskId, { ...input, idempotencyKey: requestKey(scope.taskId, input.idempotencyKey) });
-  });
-  app.get<{ Params: { id: string } }>(`${base}/:id`, async request => {
-    const scope = await context(request);
-    return options.work.get(scope.sessionId, request.params.id, scope.actorId);
-  });
-  // Agent 修订只能收窄计划；扩大范围或目标本身要求确认时记为待确认修订，由人工确认后生效。dryRun 只返回影响预览。
-  app.post<{ Params: { id: string } }>(`${base}/:id/revise`, async request => {
-    const scope = await context(request);
-    const { dryRun, ...input } = workInput(agentReviseInput, request.body);
-    return dryRun ? options.work.previewRevision(scope.sessionId, request.params.id, input, scope.actorId, 'agent')
-      : options.work.revise(scope.sessionId, request.params.id, input, scope.actorId, 'agent');
-  });
-  app.post<{ Params: { id: string } }>(`${base}/:id/template`, async request => {
-    const scope = await context(request);
-    return options.work.saveTemplate(scope.sessionId, request.params.id, workInput(templateNameInput, request.body).name, scope.actorId);
-  });
-  app.post<{ Params: { id: string } }>(`${base}/templates/:id/run`, async request => {
-    const scope = await context(request);
-    const input = workInput(runTemplateInput, request.body);
-    return options.work.runTemplate(scope.sessionId, request.params.id, input.version, input.goal, requestKey(scope.taskId, input.idempotencyKey), scope.actorId);
+  registerToolFamily<{ Params: { id: string } }>(app, [toolNeeds.work], {
+    'work.agents': async request => {
+      const scope = await context(request);
+      await options.work.listBySession(scope.sessionId, scope.actorId);
+      return { agents: (await options.runtime.listAgents()).map(toPublicAgent), readiness: 'configured; execution checks availability, tools and credentials remain provider-specific' };
+    },
+    'work.skills': async request => {
+      const scope = await context(request);
+      await options.work.listBySession(scope.sessionId, scope.actorId);
+      const session = await options.runtime.getSession(scope.sessionId);
+      return { ...(await discoverSkillCatalog(session!.cwd)), delivery: 'prompt snapshot at step acceptance; tool authorization is checked separately' };
+    },
+    'work.list': async request => {
+      const scope = await context(request);
+      return { items: await options.work.listBySession(scope.sessionId, scope.actorId), templates: await options.work.listTemplates(scope.sessionId, scope.actorId) };
+    },
+    'work.create': async request => {
+      const scope = await context(request);
+      const input = workInput(createWorkItemSchema, request.body);
+      return options.work.create(scope.sessionId, { ...input, idempotencyKey: requestKey(scope.taskId, input.idempotencyKey) }, scope.actorId);
+    },
+    'work.delegate': async request => {
+      const scope = await context(request);
+      if (!options.delegations) throw new RuntimeError('LEADER_DELEGATION_DISABLED', '当前实例未启用 Leader 模式', 409);
+      const input = workInput(delegationBriefSchema, request.body);
+      return options.delegations.delegate(scope.sessionId, scope.actorId, scope.taskId, { ...input, idempotencyKey: requestKey(scope.taskId, input.idempotencyKey) });
+    },
+    'work.show': async request => {
+      const scope = await context(request);
+      return options.work.get(scope.sessionId, request.params.id, scope.actorId);
+    },
+    // Agent 修订只能收窄计划；扩大范围或目标本身要求确认时记为待确认修订，由人工确认后生效。dryRun 只返回影响预览。
+    'work.revise': async request => {
+      const scope = await context(request);
+      const { dryRun, ...input } = workInput(agentReviseInput, request.body);
+      return dryRun ? options.work.previewRevision(scope.sessionId, request.params.id, input, scope.actorId, 'agent')
+        : options.work.revise(scope.sessionId, request.params.id, input, scope.actorId, 'agent');
+    },
+    'work.save': async request => {
+      const scope = await context(request);
+      return options.work.saveTemplate(scope.sessionId, request.params.id, workInput(templateNameInput, request.body).name, scope.actorId);
+    },
+    'work.run': async request => {
+      const scope = await context(request);
+      const input = workInput(runTemplateInput, request.body);
+      return options.work.runTemplate(scope.sessionId, request.params.id, input.version, input.goal, requestKey(scope.taskId, input.idempotencyKey), scope.actorId);
+    }
   });
 }
 
