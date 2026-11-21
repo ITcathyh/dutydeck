@@ -85,7 +85,7 @@ describe('reaction task confirmation', () => {
     expect(clicks.map(reply => reply?.type).sort()).toEqual(['info', 'success']);
     await expect.poll(() => h.prompts.length).toBe(1);
     const [task] = await h.mappings();
-    expect(task?.saved).toMatchObject({ sender_open_id: SCENARIO_REQUESTER, thread_id: threadId, scope_id: `thread:${rootId}` });
+    expect(task?.saved).toMatchObject({ anchor_message_id: record.receipt, sender_open_id: SCENARIO_REQUESTER, thread_id: threadId, scope_id: `thread:${rootId}` });
     expect((await h.inboxRecord(task!.externalId))?.event).toMatchObject({ parentId: messageId, replyMessageId: record.receipt });
     expect(h.prompts[0]).toContain(text);
     await h.settle(task!.externalId);

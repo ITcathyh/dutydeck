@@ -1,7 +1,7 @@
 import { readTaskReportSafely } from '@dutydeck/shared';
 import { taskReportCardElements } from './task-report-card.js';
 import { clearPendingPromptUsage, type BotPromptUsage, freezePromptUsage, pendingPromptUsageKey, promptUsageSnapshot, recordPromptUsage } from './prompt-versions.js';
-import { larkAgentUnavailableReason, larkFallbackHasActivity } from './agent-fallback.js';
+import { larkAgentUnavailableReason, larkFallbackHasActivity, larkFallbackNoteElements } from './agent-fallback.js';
 import { recordTaskAuthorization } from '../task-authorization.js';
 import { larkMessageAnchor } from './message-anchor.js';
 import type { PromptPart } from '@dutydeck/shared';
@@ -1621,7 +1621,7 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
           ? larkTurnDiffElement(await readTurnDiffRecord(this.workflowOptions.store, task.sessionId, task.runtimeTaskId).catch(() => undefined), config.webBaseUrl) : undefined;
         const elements = [
           ...reportElements,
-          ...(task.fallbackNote ? [{ tag: 'markdown', element_id: 'agent_fallback_note', content: task.fallbackNote, text_size: 'notation' }] : []),
+          ...larkFallbackNoteElements(task.fallbackNote),
           ...(continueCause?.settled ? [{ tag: 'markdown', element_id: 'recovery_note', content: larkQuietSettledNote(continueCause) }] : []),
           ...(explicit ? [] : task.steered ? [{ tag: 'markdown', element_id: 'steer_note', content: task.steerNote ?? steeringOutcomeText(task.steered) }] : renderLarkResultElements(verifiedOutput ? [verifiedOutput] : task.events, { state, agentName: cardContext.agentName })),
           ...(context && this.workflows ? await this.workflows.result(context, '') : []),

@@ -141,6 +141,8 @@ export type PersistedLarkCardTask = {
   scope_id?: string;
   app_id: string;
   chat_id: string;
+  anchor_message_id?: string;
+  fallback_note?: string;
   reply_message_id?: string;
   reply_in_thread?: boolean;
   /** @deprecated 兼容旧记录；历史版本可能错误地写入 omt_* thread_id。 */

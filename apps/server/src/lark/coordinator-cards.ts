@@ -18,7 +18,7 @@ import type { LarkConfirmRecord } from './confirm-cards.js';
 import { larkTurnDiffReviewKind } from './turn-diff.js';
 import type { LarkMessageEvent } from './listener.js';
 import type { LarkTaskState, LarkTask, PersistedLarkCardTask } from './coordinator.js';
-import { parseCardTask, parseOptionalCardTask } from './persisted-card-task.js';
+import { parseCardTask, parseOptionalCardTask, persistedMessageAnchor } from './persisted-card-task.js';
 import { larkCardChannel, withoutLeadingBotMention, larkScopeContinuesFor, sendTaskCard } from './coordinator-core.js';
 import { scheduleNameConflictNotice } from './schedule-command.js';
 import { LarkCoordinatorCore } from './coordinator-core.js';
@@ -86,6 +86,8 @@ export abstract class LarkCoordinatorCards extends LarkCoordinatorCore {
     if (!mappings || !sessionId || !task.startedAt) return;
     const extra: PersistedLarkCardTask = {
       ...(task.launcherRecoveryNote ? { launcher_recovery_note: true } : {}),
+      anchor_message_id: larkMessageAnchor(task.event),
+      ...(task.fallbackNote ? { fallback_note: task.fallbackNote } : {}),
       app_id: task.config.appId,
       sender_open_id: task.event.senderOpenId,
       ...(task.event.senderType ? { sender_type: task.event.senderType } : {}),
@@ -186,6 +188,7 @@ export abstract class LarkCoordinatorCards extends LarkCoordinatorCore {
   private mergeCardTaskExtra(previous: string | null | undefined, extra: PersistedLarkCardTask, turn: number, sameSession: boolean): PersistedLarkCardTask {
     try {
       const parsed = parseOptionalCardTask(previous);
+      if (parsed?.anchor_message_id) extra.anchor_message_id = parsed.anchor_message_id;
       if (parsed && sameSession && (parsed.turn ?? 0) === turn) {
         if (parsed.final_delivery_first_failed_at !== undefined && extra.final_delivery_first_failed_at !== undefined) {
           extra.final_delivery_first_failed_at = Math.min(parsed.final_delivery_first_failed_at, extra.final_delivery_first_failed_at);
@@ -205,7 +208,9 @@ export abstract class LarkCoordinatorCards extends LarkCoordinatorCore {
    * 带全字段是硬要求：少带一个，saveCardTask 写回时那个字段就会从记录里消失。
    */
   protected restoredCardTask(config: StoredLarkConfig, mapping: { externalId: string; sessionId: string }, saved: PersistedLarkCardTask): LarkTask {
+    const anchor = persistedMessageAnchor(saved, mapping.externalId);
     return {
+      fallbackNote: saved.fallback_note,
       ...(saved.launcher_recovery_note ? { launcherRecoveryNote: true } : {}),
       id: mapping.externalId, group: { tail: Promise.resolve() }, config, state: saved.state,
       turn: saved.turn ?? 0, epoch: 0, scopeId: saved.scope_id ?? '', prompt: saved.prompt,
@@ -223,7 +228,7 @@ export abstract class LarkCoordinatorCards extends LarkCoordinatorCore {
       ...(saved.last_successful_elements ? { lastSuccessfulElements: saved.last_successful_elements } : {}),
       ...(saved.verification_auto ? { autoVerification: saved.verification_auto } : {}),
       finalElements: saved.final_elements ?? [],
-      event: { messageId: mapping.externalId, ...(saved.reply_message_id && saved.reply_message_id !== mapping.externalId ? { replyMessageId: saved.reply_message_id } : {}), chatId: saved.chat_id, chatType: saved.chat_type ?? 'group', messageType: 'text',
+      event: { messageId: mapping.externalId, ...(anchor !== mapping.externalId ? { replyMessageId: anchor } : {}), chatId: saved.chat_id, chatType: saved.chat_type ?? 'group', messageType: 'text',
         content: '', mentions: [], senderOpenId: saved.sender_open_id,
         ...(saved.sender_type ? { senderType: saved.sender_type } : {}),
         ...(saved.thread_id ? { threadId: saved.thread_id } : {}) }

@@ -172,6 +172,7 @@ describe('ADHD durable confirmation — actual Runtime and SQLite', () => {
     const mapping = (await h.repos.channelMappings.get(`lark-card:${h.config.appId}`, `confirmation_${h.record.id}`))!;
     expect(JSON.parse(mapping.extra!).task_name).toBe(expected);
     const inbox = (await new LarkTaskInbox(h.repos.config).lookup(h.config.appId, `confirmation_${h.record.id}`))!;
+    expect(JSON.parse(mapping.extra!).anchor_message_id).toBe(inbox.event.replyMessageId);
     const internal = JSON.parse(inbox.event.content).text.slice('@_user_1 '.length);
     expect(internal).toContain(`持久确认记录 ID：${h.record.id}`);
     expect((await h.runtime.getTasks(h.sessionId))[1]!.prompt).toBe(internal);

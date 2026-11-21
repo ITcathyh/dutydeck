@@ -36,6 +36,8 @@ import { larkTaskAgentGuid } from './task-agent.js';
 import type { ListenerLog, LarkRuntime } from './listener.js';
 import type { PersistedLarkCardTask } from './coordinator.js';
 import type { LarkHeldCause } from './turn-redispatch.js';
+import { larkFallbackNoteElements } from './agent-fallback.js';
+import { persistedMessageAnchor, persistedReplyTarget } from './persisted-card-task.js';
 import { persistedRecallLine } from './scenario-legacy.js';
 
 /** 过程卡顶部场景关联那一行：新映射存 scenario_recall，升级前的存 alert_recall。 */
@@ -154,9 +156,11 @@ export async function performLarkCardReconcile(input: {
     try {
       const persisted = persistedCardTask(mapping.extra);
       if (!persisted) continue;
+      const anchor = persistedMessageAnchor(persisted, mapping.externalId);
+      const target = persistedReplyTarget(persisted, mapping.externalId);
       // Frozen delivery authority survives task completion, but never a replacement mapping/turn.
       const scope = (saved: PersistedLarkCardTask) => JSON.stringify([saved.app_id, saved.chat_id, saved.turn ?? 0,
-        saved.runtime_task_id, saved.card_message_id, saved.reply_message_id, saved.root_message_id, saved.reply_in_thread, saved.started_at]);
+        saved.runtime_task_id, saved.card_message_id, saved.anchor_message_id, saved.fallback_note, saved.reply_message_id, saved.root_message_id, saved.reply_in_thread, saved.started_at]);
       const beforeProcessSend = async () => {
         const latest = await cardMappings.get(mapping.channel, mapping.externalId);
         const saved = persistedCardTask(latest?.extra);
@@ -314,10 +318,7 @@ export async function performLarkCardReconcile(input: {
             service, store: input.deliveryStore, log, appId: persisted.app_id,
             sessionId: mapping.sessionId, taskId: runtimeTask.id, turn: persisted.turn,
             ...(recoveryMention ? { mention: recoveryMention } : {}),
-            target: { chatId: persisted.chat_id,
-              replyMessageId: persisted.reply_message_id?.trim()
-                || (persisted.root_message_id?.trim().startsWith('om_') ? persisted.root_message_id.trim() : undefined),
-              replyInThread: persisted.reply_in_thread }
+            target
           });
         };
         if (effective.silentProgress || persisted.progress_frozen || !persisted.card_message_id) {
@@ -392,7 +393,7 @@ export async function performLarkCardReconcile(input: {
         ...(persisted.launcher_recovery_note ? [{ tag: 'markdown', element_id: 'launcher_recovery_note', content: LARK_LAUNCHER_RECOVERY_NOTE }] : [])]);
       // 只贴表情与实时链路同一判断：计划轮和任务通道仍补发结果卡。
       const reportElements = taskReportCardElements(input.deliveryStore ? await readTaskReportSafely(input.deliveryStore, runtimeTask.id) : undefined);
-      const reactionOnly = !reportElements.length && completed && larkCompletionReactionOnly(effective, persisted.prompt, mapping.externalId);
+      const reactionOnly = !reportElements.length && !persisted.fallback_note && completed && larkCompletionReactionOnly(effective, persisted.prompt, anchor);
       // 回执上的「结果见下条」：只贴表情的轮次这次对账不会补发结果消息。
       const resultFollows = completed && !reactionOnly;
       let deliveredElements = persisted.last_successful_elements;
@@ -462,7 +463,7 @@ export async function performLarkCardReconcile(input: {
           // 失败/中断/取消照旧补发结果卡——重启不是把失败藏起来的理由。
           if (!explicit && reactionOnly) {
             reactionDelivered = await deliverLarkStatusReaction(
-              service, { appId: persisted.app_id, messageId: mapping.externalId, completed: true }, log, input.deliveryStore);
+              service, { appId: persisted.app_id, messageId: anchor, completed: true }, log, input.deliveryStore);
           } else if ((resultDue || receiptOnly) && !quietNote) {
           // P0-4：重启对账补发的结果/失败/中断卡与实时链路同口径 @ 发起人；idempotencyKey
           // 保证消息不重发，@ 也不会重复。开关按群覆盖后的生效配置取值（与实时链路一致），
@@ -481,6 +482,7 @@ export async function performLarkCardReconcile(input: {
           const finalOutput = explicit || steered ? undefined : String(resultBody.find(element => element.element_id === 'final_output')?.content ?? '');
           const elements = [
             ...reportElements,
+            ...larkFallbackNoteElements(persisted.fallback_note),
             ...resultBody,
             ...(decoration?.elements ?? []),
             ...(!receiptOnly && completed && input.resultElements ? await input.resultElements(mapping, persisted, '', { finalOutput, groupMention: Boolean(mention) }) : []),
@@ -498,12 +500,7 @@ export async function performLarkCardReconcile(input: {
           await beforeProcessSend();
           if (receiptOnly) {
             const receipt = await readConfirmedExplicitFinal(input.deliveryStore, service, finalContext)
-              ?? (!explicit ? await readConfirmedLarkResult(service, {
-                chatId: persisted.chat_id,
-                replyMessageId: persisted.reply_message_id?.trim()
-                  || (persisted.root_message_id?.trim().startsWith('om_') ? persisted.root_message_id.trim() : undefined),
-                replyInThread: persisted.reply_in_thread
-              }, { ...finalCardInput, elements, idempotencyKey: larkResultKey(cardMessageId ?? larkSilentResultAnchor(mapping.externalId, persisted.turn)) }, log, input.deliveryStore) : undefined);
+              ?? (!explicit ? await readConfirmedLarkResult(service, target, { ...finalCardInput, elements, idempotencyKey: larkResultKey(cardMessageId ?? larkSilentResultAnchor(mapping.externalId, persisted.turn)) }, log, input.deliveryStore) : undefined);
             await beforeProcessSend();
             finalMessageId = receipt?.messageId;
             finalAttachmentMessageId = receipt?.attachmentMessageId;
@@ -524,12 +521,7 @@ export async function performLarkCardReconcile(input: {
               persisted.final_card_input = anchored.final_card_input;
               mapping.extra = extra;
             }
-            const result = await completeExplicitFinal(input.deliveryStore, service, finalContext, finalCardInput, elements, beforeSend, input.authorizeFinalRelay ?? (async () => { throw new LarkServiceError('FINAL_RELAY_REVOKED', '回传恢复缺少授权检查。', 403); })) ?? await sendLarkResult(service, {
-              chatId: persisted.chat_id,
-              replyMessageId: persisted.reply_message_id?.trim()
-                || (persisted.root_message_id?.trim().startsWith('om_') ? persisted.root_message_id.trim() : undefined),
-              replyInThread: persisted.reply_in_thread
-            }, { ...finalCardInput, elements, idempotencyKey: larkResultKey(cardMessageId ?? larkSilentResultAnchor(mapping.externalId, persisted.turn)) }, log, input.deliveryStore, beforeSend);
+            const result = await completeExplicitFinal(input.deliveryStore, service, finalContext, finalCardInput, elements, beforeSend, input.authorizeFinalRelay ?? (async () => { throw new LarkServiceError('FINAL_RELAY_REVOKED', '回传恢复缺少授权检查。', 403); })) ?? await sendLarkResult(service, target, { ...finalCardInput, elements, idempotencyKey: larkResultKey(cardMessageId ?? larkSilentResultAnchor(mapping.externalId, persisted.turn)) }, log, input.deliveryStore, beforeSend);
             receiptDeliveryFailure = 'deliveryFailure' in result && typeof result.deliveryFailure === 'string' ? result.deliveryFailure : undefined;
             textReceipt = 'textReceipt' in result && result.textReceipt === true;
             if (textReceipt) finalCardInput = undefined;
@@ -549,7 +541,7 @@ export async function performLarkCardReconcile(input: {
           // 重启时不给几天前的消息补表情。贴失败只 warn，幂等键保证对账重入不重复贴。
           if (!receiptOnly && !receiptDeliveryFailure && state !== 'cancelled' && !runtimeTask.interruptedByActor && !larkTaskAgentGuid(mapping.externalId)
             && !await input.staleTurn?.(mapping.sessionId, runtimeTask)) {
-            await deliverLarkStatusReaction(service, { appId: persisted.app_id, messageId: mapping.externalId, completed }, log, input.deliveryStore);
+            await deliverLarkStatusReaction(service, { appId: persisted.app_id, messageId: anchor, completed }, log, input.deliveryStore);
           }
           }
         } catch (error) {

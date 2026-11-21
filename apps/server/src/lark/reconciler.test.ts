@@ -976,6 +976,49 @@ describe('performLarkCardReconcile 遵守群级呈现开关', () => {
     expect(h.service.update).toHaveBeenCalledWith(expect.objectContaining({ messageId: 'om_card_om_req_react', state: 'completed' }));
   });
 
+  it.each([
+    ['confirmation_replay', { anchor_message_id: 'om_visible', reply_message_id: 'om_other' }, 'om_visible'],
+    ['reaction_trigger', { anchor_message_id: 'om_visible' }, 'om_visible'],
+    ['confirmation_legacy', { reply_message_id: 'om_reply' }, 'om_reply'],
+    ['om_legacy', {}, 'om_legacy']
+  ] as const)('重启后在可见消息上贴表情并收敛 (%s)', async (externalId, fields, expected) => {
+    const task = completedTask('session');
+    const h = reconcileHarness([createMapping('mapping', externalId, task.sessionId, { ...fields, runtime_task_id: task.id })], { session: [task] });
+    h.service.addReaction.mockImplementation(async (messageId, emoji) => {
+      if (messageId !== expected) throw new Error('unknown message');
+      return { messageId, reactionId: `r_${emoji}` };
+    });
+    const reconcile = () => performLarkCardReconcile({ ...h, runtime: h.runtime as any, service: h.service as any,
+      channel: 'lark-card:cli_test', config: { ...config, completionReactionOnly: true } });
+
+    const rounds = [await reconcile(), await reconcile()];
+    expect(h.service.addReaction.mock.calls).toEqual([[expected, COMPLETION_REACTION_EMOJI]]);
+    expect(rounds).toEqual([0, 0]);
+    expect(JSON.parse(h.cardMappings.mappings[0]!.extra!)).toMatchObject({ final_delivery_state: 'reaction', progress_frozen: true });
+    expect(h.service.send).not.toHaveBeenCalled();
+    expect(h.service.reply).not.toHaveBeenCalled();
+  });
+
+  it('重启后把换 Agent 说明放在结果正文前，回复并贴表情到同一条原消息', async () => {
+    const task = completedTask('session');
+    const note = 'Agent primary 不可用，已切换到兜底 Agent spare。';
+    const mapping = createMapping('mapping', 'confirmation_replay', task.sessionId, { runtime_task_id: task.id,
+      chat_type: 'group', anchor_message_id: 'om_visible', reply_message_id: 'om_other', fallback_note: note });
+    const h = reconcileHarness([mapping], { session: [task] });
+    const reconcile = () => performLarkCardReconcile({ ...h, runtime: h.runtime as any, service: h.service as any,
+      channel: 'lark-card:cli_test', config: { ...config, completionReactionOnly: true } });
+
+    expect(await reconcile()).toBe(0);
+    expect(await reconcile()).toBe(0);
+    expect(h.service.reply).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ messageId: 'om_visible',
+      state: 'completed', cardKind: 'result', elements: [
+        { tag: 'markdown', element_id: 'agent_fallback_note', content: note, text_size: 'notation' },
+        expect.objectContaining({ element_id: 'final_output' })
+      ] }));
+    expect(h.service.addReaction.mock.calls).toEqual([['om_visible', COMPLETION_REACTION_EMOJI]]);
+    expect(JSON.parse(h.cardMappings.mappings[0]!.extra!).final_delivery_state).toBe('delivered');
+  });
+
   it('completionReactionOnly 开启但终态是失败时，仍然补发结果卡', async () => {
     const task = { ...completedTask('ses-fail'), status: 'failed' as const };
     const mapping = createMapping('map-fail', 'om_req_fail', 'ses-fail', { runtime_task_id: task.id, state: 'running', turn: 1 });
