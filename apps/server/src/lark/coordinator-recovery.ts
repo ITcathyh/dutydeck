@@ -37,7 +37,7 @@ import { larkGroupKey, listPersistedLarkSessions, resolveLarkSession } from './s
 import { planTaskOf } from '../plan-mode.js';
 import type { LarkMessageEvent } from './listener.js';
 import type { LarkGroup, LarkTask, PersistedLarkCardTask } from './coordinator.js';
-import { parseCardTask, parseOptionalCardTask, persistedMessageAnchor, persistedReplyTarget } from './persisted-card-task.js';
+import { parseCardTask, parseOptionalCardTask, persistedReplyTarget } from './persisted-card-task.js';
 import { larkCardChannel, type LarkRelaunchAction, type LarkRelaunchClaim, relaunchRetainedKey, larkScopeContinuesFor, sendTaskCard } from './coordinator-core.js';
 import { LarkCoordinatorCards } from './coordinator-cards.js';
 
@@ -69,9 +69,9 @@ export abstract class LarkCoordinatorRecovery extends LarkCoordinatorCards {
   private reconcileAuthorizationRetry = false;
   private async reconciledResult(mapping: { externalId: string; sessionId: string }, saved: PersistedLarkCardTask, cardId: string, created?: { finalOutput?: string; groupMention: boolean }) {
     if (!this.workflows || !saved.sender_open_id || !saved.runtime_task_id || !saved.turn) return [];
-    const anchor = persistedMessageAnchor(saved, mapping.externalId);
+    const replyMessageId = saved.anchor_message_id ?? saved.reply_message_id;
     const context = { appId: saved.app_id, sessionId: mapping.sessionId, taskId: saved.runtime_task_id, turn: saved.turn,
-      event: { messageId: mapping.externalId, ...(anchor !== mapping.externalId ? { replyMessageId: anchor } : {}), chatId: saved.chat_id, chatType: saved.chat_type ?? 'group', senderOpenId: saved.sender_open_id,
+      event: { messageId: mapping.externalId, ...(replyMessageId && replyMessageId !== mapping.externalId ? { replyMessageId } : {}), chatId: saved.chat_id, chatType: saved.chat_type ?? 'group', senderOpenId: saved.sender_open_id,
         threadId: saved.thread_id, messageType: 'text', content: JSON.stringify({ text: saved.prompt }), mentions: [] } };
     const related = saved.final_attachment_message_id ? [saved.final_attachment_message_id] : undefined;
     // 计划轮的结果卡补发时带回计划操作。重启早于首次交付时计划记录还没建，按本轮结果正文补建（同实时链路）。
@@ -1059,7 +1059,7 @@ export abstract class LarkCoordinatorRecovery extends LarkCoordinatorCards {
     const messageId = await notifyLarkUnknownTask({ service: this.service, store, log: this.log, appId: config.appId, sessionId: mapping.sessionId, runtimeTaskId: runtimeTask.id, facts,
       ...(unknownMention ? { mention: unknownMention } : {}),
       messageTaskId: mapping.externalId, turn: saved.turn ?? 0, taskName: saved.task_name, agentName: await this.resolveSessionAgentName(config, mapping.sessionId),
-      target: persistedReplyTarget(saved, mapping.externalId),
+      target: persistedReplyTarget(saved),
       ...(config.webBaseUrl ? { webBaseUrl: config.webBaseUrl } : {}), ...(this.workflowOptions.loginLinks ? { detailLogin: true } : {}) });
     // 提醒卡挂太久没人处理，按加急设置提醒发起人；机器人发起的不加急。
     const manager = this.workflows?.urgentManager;

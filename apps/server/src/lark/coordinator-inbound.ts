@@ -214,9 +214,9 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
         const key = larkGroupKey(stored.event, saved.scope_id, config.appId);
         const group = this.groups.get(key) ?? { tail: Promise.resolve() };
         this.groups.set(key, group);
-        const anchor = saved.anchor_message_id ?? saved.reply_message_id ?? larkMessageAnchor(stored.event);
+        const anchor = saved.anchor_message_id;
         const task: LarkTask = { id: mapping.externalId,
-          event: { ...stored.event, replyMessageId: anchor !== mapping.externalId ? anchor : undefined },
+          event: anchor === undefined ? stored.event : { ...stored.event, replyMessageId: anchor !== mapping.externalId ? anchor : undefined },
           config: effective, prompt: saved.prompt, resources: [],
           group, inbox: adopted, state: 'queued', events: [], turn: (saved.turn ?? 1) - 1, scopeId: saved.scope_id, epoch: group.epoch ?? 0,
           retryMaterialPrompt: saved.retry_material_prompt, sessionId: mapping.sessionId, cardMessageId: saved.card_message_id,

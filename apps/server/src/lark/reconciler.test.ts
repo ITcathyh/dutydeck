@@ -999,6 +999,27 @@ describe('performLarkCardReconcile 遵守群级呈现开关', () => {
     expect(h.service.reply).not.toHaveBeenCalled();
   });
 
+  it.each([
+    ['group', { reply_message_id: ' om_reply ' }, 'om_reply'],
+    ['group', { root_message_id: ' om_root ' }, 'om_root'],
+    ['group', {}, undefined],
+    ['p2p', {}, undefined]
+  ] as const)('旧记录补发结果卡沿用原回复目标 (%s, %j)', async (chatType, fields, replyTo) => {
+    const task = completedTask('session');
+    const mapping = createMapping('mapping', 'om_child', task.sessionId, { chat_type: chatType, ...fields, runtime_task_id: task.id });
+    const h = reconcileHarness([mapping], { session: [task] });
+    expect(await performLarkCardReconcile({ ...h, runtime: h.runtime as any, service: h.service as any,
+      channel: mapping.channel, config: { ...config, completionReactionOnly: false } })).toBe(0);
+
+    if (replyTo) {
+      expect(h.service.reply).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ messageId: replyTo, cardKind: 'result' }));
+      expect(h.service.send).not.toHaveBeenCalled();
+    } else {
+      expect(h.service.send).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ chatId: 'oc_test_chat', cardKind: 'result' }));
+      expect(h.service.reply).not.toHaveBeenCalled();
+    }
+  });
+
   it('重启后把换 Agent 说明放在结果正文前，回复并贴表情到同一条原消息', async () => {
     const task = completedTask('session');
     const note = 'Agent primary 不可用，已切换到兜底 Agent spare。';

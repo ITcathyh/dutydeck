@@ -157,7 +157,7 @@ export async function performLarkCardReconcile(input: {
       const persisted = persistedCardTask(mapping.extra);
       if (!persisted) continue;
       const anchor = persistedMessageAnchor(persisted, mapping.externalId);
-      const target = persistedReplyTarget(persisted, mapping.externalId);
+      const target = persistedReplyTarget(persisted);
       // Frozen delivery authority survives task completion, but never a replacement mapping/turn.
       const scope = (saved: PersistedLarkCardTask) => JSON.stringify([saved.app_id, saved.chat_id, saved.turn ?? 0,
         saved.runtime_task_id, saved.card_message_id, saved.anchor_message_id, saved.fallback_note, saved.reply_message_id, saved.root_message_id, saved.reply_in_thread, saved.started_at]);
