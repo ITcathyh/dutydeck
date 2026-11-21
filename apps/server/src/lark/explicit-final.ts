@@ -6,7 +6,7 @@ import { larkFailureKind } from './api-gate.js';
 import { isLarkMessageUnupdatable } from './card-renderer.js';
 import { serialByKey, type ConfigRepository, type ChannelMapping } from '@dutydeck/shared';
 import type { PersistedLarkCardTask } from './coordinator.js';
-import { parseCardTask } from './persisted-card-task.js';
+import { parseCardFields } from './persisted-card-task.js';
 import { isLarkFinalContentAuditRejected, recordLarkResultAuditRejection, prepareLarkResult, readConfirmedLarkResult, sendLarkResult, sendLarkDeliveryText, type DeliveryTarget } from './result-delivery.js';
 import { LarkServiceError, type LarkCardInput, type LarkCardService, type LarkWriteGuard } from './service.js';
 import type { LarkAgentSessionBinding } from './agent-tools.js';
@@ -41,7 +41,7 @@ export async function withExplicitFinalLock<T>(store: ConfigRepository | undefin
 }
 
 // Routing comes only from the exact persisted mapping, never from agent text.
-export function explicitFinalContext(mapping: Pick<ChannelMapping, 'externalId' | 'sessionId'>, saved: PersistedLarkCardTask, attemptId?: string): ExplicitFinalContext | undefined {
+export function explicitFinalContext(mapping: Pick<ChannelMapping, 'externalId' | 'sessionId'>, saved: Partial<PersistedLarkCardTask>, attemptId?: string): ExplicitFinalContext | undefined {
   if (!attemptId || !saved.runtime_task_id || !saved.app_id || !saved.chat_id || !mapping.externalId.startsWith('om_')
     || !Number.isInteger(saved.turn) || !saved.task_name || !['group', 'p2p'].includes(saved.chat_type ?? '')) return;
   const reply = saved.reply_message_id ?? '';
@@ -56,8 +56,8 @@ export function explicitFinalContext(mapping: Pick<ChannelMapping, 'externalId' 
 export async function resolveExplicitFinalContext(rows: ChannelMapping[], binding: LarkAgentSessionBinding, task: { taskId: string; attemptId?: string }): Promise<ExplicitFinalContext | undefined> {
   const matches = rows.flatMap(row => {
     try {
-      const saved = parseCardTask(row.extra ?? '{}');
-      if (row.channel !== `lark-card:${binding.appId}` || row.sessionId !== binding.sessionId || saved.runtime_task_id !== task.taskId) return [];
+      const saved = parseCardFields(row.extra ?? '{}');
+      if (!saved || row.channel !== `lark-card:${binding.appId}` || row.sessionId !== binding.sessionId || saved.runtime_task_id !== task.taskId) return [];
       return [{ row, saved }];
     } catch { return []; }
   });

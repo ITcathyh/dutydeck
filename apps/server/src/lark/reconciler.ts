@@ -1,6 +1,5 @@
-import { planTaskOf } from '../plan-mode.js';
+import { planTerminalDelivery, type TerminalState } from './terminal-plan.js';
 import type { ReplyPolish } from './reply-polish.js';
-import { isBotSenderType } from './card-mentions.js';
 import { explicitFinalTextReceiptReader, completeExplicitFinal, readConfirmedExplicitFinal, explicitFinalContext, hasExplicitFinal, withExplicitFinalLock } from './explicit-final.js';
 import { sleep } from '../daemon/time.js';
 import { describeLarkTaskRecovery, notifyLarkTaskRecovery, verifiedLarkRecoveryOutput } from './task-recovery.js';
@@ -27,17 +26,15 @@ import {
   steeringOutcomeText,
   terminalTaskStates
 } from './card-renderer.js';
-import { deliverLarkStatusReaction, larkCompletionReactionOnly, larkResultKey, larkSilentResultAnchor, readConfirmedLarkResult, sendLarkResult } from './result-delivery.js';
+import { deliverLarkStatusReaction, readConfirmedLarkResult, sendLarkResult } from './result-delivery.js';
 import { RECOVERY_TRACKING_NOTE } from './recovery-notes.js';
 import { isLarkDeterministicFailure } from './api-gate.js';
 import { redactTraceText } from './secret-redaction.js';
 import { larkNotice } from './notify-tier.js';
-import { larkTaskAgentGuid } from './task-agent.js';
 import type { ListenerLog, LarkRuntime } from './listener.js';
 import type { PersistedLarkCardTask } from './coordinator.js';
 import type { LarkHeldCause } from './turn-redispatch.js';
-import { larkFallbackNoteElements } from './agent-fallback.js';
-import { persistedMessageAnchor, persistedReplyTarget } from './persisted-card-task.js';
+import { parseCardFields, parseCardTask, persistedReplyTarget } from './persisted-card-task.js';
 import { persistedRecallLine } from './scenario-legacy.js';
 
 /** 过程卡顶部场景关联那一行：新映射存 scenario_recall，升级前的存 alert_recall。 */
@@ -53,11 +50,7 @@ export type LarkInterruptedTurn = { kind: 'handled' } | ({ kind: 'hold' } & Lark
 const persistedCardTask = (value?: string | null): PersistedLarkCardTask | undefined => {
   if (!value) return;
   try {
-    const parsed = JSON.parse(value) as Partial<PersistedLarkCardTask>;
-    // card_message_id 可以缺席：中间进展静默的那些轮次根本没发过程卡，
-    // 但结果仍然要靠对账补发，映射不能被当成损坏记录丢掉。
-    if (!parsed.app_id || !parsed.chat_id || !parsed.task_name || !parsed.state || !Number.isFinite(parsed.started_at)) return;
-    return parsed as PersistedLarkCardTask;
+    return parseCardTask(value);
   } catch { return; }
 };
 
@@ -81,8 +74,10 @@ export type LarkResultDeliveryIssue = {
 /** 结果没送达的轮次：已判定失败的，和正在退避重发的。/status 与 dutydeck recovery 共用。 */
 export function larkResultDeliveryIssues(mappings: ChannelMapping[]): LarkResultDeliveryIssue[] {
   return mappings.flatMap((mapping): LarkResultDeliveryIssue[] => {
-    const saved = persistedCardTask(mapping.extra);
-    if (!saved || saved.final_delivery_state === 'delivered' || saved.final_delivery_state === 'reaction') return [];
+    let saved;
+    try { saved = parseCardFields(mapping.extra); } catch { return []; }
+    if (!saved?.app_id || !saved.chat_id || !saved.task_name || !saved.state || saved.started_at === undefined) return [];
+    if (saved.final_delivery_state === 'delivered' || saved.final_delivery_state === 'reaction') return [];
     const base = { sessionId: mapping.sessionId, messageId: mapping.externalId, chatId: saved.chat_id, taskName: saved.task_name,
       ...(saved.final_delivery_error ? { error: saved.final_delivery_error } : {}) };
     if (saved.final_delivery_state === 'failed') return [{ ...base, state: 'failed' }];
@@ -157,7 +152,6 @@ export async function performLarkCardReconcile(input: {
     try {
       const persisted = persistedCardTask(mapping.extra);
       if (!persisted) continue;
-      const anchor = persistedMessageAnchor(persisted, mapping.externalId);
       const target = persistedReplyTarget(persisted);
       // Frozen delivery authority survives task completion, but never a replacement mapping/turn.
       const scope = (saved: PersistedLarkCardTask) => JSON.stringify([saved.app_id, saved.chat_id, saved.turn ?? 0,
@@ -208,17 +202,17 @@ export async function performLarkCardReconcile(input: {
       const processContext = { ...cardContext, ...(input.detailLogin ? { detailLogin: true } : {}) };
 
       const terminalPersisted = terminalTaskStates.has(persisted.state);
-      const alreadyDelivered = terminalPersisted
-        && ((persisted.final_delivery_state === 'delivered' && Boolean(persisted.final_message_id))
-          // 只贴表情的终态没有结果消息 id，它本身就是「已交付」。
-          || persisted.final_delivery_state === 'reaction');
+      const savedPlan = terminalPersisted ? planTerminalDelivery(persisted, mapping.externalId, effective, {
+        state: persisted.state as TerminalState, now: Date.now(), receiptOnly, resultDue
+      }) : undefined;
+      const alreadyDelivered = savedPlan?.kind === 'delivered';
       // 旧版单卡结果已经交付，保留历史消息，不追发。
       if (alreadyDelivered && persisted.final_message_id && persisted.final_message_id === persisted.card_message_id) continue;
       if (alreadyDelivered) {
         if (persisted.state === 'completed' && persisted.final_message_id && input.resultElements
           && !await isTextReceipt(mapping, persisted, persisted.final_message_id)) await input.resultElements(mapping, persisted, persisted.final_message_id);
         // 没有过程卡就没有可冻结的对象，直接收敛。
-        if (persisted.progress_frozen || !persisted.card_message_id) continue;
+        if (!savedPlan.closeProcess || !persisted.card_message_id) continue;
         const legacyElements = persisted.last_successful_elements?.length ? persisted.last_successful_elements : undefined;
         try {
           await service.update({
@@ -236,7 +230,7 @@ export async function performLarkCardReconcile(input: {
             readOnly: true,
             turn: persisted.turn,
             // 结果早已作为另一条消息送达（只贴表情时没有这一条）。
-            ...(persisted.final_delivery_state === 'delivered' ? { resultFollows: true } : {}),
+            ...(savedPlan.resultFollows ? { resultFollows: true } : {}),
             ...(config.webBaseUrl ? { webBaseUrl: config.webBaseUrl } : {}),
             ...(legacyElements ? { elements: legacyElements } : {})
           });
@@ -393,70 +387,69 @@ export async function performLarkCardReconcile(input: {
       const elapsedSeconds = Math.max(0, (Date.parse(runtimeTask.updatedAt) - persisted.started_at) / 1_000);
       const cardMessageId = persisted.card_message_id;
       // 没有过程卡的轮次直接视为「过程已收敛」，只补结果这条腿。
-      let updated = Boolean(persisted.progress_frozen) || !cardMessageId;
       let lastError: unknown;
       let contentRejected = false;
       const currentElements = boundLarkCardElements([...quietNote ? [{ tag: 'markdown', element_id: 'recovery_note', content: quietNote }] : [],
         ...renderLarkProcessElements(events, config, true),
         ...(persisted.launcher_recovery_note ? [{ tag: 'markdown', element_id: 'launcher_recovery_note', content: LARK_LAUNCHER_RECOVERY_NOTE }] : [])]);
-      // 只贴表情与实时链路同一判断：计划轮和任务通道仍补发结果卡。
       const reportElements = taskReportCardElements(input.deliveryStore ? await readTaskReportSafely(input.deliveryStore, runtimeTask.id) : undefined);
-      const reactionOnly = !reportElements.length && !persisted.fallback_note && completed && larkCompletionReactionOnly(effective, persisted.prompt, anchor);
-      // 回执上的「结果见下条」：只贴表情的轮次这次对账不会补发结果消息。
-      const resultFollows = completed && !reactionOnly;
-      let deliveredElements = persisted.last_successful_elements;
-      const updateProcessCard = (messageId: string, elements: Array<Record<string, any>>) => service.update({
-        beforeSend: beforeProcessSend,
-        ...processContext,
-        ...recallOf(persisted),
-        cardKind: 'process',
-        messageId,
-        permissionMode: larkPermissionMode(config),
-        state,
-        taskId: mapping.externalId,
-        taskName: persisted.task_name,
-        elapsedSeconds,
-        sessionId: mapping.sessionId,
-        readOnly: true,
-        turn: persisted.turn,
-        ...(resultFollows ? { resultFollows: true } : {}),
-        ...(config.webBaseUrl ? { webBaseUrl: config.webBaseUrl } : {}),
-        elements
-      });
-      for (let attempt = 1; !updated && cardMessageId && attempt <= 3; attempt++) {
-        try {
-          await updateProcessCard(cardMessageId, currentElements);
-          updated = true;
-          deliveredElements = currentElements;
-          break;
-        } catch (error) {
-          lastError = error;
-          if (isLarkCardContentRejected(error)) { contentRejected = true; break; }
-          if (isLarkMessageUnupdatable(error)) break;
-          if (attempt < 3) {
-            const delay = isLarkMessageRateLimit(error) ? larkRateLimitBackoffMs(attempt) : attempt * 300;
-            await sleep(delay);
-          }
-        }
-      }
-      // 内容被拒绝只允许原地降级，不允许因此另发一条消息。
-      if (!updated && cardMessageId && contentRejected && Array.isArray(persisted.last_successful_elements) && persisted.last_successful_elements.length) {
-        const patchedElements = patchRejectedCardDelta(persisted.last_successful_elements, currentElements);
-        try {
-          await updateProcessCard(cardMessageId, patchedElements);
-          updated = true;
-          deliveredElements = patchedElements;
-          lastError = undefined;
-          log.warn({ messageId: persisted.card_message_id, state }, '飞书终态卡片增量被拒绝，已保留上次成功内容并原地修补');
-        } catch (error) {
-          lastError = error;
-        }
-      }
-      if (!updated && isLarkMessageUnupdatable(lastError)) updated = true;
       await withExplicitFinalLock(input.deliveryStore, runtimeTask.id, async () => {
         if (input.skipTask?.(mapping.externalId, mapping.sessionId, persisted.turn ?? 0)) return;
         const finalContext = explicitFinalContext(mapping, persisted, runtimeTask.currentAttemptId);
         const explicit = await hasExplicitFinal(input.deliveryStore, finalContext, state);
+        const plan = planTerminalDelivery(persisted, mapping.externalId, effective, { state, now: Date.now(), explicit,
+          quiet: Boolean(quietNote), hasReport: reportElements.length > 0, steered: Boolean(steered),
+          interruptedByUser: Boolean(runtimeTask.interruptedByActor), resultDue, receiptOnly });
+        let updated = !plan.closeProcess;
+        let deliveredElements = persisted.last_successful_elements;
+        const updateProcessCard = (messageId: string, elements: Array<Record<string, any>>) => service.update({
+          beforeSend: beforeProcessSend,
+          ...processContext,
+          ...recallOf(persisted),
+          cardKind: 'process',
+          messageId,
+          permissionMode: larkPermissionMode(config),
+          state,
+          taskId: mapping.externalId,
+          taskName: persisted.task_name,
+          elapsedSeconds,
+          sessionId: mapping.sessionId,
+          readOnly: true,
+          turn: persisted.turn,
+          ...(plan.resultFollows ? { resultFollows: true } : {}),
+          ...(config.webBaseUrl ? { webBaseUrl: config.webBaseUrl } : {}),
+          elements
+        });
+        for (let attempt = 1; !updated && cardMessageId && attempt <= 3; attempt++) {
+          try {
+            await updateProcessCard(cardMessageId, currentElements);
+            updated = true;
+            deliveredElements = currentElements;
+            break;
+          } catch (error) {
+            lastError = error;
+            if (isLarkCardContentRejected(error)) { contentRejected = true; break; }
+            if (isLarkMessageUnupdatable(error)) break;
+            if (attempt < 3) {
+              const delay = isLarkMessageRateLimit(error) ? larkRateLimitBackoffMs(attempt) : attempt * 300;
+              await sleep(delay);
+            }
+          }
+        }
+        // 内容被拒绝只允许原地降级，不允许因此另发一条消息。
+        if (!updated && cardMessageId && contentRejected && Array.isArray(persisted.last_successful_elements) && persisted.last_successful_elements.length) {
+          const patchedElements = patchRejectedCardDelta(persisted.last_successful_elements, currentElements);
+          try {
+            await updateProcessCard(cardMessageId, patchedElements);
+            updated = true;
+            deliveredElements = patchedElements;
+            lastError = undefined;
+            log.warn({ messageId: persisted.card_message_id, state }, '飞书终态卡片增量被拒绝，已保留上次成功内容并原地修补');
+          } catch (error) {
+            lastError = error;
+          }
+        }
+        if (!updated && isLarkMessageUnupdatable(lastError)) updated = true;
         let finalCardInput: LarkCardInput | undefined;
         let finalMessageId: string | undefined;
         let finalAttachmentMessageId: string | undefined;
@@ -469,88 +462,87 @@ export async function performLarkCardReconcile(input: {
         try {
           // 完成时只贴表情：重启补发同样不发结果卡，只补那一枚表情。
           // 失败/中断/取消照旧补发结果卡——重启不是把失败藏起来的理由。
-          if (!explicit && reactionOnly) {
+          if (plan.kind === 'reaction') {
             reactionDelivered = await deliverLarkStatusReaction(
-              service, { appId: persisted.app_id, messageId: anchor, completed: true }, log, input.deliveryStore);
-          } else if ((resultDue || receiptOnly) && !quietNote) {
-          // P0-4：重启对账补发的结果/失败/中断卡与实时链路同口径 @ 发起人；idempotencyKey
-          // 保证消息不重发，@ 也不会重复。开关按群覆盖后的生效配置取值（与实时链路一致），
-          // 群里关掉 @ 时本元素不存在。
-          // 发起人是机器人时同样不 @ 回去：刷屏事故里最容易触发的恰好是重启对账这条路。
-          const mention = larkNotice('result', effective, {
-            chatType: persisted.chat_type, senderOpenId: persisted.sender_open_id, senderType: persisted.sender_type }).mention;
-          const decoration = !receiptOnly ? await input.terminalDecoration?.(mapping, { ...persisted, runtime_task_id: runtimeTask.id, state }, effective) : undefined;
-          const resultBody = explicit ? [] : steered ? [{ tag: 'markdown', element_id: 'steer_note', content: steeringOutcomeText(steered) }] : renderLarkResultElements(verifiedOutput ? [verifiedOutput] : events);
-          const prose = resultBody.find(element => element.element_id === 'final_output');
-          if (completed && !explicit && !steered && planTaskOf(persisted.prompt) === undefined && !isBotSenderType(persisted.sender_type)
-            && typeof prose?.content === 'string' && input.polishReply) {
-            prose.content = await input.polishReply(effective, prose.content,
-              larkResultKey(cardMessageId ?? larkSilentResultAnchor(mapping.externalId, persisted.turn)), persisted.chat_id, true);
-          }
-          const finalOutput = explicit || steered ? undefined : String(resultBody.find(element => element.element_id === 'final_output')?.content ?? '');
-          const elements = [
-            ...reportElements,
-            ...larkFallbackNoteElements(persisted.fallback_note),
-            ...resultBody,
-            ...(decoration?.elements ?? []),
-            ...(!receiptOnly && completed && input.resultElements ? await input.resultElements(mapping, persisted, '', { finalOutput, groupMention: Boolean(mention) }) : []),
-            ...(mention ? [{ tag: 'markdown', element_id: 'group_mention', content: mention }] : [])];
-          const cancellationStatusLabel = !receiptOnly && (state === 'interrupted' || state === 'cancelled') && runtimeTask.interruptedByActor
-            ? await larkCancellationStatusLabel(service, runtimeTask.interruptedByActor, persisted.final_card_input)
-            : undefined;
-          finalCardInput = {
-            ...cardContext, permissionMode: larkPermissionMode(config), state, cardKind: 'result',
-            ...(cancellationStatusLabel ? { statusLabel: cancellationStatusLabel } : {}),
-            taskId: mapping.externalId, taskName: persisted.task_name,
-            elapsedSeconds, sessionId: mapping.sessionId, turn: persisted.turn, readOnly: true,
-            ...(config.webBaseUrl ? { webBaseUrl: config.webBaseUrl } : {}), ...decoration?.cardInput
-          };
-          await beforeProcessSend();
-          if (receiptOnly) {
-            const receipt = await readConfirmedExplicitFinal(input.deliveryStore, service, finalContext)
-              ?? (!explicit ? await readConfirmedLarkResult(service, target, { ...finalCardInput, elements, idempotencyKey: larkResultKey(cardMessageId ?? larkSilentResultAnchor(mapping.externalId, persisted.turn)) }, log, input.deliveryStore) : undefined);
+              service, plan.reaction!, log, input.deliveryStore);
+          } else if (plan.kind === 'result' || plan.kind === 'receipt_only') {
+            // P0-4：重启对账补发的结果/失败/中断卡与实时链路同口径 @ 发起人；idempotencyKey
+            // 保证消息不重发，@ 也不会重复。开关按群覆盖后的生效配置取值（与实时链路一致），
+            // 群里关掉 @ 时本元素不存在。
+            // 发起人是机器人时同样不 @ 回去：刷屏事故里最容易触发的恰好是重启对账这条路。
+            const mention = plan.mention;
+            const decoration = !receiptOnly ? await input.terminalDecoration?.(mapping, { ...persisted, runtime_task_id: runtimeTask.id, state }, effective) : undefined;
+            const resultBody = explicit ? [] : steered ? [{ tag: 'markdown', element_id: 'steer_note', content: steeringOutcomeText(steered) }] : renderLarkResultElements(verifiedOutput ? [verifiedOutput] : events);
+            const prose = resultBody.find(element => element.element_id === 'final_output');
+            if (plan.polish
+              && typeof prose?.content === 'string' && input.polishReply) {
+              prose.content = await input.polishReply(effective, prose.content,
+                plan.key, persisted.chat_id, true);
+            }
+            const finalOutput = explicit || steered ? undefined : String(resultBody.find(element => element.element_id === 'final_output')?.content ?? '');
+            const elements = [
+              ...reportElements,
+              ...plan.fallbackElements,
+              ...resultBody,
+              ...(decoration?.elements ?? []),
+              ...(!receiptOnly && completed && input.resultElements ? await input.resultElements(mapping, persisted, '', { finalOutput, groupMention: Boolean(mention) }) : []),
+              ...plan.mentionElements];
+            const cancellationStatusLabel = !receiptOnly && (state === 'interrupted' || state === 'cancelled') && runtimeTask.interruptedByActor
+              ? await larkCancellationStatusLabel(service, runtimeTask.interruptedByActor, persisted.final_card_input)
+              : undefined;
+            finalCardInput = {
+              ...cardContext, permissionMode: larkPermissionMode(config), state, cardKind: 'result',
+              ...(cancellationStatusLabel ? { statusLabel: cancellationStatusLabel } : {}),
+              taskId: mapping.externalId, taskName: persisted.task_name,
+              elapsedSeconds, sessionId: mapping.sessionId, turn: persisted.turn, readOnly: true,
+              ...(config.webBaseUrl ? { webBaseUrl: config.webBaseUrl } : {}), ...decoration?.cardInput
+            };
             await beforeProcessSend();
-            finalMessageId = receipt?.messageId;
-            finalAttachmentMessageId = receipt?.attachmentMessageId;
-            finalElements = receipt?.elements;
-            // Read-only recovery must not claim execution decorations were published.
-            finalCardInput = undefined;
-          } else {
-            const freezeCancellationInput = (state === 'interrupted' || state === 'cancelled') && runtimeTask.interruptedByActor && !persisted.final_card_input;
-            if (persisted.final_delivery_first_failed_at === undefined || freezeCancellationInput) {
-              const anchored = { ...persisted,
-                ...(persisted.final_delivery_first_failed_at === undefined ? { final_delivery_first_failed_at: Date.now() } : {}),
-                ...(freezeCancellationInput ? { final_card_input: finalCardInput as Record<string, unknown> } : {}) };
-              const extra = JSON.stringify(anchored);
-              if (!await cardMappings.compareAndSetExtra(mapping.id, mapping.extra, extra)) {
-                throw new LarkServiceError('LARK_WRITE_OBSOLETE', '首次投递时间写入时轮次已更新。', 409);
+            if (receiptOnly) {
+              const receipt = await readConfirmedExplicitFinal(input.deliveryStore, service, finalContext)
+                ?? (!explicit ? await readConfirmedLarkResult(service, plan.target, { ...finalCardInput, elements, idempotencyKey: plan.key }, log, input.deliveryStore) : undefined);
+              await beforeProcessSend();
+              finalMessageId = receipt?.messageId;
+              finalAttachmentMessageId = receipt?.attachmentMessageId;
+              finalElements = receipt?.elements;
+              // Read-only recovery must not claim execution decorations were published.
+              finalCardInput = undefined;
+            } else {
+              const freezeCancellationInput = (state === 'interrupted' || state === 'cancelled') && runtimeTask.interruptedByActor && !persisted.final_card_input;
+              if (persisted.final_delivery_first_failed_at === undefined || freezeCancellationInput) {
+                const anchored = { ...persisted,
+                  ...(persisted.final_delivery_first_failed_at === undefined ? { final_delivery_first_failed_at: Date.now() } : {}),
+                  ...(freezeCancellationInput ? { final_card_input: finalCardInput as Record<string, unknown> } : {}) };
+                const extra = JSON.stringify(anchored);
+                if (!await cardMappings.compareAndSetExtra(mapping.id, mapping.extra, extra)) {
+                  throw new LarkServiceError('LARK_WRITE_OBSOLETE', '首次投递时间写入时轮次已更新。', 409);
+                }
+                persisted.final_delivery_first_failed_at = anchored.final_delivery_first_failed_at;
+                persisted.final_card_input = anchored.final_card_input;
+                mapping.extra = extra;
               }
-              persisted.final_delivery_first_failed_at = anchored.final_delivery_first_failed_at;
-              persisted.final_card_input = anchored.final_card_input;
-              mapping.extra = extra;
+              const result = await completeExplicitFinal(input.deliveryStore, service, finalContext, finalCardInput, elements, beforeSend, input.authorizeFinalRelay ?? (async () => { throw new LarkServiceError('FINAL_RELAY_REVOKED', '回传恢复缺少授权检查。', 403); })) ?? await sendLarkResult(service, plan.target, { ...finalCardInput, elements, idempotencyKey: plan.key }, log, input.deliveryStore, beforeSend);
+              receiptDeliveryFailure = 'deliveryFailure' in result && typeof result.deliveryFailure === 'string' ? result.deliveryFailure : undefined;
+              textReceipt = 'textReceipt' in result && result.textReceipt === true;
+              if (textReceipt) finalCardInput = undefined;
+              finalAttachmentMessageId = result.attachmentMessageId;
+              finalMessageId = result.messageId;
+              finalElements = result.elements;
             }
-            const result = await completeExplicitFinal(input.deliveryStore, service, finalContext, finalCardInput, elements, beforeSend, input.authorizeFinalRelay ?? (async () => { throw new LarkServiceError('FINAL_RELAY_REVOKED', '回传恢复缺少授权检查。', 403); })) ?? await sendLarkResult(service, target, { ...finalCardInput, elements, idempotencyKey: larkResultKey(cardMessageId ?? larkSilentResultAnchor(mapping.externalId, persisted.turn)) }, log, input.deliveryStore, beforeSend);
-            receiptDeliveryFailure = 'deliveryFailure' in result && typeof result.deliveryFailure === 'string' ? result.deliveryFailure : undefined;
-            textReceipt = 'textReceipt' in result && result.textReceipt === true;
-            if (textReceipt) finalCardInput = undefined;
-            finalAttachmentMessageId = result.attachmentMessageId;
-            finalMessageId = result.messageId;
-            finalElements = result.elements;
-          }
-          if (!receiptOnly && !textReceipt && finalMessageId && completed && input.resultElements) {
-            try {
-              await input.resultElements(mapping, { ...persisted, final_attachment_message_id: finalAttachmentMessageId }, finalMessageId);
-            } catch (callbackError) {
-              resultCallbackFailed = true;
-              log.warn({ error: callbackError, messageId: persisted.card_message_id, finalMessageId, sessionId: mapping.sessionId, externalId: mapping.externalId }, '执行结果回调写入失败，稍后重试');
+            if (!receiptOnly && !textReceipt && finalMessageId && completed && input.resultElements) {
+              try {
+                await input.resultElements(mapping, { ...persisted, final_attachment_message_id: finalAttachmentMessageId }, finalMessageId);
+              } catch (callbackError) {
+                resultCallbackFailed = true;
+                log.warn({ error: callbackError, messageId: persisted.card_message_id, finalMessageId, sessionId: mapping.sessionId, externalId: mapping.externalId }, '执行结果回调写入失败，稍后重试');
+              }
             }
-          }
-          // 补发结果后同实时链路一样在原消息上贴状态表情。用户自己取消、停下的不贴；旧的一轮也不贴，
-          // 重启时不给几天前的消息补表情。贴失败只 warn，幂等键保证对账重入不重复贴。
-          if (!receiptOnly && !receiptDeliveryFailure && state !== 'cancelled' && !runtimeTask.interruptedByActor && !larkTaskAgentGuid(mapping.externalId)
-            && !await input.staleTurn?.(mapping.sessionId, runtimeTask)) {
-            await deliverLarkStatusReaction(service, { appId: persisted.app_id, messageId: anchor, completed }, log, input.deliveryStore);
-          }
+            // 补发结果后同实时链路一样在原消息上贴状态表情。用户自己取消、停下的不贴；旧的一轮也不贴，
+            // 重启时不给几天前的消息补表情。贴失败只 warn，幂等键保证对账重入不重复贴。
+            if (plan.reaction && !receiptDeliveryFailure
+              && !await input.staleTurn?.(mapping.sessionId, runtimeTask)) {
+              await deliverLarkStatusReaction(service, plan.reaction, log, input.deliveryStore);
+            }
           }
         } catch (error) {
           if (error instanceof LarkServiceError && error.code === 'LARK_WRITE_OBSOLETE') { unresolved++; return; }

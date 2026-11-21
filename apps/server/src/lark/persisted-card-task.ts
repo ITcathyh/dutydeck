@@ -1,8 +1,14 @@
-import type { PersistedLarkCardTask } from './coordinator.js';
+import { turnRecordSchema, type PersistedLarkCardTask } from './turn-record.js';
 
 /** 解析卡片映射的 extra；JSON 损坏时抛错。 */
 export function parseCardTask(extra: string) {
-  return JSON.parse(extra) as PersistedLarkCardTask;
+  return turnRecordSchema.parse(JSON.parse(extra));
+}
+
+// Routing and delivery diagnostics also read older mappings that contain only their own fields.
+const fieldSchema = turnRecordSchema.partial();
+export function parseCardFields(extra: string | null | undefined) {
+  return extra ? fieldSchema.parse(JSON.parse(extra)) : undefined;
 }
 
 /** 同 parseCardTask，extra 为空时返回 undefined。 */

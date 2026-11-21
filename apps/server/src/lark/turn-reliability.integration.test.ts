@@ -1,3 +1,4 @@
+import { TurnRecoveryDecisions, turnDecisionKey } from './recovery-decision.js';
 import { MattersService } from '../matters.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { mkdtemp, rm } from 'node:fs/promises';
@@ -206,6 +207,8 @@ describe('结果未知的一轮不锁住话题（A2）', () => {
     const { sessionId, saved } = await h.mapping();
     await until(async () => (await h.tasks())[0]?.status === 'interrupted');
     expect(JSON.parse(await h.repos.config.get('lark.settled.app.om_first.1') ?? '{}')).toEqual({ code: 'DRIVER_INPUT_UNCONFIRMED', agent: 'Fixture' });
+    expect((await h.mapping()).saved.recovery).toMatchObject({ kind: 'settled',
+      values: { settled: { code: 'DRIVER_INPUT_UNCONFIRMED', agent: 'Fixture' } } });
     await until(async () => Boolean(await h.resultCard()));
     const result = (await h.resultCard())!;
     expect(JSON.stringify(result.card.elements)).toContain('上一轮 Fixture 没确认收到消息，可能没开始执行。Agent 已经停下，这一轮也没有做过可能对外生效的操作，已自动结束。');
@@ -793,7 +796,9 @@ describe('收尾操作与控制语的并发和失败', () => {
     const held = JSON.parse((await h.repos.config.get(key))!);
     expect(held).toMatchObject({ phase: 'held' });
     // 模拟「重新执行」先一步把这一轮认领走（同一进程，对账不会接手）。
-    await h.repos.config.set(key, JSON.stringify({ ...held, phase: 'claimed', boot: (h.coordinator as any).relaunchBoot }));
+    const decisions = new TurnRecoveryDecisions(h.repos.config, h.repos.channelMappings, { warn: vi.fn() });
+    expect(await decisions.compareAndSet(turnDecisionKey('redispatch', 'app', 'om_first', 1), JSON.stringify(held),
+      JSON.stringify({ ...held, phase: 'claimed', boot: (h.coordinator as any).relaunchBoot }))).toBe(true);
     expect(await h.coordinator.handleAction(callbackValueOf(card, 'continue_in_place'), 'ou_alice', { messageId: cardId, chatId: 'oc_group' }))
       .toMatchObject({ type: 'warning' });
     await new Promise(resolve => setTimeout(resolve, 100));

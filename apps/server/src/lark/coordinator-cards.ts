@@ -1,3 +1,4 @@
+import { fromRecord, mergeRestoredRecord, toRecord } from './turn-record.js';
 import { larkMessageAnchor } from './message-anchor.js';
 import { formatUnknownTaskTime } from '../task-resolution.js';
 import { sleep } from '../daemon/time.js';
@@ -86,45 +87,7 @@ export abstract class LarkCoordinatorCards extends LarkCoordinatorCore {
     const mappings = this.cardMappings;
     const { sessionId, turn, runtimeTaskId } = task;
     if (!mappings || !sessionId || !task.startedAt) return { saved: false, reason: 'missing_mapping_context' };
-    const extra: PersistedLarkCardTask = {
-      ...(task.launcherRecoveryNote ? { launcher_recovery_note: true } : {}),
-      anchor_message_id: larkMessageAnchor(task.event),
-      ...(task.fallbackNote ? { fallback_note: task.fallbackNote } : {}),
-      app_id: task.config.appId,
-      sender_open_id: task.event.senderOpenId,
-      ...(task.event.senderType ? { sender_type: task.event.senderType } : {}),
-      thread_id: task.event.threadId,
-      scope_id: task.scopeId,
-      chat_id: task.event.chatId,
-      ...(task.cardMessageId ? { card_message_id: task.cardMessageId } : {}),
-      ...(runtimeTaskId ? { runtime_task_id: runtimeTaskId } : {}),
-      task_name: this.taskTitle(task),
-      prompt: task.prompt,
-      ...(task.retryMaterialPrompt ? { retry_material_prompt: task.retryMaterialPrompt } : {}),
-      state,
-      chat_type: task.event.chatType,
-      turn,
-      ...(task.finalMessageId
-        ? { final_message_id: task.finalMessageId, final_delivery_state: task.finalDeliveryState ?? 'delivered' as const }
-        : task.finalDeliveryState ? { final_delivery_state: task.finalDeliveryState } : {}),
-      ...(task.finalDeliveryError ? { final_delivery_error: task.finalDeliveryError } : {}),
-      ...(task.finalMessageId ? { final_delivery_first_failed_at: undefined }
-        : task.finalDeliveryFirstFailedAt !== undefined ? { final_delivery_first_failed_at: task.finalDeliveryFirstFailedAt } : {}),
-      ...(task.finalAttachmentMessageId ? { final_attachment_message_id: task.finalAttachmentMessageId } : {}),
-      ...(task.finalElements ? { final_elements: task.finalElements } : {}),
-      ...(task.finalCardInput ? { final_card_input: task.finalCardInput } : {}),
-      ...(task.progressFrozen ? { progress_frozen: true } : {}),
-      ...(task.lastSuccessfulElements?.length ? { last_successful_elements: task.lastSuccessfulElements } : {}),
-      // 没有进展也写这个键（序列化时省略）：同一轮合并写时要能清掉旧的进展。
-      verification_auto: task.autoVerification,
-      ...(task.scenarioRecall ? { scenario_recall: { packId: task.scenarioRecall.packId, line: task.scenarioRecall.line } } : {}),
-      ...(task.event.replyMessageId && task.event.chatType !== 'group' ? { reply_message_id: task.event.replyMessageId } : {}),
-      ...(task.event.chatType === 'group' ? {
-        reply_message_id: larkMessageAnchor(task.event),
-        ...(task.event.threadId?.trim() ? { reply_in_thread: true } : {})
-      } : {}),
-      started_at: task.startedAt
-    };
+    const extra = toRecord(task, state, this.taskTitle(task));
     const channel = larkCardChannel(task.config.appId);
     const row = { id: `${channel}:${task.id}`, channel, externalId: task.id, sessionId,
       createdAt: new Date(task.startedAt).toISOString() };
@@ -156,7 +119,7 @@ export abstract class LarkCoordinatorCards extends LarkCoordinatorCore {
       // 同轮但 runtime task 不同也无法证明属于同一次执行，不能按普通字段合并放行。
       if (current && (currentTurn > turn || !replacesRetiredSession && !sameSession && saved !== undefined && currentTurn >= turn
         || sameSession && currentTurn === turn && saved?.runtime_task_id && runtimeTaskId && saved.runtime_task_id !== runtimeTaskId)) return { saved: false, reason: 'obsolete_turn' };
-      const merged = JSON.stringify(this.mergeCardTaskExtra(current?.extra, extra, turn, sameSession));
+      const merged = JSON.stringify(this.mergeCardTaskExtra(task, current?.extra, extra, turn, sameSession));
       try {
         // 新建记录或换了会话（/new 之后 sessionId 变了）必须整行落库；存储没有 CAS（测试替身）时也只能如此。
         // 写前再核对任务对象没有在 await 期间推进，避免无 CAS 的整行写绕开上面的持久归属检查。
@@ -190,7 +153,7 @@ export abstract class LarkCoordinatorCards extends LarkCoordinatorCore {
    * 上一轮的卡片消息 ID 记进 earlier_message_ids（最多留 20 个），旧卡上的「查看详情」仍能认回这条任务；
    * 换了会话（转到新会话中执行）时上一轮的卡由转交认领认回原会话，这里不记。
    */
-  private mergeCardTaskExtra(previous: string | null | undefined, extra: PersistedLarkCardTask, turn: number, sameSession: boolean): PersistedLarkCardTask {
+  private mergeCardTaskExtra(task: LarkTask, previous: string | null | undefined, extra: PersistedLarkCardTask, turn: number, sameSession: boolean): PersistedLarkCardTask {
     try {
       const parsed = parseOptionalCardTask(previous);
       // 给旧记录补一个推算的锚点会改掉下次对账的回复目标。
@@ -199,7 +162,7 @@ export abstract class LarkCoordinatorCards extends LarkCoordinatorCore {
         if (parsed.final_delivery_first_failed_at !== undefined && extra.final_delivery_first_failed_at !== undefined) {
           extra.final_delivery_first_failed_at = Math.min(parsed.final_delivery_first_failed_at, extra.final_delivery_first_failed_at);
         }
-        return { ...parsed, ...extra };
+        return mergeRestoredRecord(task, extra, parsed);
       }
       const earlier = [...parsed?.earlier_message_ids ?? [], ...(sameSession ? [parsed?.card_message_id, parsed?.final_message_id] : [])]
         .filter((id): id is string => Boolean(id)).slice(-20);
@@ -208,37 +171,8 @@ export abstract class LarkCoordinatorCards extends LarkCoordinatorCore {
     return extra;
   }
 
-  /**
-   * 从持久化记录重建一份足够渲染结果卡的任务视图。
-   * 重启后的「运行验证」与验收刷新都从这里取能力与状态，两条路径因此不会给出不同答案。
-   * 带全字段是硬要求：少带一个，saveCardTask 写回时那个字段就会从记录里消失。
-   */
-  protected restoredCardTask(config: StoredLarkConfig, mapping: { externalId: string; sessionId: string }, saved: PersistedLarkCardTask): LarkTask {
-    const replyMessageId = saved.anchor_message_id ?? saved.reply_message_id;
-    return {
-      fallbackNote: saved.fallback_note,
-      ...(saved.launcher_recovery_note ? { launcherRecoveryNote: true } : {}),
-      id: mapping.externalId, group: { tail: Promise.resolve() }, config, state: saved.state,
-      turn: saved.turn ?? 0, epoch: 0, scopeId: saved.scope_id ?? '', prompt: saved.prompt,
-      ...(config.adhdMode === true && mapping.externalId.startsWith('confirmation_') && !saved.task_name.startsWith('持久确认记录 ID：') ? { displayName: saved.task_name } : {}),
-      resources: [], events: [], sessionId: mapping.sessionId, startedAt: saved.started_at,
-      ...(saved.runtime_task_id ? { runtimeTaskId: saved.runtime_task_id } : {}),
-      ...(saved.card_message_id ? { cardMessageId: saved.card_message_id } : {}),
-      ...(saved.final_message_id ? { finalMessageId: saved.final_message_id } : {}),
-      ...(saved.final_delivery_error ? { finalDeliveryError: saved.final_delivery_error } : {}),
-      ...(saved.final_delivery_first_failed_at !== undefined ? { finalDeliveryFirstFailedAt: saved.final_delivery_first_failed_at } : {}),
-      ...(saved.final_delivery_state ? { finalDeliveryState: saved.final_delivery_state } : {}),
-      ...(saved.final_attachment_message_id ? { finalAttachmentMessageId: saved.final_attachment_message_id } : {}),
-      ...(saved.final_card_input ? { finalCardInput: saved.final_card_input } : {}),
-      ...(saved.progress_frozen ? { progressFrozen: true } : {}),
-      ...(saved.last_successful_elements ? { lastSuccessfulElements: saved.last_successful_elements } : {}),
-      ...(saved.verification_auto ? { autoVerification: saved.verification_auto } : {}),
-      finalElements: saved.final_elements ?? [],
-      event: { messageId: mapping.externalId, ...(replyMessageId && replyMessageId !== mapping.externalId ? { replyMessageId } : {}), chatId: saved.chat_id, chatType: saved.chat_type ?? 'group', messageType: 'text',
-        content: '', mentions: [], senderOpenId: saved.sender_open_id,
-        ...(saved.sender_type ? { senderType: saved.sender_type } : {}),
-        ...(saved.thread_id ? { threadId: saved.thread_id } : {}) }
-    };
+  protected restoredCardTask(config: StoredLarkConfig, mapping: Pick<ChannelMapping, 'sessionId' | 'externalId'>, saved: PersistedLarkCardTask) {
+    return fromRecord(saved, mapping, config);
   }
 
   protected async refreshResultFeedback(config: StoredLarkConfig, requestId: string, textReceiptReader?: ExplicitFinalTextReceiptReader) {
