@@ -46,99 +46,99 @@ function larkSessionConfigFailure(error: unknown, input: { command: string; labe
 }
 
 async function executeSessionConfigCommand(ctx: CommandContext,
-    route: Extract<LarkCommandRoute, { kind: 'intent' }>, config: StoredLarkConfig, event: LarkMessageEvent, sessionId: string | undefined, reply: CommandContext['replyCard']
-  ) {
-    const model = route.command === 'model';
-    const command = model ? '/model' : '/effort';
-    const label = model ? '模型' : '思考强度';
-    const flag = model ? '--model 模型' : '--effort 档位';
-    const fail = (markdown: string) => reply(`${command} 未执行`, markdown, { failed: true });
-    if (route.args.length > 1) { await fail(`**用法：\`${model ? '/model [模型]' : '/effort [档位]'}\`**`); return; }
-    const session = sessionId ? await ctx.runtime.getSession(sessionId) : undefined;
-    if (!session) { await fail(`**当前话题还没有会话。**\n\n先发一条任务开始会话；想在开始时就指定${label}，用 \`/new ${flag} -- 任务\`。`); return; }
-    if (!isRunnable(session)) { await fail('**当前会话已关闭，不能切换。**\n\n发送 `/resume` 恢复，或用 `/new` 开新会话。'); return; }
-    const agent = (await ctx.runtime.listAgents?.())?.find(item => item.id === session.agentId);
-    const current = model ? session.model ?? agent?.model : session.reasoningEffort ?? agent?.reasoningEffort;
-    const currentLine = `**当前${label}：${current ? `\`${larkCommandEcho(current, 64)}\`` : '未指定（Agent 默认）'}**`;
-    const unsupported = `${larkCommandEcho(agent?.name ?? session.agentId, 64)} 不支持在会话中切换${label}`;
-    const requested = route.args[0];
-    // 终端驱动没有会话内切换：不列档位、不去连终端（连接会拉起终端进程）再被拒绝。
-    if (session.protocol === 'pty-cli') {
-      if (!requested) await reply(`当前${label}`, `${currentLine}\n\n当前 Agent 不支持在会话中切换${label}。要换${label}，用 \`/new ${flag} -- 任务\` 开新会话。`);
-      else await fail(`**${unsupported}，${label}没有改动。**\n\n要换${label}，用 \`/new ${flag} -- 任务\` 开新会话。`);
-      return;
-    }
-    if (!requested) {
-      const found = (await larkSessionConfigProbe(agent, session, larkPermissionMode(config))).result;
-      const options = (model ? found?.models : found?.reasoningEfforts)?.map(item => item.id) ?? [];
-      const shown = options.slice(0, 30).map(item => `\`${larkCommandEcho(item, 64)}\``).join('、');
-      await reply(`当前${label}`, [
-        currentLine,
-        shown ? `可选：${shown}${options.length > 30 ? `，等共 ${options.length} 项` : ''}` : '可选项暂时读取不到，可以直接输入名称尝试。',
-        `切换：\`${command} ${model ? '<模型>' : '<档位>'}\`。只在会话空闲时切换，下一轮起使用新值；本轮运行中会被拒绝。`
-      ].join('\n\n'));
-      return;
-    }
-    // 权限照搬 /new --model：执行策略先过，受管理的群再过群级授权（run.change_model 是群管理员动作）。
-    try { await ctx.requireExecution('session', 'run.change_model'); }
-    catch (error) {
-      if (!(error instanceof LarkServiceError)) throw error;
-      await fail(`**当前没有切换${label}的权限。**\n\n${larkCommandEcho(error.message, 200)}`); return;
-    }
-    if (config.managedGroup) {
-      const decision = await ctx.groupManager?.authorize(config.appId, event.chatId, event.senderOpenId, 'run.change_model');
-      if (!decision?.allowed) { await fail(`**当前账号没有切换会话${label}的权限。**\n\n${larkCommandEcho(decision?.reason ?? '群里受管理时，这需要群管理员权限。', 200)}`); return; }
-    }
-    if (!agent) { await fail('**找不到本会话的 Agent，没有切换。**'); return; }
-    // 与查看同一次探测、同一个 10 秒上限（命中同一份缓存）；思考强度按会话当前模型取档位。
-    const probe = await larkSessionConfigProbe(agent, session, larkPermissionMode(config));
-    if (!probe.result) { await fail(`**10 秒内没有读到 Agent 的可选${label}，没有切换。**\n\n稍后再试，或发送 \`${command}\` 查看可选项。`); return; }
-    const available = probe.result;
-    try {
-      await validateLarkLaunchOptions(model ? { model: requested } : { reasoningEffort: requested }, probe.agent!, config.workspaceAliases, async () => available);
-    } catch (error) { await fail(`**${larkCommandEcho(error instanceof Error ? error.message : String(error), 200)}**\n\n发送 \`${command}\` 查看可选项。`); return; }
-    if (requested === (model ? session.model : session.reasoningEffort)) { await reply(`${command} 无需切换`, `**当前${label}已经是 \`${larkCommandEcho(requested, 64)}\`。**`); return; }
-    let updated: Session;
-    try {
-      updated = await (model ? ctx.runtime.setModel!(session.id, requested) : ctx.runtime.setReasoningEffort!(session.id, requested));
-    } catch (error) {
-      const text = larkSessionConfigFailure(error, { command, label, flag, agent: agent.name ?? session.agentId });
-      if (!text) throw error;
-      await fail(text); return;
-    }
-    const pinned = await ctx.pinSwitchedSession(config, updated);
-    await reply(`已切换${label}`, `**${label}已切换为 \`${larkCommandEcho(requested, 64)}\`。**\n\n原值：${current ? `\`${larkCommandEcho(current, 64)}\`` : 'Agent 默认'}。下一轮起使用新值。${pinned ? '' : '\n\n注意：没能保存会话绑定，服务重启后这个话题可能不会沿用当前会话。'}`);
+  route: Extract<LarkCommandRoute, { kind: 'intent' }>, config: StoredLarkConfig, event: LarkMessageEvent, sessionId: string | undefined, reply: CommandContext['replyCard']
+) {
+  const model = route.command === 'model';
+  const command = model ? '/model' : '/effort';
+  const label = model ? '模型' : '思考强度';
+  const flag = model ? '--model 模型' : '--effort 档位';
+  const fail = (markdown: string) => reply(`${command} 未执行`, markdown, { failed: true });
+  if (route.args.length > 1) { await fail(`**用法：\`${model ? '/model [模型]' : '/effort [档位]'}\`**`); return; }
+  const session = sessionId ? await ctx.runtime.getSession(sessionId) : undefined;
+  if (!session) { await fail(`**当前话题还没有会话。**\n\n先发一条任务开始会话；想在开始时就指定${label}，用 \`/new ${flag} -- 任务\`。`); return; }
+  if (!isRunnable(session)) { await fail('**当前会话已关闭，不能切换。**\n\n发送 `/resume` 恢复，或用 `/new` 开新会话。'); return; }
+  const agent = (await ctx.runtime.listAgents?.())?.find(item => item.id === session.agentId);
+  const current = model ? session.model ?? agent?.model : session.reasoningEffort ?? agent?.reasoningEffort;
+  const currentLine = `**当前${label}：${current ? `\`${larkCommandEcho(current, 64)}\`` : '未指定（Agent 默认）'}**`;
+  const unsupported = `${larkCommandEcho(agent?.name ?? session.agentId, 64)} 不支持在会话中切换${label}`;
+  const requested = route.args[0];
+  // 终端驱动没有会话内切换：不列档位、不去连终端（连接会拉起终端进程）再被拒绝。
+  if (session.protocol === 'pty-cli') {
+    if (!requested) await reply(`当前${label}`, `${currentLine}\n\n当前 Agent 不支持在会话中切换${label}。要换${label}，用 \`/new ${flag} -- 任务\` 开新会话。`);
+    else await fail(`**${unsupported}，${label}没有改动。**\n\n要换${label}，用 \`/new ${flag} -- 任务\` 开新会话。`);
+    return;
   }
+  if (!requested) {
+    const found = (await larkSessionConfigProbe(agent, session, larkPermissionMode(config))).result;
+    const options = (model ? found?.models : found?.reasoningEfforts)?.map(item => item.id) ?? [];
+    const shown = options.slice(0, 30).map(item => `\`${larkCommandEcho(item, 64)}\``).join('、');
+    await reply(`当前${label}`, [
+      currentLine,
+      shown ? `可选：${shown}${options.length > 30 ? `，等共 ${options.length} 项` : ''}` : '可选项暂时读取不到，可以直接输入名称尝试。',
+      `切换：\`${command} ${model ? '<模型>' : '<档位>'}\`。只在会话空闲时切换，下一轮起使用新值；本轮运行中会被拒绝。`
+    ].join('\n\n'));
+    return;
+  }
+  // 权限照搬 /new --model：执行策略先过，受管理的群再过群级授权（run.change_model 是群管理员动作）。
+  try { await ctx.requireExecution('session', 'run.change_model'); }
+  catch (error) {
+    if (!(error instanceof LarkServiceError)) throw error;
+    await fail(`**当前没有切换${label}的权限。**\n\n${larkCommandEcho(error.message, 200)}`); return;
+  }
+  if (config.managedGroup) {
+    const decision = await ctx.groupManager?.authorize(config.appId, event.chatId, event.senderOpenId, 'run.change_model');
+    if (!decision?.allowed) { await fail(`**当前账号没有切换会话${label}的权限。**\n\n${larkCommandEcho(decision?.reason ?? '群里受管理时，这需要群管理员权限。', 200)}`); return; }
+  }
+  if (!agent) { await fail('**找不到本会话的 Agent，没有切换。**'); return; }
+  // 与查看同一次探测、同一个 10 秒上限（命中同一份缓存）；思考强度按会话当前模型取档位。
+  const probe = await larkSessionConfigProbe(agent, session, larkPermissionMode(config));
+  if (!probe.result) { await fail(`**10 秒内没有读到 Agent 的可选${label}，没有切换。**\n\n稍后再试，或发送 \`${command}\` 查看可选项。`); return; }
+  const available = probe.result;
+  try {
+    await validateLarkLaunchOptions(model ? { model: requested } : { reasoningEffort: requested }, probe.agent!, config.workspaceAliases, async () => available);
+  } catch (error) { await fail(`**${larkCommandEcho(error instanceof Error ? error.message : String(error), 200)}**\n\n发送 \`${command}\` 查看可选项。`); return; }
+  if (requested === (model ? session.model : session.reasoningEffort)) { await reply(`${command} 无需切换`, `**当前${label}已经是 \`${larkCommandEcho(requested, 64)}\`。**`); return; }
+  let updated: Session;
+  try {
+    updated = await (model ? ctx.runtime.setModel!(session.id, requested) : ctx.runtime.setReasoningEffort!(session.id, requested));
+  } catch (error) {
+    const text = larkSessionConfigFailure(error, { command, label, flag, agent: agent.name ?? session.agentId });
+    if (!text) throw error;
+    await fail(text); return;
+  }
+  const pinned = await ctx.pinSwitchedSession(config, updated);
+  await reply(`已切换${label}`, `**${label}已切换为 \`${larkCommandEcho(requested, 64)}\`。**\n\n原值：${current ? `\`${larkCommandEcho(current, 64)}\`` : 'Agent 默认'}。下一轮起使用新值。${pinned ? '' : '\n\n注意：没能保存会话绑定，服务重启后这个话题可能不会沿用当前会话。'}`);
+}
 
 async function executeRenameCommand(ctx: CommandContext,
-    route: Extract<LarkCommandRoute, { kind: 'intent' }>, config: StoredLarkConfig, event: LarkMessageEvent, sessionId: string | undefined, reply: CommandContext['replyCard']
-  ) {
-    const fail = (markdown: string) => reply('/rename 未执行', markdown, { failed: true });
-    const text = route.argsText;
-    if (!text || text.startsWith('--') && text !== '--clear') { await fail('**用法：`/rename <名称>`；`/rename --clear` 恢复默认标题。**'); return; }
-    // Web 改名要求安装管理员。飞书里与之对应的是安装管理员在机器人设置里配置的操作白名单（机器人所有者），
-    // 受管理的群也一样；群管理员角色只管本群，不能改全局可见的会话名。未配置白名单时不开放。
-    if (!larkTaskAgentAllowlistConfigured(config)) { await fail('未配置操作白名单时，飞书里不能执行 /rename，请在 Web 上改名。'); return; }
-    if (!event.senderOpenId || !await ctx.isStaticOperatorAllowed(config, event.senderOpenId, event.chatId)) {
-      await fail('当前账号无权改名：需要是机器人所有者（机器人设置里操作白名单中的人），群管理员不够（与 Web 改名需要安装管理员一致）。');
-      return;
-    }
-    let name: string | null;
-    try { name = text === '--clear' ? null : normalizeSessionName(text); }
-    catch (error) {
-      if (!(error instanceof RuntimeError)) throw error;
-      await fail(`**名称不合法。**\n\n名称不能为空、不能换行，最长 ${SESSION_NAME_MAX_LENGTH} 个字符。`); return;
-    }
-    const session = sessionId ? await ctx.runtime.getSession(sessionId) : undefined;
-    if (!session) { await fail('**当前话题还没有会话。**\n\n先发一条任务开始会话，再改名。'); return; }
-    try { await ctx.runtime.setSessionName!(session.id, name); }
-    catch (error) {
-      if (!(error instanceof RuntimeError) || error.code !== 'INVALID_WORK_SESSION') throw error;
-      await fail('**工作项管理的会话不能改名。**'); return;
-    }
-    const before = session.name ? `\`${escapeLarkPromptEcho(larkCommandEcho(session.name, 80))}\`` : '默认标题';
-    await reply('已改名', name === null ? `**已恢复默认标题。**\n\n原名称：${before}。` : `**会话名称已改为 \`${escapeLarkPromptEcho(larkCommandEcho(name, 80))}\`。**\n\n原名称：${before}。Web、/tasks 和 /resume list 都显示新名称。`);
+  route: Extract<LarkCommandRoute, { kind: 'intent' }>, config: StoredLarkConfig, event: LarkMessageEvent, sessionId: string | undefined, reply: CommandContext['replyCard']
+) {
+  const fail = (markdown: string) => reply('/rename 未执行', markdown, { failed: true });
+  const text = route.argsText;
+  if (!text || text.startsWith('--') && text !== '--clear') { await fail('**用法：`/rename <名称>`；`/rename --clear` 恢复默认标题。**'); return; }
+  // Web 改名要求安装管理员。飞书里与之对应的是安装管理员在机器人设置里配置的操作白名单（机器人所有者），
+  // 受管理的群也一样；群管理员角色只管本群，不能改全局可见的会话名。未配置白名单时不开放。
+  if (!larkTaskAgentAllowlistConfigured(config)) { await fail('未配置操作白名单时，飞书里不能执行 /rename，请在 Web 上改名。'); return; }
+  if (!event.senderOpenId || !await ctx.isStaticOperatorAllowed(config, event.senderOpenId, event.chatId)) {
+    await fail('当前账号无权改名：需要是机器人所有者（机器人设置里操作白名单中的人），群管理员不够（与 Web 改名需要安装管理员一致）。');
+    return;
   }
+  let name: string | null;
+  try { name = text === '--clear' ? null : normalizeSessionName(text); }
+  catch (error) {
+    if (!(error instanceof RuntimeError)) throw error;
+    await fail(`**名称不合法。**\n\n名称不能为空、不能换行，最长 ${SESSION_NAME_MAX_LENGTH} 个字符。`); return;
+  }
+  const session = sessionId ? await ctx.runtime.getSession(sessionId) : undefined;
+  if (!session) { await fail('**当前话题还没有会话。**\n\n先发一条任务开始会话，再改名。'); return; }
+  try { await ctx.runtime.setSessionName!(session.id, name); }
+  catch (error) {
+    if (!(error instanceof RuntimeError) || error.code !== 'INVALID_WORK_SESSION') throw error;
+    await fail('**工作项管理的会话不能改名。**'); return;
+  }
+  const before = session.name ? `\`${escapeLarkPromptEcho(larkCommandEcho(session.name, 80))}\`` : '默认标题';
+  await reply('已改名', name === null ? `**已恢复默认标题。**\n\n原名称：${before}。` : `**会话名称已改为 \`${escapeLarkPromptEcho(larkCommandEcho(name, 80))}\`。**\n\n原名称：${before}。Web、/tasks 和 /resume list 都显示新名称。`);
+}
 
 export const handleModel: ChatCommandHandler = async (ctx) => {
   const { event, config, sessionId, replyCard, route } = ctx;

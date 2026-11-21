@@ -1,7 +1,7 @@
 import { LarkServiceError } from '../service.js';
 import { resolveLarkScopeId } from '../session-resolver.js';
 import type { ParsedSlashCommand } from '../commands.js';
-import type { LarkCoordinatorInbound } from '../coordinator-inbound.js';
+import type { WorkflowServices } from './service-context.js';
 import type { LarkCommandReceipts } from '../coordinator-inbound.js';
 import type { LarkMessageEvent } from '../listener.js';
 import type { StoredLarkConfig } from '../config.js';
@@ -16,7 +16,7 @@ interface WorkflowInput {
   parsed?: ParsedSlashCommand;
   receipts?: LarkCommandReceipts;
 }
-export type WorkflowCommandHandler = (ctx: ReturnType<LarkCoordinatorInbound['workflowDependencies']>, input: WorkflowInput) => Promise<boolean>;
+export type WorkflowCommandHandler = (ctx: WorkflowServices, input: WorkflowInput) => Promise<boolean>;
 
 export const tasks: WorkflowCommandHandler = async (ctx, { event, config, parsed, receipts }) => {
   const elements = await ctx.taskDashboard(event, config, Number(parsed!.args[0] ?? 1));

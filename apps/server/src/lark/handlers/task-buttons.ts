@@ -1,5 +1,4 @@
-import { clearTaskReportSafely, errorMessage } from '@dutydeck/shared';
-import { deferredConfirmationId, type Session } from '@dutydeck/shared';
+import { clearTaskReportSafely, deferredConfirmationId, errorMessage } from '@dutydeck/shared';
 import { saveLarkConfig } from '../config.js';
 import { isLarkCardActionAvailable } from '../card-actions.js';
 import type { TaskButtonHandler } from './button-context.js';
@@ -67,7 +66,7 @@ const useCommand: TaskButtonHandler = async (ctx, input) => {
 };
 
 const verify: TaskButtonHandler = async (ctx, input) => {
-  const { task, taskId, effectiveConfig, operatorOpenId } = input;
+  const { task, effectiveConfig, operatorOpenId } = input;
   // 与渲染端同一个判断：verificationView 内部就走 isLarkCardActionAvailable，
   // 所以「界面上出现的按钮」与「后端接受的回调」严格等价，不存在死按钮也不存在旁路。
   if (!(await ctx.verificationView(task, effectiveConfig, task.state)).canRun) {

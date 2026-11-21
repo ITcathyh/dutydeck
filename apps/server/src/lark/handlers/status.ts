@@ -4,7 +4,7 @@ import { larkCommandEcho } from '../commands.js';
 import type { ChatCommandHandler } from './command-context.js';
 
 export const handleStatus: ChatCommandHandler = async (ctx) => {
-  const { event, config, group, sessionId, latestTask, replyCard } = ctx;
+  const { event, config, sessionId, latestTask, replyCard } = ctx;
   const participation = event.chatType === 'group'
     ? await ctx.participation?.describe({ appId: config.appId, chatId: event.chatId }).catch(() => undefined) : undefined;
   const usage = await ctx.usage?.describe(config.appId, event.chatType === 'group' ? event.chatId : undefined).catch(() => undefined);

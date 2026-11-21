@@ -23,7 +23,7 @@ export const handleRepair: ChatCommandHandler = async (ctx) => {
 };
 
 export const handleGrant: ChatCommandHandler = async (ctx) => {
-  const { event, config, group, replyCard, route } = ctx;
+  const { event, config, replyCard, route } = ctx;
   const command = route.command === 'grant' ? 'grant' : 'revoke';
   const { argsText } = route;
   const manager = ctx.groupManager;

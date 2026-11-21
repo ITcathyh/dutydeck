@@ -5,12 +5,7 @@ import type { ChatCommandHandler } from './handlers/command-context.js';
  *
  * 设计约束（与 docs/interaction-design-2026-08-30.md 2.1 与第 3 节一致）：
  *
- * 1. **纯模块，零依赖**：本文件不 import 任何东西——不碰 runtime、不发网络请求、不触碰
- *    卡片生命周期。它只返回一个「被描述的意图」（intent），由 coordinator 执行。
- *    这样命令层可以单测，而权限判定与卡片生命周期仍留在 coordinator 里（那里已经有
- *    白名单解析与进度卡/收据的全套机制，不应该被复制一份）。
- *    需要 LarkCardElement 时在本文件本地声明，不从 card-renderer.ts 引入（card-renderer
- *    依赖 service.ts，会把网络层拖进这个纯模块）。
+ * 1. 解析和权限判定只读注册表。协调器完成授权后才调用对应处理器，按需加载各领域的执行依赖。
  *
  * 2. **只有一个命令形状校验器**：{@link parseSlashCommand}。路由（{@link routeLarkCommand}）
  *    与权限门（{@link authorizeLarkCommandText}）都通过同一个 {@link evaluateLarkCommand}
@@ -216,8 +211,8 @@ export const larkCommandRegistry: readonly LarkCommandDefinition[] = [
   { name: 'reject', workflow: async (ctx, input) => (await import('./handlers/workflow-commands.js')).reject(ctx, input), summary: '拒绝卡片上的本次工具调用', usage: '/reject <请求编号>', mutating: true, requires: c => c.approval === true, unavailableReason: '当前机器人无法处理工具调用审批，/reject 已停用。' },
   // 会话记忆跨话题、跨 /new、跨重启生效：同一机器人的所有群共享一份，每个私聊各自一份。
   { name: 'remember', execute: async ctx => (await import('./handlers/memory.js')).handleRemember(ctx), summary: '把一条事实、偏好或约定保存为长期记忆（私聊各自独立；群聊的记忆范围按 bot 配置：各群共享或按群隔离），之后每轮任务都会带给 Agent', usage: '/remember <内容>', mutating: true, requires: c => c.memory === true, unavailableReason: '当前服务没有会话记忆存储，/remember 已停用。' },
-  { name: 'memory', execute: async ctx => (await import('./handlers/memory.js')).handleRemember(ctx), summary: '查看当前可见的记忆及其编号、后台提取与整理状态', usage: '/memory；/memory consolidate；/memory ignore 描述；/memory ignore list；/memory ignore remove 编号', mutating: false, requires: c => c.memory === true, unavailableReason: '当前服务没有会话记忆存储，/memory 已停用。' },
-  { name: 'forget', execute: async ctx => (await import('./handlers/memory.js')).handleRemember(ctx), summary: '删除当前可见记忆中指定编号的一条', usage: '/forget <记忆编号>', mutating: true, requires: c => c.memory === true, unavailableReason: '当前服务没有会话记忆存储，/forget 已停用。' },
+  { name: 'memory', execute: async ctx => (await import('./handlers/memory.js')).handleMemory(ctx), summary: '查看当前可见的记忆及其编号、后台提取与整理状态', usage: '/memory；/memory consolidate；/memory ignore 描述；/memory ignore list；/memory ignore remove 编号', mutating: false, requires: c => c.memory === true, unavailableReason: '当前服务没有会话记忆存储，/memory 已停用。' },
+  { name: 'forget', execute: async ctx => (await import('./handlers/memory.js')).handleForget(ctx), summary: '删除当前可见记忆中指定编号的一条', usage: '/forget <记忆编号>', mutating: true, requires: c => c.memory === true, unavailableReason: '当前服务没有会话记忆存储，/forget 已停用。' },
   {
     name: 'help', reply: helpReply,
     summary: '列出当前可用的 Dutydeck 命令及其用法',

@@ -1,3 +1,4 @@
+import type { CommandServices, ButtonServices, WorkflowServices } from './handlers/service-context.js';
 import type { ButtonResult, ButtonSource } from './handlers/button-context.js';
 import { answer as answerWorkflow } from './handlers/workflow-commands.js';
 import { storedButtons } from './handlers/stored-buttons.js';
@@ -5,7 +6,6 @@ import { taskButtons } from './handlers/task-buttons.js';
 import { resolveCallback } from './handlers/callbacks.js';
 import { turnDecisionKey } from './recovery-decision.js';
 import { fromRecord } from './turn-record.js';
-import { clearTaskReportSafely, errorMessage, isTerminalTaskStatus } from '@dutydeck/shared';
 import { annotateDisposition, type Disposition } from './disposition.js';
 import { larkMessageAnchor } from './message-anchor.js';
 import { runAgentScheduleRequest } from '../agent-schedule-request.js';
@@ -13,68 +13,52 @@ import { larkElapsedLabel } from './card-status.js';
 import { agentSettingsConfirmKind, parseAgentSettings, showAgentSettings } from './agent-settings.js';
 import { createHash } from 'node:crypto';
 import { jsonSha256 } from '../hash.js';
-import { describeLarkTaskRecovery, larkContinuePrompt, larkRecoveryRetainedNote, larkReliability, larkSteeringUnknownNote } from './task-recovery.js';
+import { describeLarkTaskRecovery, larkContinuePrompt, larkReliability } from './task-recovery.js';
 import type { LarkInteraction } from './workflow-interactions.js';
 import { formatUnknownTaskTime as deadlineText } from '../task-resolution.js';
 import type { LarkInboxAdoption, LarkInboxRecord } from './task-inbox.js';
 import { larkTurnIdentityError, larkConfirmationInputDigest, isLarkFirstCardUndelivered } from './task-inbox.js';
-import { larkForkWorkspaceMode, larkNativeForkId, larkResumeUnavailable } from './session-branches.js';
-import { parseLarkNewSession, validateLarkLaunchOptions } from './new-session.js';
-import type { AgentModelsResult } from '../agent-models.js';
-import { discoverSessionAgentModels } from '../session-model-probe.js';
-import { formatLarkHandoff, larkHandoffAck, larkHandoffTitle, larkHandoffEventLimit, larkHandoffIndexLimit } from './handoff.js';
+import { parseLarkNewSession } from './new-session.js';
+import { formatLarkHandoff, larkHandoffEventLimit, larkHandoffIndexLimit } from './handoff.js';
 import { explicitFinalContext, readExplicitFinal } from './explicit-final.js';
 import { redactTraceText } from './secret-redaction.js';
 import { readGitSnapshot } from './git-status.js';
 import { buildLarkTaskDashboard, pageLarkTaskDashboard, type LarkTaskDashboardDecision, type LarkTaskDashboardEntry } from './task-dashboard.js';
 import { collectInbox } from '../inbox.js';
 import { isRunnable } from '../ci-common.js';
-import { isLarkGroupChatMemoryPool, isLarkGroupMemoryPool, isLarkPerGroupMemoryPool, isLarkMemoryId, isLarkMemoryIgnoreRuleId, larkMemoryLimits, larkMemoryScope, renderLarkMemoryList, renderLarkMemoryStatusLine } from './memory.js';
-import { deferredConfirmationId, describeScheduleTrigger, scenarioPolicyVersion, parseLarkSourceId, resolveParticipation, normalizeSessionName, RuntimeError, SESSION_NAME_MAX_LENGTH, timeLoop, type AgentConfig, type ChannelMapping, type PolicyAction, type Session, type TaskRecord } from '@dutydeck/shared';
+import { describeScheduleTrigger, scenarioPolicyVersion, parseLarkSourceId, resolveParticipation, RuntimeError, timeLoop, type ChannelMapping, type PolicyAction, type Session, type TaskRecord } from '@dutydeck/shared';
 import { decideWake, isExplicitWake, wakeSignals, type WakeFacts } from './wake-decision.js';
 import { directScenarioPrompt } from './scenario-direct.js';
 import { larkScenarioAdoptionOf } from './scenario-legacy.js';
-import { executeScheduleCommand, scheduleRequestCard } from './schedule-command.js';
 import { isBotSenderType, renderGroupMention } from './card-mentions.js';
-import { larkExecutionIdentity, larkMemoryEnabled, larkPermissionMode, readLarkConfig, saveLarkConfig, type StoredLarkConfig } from './config.js';
+import { larkExecutionIdentity, larkPermissionMode, readLarkConfig, type StoredLarkConfig } from './config.js';
 import type { LarkMessageResource } from './message-content.js';
 import { LarkServiceError, type LarkChatMessage } from './service.js';
 import { isLarkDeterministicFailure } from './api-gate.js';
 import { larkRecoveryNoticeExpired, larkRedispatchMaxAgeMs } from './turn-redispatch.js';
-import { busyProgressSummary, eventsForRuntimeTask, loadLarkTaskWindow, renderLarkResultElements, steeringOutcomeText, renderLarkRecordExport, terminalTaskStates, type LarkCardElement } from './card-renderer.js';
-import { sendLarkFile } from './result-delivery.js';
+import { busyProgressSummary, eventsForRuntimeTask, loadLarkTaskWindow, renderLarkResultElements, terminalTaskStates, type LarkCardElement } from './card-renderer.js';
 import { larkResultDeliveryIssues } from './reconciler.js';
 import { larkSessionDetailUrl } from './detail-link.js';
 import { clock } from './group-task-context.js';
 import { isLarkCardActionAvailable, parseLarkCardActionValue, safeLarkWebUrl } from './card-actions.js';
 import {
-  larkAgentAvailabilityLine,
-  larkCommandCapabilities,
-  larkCommandEcho,
-  larkHelpCardTitle,
-  parseLarkHelpPageValue,
-  parseSlashCommand,
-  resolveLarkCommand,
-  renderLarkCommandHelp,
-  routeLarkCommand,
-  type LarkCommandRoute
+  larkAgentAvailabilityLine, larkCommandCapabilities, larkCommandEcho, larkHelpCardTitle,
+  parseSlashCommand, resolveLarkCommand, routeLarkCommand, type LarkCommandRoute
 } from './commands.js';
 import { expandLarkPluginCommand, larkPluginCommandHelp, resolveLarkPluginQuery, callLarkPluginQuery, pluginQueryReplyText } from './plugin-commands.js';
-import { clipCodePoints, escapeLarkPromptEcho, renderQueueSummary, QUEUE_SUMMARY_MAX_ITEMS } from './queue-summary.js';
+import { clipCodePoints, escapeLarkPromptEcho } from './queue-summary.js';
 import { unwrapEditedTextContent } from './edited-message.js';
 import { withLarkContextReadTimeout } from './context-read-timeout.js';
 import { larkNotice } from './notify-tier.js';
 import { claimLarkTaskDispatches, larkTaskAgentAllowlistConfigured, larkTaskAgentGuid, releaseLarkTaskClaim } from './task-agent.js';
-import { buildRepairConfirmCard, parseRepairCardActionValue, renderRepairResultCard, runOpenPlatformRepair } from './repair.js';
-import { buildPullRequestConfirmCard, buildPullRequestFollowCard } from './pull-request-card.js';
+import { buildRepairConfirmCard, renderRepairResultCard, runOpenPlatformRepair } from './repair.js';
 import { connectLarkOpenPlatformSession } from './open-platform-session.js';
-import { findLarkThreadContinuation, listPersistedLarkSessions, larkSessionMatchesScope, larkSourceId, larkGroupKey, larkSessionConfigKey, parsePrompt, resolveLarkScopeId, sameWorkspace } from './session-resolver.js';
+import { findLarkThreadContinuation, listPersistedLarkSessions, larkSessionMatchesScope, larkGroupKey, larkSessionConfigKey, parsePrompt, resolveLarkScopeId, sameWorkspace } from './session-resolver.js';
 import type { LarkMessageEvent } from './listener.js';
 import type { LarkGroup, LarkTask, PersistedLarkCardTask } from './coordinator.js';
 import { parseCardTask, parseOptionalCardTask } from './persisted-card-task.js';
 import { type LarkCommandPrompt, larkCardChannel, larkHumanTaskAllowed, type LarkRelaunchClaim, larkTaskTitle, sendTaskCard } from './coordinator-core.js';
 import { LarkCoordinatorDispatch, larkCancelledBeforeSubmit, larkTurnRequest, larkTurnRequestKey } from './coordinator-dispatch.js';
-import { planPrompt } from '../plan-mode.js';
 import { planReplyAction } from './plan-flow.js';
 import { AgentCommandParamError, agentCommandConfirmSummary, agentCommandPlan, larkAgentCommandKind, type LarkAgentCommandRequest, type LarkAgentViewRequest, type LarkAgentSettingsRequest } from './agent-command.js';
 import type { LarkConfirmRecord } from './confirm-cards.js';
@@ -86,12 +70,6 @@ const larkPlainText = (markdown: string) => markdown.replace(/\*\*/g, '').trim()
 // 飞书消息协调器 · 入站唤醒：入站消息与卡片回调的入口和路由、聊天命令与 /status、
 // 工作流与问答回复、群参与认领，以及飞书任务的认领。
 
-/**
- * /status 的执行身份说明。机器人干活用的是**部署这台机器的人**的身份：worktree 只隔离
- * 可写目录，不隔离宿主凭据、文件系统与网络（README「远程浏览器访问」一节同一口径）。
- * 别人在群里使唤它，实际就是拿部署者的权限在跑，这件事必须写在状态里，而不是靠人推断。
- */
-/** 生效的群访问口径的人话说明，/grant、/revoke 的回执用它写清「改之前/改之后谁能用」。 */
 /** 私信里的登录卡：一句说明、链接按钮、一句使用限制。登录链接只出现在这张卡上。 */
 const larkDetailLoginElements = (url: string): LarkCardElement[] => [
   { tag: 'markdown', content: '点击下方按钮登录 Dutydeck Web，并打开这个任务的会话页。', margin: '0px' },
@@ -473,7 +451,7 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
     return { entries, sessions };
   }
 
-  private workflowDependencies(workflows: NonNullable<typeof this.workflows>) {
+  private workflowDependencies(workflows: NonNullable<typeof this.workflows>): WorkflowServices {
     return {
       workflows,
       chatModeResolver: this.chatModeResolver,
@@ -1527,7 +1505,7 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
     return access?.allowed ?? await this.isOperatorAllowed(config, operatorOpenId, chatId, sessionId);
   }
 
-  private commandDependencies() {
+  private commandDependencies(): CommandServices {
     return {
       absorbQueuedTask: this.absorbQueuedTask.bind(this),
       approvalBlock: this.approvalBlock.bind(this),
@@ -1615,18 +1593,12 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
       }
       const execute = route.definition.execute;
       if (execute) return await execute({ ...this.commandDependencies(), route, event, config, group, scopeId, sessionId, latestTask, replyCard, acknowledgement });
-
-
-
-      // 记忆命令的授权就是命令层的白名单门（发言人能在本聊天用命令，就能维护本聊天可见的记忆），
-      // 作用域由当前聊天决定：群聊是本机器人的群共享池，私聊是自己的池；不接受参数指定别的聊天。
     } catch (error) {
       this.log.warn({ error, command: route.command, messageId: event.messageId }, '执行飞书聊天命令失败');
       await replyCard(`/${route.command} 执行失败`, `**命令未能完成。**\n\n${error instanceof Error ? error.message : String(error)}\n\n可稍后重试，或前往 Dutydeck Web 处理。`, { failed: true });
     }
     return 'handled';
   }
-
 
   /**
    * 切换后的模型与机器人配置的默认模型不一致时，普通消息的会话匹配（larkSessionMatchesScope）会在重启后认不出这条会话，
@@ -1654,7 +1626,6 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
       return false;
     }
   }
-
 
   /** /fork list：同一事项（源会话与它的所有分身共用）里 relation=fork 的会话，只列调用人能查看结果的。 */
   private async replyForkList(config: StoredLarkConfig, event: LarkMessageEvent, sessionId: string | undefined, reply: ChatCommandReply) {
@@ -1763,7 +1734,6 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
       eventsIncomplete: window.length >= larkHandoffEventLimit || turns.some(turn => !turn.events.length),
       ...(cwd ? { cwd, git: await readGitSnapshot(cwd) } : {}) });
   }
-
 
   /**
    * 汇总会话/Agent/工作区/排队状态，口径与 Web 保持一致：运行数与待执行指令数分开。
@@ -2278,7 +2248,7 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
     await this.handle(event, config);
   }
 
-  private buttonDependencies() {
+  private buttonDependencies(): ButtonServices {
     const host = this;
     return {
       capabilitiesForTask: this.capabilitiesForTask.bind(this),

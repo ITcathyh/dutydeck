@@ -1,12 +1,12 @@
 import type { LarkCommandRoute } from '../commands.js';
 import type { LarkGroup, LarkTask } from '../coordinator.js';
 import type { LarkCommandPrompt } from '../coordinator-core.js';
-import type { LarkCoordinatorInbound } from '../coordinator-inbound.js';
+import type { CommandServices } from './service-context.js';
 import type { LarkMessageEvent } from '../listener.js';
 import type { StoredLarkConfig } from '../config.js';
 import type { LarkCardElement } from '../card-renderer.js';
 
-export interface CommandContext extends ReturnType<LarkCoordinatorInbound['commandDependencies']> {
+export interface CommandContext extends CommandServices {
   route: Extract<LarkCommandRoute, { kind: 'intent' }>;
   event: LarkMessageEvent;
   config: StoredLarkConfig;
