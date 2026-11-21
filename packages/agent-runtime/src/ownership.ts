@@ -115,8 +115,8 @@ export class RuntimeSessionMutations extends SessionMutations {
   constructor(assertControl: () => void, private readonly assertReady: () => void, readonly owners: {
     lifecycle(id: string): Owner;
     ownerOf(id: string): Owner;
-    transition(id: string, reason: RevocationReason): Owner;
-    renew(id: string, parent: Owner): void;
+    transition(id: string, reason?: RevocationReason): Owner;
+    renew(id: string, parent: Owner): Owner;
     attempt(id: string): Owner | undefined;
   }) { super(assertControl); }
 }

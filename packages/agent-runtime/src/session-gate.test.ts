@@ -26,7 +26,7 @@ type Case = [string, boolean, boolean, boolean, (f: ReturnType<typeof fixture>) 
 const cases: Case[] = [
   ['clear', false, false, false, () => {}],
   ['capacity_wait', true, false, false, ({ r, execution }) => { r.capacityTimers.set(id, { taskId: 'task' }); execution.getTaskExecution.mockReturnValue({ task: { status: 'queued' }, currentAttempt: { automaticRetry: { dueAt: '2099-01-01' } } }); }],
-  ['pty_retirement', true, false, true, ({ r }) => { r.ptyRetirements.add(id); }],
+  ['pty_retirement', true, false, true, ({ r }) => { runtimeComponents(r).recovery.reservePtyRetirement(id); }],
   ['shutting_down', true, false, true, ({ r }) => { r.shuttingDown = true; }],
   ['queue_held', true, false, false, ({ r }) => { r.queueHeld = true; }],
   ['initialization_failed', true, false, false, ({ r }) => { r.initializationFailed = true; }],
