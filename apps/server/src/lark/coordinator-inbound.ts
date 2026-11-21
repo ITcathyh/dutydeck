@@ -2287,8 +2287,14 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
   private buttonDependencies() {
     const host = this;
     return {
+      cardMappings: this.cardMappings,
+      currentAccess: this.currentAccess.bind(this),
+      log: this.log,
       get reconcileConfig() { return host.reconcileConfig; },
+      runtime: this.runtime,
+      service: this.service,
       participation: this.workflowOptions.participation,
+      store: this.workflowOptions.store,
     };
   }
 
@@ -2299,61 +2305,6 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
       if (callback) {
         const [key, , handle] = callback;
         return handle(this.buttonDependencies(), { key, workflow, operatorOpenId, context });
-      }
-    }
-    if (workflow && workflow.dutydeck_export_trace === 'download') {
-      if (!operatorOpenId || !context?.messageId || !context.chatId || !this.reconcileConfig || !this.cardMappings || !this.runtime.getEvents) {
-        return { type: 'error', content: '记录入口已失效，请在原任务卡上操作。' };
-      }
-      try {
-        const config = await readLarkConfig(this.workflowOptions.store, this.reconcileConfig.appId);
-        if (!config?.listening) return { type: 'warning', content: '机器人已停用，无法导出记录。' };
-        const mapping = typeof workflow.task_id === 'string' ? await this.cardMappings.get(larkCardChannel(config.appId), workflow.task_id) : undefined;
-        const saved = parseOptionalCardTask(mapping?.extra);
-        if (!mapping || !saved?.runtime_task_id || saved.app_id !== config.appId || saved.chat_id !== context.chatId
-          || ![saved.card_message_id, saved.final_message_id].includes(context.messageId)
-          || saved.chat_type !== 'group' && saved.sender_open_id !== operatorOpenId
-          || String(saved.turn) !== workflow.turn
-          || !await this.currentAccess(config, saved.chat_id, saved.chat_type ?? 'group', operatorOpenId, 'task.view_result', mapping.sessionId, saved.sender_open_id)) {
-          return { type: 'warning', content: '当前账号无权导出此任务记录，或卡片已失效。' };
-        }
-        const task = (await this.runtime.getTasks?.(mapping.sessionId))?.find(item => item.id === saved.runtime_task_id);
-        if (!task) return { type: 'warning', content: '原任务记录不存在，无法导出。' };
-        if (task.status === 'queued' || task.status === 'cancelled') {
-          return { type: 'warning', content: '任务尚未执行，暂无执行记录可导出。' };
-        }
-        // The platform callback has a short deadline. Authorize first, then
-        // deliver to the persisted chat/topic, never to callback-supplied IDs.
-        void (async () => {
-          try {
-            const events = await this.runtime.getEvents!(mapping.sessionId);
-            const start = events.findIndex(item => item.type === 'text' && (item.data as any)?.role === 'user' && (item.data as any)?.taskId === task.id);
-            if (start < 0) throw new Error('原任务记录不完整，无法安全限定导出范围。');
-            // Stop at the next user task as well as the terminal event: an
-            // incomplete old turn must not export a later user's records.
-            const end = events.findIndex((item, index) => index > start && (item.type === 'text' && (item.data as any)?.role === 'user'
-              || item.type === 'task' && (item.data as any)?.task?.id === task.id && isTerminalTaskStatus((item.data as any)?.task?.status)));
-            const text = renderLarkRecordExport(events.slice(start + 1, end < 0 ? undefined : end));
-            const current = await readLarkConfig(this.workflowOptions.store, config.appId);
-            if (!current?.listening || !await this.currentAccess(current, saved.chat_id, saved.chat_type ?? 'group', operatorOpenId, 'task.view_result', mapping.sessionId, saved.sender_open_id)) return;
-            const key = `trace_${createHash('sha256').update([config.appId, task.id, text].join('\0')).digest('hex').slice(0, 40)}`;
-            await sendLarkFile(this.service, { chatId: saved.chat_id,
-              replyMessageId: saved.reply_message_id ?? saved.card_message_id, replyInThread: saved.reply_in_thread }, {
-              data: Buffer.from(text, 'utf8'), filename: '公开执行记录.md', idempotencyKey: key
-            }, this.log, this.workflowOptions.store);
-          } catch (error) {
-            this.log.warn({ error, taskId: task.id }, '导出执行记录失败');
-            await sendTaskCard(this.service, { messageId: saved.card_message_id ?? task.id, chatId: saved.chat_id,
-              chatType: saved.chat_type ?? 'group', threadId: saved.thread_id, messageType: 'text', content: '', mentions: [] }, {
-              state: 'failed', readOnly: true, taskName: '记录未能导出',
-              markdown: '未能获取或发送本轮完整公开记录，请稍后重试。'
-            }, this.log).catch(() => undefined);
-          }
-        })();
-        return { type: 'success', content: '正在导出公开执行记录，文件将发送到原任务会话。' };
-      } catch (error) {
-        this.log.warn({ error }, '受理记录导出失败');
-        return { type: 'error', content: '暂时无法导出，请稍后重试。' };
       }
     }
     // P0-6：/repair 确认卡回调。发布飞书应用版本不可撤销，确认按钮是逐次显式确认的唯一载体；
