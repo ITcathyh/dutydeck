@@ -1,4 +1,5 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { createMemoryLarkRuntime } from './runtime-test-fixture.js';
+import { afterEach, describe, expect, it, onTestFinished, vi } from 'vitest';
 import '../../../../tests/support/fast-wait-for.js';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -661,16 +662,17 @@ describe('Lark message coordinator', () => {
   });
 
   it('rejects malformed and unknown card action values through the shared validator', async () => {
-    const runtime = {
-      start: vi.fn(async () => session), getSession: vi.fn(async () => session), subscribe: vi.fn(() => vi.fn()),
-      send: vi.fn(async () => {}), interrupt: vi.fn(async () => {})
-    };
+    const { runtime, store, cardMappings, close } = await createMemoryLarkRuntime(config);
     const service = {
       addReaction: vi.fn(async () => ({ reactionId: 'reaction-1' })),
       send: vi.fn(async () => ({ messageId: 'om_card' })),
       deleteReaction: vi.fn(async () => {}), update: vi.fn(async () => ({ messageId: 'om_card' }))
     };
-    const coordinator = new LarkMessageCoordinator(runtime as any, service as any, { info: vi.fn(), warn: vi.fn(), error: vi.fn() }, Math.random, 'ou_bot');
+    const coordinator = new LarkMessageCoordinator(runtime, service as any, { info: vi.fn(), warn: vi.fn(), error: vi.fn() }, Math.random, 'ou_bot',
+      undefined, cardMappings, undefined, undefined, undefined, { store });
+    onTestFinished(async () => {
+      try { await coordinator.stop(); } finally { await close(); }
+    });
     for (const value of ['not json', null, [], {}, { action: 'launch_missiles', task_id: 'om_x' }, { action: 'cancel' }]) {
       await expect(coordinator.handleAction(value as any)).resolves.toEqual({ type: 'error', content: '无法识别卡片操作' });
     }
@@ -679,16 +681,17 @@ describe('Lark message coordinator', () => {
   it('routes approval cards issued before the rename into the workflow branch', async () => {
     // 按钮的 callback value 存在飞书服务器上：改名前发出、升级后才被点的卡片仍带 dockmux_workflow。
     // 这里断言它进的是 workflow 分支（回「卡片身份不完整」），而不是掉进「无法识别卡片操作」。
-    const runtime = {
-      start: vi.fn(async () => session), getSession: vi.fn(async () => session), subscribe: vi.fn(() => vi.fn()),
-      send: vi.fn(async () => {}), interrupt: vi.fn(async () => {})
-    };
+    const { runtime, store, cardMappings, close } = await createMemoryLarkRuntime(config);
     const service = {
       addReaction: vi.fn(async () => ({ reactionId: 'reaction-1' })),
       send: vi.fn(async () => ({ messageId: 'om_card' })),
       deleteReaction: vi.fn(async () => {}), update: vi.fn(async () => ({ messageId: 'om_card' }))
     };
-    const coordinator = new LarkMessageCoordinator(runtime as any, service as any, { info: vi.fn(), warn: vi.fn(), error: vi.fn() }, Math.random, 'ou_bot');
+    const coordinator = new LarkMessageCoordinator(runtime, service as any, { info: vi.fn(), warn: vi.fn(), error: vi.fn() }, Math.random, 'ou_bot',
+      undefined, cardMappings, undefined, undefined, undefined, { store });
+    onTestFinished(async () => {
+      try { await coordinator.stop(); } finally { await close(); }
+    });
     for (const key of ['dockmux_workflow', 'dutydeck_workflow']) {
       await expect(coordinator.handleAction({ [key]: 'approve', request_id: 'req_1', generation: 'gen_1' } as any))
         .resolves.toEqual({ type: 'error', content: '卡片身份不完整或已失效。' });
@@ -697,16 +700,19 @@ describe('Lark message coordinator', () => {
 
   it('answers /help with a read-only receipt without starting an Agent turn', async () => {
     // 命令不是 Agent 任务：不得占用一次 Agent 轮次，也不得留下可操作的进度卡。
-    const runtime = {
-      start: vi.fn(async () => session), getSession: vi.fn(async () => session), subscribe: vi.fn(() => vi.fn()),
-      send: vi.fn(async () => {}), interrupt: vi.fn(async () => {})
-    };
+    const { runtime, store, cardMappings, close } = await createMemoryLarkRuntime(config);
     const service = {
       addReaction: vi.fn(async () => ({ reactionId: 'reaction-help' })),
       send: vi.fn(async () => ({ messageId: 'om_help' })),
       deleteReaction: vi.fn(async () => {}), update: vi.fn()
     };
-    const coordinator = new LarkMessageCoordinator(runtime as any, service as any, { info: vi.fn(), warn: vi.fn(), error: vi.fn() }, Math.random, 'ou_bot');
+    const coordinator = new LarkMessageCoordinator(runtime, service as any, { info: vi.fn(), warn: vi.fn(), error: vi.fn() }, Math.random, 'ou_bot',
+      undefined, cardMappings, undefined, undefined, undefined, { store });
+    onTestFinished(async () => {
+      try { await coordinator.stop(); } finally { await close(); }
+    });
+    vi.spyOn(runtime, 'start');
+    vi.spyOn(runtime, 'send');
     await coordinator.handle({ messageId: 'om_help_msg', chatId: 'oc_p2p', chatType: 'p2p', messageType: 'text', content: '{"text":"/help"}', mentions: [] }, config);
     await vi.waitFor(() => expect(service.send).toHaveBeenCalledWith(expect.objectContaining({ readOnly: true, taskName: '命令帮助' })));
     // 帮助回执必须列出真实可用的命令，且不得使用 schema 2.0 拒绝的 note 标签。
