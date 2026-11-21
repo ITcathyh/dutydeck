@@ -1,3 +1,4 @@
+import { runtimeComponents } from '../test-support/components.js';
 import { captureBoundExecution } from '../../../tests/support/bound-execution.js';
 import { afterEach, expect, it, vi } from 'vitest';
 import { createRepositories } from '@dutydeck/storage';
@@ -400,7 +401,6 @@ it('drains registered task continuations when a separate cleanup makes shutdown 
   const entered = deferred(), gate = deferred();
   const internal = h.runtime as unknown as {
     executeTask(id: string, task: import('@dutydeck/shared').TaskRecord): Promise<import('@dutydeck/shared').PublicTaskRecord>;
-    cleanupRun?: Promise<void>;
   };
   const execute = internal.executeTask.bind(h.runtime);
   internal.executeTask = async (id, task) => {
@@ -412,7 +412,7 @@ it('drains registered task continuations when a separate cleanup makes shutdown 
   await h.runs[0]!.sent.promise;
   const failure = new Error('cleanup failed');
   const failedCleanup = Promise.reject(failure); void failedCleanup.catch(() => {});
-  internal.cleanupRun = failedCleanup;
+  vi.spyOn(runtimeComponents(h.runtime).maintenance, 'currentRun', 'get').mockReturnValue(failedCleanup);
   let stopped = false;
   const stopping = h.runtime.shutdown().catch(error => error).then(result => { stopped = true; return result; });
   try {

@@ -1,3 +1,4 @@
+import { runtimeComponents } from '../test-support/components.js';
 import { expect, it, vi } from 'vitest';
 import type { RepositoryBundle } from '@dutydeck/shared';
 import { DutydeckRuntime } from './index.js';
@@ -61,7 +62,7 @@ it.each(cases)('%s', (_name, drain, held, idle, activate) => {
   const f = fixture();
   activate(f);
   expect(f.r.sessionHeld(id)).toBe(held);
-  expect(f.r.idleCpuBlocked(id, f.driver)).toBe(idle);
+  expect(runtimeComponents(f.r).maintenance.idleCpuBlocked(id, f.driver)).toBe(idle);
   f.r.scheduleQueue(id);
   expect(f.r.drainQueue.mock.calls.length === 0).toBe(drain);
 });
@@ -73,7 +74,7 @@ it('returns concurrent reasons with the original stop evidence and skips unneces
   expect(r.gate.reasons(id, 'held')).toEqual([
     { code: 'stop_unverified', reason: 'exit pending' }, { code: 'blocked_driver', reason: 'driver pending' }
   ]);
-  expect(r.idleCpuBlocked(id, driver)).toBe(true);
+  expect(runtimeComponents(r).maintenance.idleCpuBlocked(id, driver)).toBe(true);
   expect(driver.isIdle).not.toHaveBeenCalled();
   expect(execution.getUnresolvedTasks).not.toHaveBeenCalled();
 });

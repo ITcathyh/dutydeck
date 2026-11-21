@@ -97,3 +97,14 @@ export class SessionMutations {
     else while (this.tails.size) await Promise.all([...this.tails.values()]);
   }
 }
+
+/** Resolve the runtime's shared session owners at the point an operation starts. */
+export class RuntimeSessionMutations extends SessionMutations {
+  constructor(assertControl: () => void, readonly owners: {
+    lifecycle(id: string): Owner;
+    ownerOf(id: string): Owner;
+    transition(id: string, reason: RevocationReason): Owner;
+    renew(id: string, parent: Owner): void;
+    attempt(id: string): Owner | undefined;
+  }) { super(assertControl); }
+}
