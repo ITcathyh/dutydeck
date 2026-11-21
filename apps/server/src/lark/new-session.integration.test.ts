@@ -1,3 +1,4 @@
+import { fixtureRuntime } from './coordinator-test-fixture.js';
 import { readTestAcceptanceByKey } from './runtime-test-fixture.js';
 import { executionTaskId } from '@dutydeck/storage/helpers';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -131,7 +132,7 @@ async function harness(options: {
   const service = cardService();
   const mappings = options.mappings ?? repos.channelMappings;
   const createCoordinator = () => new LarkMessageCoordinator(
-    runtime as any, service as any, silentLog(), Math.random, 'ou_bot', undefined,
+    fixtureRuntime(runtime as any), service as any, silentLog(), Math.random, 'ou_bot', undefined,
     mappings, async () => 'group', options.executionPolicy as any, options.groupManager as any, { store: repos.config }
   );
   cleanups.push(async () => { repos.close(); await rm(directory, { recursive: true, force: true }); });
@@ -575,7 +576,7 @@ describe('managed first-turn recovery authorization', () => {
     });
     Object.assign(h.runtime, { dispatchRequest: dispatch, getAcceptedTaskByKey: readTestAcceptanceByKey, getAcceptedTask: (id: string) => accepted.get(id) });
     const coordinate = () => {
-      const coordinator = new LarkMessageCoordinator(h.runtime as any, h.service as any, silentLog(), Math.random, 'ou_bot', undefined,
+      const coordinator = new LarkMessageCoordinator(fixtureRuntime(h.runtime as any), h.service as any, silentLog(), Math.random, 'ou_bot', undefined,
         h.repos.channelMappings, async () => 'group', undefined, manager, { store: h.repos.config });
       cleanups.push(async () => coordinator.stop());
       return coordinator;

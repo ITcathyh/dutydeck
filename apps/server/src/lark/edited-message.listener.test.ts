@@ -1,3 +1,4 @@
+import { createTestLarkStorage } from './coordinator-test-fixture.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { LarkLongConnectionListener } from './listener.js';
 import { LarkMessageCoordinator } from './coordinator.js';
@@ -35,7 +36,7 @@ const listeners: LarkLongConnectionListener[] = [];
 afterEach(() => { listeners.splice(0).forEach(listener => listener.stop()); vi.restoreAllMocks(); });
 
 async function harness(items = [detail()], mode: 'topic' | 'group' | 'p2p' = 'topic') {
-  const handle = vi.spyOn(LarkMessageCoordinator.prototype, 'handle').mockResolvedValue();
+  const handle = vi.spyOn(LarkMessageCoordinator.prototype, 'handleEdited').mockResolvedValue();
   const log = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
   const resolveMode = vi.fn(async () => mode);
   let readError = false;
@@ -49,7 +50,7 @@ async function harness(items = [detail()], mode: 'topic' | 'group' | 'p2p' = 'to
     return new Response(JSON.stringify(data), { headers: { 'content-type': 'application/json' } });
   });
   const listener = new LarkLongConnectionListener(log, {
-    runtime: {} as any, fetcher: fetcher as typeof fetch, chatModeResolver: resolveMode,
+    ...createTestLarkStorage(config), runtime: {} as any, fetcher: fetcher as typeof fetch, chatModeResolver: resolveMode,
     env: { LARK_API_RETRY_MAX_ATTEMPTS: '0' }
   });
   listeners.push(listener);

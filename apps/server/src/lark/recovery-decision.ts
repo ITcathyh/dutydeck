@@ -41,11 +41,11 @@ function competingDecision(values: Recovery['values'], kind: Kind, next: Record<
 export class TurnRecoveryDecisions {
   private readonly warnings = new Set<string>();
 
-  constructor(private readonly store: ConfigRepository | undefined, private readonly mappings: ChannelMappingRepository | undefined,
+  constructor(private readonly store: ConfigRepository, private readonly mappings: ChannelMappingRepository,
     private readonly log: Pick<ListenerLog, 'warn'>) {}
 
   private async mapping(key: TurnDecisionKey) {
-    const row = await this.mappings?.get('lark-card:' + key.appId, key.messageId);
+    const row = await this.mappings.get('lark-card:' + key.appId, key.messageId);
     const record = parseOptionalCardTask(row?.extra);
     if (row?.extra && record?.app_id === key.appId && (record.turn ?? 0) === key.turn) return { row, record, extra: row.extra };
   }
@@ -65,11 +65,11 @@ export class TurnRecoveryDecisions {
 
   async get(key: TurnDecisionKey) {
     const current = await this.mapping(key);
-    return this.value(key, current?.record.recovery, await this.store?.get(legacyKey(key)));
+    return this.value(key, current?.record.recovery, await this.store.get(legacyKey(key)));
   }
 
   async compareAndSet(key: TurnDecisionKey, expected: string | undefined, next: string, evidence?: string) {
-    if (!this.store?.compareAndSetMappingAndConfig) return false;
+    if (!this.store.compareAndSetMappingAndConfig) return false;
     const value: Record<string, unknown> = JSON.parse(next);
     const basis = evidence ?? decisionBasis(key.kind, value);
     for (let attempt = 0; attempt < 5; attempt++) {
@@ -80,7 +80,7 @@ export class TurnRecoveryDecisions {
       const { record, row, extra } = current;
       // On first write bring across all the old facts, including a settlement followed by a continuation.
       const kinds = record.recovery ? [key.kind] : recoveryKind.options;
-      const checks = await Promise.all(kinds.map(async kind => ({ kind, key: legacyKey(key, kind), expected: await this.store!.get(legacyKey(key, kind)) })));
+      const checks = await Promise.all(kinds.map(async kind => ({ kind, key: legacyKey(key, kind), expected: await this.store.get(legacyKey(key, kind)) })));
       const previous = checks.find(item => item.kind === key.kind)!.expected;
       if (this.value(key, record.recovery, previous) !== expected) return false;
       const values = record.recovery?.values ?? Object.fromEntries(checks.filter(item => item.expected !== undefined)

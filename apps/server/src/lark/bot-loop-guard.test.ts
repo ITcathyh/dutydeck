@@ -1,3 +1,4 @@
+import { createTestLarkCoordinator } from './coordinator-test-fixture.js';
 // 多 bot 互相 @ 的回合门禁回归。
 //
 // 真实事故形态：两个机器人互相 @，几千条消息把群刷爆，把它们移出群再拉回来还会复发。
@@ -21,7 +22,6 @@ import {
 } from '@dutydeck/shared';
 import { LarkGroupParticipation } from './group-participation.js';
 import { TRUSTED_BOT_REF } from './participation-rules.js';
-import { LarkMessageCoordinator } from './coordinator.js';
 import { senderGroupMention } from './card-mentions.js';
 import { LarkWorkflowInteractions } from './workflow-interactions.js';
 import type { LarkGroupManager } from './group-management.js';
@@ -91,8 +91,8 @@ function harness(clock: { now: Date } = { now: new Date('2026-09-18T10:00:00.000
       records.set(key, value); return true;
     }
   };
-  const coordinator = new LarkMessageCoordinator(runtime as any, service as any, log, Math.random, 'ou_bot',
-    peerBotAuthorized, undefined, async () => 'group', undefined, options.groupManager, { participation, ...(options.workflow ? { store } : {}) });
+  const coordinator = createTestLarkCoordinator(current, runtime as any, service as any, log, Math.random, 'ou_bot',
+    peerBotAuthorized, undefined, async () => 'group', undefined, options.groupManager, { participation, store });
   cleanups.push(async () => { coordinator.stop(); await participation.close(); if (db.open) db.close(); });
   return { repository, participation, coordinator, runtime, service, log, clock, decider, peerBotAuthorized, store };
 }
@@ -120,7 +120,7 @@ describe.each(['off', 'observe', 'selective'] as const)('机器人定向交接�
     const current = { ...restrictedConfig, workspace, ...(authorization === 'allowlist' ? { peerBotsAllowed: false,
       allowedBots: [{ openId: 'ou_peer_bot', name: 'Peer' }] } : {}) };
     if (authorization === 'allowlist') h.peerBotAuthorized.mockResolvedValue(false);
-    await h.coordinator.handle(botMessage('om_peer_request'), current);
+    await h.coordinator.handleWithBotConfig(botMessage('om_peer_request'), current);
     await vi.waitFor(() => expect(h.runtime.send).toHaveBeenCalledOnce());
     await h.participation.flush(scope);
     expect(h.peerBotAuthorized).toHaveBeenCalledWith(scope.chatId, 'ou_peer_bot');
@@ -137,7 +137,7 @@ describe.each(['off', 'observe', 'selective'] as const)('机器人定向交接�
   it('未@的不受信机器人消息不启动执行或只读判定', async () => {
     const h = await configuredHarness();
     h.peerBotAuthorized.mockResolvedValue(false);
-    await h.coordinator.handle(botMessage('om_bot_chat', { mentions: [] }), { ...restrictedConfig, mentionPolicy: 'never' });
+    await h.coordinator.handleWithBotConfig(botMessage('om_bot_chat', { mentions: [] }), { ...restrictedConfig, mentionPolicy: 'never' });
     await h.participation.flush(scope);
     expect(h.runtime.start).not.toHaveBeenCalled();
     expect(h.decider.decide).not.toHaveBeenCalled();
@@ -151,7 +151,7 @@ describe.each(['off', 'observe', 'selective'] as const)('机器人定向交接�
   it.each(['untrusted', 'disabled'] as const)('拒绝%s的peer机器人，不绕过现有访问授权', async reason => {
     const h = await configuredHarness();
     h.peerBotAuthorized.mockResolvedValue(reason !== 'untrusted');
-    await h.coordinator.handle(botMessage('om_denied_peer'), { ...restrictedConfig, peerBotsAllowed: reason !== 'disabled' });
+    await h.coordinator.handleWithBotConfig(botMessage('om_denied_peer'), { ...restrictedConfig, peerBotsAllowed: reason !== 'disabled' });
     await vi.waitFor(() => expect(h.service.reply).toHaveBeenCalledWith(expect.objectContaining({ taskName: '访问被拒绝' })));
     expect(h.runtime.start).not.toHaveBeenCalled();
     expect(h.decider.decide).not.toHaveBeenCalled();

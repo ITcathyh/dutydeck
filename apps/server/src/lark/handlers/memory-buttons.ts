@@ -7,7 +7,7 @@ export const forget: CallbackHandler = async (ctx, { workflow, operatorOpenId, c
   const turnTaskId = typeof workflow.task_id === 'string' ? workflow.task_id : '';
   const turnSessionId = typeof workflow.session_id === 'string' ? workflow.session_id : '';
   if (!isLarkMemoryId(memoryId) || !turnTaskId || !turnSessionId) return { type: 'error', content: '无法识别要删除的记忆。' };
-  if (!context?.chatId || !operatorOpenId || !ctx.reconcileConfig || !ctx.memory || !ctx.store) {
+  if (!context?.chatId || !operatorOpenId || !ctx.reconcileConfig || !ctx.memory) {
     return { type: 'error', content: '删除入口已失效，请发送 /memory 查看，再用 /forget <编号> 删除。' };
   }
   try {

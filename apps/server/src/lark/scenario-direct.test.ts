@@ -1,3 +1,4 @@
+import { createTestLarkCoordinator } from './coordinator-test-fixture.js';
 // direct 模式的场景包：decideDirect 的表驱动用例、执行 prompt 和收养字段，以及从 group-participation.test.ts 迁来的告警用例
 // （通过注册表加载内置告警包运行；记录、派发事件、订阅、确认单的结构变了，比较前经下面的投影换回原来的形状）。
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -11,7 +12,6 @@ import { builtinScenarioRegistry } from '../plugins/builtin-scenarios.test-helpe
 import { ScenarioRegistry } from '../plugins/scenario-registry.js';
 import { assemblePrompt } from '../prompt-context.js';
 import { LarkGroupParticipation, type GroupParticipationOptions } from './group-participation.js';
-import { LarkMessageCoordinator } from './coordinator.js';
 import { LarkScenarios } from './group-scenarios.js';
 import type { LarkMessageEvent } from './listener.js';
 import type { StoredLarkConfig } from './config.js';
@@ -149,7 +149,7 @@ async function harness(mode: 'off' | 'observe' | 'selective' | 'eager' = 'select
     readGroupDescription: async () => '测试群', listScopes: async () => [scope], debounceMs: 10000, scenarios: await builtinScenarioRegistry(), ...extra });
   const session = { id: 's1', protocol: 'acp', state: 'idle', agentId: 'mock', cwd: '/tmp', permissionMode: 'ask', createdAt: '', updatedAt: '' };
   const runtime = { start: vi.fn(async () => session), getSession: vi.fn(async () => session), subscribe: vi.fn(() => vi.fn()), send: vi.fn(async () => {}), interrupt: vi.fn(async () => {}) };
-  const coordinator = new LarkMessageCoordinator(runtime as any, service as any, { info: vi.fn(), warn: vi.fn(), error: vi.fn() }, Math.random, 'ou_bot', undefined, undefined, async () => 'group', undefined, undefined, { participation });
+  const coordinator = createTestLarkCoordinator(config, runtime as any, service as any, { info: vi.fn(), warn: vi.fn(), error: vi.fn() }, Math.random, 'ou_bot', undefined, undefined, async () => 'group', undefined, undefined, { participation });
   cleanups.push(async () => { coordinator.stop(); await participation.close(); if (db.open) db.close(); });
   return { db, repository, service, decide, respond, participation, coordinator, runtime };
 }

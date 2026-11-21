@@ -1,3 +1,4 @@
+import { createTestLarkCoordinator, createTestLarkStorage } from './coordinator-test-fixture.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import Database from 'better-sqlite3';
 import { createHash } from 'node:crypto';
@@ -7,7 +8,6 @@ import { addCollaborationScenarios, allowEagerParticipation } from '../../../../
 import { deciderMetaOf, RuntimeError, scenarioRecordOf, type CollaborationSnapshot, type CollaborationFollowup, type CollaborationTeamContext, type ObserveCollaborationInput, type Session } from '@dutydeck/shared';
 import { LarkGroupParticipation, type GroupParticipationOptions } from './group-participation.js';
 import { TASK_CONTEXT_BOT_TEXT_LIMIT, TASK_CONTEXT_BUDGET, TASK_CONTEXT_FULL_REFRESH_MS, TASK_CONTEXT_HUMAN_TEXT_LIMIT, TASK_CONTEXT_WINDOW } from './group-task-context.js';
-import { LarkMessageCoordinator } from './coordinator.js';
 import type { LarkMessageEvent } from './listener.js';
 import type { StoredLarkConfig } from './config.js';
 import type { ParticipationResult } from './readonly-decider.js';
@@ -42,7 +42,7 @@ async function harness(mode: 'off' | 'observe' | 'selective' | 'eager' = 'select
   const participation = new LarkGroupParticipation(options);
   const session = { id: 's1', protocol: 'acp', state: 'idle', agentId: 'mock', cwd: '/tmp', permissionMode: 'ask', createdAt: '', updatedAt: '' };
   const runtime = { start: vi.fn(async () => session), getSession: vi.fn(async () => session), subscribe: vi.fn(() => vi.fn()), send: vi.fn(async () => {}), interrupt: vi.fn(async () => {}) };
-  const coordinator = new LarkMessageCoordinator(runtime as any, service as any, { info: vi.fn(), warn: vi.fn(), error: vi.fn() }, Math.random, 'ou_bot', undefined, undefined, async () => 'group', undefined, undefined, { participation });
+  const coordinator = createTestLarkCoordinator(config, runtime as any, service as any, { info: vi.fn(), warn: vi.fn(), error: vi.fn() }, Math.random, 'ou_bot', undefined, undefined, async () => 'group', undefined, undefined, { participation, ...(extra.inboxStore?.list ? { store: extra.inboxStore } : {}) });
   cleanups.push(async () => { coordinator.stop(); await participation.close(); if (db.open) db.close(); });
   return { db, repository, service, decide, respond, authorize, participation, coordinator, runtime, options };
 }
@@ -441,7 +441,7 @@ describe('execution Agent task context', () => {
 describe('group observation and selective participation through the coordinator', () => {
   it('off preserves old ambient wake behavior and does not persist observation', async () => {
     const h = await harness('off');
-    await h.coordinator.handle(message(), { ...config, mentionPolicy: 'ambient' });
+    await h.coordinator.handleWithBotConfig(message(), { ...config, mentionPolicy: 'ambient' });
     await vi.waitFor(() => expect(h.runtime.send).toHaveBeenCalledOnce());
     // 只数收到时那一枚 OK：这一轮结束时还会另贴一枚状态表情。
     expect(h.service.addReaction.mock.calls.filter(call => (call as unknown[])[1] === 'OK')).toHaveLength(1);
@@ -451,12 +451,12 @@ describe('group observation and selective participation through the coordinator'
   it('ambient yields to a message addressed at someone else, while never still wakes', async () => {
     const mentionsOther = { mentions: [{ key: '@_user_1', name: '同事', openId: 'ou_other' }] };
     const ambient = await harness('off');
-    await ambient.coordinator.handle(message('om_other', '@_user_1 你看下这个', mentionsOther), { ...config, mentionPolicy: 'ambient' });
+    await ambient.coordinator.handleWithBotConfig(message('om_other', '@_user_1 你看下这个', mentionsOther), { ...config, mentionPolicy: 'ambient' });
     await ambient.participation.flush(scope);
     expect(ambient.runtime.send).not.toHaveBeenCalled();
     expect(ambient.service.addReaction).not.toHaveBeenCalled();
     const never = await harness('off');
-    await never.coordinator.handle(message('om_other', '@_user_1 你看下这个', mentionsOther), { ...config, mentionPolicy: 'never' });
+    await never.coordinator.handleWithBotConfig(message('om_other', '@_user_1 你看下这个', mentionsOther), { ...config, mentionPolicy: 'never' });
     await vi.waitFor(() => expect(never.runtime.send).toHaveBeenCalledOnce());
   });
   it('ambient yields even when the message addressed at someone else carries a slash command', async () => {
@@ -464,7 +464,7 @@ describe('group observation and selective participation through the coordinator'
     // always 策略下未被 @ 的同一条命令同样不触发，这里只是把 ambient 归到同一侧并锁住。
     const mentionsOther = { mentions: [{ key: '@_user_1', name: '同事', openId: 'ou_other' }] };
     const h = await harness('off');
-    await h.coordinator.handle(message('om_cmd', '@_user_1 /help', mentionsOther), { ...config, mentionPolicy: 'ambient' });
+    await h.coordinator.handleWithBotConfig(message('om_cmd', '@_user_1 /help', mentionsOther), { ...config, mentionPolicy: 'ambient' });
     await h.participation.flush(scope);
     expect(h.runtime.send).not.toHaveBeenCalled();
     expect(h.service.addReaction).not.toHaveBeenCalled();
@@ -472,16 +472,16 @@ describe('group observation and selective participation through the coordinator'
     expect(h.service.send).not.toHaveBeenCalled();
     // 没有点名任何人时同一条命令照常处理。
     const open = await harness('off');
-    await open.coordinator.handle(message('om_cmd', '/help'), { ...config, mentionPolicy: 'ambient' });
+    await open.coordinator.handleWithBotConfig(message('om_cmd', '/help'), { ...config, mentionPolicy: 'ambient' });
     await vi.waitFor(() => expect(open.service.reply.mock.calls.length + open.service.send.mock.calls.length).toBeGreaterThan(0));
   });
   it('stops calling the decider once the hourly decision budget is exhausted', async () => {
     const h = await harness();
     await h.repository.updateSettings(scope, { expectedRevision: 1, maxDecisionsPerHour: 1 }, 'owner');
-    await h.coordinator.handle(message('om_1', '第一条'), { ...config, mentionPolicy: 'never' });
+    await h.coordinator.handleWithBotConfig(message('om_1', '第一条'), { ...config, mentionPolicy: 'never' });
     await h.participation.flush(scope);
     expect(h.decide).toHaveBeenCalledOnce();
-    await h.coordinator.handle(message('om_2', '第二条'), { ...config, mentionPolicy: 'never' });
+    await h.coordinator.handleWithBotConfig(message('om_2', '第二条'), { ...config, mentionPolicy: 'never' });
     await h.participation.flush(scope);
     expect(h.decide).toHaveBeenCalledOnce();
     const decisions = await h.repository.listDecisions(scope);
@@ -491,14 +491,14 @@ describe('group observation and selective participation through the coordinator'
   it('does not let budget-gated records consume the next window', async () => {
     const h = await harness();
     await h.repository.updateSettings(scope, { expectedRevision: 1, maxDecisionsPerHour: 1 }, 'owner');
-    await h.coordinator.handle(message('om_1', '第一条'), { ...config, mentionPolicy: 'never' });
+    await h.coordinator.handleWithBotConfig(message('om_1', '第一条'), { ...config, mentionPolicy: 'never' });
     await h.participation.flush(scope);
-    await h.coordinator.handle(message('om_2', '第二条'), { ...config, mentionPolicy: 'never' });
+    await h.coordinator.handleWithBotConfig(message('om_2', '第二条'), { ...config, mentionPolicy: 'never' });
     await h.participation.flush(scope);
     expect(h.decide).toHaveBeenCalledOnce();
     // 被闸门挡下的记录不消耗预算：上限抬到 2 时，只有那一次真实判定计入。
     await h.repository.updateSettings(scope, { expectedRevision: 2, maxDecisionsPerHour: 2 }, 'owner');
-    await h.coordinator.handle(message('om_3', '第三条'), { ...config, mentionPolicy: 'never' });
+    await h.coordinator.handleWithBotConfig(message('om_3', '第三条'), { ...config, mentionPolicy: 'never' });
     await h.participation.flush(scope);
     expect(h.decide).toHaveBeenCalledTimes(2);
   });
@@ -506,7 +506,7 @@ describe('group observation and selective participation through the coordinator'
     const h = await harness();
     await h.repository.updateSettings(scope, { expectedRevision: 1, maxDecisionsPerHour: 0 }, 'owner');
     for (const index of [1, 2, 3, 4, 5]) {
-      await h.coordinator.handle(message(`om_${index}`, `第 ${index} 条`), { ...config, mentionPolicy: 'never' });
+      await h.coordinator.handleWithBotConfig(message(`om_${index}`, `第 ${index} 条`), { ...config, mentionPolicy: 'never' });
       await h.participation.flush(scope);
     }
     expect(h.decide).not.toHaveBeenCalled();
@@ -515,7 +515,7 @@ describe('group observation and selective participation through the coordinator'
   });
   it('persists an unmentioned message before silence, with no reaction, card, or runtime task', async () => {
     const h = await harness();
-    await h.coordinator.handle(message(), { ...config, mentionPolicy: 'never' });
+    await h.coordinator.handleWithBotConfig(message(), { ...config, mentionPolicy: 'never' });
     expect((await h.repository.listObservations(scope)).some(item => item.messageId === 'om_1')).toBe(true);
     await h.participation.flush(scope);
     expect(h.decide).toHaveBeenCalledOnce();
@@ -623,14 +623,17 @@ describe('group observation and selective participation through the coordinator'
     expect(h.respond).not.toHaveBeenCalled(); expect(h.service.addReaction).not.toHaveBeenCalled();
   });
   it('requests confirmation for act and only hands the confirmed message to execution once', async () => {
-    const h = await harness(); h.decide.mockImplementation(async (_config, snapshot) => act(snapshot));
+    const { workflowStore } = createTestLarkStorage(config);
+    const h = await harness('selective', { inboxStore: workflowStore }); h.decide.mockImplementation(async (_config, snapshot) => act(snapshot));
     h.participation.setDispatcher(scope.appId, (event, current) => h.coordinator.adopt(event, current), async () => true);
     const incoming = message('om_1', 'Bot 帮我读下这份文档');
-    await h.coordinator.handle(incoming, config); await h.participation.flush(scope);
+    await h.coordinator.receive(incoming, config);
+    await vi.waitFor(async () => expect(await h.repository.listObservations(scope)).toHaveLength(1));
+    await h.participation.flush(scope);
     expect(h.runtime.send).not.toHaveBeenCalled();
     const card = (await h.repository.listActions(scope)).find(item => item.kind === 'confirm.participation_act')!;
     expect(JSON.stringify(h.service.reply.mock.calls)).toContain('交给我处理');
-    // This compatibility harness has no inbox: the card's JSON, not this mutable event, owns the request.
+    // The inbox and the confirmation both retain the received message after the caller mutates its object.
     incoming.content = JSON.stringify({ text: '替换后的高风险请求' });
     expect(await h.participation.confirmations.handle(scope.appId, { dutydeck_confirm: 'confirm', confirm_id: card.id, chat_id: scope.chatId }, 'ou_a', { messageId: card.receipt, chatId: scope.chatId })).toMatchObject({ type: 'success' });
     await vi.waitFor(() => expect(h.runtime.send).toHaveBeenCalledOnce());
@@ -1264,7 +1267,7 @@ describe('多机器人群的接话人', () => {
   };
   const restart = async (h: Awaited<ReturnType<typeof harness>>) => {
     const participation = new LarkGroupParticipation(h.options);
-    const coordinator = new LarkMessageCoordinator(h.runtime as any, h.service as any, { info: vi.fn(), warn: vi.fn(), error: vi.fn() }, Math.random, 'ou_bot', undefined, undefined, async () => 'group', undefined, undefined, { participation });
+    const coordinator = createTestLarkCoordinator(config, h.runtime as any, h.service as any, { info: vi.fn(), warn: vi.fn(), error: vi.fn() }, Math.random, 'ou_bot', undefined, undefined, async () => 'group', undefined, undefined, { participation });
     cleanups.push(async () => { coordinator.stop(); await participation.close(); });
     await participation.recover(scope.appId);
     return { participation, coordinator };
@@ -1515,7 +1518,7 @@ describe('多机器人群的接话人', () => {
       Object.assign(h.service, { listChatMembers: members(3, bots), getMessage: details({ om_alarm_1: 'cli_alarm' }) });
       const groupManager = { resolved: async (current: StoredLarkConfig) => ({ ...current, mentionPolicy: 'topic' as const }), ownsTopic: vi.fn(async () => ownsTopic),
         authorize: async () => ({ allowed: true }), hasActiveSession: async () => false, highRiskOpenIds: async () => [], recordRun: async () => {} };
-      const coordinator = new LarkMessageCoordinator(h.runtime as any, h.service as any, { info: vi.fn(), warn: vi.fn(), error: vi.fn() }, Math.random, 'ou_bot', undefined, undefined,
+      const coordinator = createTestLarkCoordinator(config, h.runtime as any, h.service as any, { info: vi.fn(), warn: vi.fn(), error: vi.fn() }, Math.random, 'ou_bot', undefined, undefined,
         async () => 'group', undefined, groupManager as any, { participation: h.participation });
       cleanups.push(() => coordinator.stop());
       h.participation.setDispatcher(scope.appId, (event, current) => coordinator.adopt(event, current));
@@ -1549,7 +1552,7 @@ describe('角色在群参与的实时判定接线', () => {
     Object.assign(h.service, { listChatMembers: members(3, bots) });
 
     // 1. 多 Bot 未指定接话人：无 scope 时会判 no_responder，有 scope 时绕过规则进入 decider
-    await h.coordinator.handle(message('om_multi', '线上告警排查一下'), currentConfig);
+    await h.coordinator.handleWithBotConfig(message('om_multi', '线上告警排查一下'), currentConfig);
     await h.participation.flush(scope);
     expect(h.decide).toHaveBeenCalledOnce();
     const dec1 = (await h.repository.listDecisions(scope)).find(d => deciderMetaOf(d)?.trigger?.messageId === 'om_multi');
@@ -1561,7 +1564,7 @@ describe('角色在群参与的实时判定接线', () => {
 
     // 2. 接话人是别人：更新 duty.responder 为 cli_flash，无 scope 会判 not_responder，有 scope 时进入 decider
     await h.repository.updateDuty(scope, { expectedRevision: 0, responder: { appId: 'cli_flash', name: 'bdev-flash', since: new Date().toISOString() } }, 'owner');
-    await h.coordinator.handle(message('om_other_resp', '又一个报错看一下'), currentConfig);
+    await h.coordinator.handleWithBotConfig(message('om_other_resp', '又一个报错看一下'), currentConfig);
     await h.participation.flush(scope);
     expect(h.decide).toHaveBeenCalledTimes(2);
     const dec2 = (await h.repository.listDecisions(scope)).find(d => deciderMetaOf(d)?.trigger?.messageId === 'om_other_resp');
@@ -1574,13 +1577,13 @@ describe('角色在群参与的实时判定接线', () => {
     // 3. 单人 eager：改成 eager 模式，单人群；无 scope 会直接判 eager_default 为 act，有 scope 时进入 decider
     await h.repository.updateSettings(scope, { expectedRevision: 1, participation: 'eager' }, 'owner');
     Object.assign(h.service, { listChatMembers: members(1) });
-    await h.coordinator.handle(message('om_single_eager', '单人闲聊'), currentConfig);
+    await h.coordinator.handleWithBotConfig(message('om_single_eager', '单人闲聊'), currentConfig);
     await h.participation.flush(scope);
     expect(h.decide).toHaveBeenCalledTimes(3);
 
     // 4. 配置变化后新判定记录反映新 role，旧记录保持不变
     currentConfig = { ...config, roleTitle: '普通助手' }; // 去掉 roleScope
-    await h.coordinator.handle(message('om_plain_single', '单人闲聊2'), currentConfig);
+    await h.coordinator.handleWithBotConfig(message('om_plain_single', '单人闲聊2'), currentConfig);
     await h.participation.flush(scope);
     const decisions = await h.repository.listDecisions(scope);
     const decOld = decisions.find(d => deciderMetaOf(d)?.roleScope === '报警和告警排查');
@@ -1599,7 +1602,7 @@ describe('角色在群参与的实时判定接线', () => {
     const mentionOtherEvent = message('om_mention_other', '@_user_2 你看下', {
       mentions: [{ key: '@_user_2', name: '小李', openId: 'ou_other' }]
     });
-    await h.coordinator.handle(mentionOtherEvent, roleConfig);
+    await h.coordinator.handleWithBotConfig(mentionOtherEvent, roleConfig);
     await h.participation.flush(scope);
     expect(h.decide).not.toHaveBeenCalled();
     const decMention = (await h.repository.listDecisions(scope))[0]!;
@@ -1631,7 +1634,7 @@ describe('角色在群参与的实时判定接线', () => {
         updated: false
       }))
     });
-    await h.coordinator.handle(threadOtherEvent, roleConfig);
+    await h.coordinator.handleWithBotConfig(threadOtherEvent, roleConfig);
     await h.participation.flush(scope);
     expect(h.decide).not.toHaveBeenCalled();
     const decThread = (await h.repository.listDecisions(scope)).find(d => deciderMetaOf(d)?.rule === 'topic_of_other')!;
@@ -1657,7 +1660,7 @@ describe('角色注入与 /status 展示', () => {
   it('执行 prompt 里角色在群长期指令前，群长期指令在做法（预注入 Prompt）前，且包含授权不改变说明', async () => {
     const h = await harness('observe');
     await h.repository.updateSettings(scope, { expectedRevision: 1, instructions: '群里讨论用中文' }, 'owner');
-    await h.coordinator.handle(message('om_role', '@_user_1 看下这个报警', { mentions: [{ key: '@_user_1', name: 'Bot', openId: 'ou_bot' }] }), roleConfig);
+    await h.coordinator.handleWithBotConfig(message('om_role', '@_user_1 看下这个报警', { mentions: [{ key: '@_user_1', name: 'Bot', openId: 'ou_bot' }] }), roleConfig);
     await vi.waitFor(() => expect(h.runtime.send).toHaveBeenCalledOnce());
     const prompt = dispatchPrompt(h);
     const roleAt = prompt.indexOf('[Dutydeck 角色 · 管理者配置]');
@@ -1674,7 +1677,7 @@ describe('角色注入与 /status 展示', () => {
 
   it('@ 它做负责范围外的事也照常派发执行，角色不拦截、不拒绝', async () => {
     const h = await harness('observe');
-    await h.coordinator.handle(message('om_outside', '@_user_1 帮我订个明天的会议室', { mentions: [{ key: '@_user_1', name: 'Bot', openId: 'ou_bot' }] }), roleConfig);
+    await h.coordinator.handleWithBotConfig(message('om_outside', '@_user_1 帮我订个明天的会议室', { mentions: [{ key: '@_user_1', name: 'Bot', openId: 'ou_bot' }] }), roleConfig);
     await vi.waitFor(() => expect(h.runtime.send).toHaveBeenCalledOnce());
     const prompt = dispatchPrompt(h);
     expect(prompt).toContain('[Dutydeck 角色 · 管理者配置]');
@@ -1700,7 +1703,7 @@ describe('角色注入与 /status 展示', () => {
     const h = await harness('selective', { applyLevel, canOperate: async (_scope, operator, requester) => operator === requester });
     h.options.readConfig = vi.fn(async () => roleConfig);
     await h.coordinator.initializeWorkflows(roleConfig);
-    await h.coordinator.handle(atBot('om_eager', '积极点'), roleConfig);
+    await h.coordinator.handleWithBotConfig(atBot('om_eager', '积极点'), roleConfig);
     await vi.waitFor(() => expect(h.service.reply).toHaveBeenCalledOnce());
     const cardContent = JSON.stringify(h.service.reply.mock.calls[0]);
     expect(cardContent).toContain('明确叫我、或负责范围内需要处理的消息我才会接；范围外请 @我');
@@ -1713,7 +1716,7 @@ describe('角色注入与 /status 展示', () => {
     // title-only 与无 scope 保持旧文案
     const titleOnlyConfig = { ...config, roleTitle: '普通助手' };
     h.options.readConfig = vi.fn(async () => titleOnlyConfig);
-    await h.coordinator.handle(atBot('om_title_eager', '积极点'), titleOnlyConfig);
+    await h.coordinator.handleWithBotConfig(atBot('om_title_eager', '积极点'), titleOnlyConfig);
     await vi.waitFor(() => expect(h.service.reply).toHaveBeenCalledTimes(2));
     const titleCardContent = JSON.stringify(h.service.reply.mock.calls[1]);
     expect(titleCardContent).toContain('除了明显是对别人说的、表情和致谢，群里真人的消息我都接，适合单人群');
@@ -1758,7 +1761,7 @@ describe('角色注入与 /status 展示', () => {
 
     // 3. 改档 note
     await h.coordinator.initializeWorkflows(roleConfig);
-    await h.coordinator.handle(atBot('om_note_test', '积极点'), roleConfig);
+    await h.coordinator.handleWithBotConfig(atBot('om_note_test', '积极点'), roleConfig);
     await vi.waitFor(() => expect(h.service.reply).toHaveBeenCalled());
     const noteCardContent = JSON.stringify(h.service.reply.mock.calls);
     expect(noteCardContent).toContain('没 @ 的消息仍由它接，但我仍按负责范围接话');
@@ -1790,7 +1793,7 @@ describe('角色注入与 /status 展示', () => {
     ], hasMore: false, securityLimited: false })) });
     // 先清掉接话人，让「你来接话」发认领确认卡
     await h.repository.updateDuty(scope, { expectedRevision: 1, responder: null }, 'owner');
-    await h.coordinator.handle(atBot('om_claim', '你来接话'), roleConfig);
+    await h.coordinator.handleWithBotConfig(atBot('om_claim', '你来接话'), roleConfig);
     await vi.waitFor(() => expect(h.service.reply).toHaveBeenCalledOnce());
     const claimCard = JSON.stringify(h.service.reply.mock.calls[0]);
     expect(claimCard).toContain('由我（cli_test）按负责范围判断接本群没 @ 机器人的消息，明确叫我照常处理。');

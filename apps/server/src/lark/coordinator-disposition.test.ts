@@ -13,7 +13,7 @@ it.each([
    authorize: async () => ({allowed:false,code:'talk_required',reason:'没有权限'})
  } : undefined;
  const participation = reason === 'bot_loop_guard' ? {handle:async()=>({enabled:false}),guardBotTurn:async()=> '回路拦截'} : undefined;
- const coordinator = new LarkMessageCoordinator({} as any, {reply:vi.fn(async()=>({messageId:'reply'}))} as any,{info:vi.fn(),warn:vi.fn(),error:vi.fn()},Math.random,'ou_bot',undefined,undefined,async () => 'group',undefined,undefined,{store:repos.config,participation:participation as any,groupManager:groupManager as any} as any);
+ const coordinator = new LarkMessageCoordinator({} as any, {reply:vi.fn(async()=>({messageId:'reply'}))} as any,{info:vi.fn(),warn:vi.fn(),error:vi.fn()},Math.random,'ou_bot',undefined,repos.channelMappings,async () => 'group',undefined,undefined,{store:repos.config,participation:participation as any,groupManager:groupManager as any} as any);
  if (groupManager) (coordinator as any).groupManager = groupManager;
  const event = {messageId:'om_1',chatId:'oc_1',chatType:'group',messageType:'text',content:reason === 'command_rejected' ? '{"text":"/new"}' : '{"text":"你好"}',senderOpenId:'ou_user',senderType,mentions:mention?[{openId:'ou_bot',key:'@_user_1',name:'测试机器人'}]:[]} as any;
  const inbox = new LarkTaskInbox(repos.config);
@@ -30,7 +30,7 @@ it('prunes ignored receipts at most once an hour on the live path, however many 
   const repos = createRepositories(':memory:');
   const config = {appId:'cli_test',appSecret:'test',listening:true,mentionPolicy:'always',permissionMode:'ask',allowedUsers:[],allowedEmails:[],riskControlMode:'off'} as any;
   await repos.config.set('lark.bots',JSON.stringify([config]));
-  const coordinator = new LarkMessageCoordinator({} as any, {reply:vi.fn(async()=>({messageId:'reply'}))} as any,{info:vi.fn(),warn:vi.fn(),error:vi.fn()},Math.random,'ou_bot',undefined,undefined,async () => 'group',undefined,undefined,{store:repos.config} as any);
+  const coordinator = new LarkMessageCoordinator({} as any, {reply:vi.fn(async()=>({messageId:'reply'}))} as any,{info:vi.fn(),warn:vi.fn(),error:vi.fn()},Math.random,'ou_bot',undefined,repos.channelMappings,async () => 'group',undefined,undefined,{store:repos.config} as any);
   const prune = vi.spyOn(LarkTaskInbox.prototype, 'pruneIgnored');
   const inbox = new LarkTaskInbox(repos.config);
   const ignore = async (index: number) => {

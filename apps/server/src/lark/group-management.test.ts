@@ -679,8 +679,8 @@ describe('live group configuration', () => {
     const start = vi.fn(async input => ({ ...existing, ...input, id: 'new' }));
     const runtime: any = { getSession: async () => existing, listSessions: async () => [existing], start, stop: vi.fn() };
     const log = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
-    expect((await resolveLarkSession(runtime, log, { tail: Promise.resolve() }, config, 'oc_one', 'group', 'thread:om_root')).id).toBe('old');
-    expect((await resolveLarkSession(runtime, log, { tail: Promise.resolve() }, config, 'oc_one', 'group', 'thread:other')).id).toBe('new');
+    expect((await resolveLarkSession(runtime, log, { tail: Promise.resolve() }, config, 'oc_one', 'group', 'thread:om_root', repos.channelMappings)).id).toBe('old');
+    expect((await resolveLarkSession(runtime, log, { tail: Promise.resolve() }, config, 'oc_one', 'group', 'thread:other', repos.channelMappings)).id).toBe('new');
     expect(start.mock.calls[0]![0]).not.toHaveProperty('model');
     expect(runtime.stop).not.toHaveBeenCalled();
   });

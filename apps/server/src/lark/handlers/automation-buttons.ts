@@ -7,7 +7,7 @@ import type { CallbackHandler } from './button-context.js';
 export const scheduleToggle: CallbackHandler = async (ctx, { workflow, operatorOpenId, context, key }) => {
   const verb = (key === 'dutydeck_schedule_enable' ? 'enable' : 'disable') === 'enable' ? '启用' : '停用';
   const scheduleId = (workflow[key] as string).trim();
-  if (!scheduleId || !context?.chatId || !operatorOpenId || !ctx.reconcileConfig || !ctx.store) {
+  if (!scheduleId || !context?.chatId || !operatorOpenId || !ctx.reconcileConfig) {
     return { type: 'error', content: `卡片已失效，无法${verb}计划。` };
   }
   const automation = ctx.automation;

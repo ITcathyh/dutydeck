@@ -8,7 +8,7 @@ import { larkCardChannel, sendTaskCard } from '../coordinator-core.js';
 import type { CallbackHandler } from './button-context.js';
 
 export const exportTrace: CallbackHandler = async (ctx, { workflow, operatorOpenId, context, key }) => {
-  if (!operatorOpenId || !context?.messageId || !context.chatId || !ctx.reconcileConfig || !ctx.cardMappings || !ctx.runtime.getEvents) {
+  if (!operatorOpenId || !context?.messageId || !context.chatId || !ctx.reconcileConfig || !ctx.runtime.getEvents) {
     return { type: 'error', content: '记录入口已失效，请在原任务卡上操作。' };
   }
   try {

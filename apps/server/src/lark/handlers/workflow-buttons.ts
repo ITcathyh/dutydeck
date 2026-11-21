@@ -13,7 +13,7 @@ export const queuedApproval: CallbackHandler = async (ctx, { workflow, operatorO
 };
 
 export const workflowAction: CallbackHandler = async (ctx, { workflow, operatorOpenId, context, key }) => {
-  if (!ctx.workflows || !context?.messageId || !context.chatId || !ctx.reconcileConfig) return { type: 'error', content: '卡片身份不完整或已失效。' };
+  if (!context?.messageId || !context.chatId || !ctx.reconcileConfig) return { type: 'error', content: '卡片身份不完整或已失效。' };
   const action = workflow[key] as string;
   if (!['approve', 'reject', 'accept', 'changes', 'answer', 'allow_session', 'allow_workspace', 'plan_approve', 'plan_revise', 'plan_cancel'].includes(action)) return { type: 'error', content: '无法识别任务操作。' };
   // P0-1：overflow 菜单只承载唯一的回调选项（审批行的「拒绝」），其余点选一律拒绝，
@@ -31,7 +31,7 @@ export const workflowAction: CallbackHandler = async (ctx, { workflow, operatorO
     // 非原审批卡的回调只可能来自已登记的 /tasks 卡：行内按钮的 value 与原卡按钮同形，
     // 不验卡来源就等于接受任意 messageId 上的伪造回调。kv 在发送 /tasks 时持久化。
     if (fromDashboard) {
-      const dashboardOrigin = await ctx.store?.get(
+      const dashboardOrigin = await ctx.store.get(
         `lark.task_dashboard.${ctx.reconcileConfig.appId}.${context.messageId}`);
       if (!dashboardOrigin) return { type: 'error', content: '请在最新的审批卡片或 /tasks 卡片上操作。' };
     }

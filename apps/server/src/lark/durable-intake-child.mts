@@ -9,7 +9,7 @@ const log = { info() {}, warn() {}, error() {} };
 const derived = process.argv[5] ? JSON.parse(process.argv[5]) : undefined;
 const service = derived ? { addReaction: async () => { process.kill(process.pid, 'SIGKILL'); return { reactionId: 'unreachable' }; } } : {};
 const coordinator = new LarkMessageCoordinator({} as any, service as any, log, Math.random, 'ou_bot',
-  undefined, undefined, undefined, undefined, undefined, { store: repositories.config });
+  undefined, repositories.channelMappings, undefined, undefined, undefined, { store: repositories.config });
 await coordinator.receive(JSON.parse(process.argv[4]!), config);
 if (derived) {
   // 受理派生身份的 CAS 完成后、首个远程确认/任务派发前崩溃。

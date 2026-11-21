@@ -1,3 +1,4 @@
+import { createTestLarkStorage } from './coordinator-test-fixture.js';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { createLarkCardService, LarkServiceError } from './service.js';
@@ -459,7 +460,7 @@ describe('resolveLarkSession permission posture', () => {
     const group = { tail: Promise.resolve() };
     const log = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
 
-    await expect(resolveLarkSession(runtime as any, log, group as any, { ...baseConfig, fullTrustConfirmed: false }, 'oc_group', 'group', 'user:ou_user')).rejects.toMatchObject({
+    await expect(resolveLarkSession(runtime as any, log, group as any, { ...baseConfig, fullTrustConfirmed: false }, 'oc_group', 'group', 'user:ou_user', createTestLarkStorage().cardMappings)).rejects.toMatchObject({
       code: 'LARK_FULL_TRUST_CONFIRMATION_REQUIRED',
       statusCode: 409
     });
@@ -479,7 +480,7 @@ describe('resolveLarkSession permission posture', () => {
     const group = { tail: Promise.resolve() };
     const log = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
 
-    await expect(resolveLarkSession(runtime as any, log, group as any, baseConfig, 'oc_group', 'group', 'user:ou_user')).resolves.toBe(trusted);
+    await expect(resolveLarkSession(runtime as any, log, group as any, baseConfig, 'oc_group', 'group', 'user:ou_user', createTestLarkStorage().cardMappings)).resolves.toBe(trusted);
 
     expect(runtime.stop).toHaveBeenCalledWith(restricted.id);
     expect(runtime.start).toHaveBeenCalledWith(expect.objectContaining({
@@ -505,11 +506,11 @@ describe('resolveLarkSession ask posture', () => {
     const unconfigured = { ...baseConfig, permissionMode: 'approve-reads' as const, fullTrustConfirmed: false };
     const session = { id: 'ses_reads', protocol: 'acp', permissionMode: 'approve-reads', state: 'idle' };
     const runtime = { listSessions: vi.fn(async () => []), start: vi.fn(async () => session), stop: vi.fn() };
-    await expect(resolveLarkSession(runtime as any, log, group() as any, unconfigured, 'oc_group', 'group', 'user:ou_user')).resolves.toBe(session);
+    await expect(resolveLarkSession(runtime as any, log, group() as any, unconfigured, 'oc_group', 'group', 'user:ou_user', createTestLarkStorage().cardMappings)).resolves.toBe(session);
     expect(runtime.start).toHaveBeenCalledWith(expect.objectContaining({ permissionMode: 'approve-reads' }));
     const pty = { id: 'ses_pty_reads', protocol: 'pty-cli', permissionMode: 'approve-reads', state: 'idle' };
     const ptyRuntime = { listSessions: vi.fn(async () => []), start: vi.fn(async () => pty), stop: vi.fn(async () => {}) };
-    await expect(resolveLarkSession(ptyRuntime as any, log, group() as any, unconfigured, 'oc_group', 'group', 'user:ou_user')).rejects.toMatchObject({ code: 'LARK_APPROVAL_UNSUPPORTED', statusCode: 422 });
+    await expect(resolveLarkSession(ptyRuntime as any, log, group() as any, unconfigured, 'oc_group', 'group', 'user:ou_user', createTestLarkStorage().cardMappings)).rejects.toMatchObject({ code: 'LARK_APPROVAL_UNSUPPORTED', statusCode: 422 });
     expect(ptyRuntime.stop).toHaveBeenCalledWith(pty.id);
   });
 
@@ -518,12 +519,12 @@ describe('resolveLarkSession ask posture', () => {
     const listAgents = vi.fn(async () => [{ id: 'claude-wrapper', name: 'Claude', protocol: 'pty-cli' as const, adapterId: 'claude-code' }]);
     const session = existing({ id: 'ses_claude', agentId: 'claude-wrapper', protocol: 'pty-cli', permissionMode });
     const runtime = { listAgents, listSessions: vi.fn(async () => []), start: vi.fn(async () => session), stop: vi.fn() };
-    await expect(resolveLarkSession(runtime as any, log, group() as any, config, 'oc_group', 'group', 'user:ou_user')).resolves.toBe(session);
+    await expect(resolveLarkSession(runtime as any, log, group() as any, config, 'oc_group', 'group', 'user:ou_user', createTestLarkStorage().cardMappings)).resolves.toBe(session);
     expect(runtime.start).toHaveBeenCalledWith(expect.objectContaining({ agentId: 'claude-wrapper', permissionMode }));
     expect(runtime.stop).not.toHaveBeenCalled();
     // 重启后没有内存绑定，持久化的同一会话照样复用，不会因为是终端模式就被换掉。
     const restarted = { listAgents, listSessions: vi.fn(async () => [session]), getTasks: vi.fn(async () => []), start: vi.fn(), stop: vi.fn() };
-    await expect(resolveLarkSession(restarted as any, log, group() as any, config, 'oc_group', 'group', 'user:ou_user')).resolves.toBe(session);
+    await expect(resolveLarkSession(restarted as any, log, group() as any, config, 'oc_group', 'group', 'user:ou_user', createTestLarkStorage().cardMappings)).resolves.toBe(session);
     expect(restarted.start).not.toHaveBeenCalled();
     expect(restarted.stop).not.toHaveBeenCalled();
   });
@@ -532,7 +533,7 @@ describe('resolveLarkSession ask posture', () => {
     const config = { ...baseConfig, defaultAgentId: 'codex', permissionMode, fullTrustConfirmed: false };
     const runtime = { listAgents: vi.fn(async () => [{ id: 'codex', name: 'Codex', protocol: 'pty-cli' as const }]),
       listSessions: vi.fn(async () => []), start: vi.fn(), stop: vi.fn() };
-    const error = await resolveLarkSession(runtime as any, log, group() as any, config, 'oc_group', 'group', 'user:ou_user').catch(caught => caught);
+    const error = await resolveLarkSession(runtime as any, log, group() as any, config, 'oc_group', 'group', 'user:ou_user', createTestLarkStorage().cardMappings).catch(caught => caught);
     expect(error).toMatchObject({ code: 'LARK_APPROVAL_UNSUPPORTED', statusCode: 422 });
     expect(error.message).toContain('dutydeck settings bot set cli_test permissionMode=full-trust fullTrustConfirmed=true');
     expect(error.message).toContain('ACP Agent');
@@ -543,7 +544,7 @@ describe('resolveLarkSession ask posture', () => {
   it('tells the user the default Agent is gone instead of failing inside the runtime', async () => {
     const config = { ...baseConfig, defaultAgentId: 'plugin-agent', permissionMode: 'ask' as const, fullTrustConfirmed: false };
     const runtime = { listAgents: vi.fn(async () => [{ id: 'other', name: 'Other', protocol: 'acp' as const }]), listSessions: vi.fn(async () => []), start: vi.fn(), stop: vi.fn() };
-    const error = await resolveLarkSession(runtime as any, log, group() as any, config, 'oc_group', 'group', 'user:ou_user').catch(caught => caught);
+    const error = await resolveLarkSession(runtime as any, log, group() as any, config, 'oc_group', 'group', 'user:ou_user', createTestLarkStorage().cardMappings).catch(caught => caught);
     expect(error).toMatchObject({ code: 'LARK_AGENT_NOT_FOUND', statusCode: 409 });
     expect(error.message).toContain('plugin-agent');
     expect(error.message).toContain('插件');
@@ -554,7 +555,7 @@ describe('resolveLarkSession ask posture', () => {
     const ask = { ...baseConfig, permissionMode: 'ask' as const, fullTrustConfirmed: false };
     const session = { id: 'ses_ask', protocol: 'acp', permissionMode: 'ask', state: 'idle' };
     const runtime = { listSessions: vi.fn(async () => []), start: vi.fn(async () => session), stop: vi.fn() };
-    await expect(resolveLarkSession(runtime as any, log, group() as any, ask, 'oc_group', 'group', 'user:ou_user')).resolves.toBe(session);
+    await expect(resolveLarkSession(runtime as any, log, group() as any, ask, 'oc_group', 'group', 'user:ou_user', createTestLarkStorage().cardMappings)).resolves.toBe(session);
     expect(runtime.start).toHaveBeenCalledWith(expect.objectContaining({ permissionMode: 'ask' }));
     expect(runtime.stop).not.toHaveBeenCalled();
   });
@@ -563,7 +564,7 @@ describe('resolveLarkSession ask posture', () => {
     const ask = { ...baseConfig, permissionMode: 'ask' as const, fullTrustConfirmed: false };
     const pty = existing({ protocol: 'pty-cli', permissionMode: 'ask', state: 'thinking' });
     const runtime = { listSessions: vi.fn(async () => [pty]), getSession: vi.fn(), getTasks: vi.fn(async () => []), start: vi.fn(), stop: vi.fn() };
-    await expect(resolveLarkSession(runtime as any, log, group() as any, ask, 'oc_group', 'group', 'user:ou_user')).rejects.toMatchObject({ code: 'LARK_CONFIGURATION_BUSY', statusCode: 409 });
+    await expect(resolveLarkSession(runtime as any, log, group() as any, ask, 'oc_group', 'group', 'user:ou_user', createTestLarkStorage().cardMappings)).rejects.toMatchObject({ code: 'LARK_CONFIGURATION_BUSY', statusCode: 409 });
     expect(runtime.stop).not.toHaveBeenCalled();
     expect(runtime.start).not.toHaveBeenCalled();
   });
@@ -572,7 +573,7 @@ describe('resolveLarkSession ask posture', () => {
     const ask = { ...baseConfig, permissionMode: 'ask' as const, fullTrustConfirmed: false };
     const trusted = existing({ permissionMode: 'full-trust', state: 'idle' });
     const runtime = { listSessions: vi.fn(async () => [trusted]), getSession: vi.fn(), getTasks: vi.fn(async () => [{ status: 'queued' }]), start: vi.fn(), stop: vi.fn() };
-    await expect(resolveLarkSession(runtime as any, log, group() as any, ask, 'oc_group', 'group', 'user:ou_user')).rejects.toMatchObject({ code: 'LARK_CONFIGURATION_BUSY', statusCode: 409 });
+    await expect(resolveLarkSession(runtime as any, log, group() as any, ask, 'oc_group', 'group', 'user:ou_user', createTestLarkStorage().cardMappings)).rejects.toMatchObject({ code: 'LARK_CONFIGURATION_BUSY', statusCode: 409 });
     expect(runtime.stop).not.toHaveBeenCalled();
   });
 
@@ -581,7 +582,7 @@ describe('resolveLarkSession ask posture', () => {
     const trusted = existing({ permissionMode: 'full-trust' });
     const pty = { id: 'ses_pty', protocol: 'pty-cli', permissionMode: 'ask', state: 'idle' };
     const runtime = { listSessions: vi.fn(async () => [trusted]), getSession: vi.fn(), getTasks: vi.fn(async () => []), start: vi.fn(async () => pty), stop: vi.fn(async () => {}) };
-    await expect(resolveLarkSession(runtime as any, log, group() as any, ask, 'oc_group', 'group', 'user:ou_user')).rejects.toMatchObject({ code: 'LARK_APPROVAL_UNSUPPORTED', statusCode: 422 });
+    await expect(resolveLarkSession(runtime as any, log, group() as any, ask, 'oc_group', 'group', 'user:ou_user', createTestLarkStorage().cardMappings)).rejects.toMatchObject({ code: 'LARK_APPROVAL_UNSUPPORTED', statusCode: 422 });
     expect(runtime.stop).toHaveBeenNthCalledWith(1, trusted.id);
     expect(runtime.stop).toHaveBeenNthCalledWith(2, pty.id);
   });

@@ -409,7 +409,7 @@ async function main() {
   // 慢速轮次同样走真实归一化（切换 defaultAgentId，其余字段由产品填默认值）。
   let slowConfig;
 
-  const newCoordinator = () => new LarkMessageCoordinator(runtime, cardService, log, Math.random, 'ou_fake_bot', undefined, repos.channelMappings);
+  const newCoordinator = () => new LarkMessageCoordinator(runtime, cardService, log, Math.random, 'ou_fake_bot', undefined, repos.channelMappings, undefined, undefined, undefined, { store: repos.config });
   let coordinator = newCoordinator();
   onCleanup('停止 coordinator', () => coordinator.stop?.());
 

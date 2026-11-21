@@ -43,6 +43,7 @@ async function harness(firstCardFailures: number) {
   const session = { id: 'ses_first_card', agentId: 'codex', state: 'idle', cwd: '/', protocol: 'acp', permissionMode: 'ask', createdAt: '', updatedAt: '' };
   const listeners: Array<(event: AgentEvent) => void> = [];
   const runtime = {
+    getTasks: async () => [],
     start: vi.fn(async () => session), getSession: vi.fn(async () => session),
     subscribe: vi.fn((_id: string, listener: (event: AgentEvent) => void) => { listeners.push(listener); return vi.fn(); }),
     getAcceptedTaskByKey: readTestAcceptanceByKey, getAcceptedTask: vi.fn(), dispatchRequest: vi.fn(async (_request: import('@dutydeck/shared').TaskRequestV1, _material: import('@dutydeck/runtime').TaskRequestMaterial) => ({ id: 'task_runtime', sessionId: session.id, status: 'queued', queuedAhead: 0 })),
@@ -66,7 +67,7 @@ async function harness(firstCardFailures: number) {
   const coordinators: LarkMessageCoordinator[] = [];
   const createCoordinator = () => {
     const coordinator = new LarkMessageCoordinator(runtime as any, service as any, log, Math.random, 'ou_bot',
-      undefined, undefined, undefined, undefined, undefined, { store: repositories.config, resourceRoot: join(directory, 'attachments') });
+      undefined, repositories.channelMappings, undefined, undefined, undefined, { store: repositories.config, resourceRoot: join(directory, 'attachments') });
     coordinators.push(coordinator);
     return coordinator;
   };

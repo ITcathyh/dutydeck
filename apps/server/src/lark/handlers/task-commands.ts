@@ -22,7 +22,7 @@ export const handleQueue: ChatCommandHandler = async (ctx) => {
     // 摘要为卡片预算只列前几条，编号却一直有效：不写这句，第 6 条以后就成了看不见也够不着的死区。
     const hidden = queued.length > QUEUE_SUMMARY_MAX_ITEMS ? `上面只列出前 ${QUEUE_SUMMARY_MAX_ITEMS} 条，编号 ${QUEUE_SUMMARY_MAX_ITEMS + 1}-${queued.length} 同样可用。` : '';
     await replyCard('待执行指令', summary
-      ? `${summary}\n\n编号按收到顺序，共 ${queued.length} 条。${hidden}取消：\`/queue cancel <编号>\`；提到队首：\`/queue top <编号>\`${ctx.runtime.injectQueued ? '；立即插话：`/queue steer <编号>`' : ''}。`
+      ? `${summary}\n\n编号按收到顺序，共 ${queued.length} 条。${hidden}取消：\`/queue cancel <编号>\`；提到队首：\`/queue top <编号>\`；立即插话：\`/queue steer <编号>\`。`
       : '**当前没有待执行的指令。**');
     return 'handled';
   }
@@ -127,7 +127,7 @@ export const handleCancel: ChatCommandHandler = async (ctx) => {
   // 内存里的排队卡就地改成已取消，不再另发一张「已取消」结果卡：这张回执已经说了。
   // 还在准备、runtime 还没有记录的自己的请求（下载附件、读上下文）也算排队，一并取消。
   let cancelled = await ctx.cancelPreparingTurns(group, event.senderOpenId);
-  for (const item of ctx.runtime.cancelQueued ? ownQueued : []) {
+  for (const item of ownQueued) {
     const live = [...ctx.tasks.values()].find(task => task.runtimeTaskId === item.id && task.state === 'queued');
     if (live ? await ctx.absorbQueuedTask(live, '**已取消**\n\n这条请求不会再执行。', '已取消', event.senderOpenId)
       : await ctx.runtime.cancelQueued!(item.sessionId, item.id, event.senderOpenId).then(() => true, error => {

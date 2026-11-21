@@ -88,7 +88,7 @@ async function harness(existing?: { directory: string; exit: Promise<ChildExit> 
   const log = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
   const coordinators: LarkMessageCoordinator[] = [];
   const createCoordinator = (options: { groupManager?: any; executionPolicy?: any; participation?: any } = {}) => {
-    const coordinator = new LarkMessageCoordinator(runtime as any, service as any, log, Math.random, 'ou_bot', undefined, undefined,
+    const coordinator = new LarkMessageCoordinator(runtime as any, service as any, log, Math.random, 'ou_bot', undefined, repositories.channelMappings,
       async () => 'group', options.executionPolicy, options.groupManager ? { recordRun: vi.fn(async () => {}), ...options.groupManager } : undefined, { store: repositories.config, participation: options.participation });
     coordinators.push(coordinator); return coordinator;
   };

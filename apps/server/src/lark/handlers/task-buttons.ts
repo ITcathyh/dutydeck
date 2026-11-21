@@ -126,14 +126,13 @@ const interrupt: TaskButtonHandler = async (ctx, input) => {
   const { task, taskId, actionStale, actionTurn, operatorOpenId } = input;
   if (!task.sessionId || task.state !== 'running') return { type: 'warning', content: '任务当前不可中断' };
   const runtimeTaskId = task.runtimeTaskId;
-  if (ctx.runtime.dispatch && !runtimeTaskId) return { type: 'warning', content: '任务尚未完成接收，请稍后再试' };
+  if (!runtimeTaskId) return { type: 'warning', content: '任务尚未完成接收，请稍后再试' };
   task.state = 'interrupting';
   task.interruptRequested = true;
   const sessionId = task.sessionId;
   void (async () => {
     try {
-      if (runtimeTaskId) await ctx.runtime.interrupt(sessionId, runtimeTaskId, operatorOpenId);
-      else await ctx.runtime.interrupt(sessionId, undefined, operatorOpenId);
+      await ctx.runtime.interrupt(sessionId, runtimeTaskId, operatorOpenId);
       // 中断返回时可能已经 /retry：新一轮正在跑，旧点击不能把它标成 interrupted。
       if (actionStale()) {
         ctx.log.info({ taskId, turn: actionTurn }, '中断完成时任务已进入新一轮，跳过旧轮次的状态改写');
@@ -181,14 +180,14 @@ const retry: TaskButtonHandler = async (ctx, input) => {
     const previousState = task.state;
     task.state = 'queued';
     try {
-      if (task.inbox) await ctx.inbox!.update(task.inbox, { event: retryEvent, state: 'received', turn: task.turn + 1, cardId: undefined, taskId: undefined, materials: undefined,
+      if (task.inbox) await ctx.inbox.update(task.inbox, { event: retryEvent, state: 'received', turn: task.turn + 1, cardId: undefined, taskId: undefined, materials: undefined,
         ...(task.inbox.request ? { request: { ...task.inbox.request, materialPrompt: task.retryMaterialPrompt ?? task.prompt } } : {}) });
     } catch (error) {
       if (!actionStale()) task.state = previousState;
       return { type: 'warning', content: error instanceof Error ? error.message : '重试记录保存失败，请稍后重试' };
     }
     if (actionStale()) return { type: 'warning', content: '任务已开始新一轮，请在最新的卡片上操作' };
-    if (task.runtimeTaskId && ctx.store) await clearTaskReportSafely(ctx.store, task.runtimeTaskId);
+    if (task.runtimeTaskId) await clearTaskReportSafely(ctx.store, task.runtimeTaskId);
     task.event = retryEvent;
     task.config = effectiveConfig;
     task.cancelRequested = undefined;

@@ -21,11 +21,11 @@ import type { CommandContext } from './command-context.js';
 import type { ChannelMappingRepository, ConfigRepository, PolicyAction, Session, StoredLarkConfig, TaskRecord } from '@dutydeck/shared';
 
 export interface SharedHandlerServices {
-  cardMappings: ChannelMappingRepository | undefined;
+  cardMappings: ChannelMappingRepository;
   currentTurnInterruptDenial(config: StoredLarkConfig, event: LarkMessageEvent, sessionId: string): Promise<string | undefined>;
   groupManager: LarkGroupManager | undefined;
   handleAction(value: unknown, operatorOpenId?: string, context?: ButtonSource): Promise<ButtonResult>;
-  inbox: LarkTaskInbox | undefined;
+  inbox: LarkTaskInbox;
   isDeferredTask(sessionId: string, taskId: string): Promise<boolean>;
   isOperatorAllowed(config: StoredLarkConfig, operatorOpenId?: string, chatId?: string, sessionId?: string, taskRequesterOpenId?: string, action?: PolicyAction): Promise<boolean>;
   isRepairOperatorAllowed(config: StoredLarkConfig, operatorOpenId?: string, chatId?: string): Promise<{ allowed: boolean; reason?: 'managed_group_denied' | 'unconfigured' | 'unauthorized' | undefined }>;
@@ -36,7 +36,7 @@ export interface SharedHandlerServices {
   tasks: Map<string, LarkTask>;
   automation: SessionAutomationService | undefined;
   participation: LarkGroupParticipation | undefined;
-  store: ConfigRepository | undefined;
+  store: ConfigRepository;
   workbench: LarkWorkbench | undefined;
 }
 
@@ -102,7 +102,7 @@ export interface ButtonServices extends SharedHandlerServices {
   repairInFlight: Set<string>;
   respondFromQueuedCard: (claim: { taskId: unknown; turn: unknown }, approval: Record<string, unknown>, operatorOpenId: string | undefined, cardMessageId: string | undefined, submit: () => Promise<ButtonResult>) => Promise<ButtonResult>;
   taskDashboard(event: LarkMessageEvent, config: StoredLarkConfig, page: number): Promise<Record<string, any>[]>;
-  workflows: LarkWorkflowInteractions | undefined;
+  workflows: LarkWorkflowInteractions;
 }
 
 export interface WorkflowServices {

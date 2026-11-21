@@ -1,7 +1,7 @@
+import { createTestLarkCoordinator } from './coordinator-test-fixture.js';
 import { describe, expect, it, vi } from 'vitest';
 import type { ChannelMapping, Session } from '@dutydeck/shared';
 import type { StoredLarkConfig } from './config.js';
-import { LarkMessageCoordinator } from './coordinator.js';
 
 const config: StoredLarkConfig = {
   appId: 'cli_status', appSecret: 'secret', workspace: '/workspace', defaultAgentId: 'codex', fullTrustConfirmed: true, listening: true,
@@ -24,7 +24,7 @@ describe('/status 显示结果投递失败', () => {
     ];
     const cardMappings = { list: vi.fn(async () => mappings), get: vi.fn(), save: vi.fn(), compareAndSetExtra: vi.fn() };
     const runtime = { getSession: vi.fn(async () => session) };
-    const coordinator = new LarkMessageCoordinator(runtime as any, {} as any, { info: vi.fn(), warn: vi.fn(), error: vi.fn() }, Math.random, 'ou_bot',
+    const coordinator = createTestLarkCoordinator(config, runtime as any, {} as any, { info: vi.fn(), warn: vi.fn(), error: vi.fn() }, Math.random, 'ou_bot',
       undefined, cardMappings as any);
     const status: string = await (coordinator as any).describeChatStatus(config, 'ses_1');
     expect(status).toContain('结果未送达');

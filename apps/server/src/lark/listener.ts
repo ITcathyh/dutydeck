@@ -177,7 +177,12 @@ export interface LarkListener {
   stop(): void;
 }
 
-export interface LarkLongConnectionListenerOptions {
+export type LarkLongConnectionListenerOptions = LarkConnectionOptions & (
+  | { runtime: LarkRuntime; workflowStore: ConfigRepository; cardMappings: ChannelMappingRepository }
+  | { runtime?: undefined; workflowStore?: ConfigRepository; cardMappings?: ChannelMappingRepository }
+);
+
+interface LarkConnectionOptions {
   /** Setup temporary listeners only: also force termination when start() cleans up its own failed connection. */
   forceCloseOnStop?: boolean;
   participation?: LarkGroupParticipation;
@@ -185,12 +190,9 @@ export interface LarkLongConnectionListenerOptions {
   automation?: SessionAutomationService;
   workbench?: import('./workbench.js').LarkWorkbench;
   polishReply?: ReplyPolish;
-  workflowStore?: ConfigRepository;
   resourceRoot?: string;
   relayBroker?: RelayAskBroker;
   groupManager?: LarkGroupManager;
-  runtime?: LarkRuntime;
-  cardMappings?: ChannelMappingRepository;
   /**
    * 欢迎语去重标记的 kv 存储（必须持久化，保证重启不重发）；
    * 缺省时回退复用 workflowStore，两者都没有则不启用欢迎语。
@@ -353,7 +355,7 @@ export class LarkLongConnectionListener implements LarkListener {
         ? {
           ...larkCommandCapabilities(this.options.runtime),
           // 与 coordinator.routeChatCommand 的 /tasks 能力判定保持同源。
-          tasks: Boolean(this.options.workflowStore && this.options.cardMappings && this.options.runtime.getTasks)
+          tasks: Boolean(this.options.runtime.getTasks)
         }
         : undefined;
       this.welcome = createLarkWelcomeService({

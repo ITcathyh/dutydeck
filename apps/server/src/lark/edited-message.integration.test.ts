@@ -46,7 +46,7 @@ async function harness() {
   };
   const log = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
   const createCoordinator = () => new LarkMessageCoordinator(runtime as any, service as any, log, Math.random, 'ou_bot',
-    undefined, undefined, async () => 'topic', undefined, undefined, { store: repositories.config, resourceRoot: join(directory, 'attachments') });
+    undefined, repositories.channelMappings, async () => 'topic', undefined, undefined, { store: repositories.config, resourceRoot: join(directory, 'attachments') });
   let coordinator = createCoordinator();
   cleanups.push(async () => { coordinator.stop(); repositories.close(); await rm(directory, { recursive: true, force: true }); });
   return {

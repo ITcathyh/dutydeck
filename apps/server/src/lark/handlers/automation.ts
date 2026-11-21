@@ -46,11 +46,11 @@ export const handlePr: ChatCommandHandler = async (ctx) => {
   }
   // A failed busy confirmation queues this same request; its Agent may retry /pr later.
   const proposalKey = `lark.pr_proposal.${config.appId}.${createHash('sha256').update(JSON.stringify([event.messageId, sessionId, event.senderOpenId, route.argsText.trim()])).digest('hex')}`;
-  const preparedId = await ctx.store?.get(proposalKey);
+  const preparedId = await ctx.store.get(proposalKey);
   const prepared = preparedId ? (await pullRequests.listBySession(sessionId)).find(item => item.id === preparedId) : undefined;
   if (preparedId && (!prepared || prepared.status !== 'proposed' || Date.parse(prepared.expiresAt) <= Date.now())) throw new Error('之前准备的 PR 提案已不可用，请重新发送开 PR 请求。');
   const proposal = prepared ?? await pullRequests.prepare(sessionId, route.argsText.trim() ? { title: route.argsText.trim() } : {}, event.senderOpenId);
-  if (!preparedId) await ctx.store?.set(proposalKey, proposal.id);
+  if (!preparedId) await ctx.store.set(proposalKey, proposal.id);
   const card = buildPullRequestConfirmCard(proposal);
   const sent = await replyCard(card.title, card.markdown, { elements: card.elements });
   if (sent?.messageId) await pullRequests.attachCard(proposal.id, sent.messageId);

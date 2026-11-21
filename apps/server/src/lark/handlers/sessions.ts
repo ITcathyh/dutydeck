@@ -154,7 +154,7 @@ export const handleRename: ChatCommandHandler = async (ctx) => {
 
 export const handleResume: ChatCommandHandler = async (ctx) => {
   const { event, config, scopeId, group, sessionId, replyCard, route } = ctx;
-  if (!ctx.runtime.resume || !ctx.cardMappings) throw new Error('当前运行时不支持恢复会话。可以用 /new --handoff。');
+  if (!ctx.runtime.resume) throw new Error('当前运行时不支持恢复会话。可以用 /new --handoff。');
   if (route.args.length > 1 || (route.args[0]?.startsWith('--'))) throw new Error('用法：/resume [会话编号]；用 /resume list 查看最近关闭的会话。');
   const epoch = group.epoch ?? 0;
   const candidates = await ctx.closedScopeSessions(config, event, scopeId);
@@ -200,7 +200,7 @@ export const handleFork: ChatCommandHandler = async (ctx) => {
     return 'handled';
   }
   if (event.chatType !== 'group' && config.p2pMode !== 'thread') throw new Error('当前私聊整段共用一个会话，没有独立话题，不能并行开分身。请在机器人设置把私聊模式改成“每条消息一个话题”后再试。');
-  if (!sessionId || !ctx.cardMappings || !ctx.inbox) throw new Error('当前没有可分身的会话，或未接入新话题存储。请先在此话题开始一个任务。');
+  if (!sessionId) throw new Error('当前没有可分身的会话，或未接入新话题存储。请先在此话题开始一个任务。');
   const source = await ctx.runtime.getSession(sessionId);
   if (!source || source.archivedAt || ['stopped', 'failed'].includes(source.state)) throw new Error('源会话已关闭，请先恢复它再开分身。');
   const tasks = await ctx.runtime.getTasks?.(source.id) ?? [];

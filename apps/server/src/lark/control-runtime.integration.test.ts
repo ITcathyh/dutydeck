@@ -114,8 +114,9 @@ describe('Feishu controls with real Runtime, SQLite and PTY driver', () => {
         started_at: Date.now() - 60_000, turn: 1, recovery_read_only: true }) });
     const service = { update: vi.fn(async (_input: any) => ({ messageId: 'om_card' })), send: vi.fn(async () => ({ messageId: 'om_result' })),
       reply: vi.fn(async () => ({ messageId: 'om_result' })) };
+    await repos.config.set('lark.bots', JSON.stringify([config]));
     const coordinator = new LarkMessageCoordinator(runtime, service as any, { info() {}, warn() {}, error() {} }, Math.random,
-      'ou_bot', undefined, repos.channelMappings);
+      'ou_bot', undefined, repos.channelMappings, undefined, undefined, undefined, { store: repos.config });
     cleanups.push(async () => { coordinator.stop(); });
     await coordinator.reconcile(config);
     const card = service.update.mock.calls.at(-1)![0] as any;

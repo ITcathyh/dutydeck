@@ -7,7 +7,7 @@ import type { CallbackHandler } from './button-context.js';
 export const helpPage: CallbackHandler = async (ctx, { workflow, operatorOpenId, context }) => {
   const pageValue = parseLarkHelpPageValue(workflow);
   if (!pageValue) return { type: 'error', content: '无法识别帮助页码。' };
-  if (!context?.messageId || !context.chatId || !operatorOpenId || !ctx.reconcileConfig || !ctx.store) {
+  if (!context?.messageId || !context.chatId || !operatorOpenId || !ctx.reconcileConfig) {
     return { type: 'error', content: '帮助卡片已失效，请重新发送 /help。' };
   }
   try {
@@ -30,7 +30,7 @@ export const helpPage: CallbackHandler = async (ctx, { workflow, operatorOpenId,
 export const taskPage: CallbackHandler = async (ctx, { workflow, operatorOpenId, context }) => {
   if (workflow.dutydeck_task_dashboard !== 'page' || typeof workflow.page !== 'number'
     || !Number.isSafeInteger(workflow.page) || workflow.page < 1) return { type: 'error', content: '无法识别任务列表页码。' };
-  if (!context?.messageId || !context.chatId || !operatorOpenId || !ctx.reconcileConfig || !ctx.store) {
+  if (!context?.messageId || !context.chatId || !operatorOpenId || !ctx.reconcileConfig) {
     return { type: 'error', content: '任务列表已失效，请重新发送 /tasks。' };
   }
   try {

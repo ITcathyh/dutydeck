@@ -1,3 +1,4 @@
+import { createTestLarkCoordinator } from './coordinator-test-fixture.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createRepositories } from '@dutydeck/storage';
 import { claudeApiError } from '../../../../packages/pty-driver/src/transcript/claude.js';
@@ -5,7 +6,6 @@ import { RuntimeError, type Session } from '@dutydeck/shared';
 import { larkAgentUnavailableReason, larkFallbackHasActivity } from './agent-fallback.js';
 import { findPersistedLarkSession, resolveLarkSession, takeLarkNewSessionNote } from './session-resolver.js';
 import type { StoredLarkConfig } from './config.js';
-import { LarkMessageCoordinator } from './coordinator.js';
 import type { LarkGroup } from './coordinator.js';
 
 const cleanups: Array<() => void> = [];
@@ -138,7 +138,7 @@ it.each(['queued', 'running', 'new-turn', 'cancelled'])('rechecks %s arriving wh
   const primary = { id: 'primary-session', agentId: 'primary', sourceId: 'app:chat:p2p', cwd: '/tmp' } as Session;
   const group = { tail: Promise.resolve(), sessionId: primary.id, epoch: 0 } as LarkGroup;
   const runtime = { ...h.runtime, getTasks: vi.fn(async () => [{ id: 'failed-task', status: 'failed' }]) };
-  const coordinator = new LarkMessageCoordinator(runtime as any, {} as any, { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+  const coordinator = createTestLarkCoordinator(h.config, runtime as any, {} as any, { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
     Math.random, undefined, undefined, h.repos.channelMappings);
   const task = { id: 'request', group, config: h.config, event: { messageId: 'om_request', chatId: 'chat', chatType: 'p2p' },
     sessionId: primary.id, runtimeTaskId: 'failed-task', turn: 1, epoch: 0, state: 'failed' } as any;
@@ -166,7 +166,7 @@ it('conservatively keeps a legacy explicit launch binding pinned to its Agent', 
     extra: JSON.stringify({ baseConfigKey: 'legacy' }), createdAt: '2026-01-01' });
   const group = { tail: Promise.resolve(), sessionId: primary.id, epoch: 0 };
   const runtime = { ...h.runtime, getTasks: vi.fn(async () => []) };
-  const coordinator = new LarkMessageCoordinator(runtime as any, {} as any, { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+  const coordinator = createTestLarkCoordinator(h.config, runtime as any, {} as any, { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
     Math.random, undefined, undefined, h.repos.channelMappings);
   const task = { id: 'request', group, config: h.config, event: {}, turn: 1, epoch: 0 };
   expect(await (coordinator as any).recoverFallbackSession(task, primary, 'rate limit', false)).toBe(false);
@@ -191,7 +191,7 @@ it.each([
   const options = { agentId: 'spare', cwd: '/tmp', ...(persisted ? { model: persisted } : {}), useAgentDefaults: true, automaticFallback: true };
   const task = { scopeId: 'p2p', event: { chatId: 'chat', chatType: 'p2p' },
     inbox: { fallbackNote: 'switched', fallbackFromSessionId: origin.id, request: { launchOptions: options } } } as any;
-  const coordinator = new LarkMessageCoordinator(h.runtime as any, {} as any, { info: vi.fn(), warn: vi.fn(), error: vi.fn() });
+  const coordinator = createTestLarkCoordinator(h.config, h.runtime as any, {} as any, { info: vi.fn(), warn: vi.fn(), error: vi.fn() });
   try {
     const result = (coordinator as any).validateFallbackRecovery(task, h.config, options);
     if (valid) {

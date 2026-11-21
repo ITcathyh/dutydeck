@@ -86,4 +86,4 @@ export type LarkRuntimeReliability = {
     actor: { kind: 'installation_owner'; id: 'installation_owner' }): Promise<unknown>;
 };
 
-export interface LarkRuntime extends LarkSessionControl, LarkExecution, LarkPermissionControl, LarkRecovery, LarkQueries, LarkRuntimeReliability {}
+export type LarkRuntime = Required<LarkSessionControl & LarkExecution & LarkPermissionControl & LarkRecovery & LarkQueries & LarkRuntimeReliability>;

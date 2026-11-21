@@ -129,10 +129,10 @@ export abstract class LarkCoordinatorCore {
   protected readonly turnCleanups = new Set<() => void>();
   /** P0-1：他人任务取消/中断/重试的二次确认键 → 过期时间戳（60s），惰性清理。 */
   protected readonly foreignActionConfirmations = new Map<string, number>();
-  protected readonly workflows?: LarkWorkflowInteractions;
-  protected readonly inbox?: LarkTaskInbox;
+  protected readonly workflows: LarkWorkflowInteractions;
+  protected readonly inbox: LarkTaskInbox;
   /** 长任务进度卡置顶。默认关闭（见 config.pinLongTasks），但对账在关闭后仍要能撤掉僵尸置顶。 */
-  protected readonly pins?: LarkPinManager;
+  protected readonly pins: LarkPinManager;
   protected taskAgentTimer?: NodeJS.Timeout;
   protected taskAgentRun?: Promise<number>;
   /** 已写回飞书任务记录的 `${guid}:${turn}:${state}`，避免同一状态被心跳重复写。 */
@@ -147,22 +147,22 @@ export abstract class LarkCoordinatorCore {
     protected readonly service: LarkCardService,
     protected readonly log: ListenerLog,
     private readonly _random: () => number = Math.random,
-    protected readonly botOpenId?: string,
-    protected readonly peerBotAuthorized?: (chatId: string, senderOpenId: string) => Promise<boolean>,
-    protected readonly cardMappings?: ChannelMappingRepository,
-    protected readonly chatModeResolver?: LarkChatModeResolver,
-    private readonly executionPolicy?: {
+    protected readonly botOpenId: string | undefined,
+    protected readonly peerBotAuthorized: ((chatId: string, senderOpenId: string) => Promise<boolean>) | undefined,
+    protected readonly cardMappings: ChannelMappingRepository,
+    protected readonly chatModeResolver: LarkChatModeResolver | undefined,
+    private readonly executionPolicy: {
       integrationMode: 'legacy_unmanaged';
       authorize(boundary: 'listener' | 'session' | 'high_risk', action: PolicyAction): Promise<PolicyDecision>;
-    },
-    protected readonly groupManager?: LarkGroupManager,
+    } | undefined,
+    protected readonly groupManager: LarkGroupManager | undefined,
     protected readonly workflowOptions: {
       polishReply?: ReplyPolish;
       participation?: LarkGroupParticipation;
       scheduleRequests?: import('../agent-schedule-request.js').LarkScheduleRequests;
       saveBotConfig?(input: import('./config.js').SaveLarkConfigInput): Promise<unknown>;
       usage?: Pick<import('../usage-ledger.js').UsageLedger, 'describe'>;
-      store?: ConfigRepository;
+      store: ConfigRepository;
       resourceRoot?: string;
       broker?: RelayAskBroker;
       automation?: import('../session-automation.js').SessionAutomationService;
@@ -177,22 +177,20 @@ export abstract class LarkCoordinatorCore {
       workspaceApprovals?: import('./workflow-interactions.js').LarkWorkspaceApprovals;
       /** 见 LarkWorkflowInteractionsOptions.deferredCloseMs。 */
       deferredCloseMs?: number;
-    } = {},
+    },
   ) {
     this.memory = workflowOptions.memory?.store;
-    if (workflowOptions.store) {
-      this.inbox = new LarkTaskInbox(workflowOptions.store);
-      this.workflows = new LarkWorkflowInteractions(workflowOptions.store, runtime, service, workflowOptions.broker,
-        (record, actor, action) => this.authorizeInteraction(record, actor, action),
-        { log: this.log, deferredCloseMs: workflowOptions.deferredCloseMs, approverCandidates: record => this.groupManager?.highRiskOpenIds(record.appId, record.event.chatId) ?? Promise.resolve([]),
-          onPlanDecision: record => this.submitPlanDecision(record),
-          onConfirmation: record => this.submitConfirmation(record), confirmationAvailable: (record, checkAccess) => this.confirmationAvailable(record, checkAccess),
-          ...(workflowOptions.workspaceApprovals ? { workspaceApprovals: workflowOptions.workspaceApprovals, authorizeWorkspaceRule: (record, actor) => this.authorizeWorkspaceRule(record, actor) } : {}) });
-      const unregister = workflowOptions.broker?.addDeferredHandler((input, context) => this.deferConfirmation(input, context));
-      if (unregister) this.turnCleanups.add(unregister);
-      // 置顶记录必须持久化：进程崩在长任务中间时，只有账本能让重启后的对账认出僵尸置顶。
-      this.pins = new LarkPinManager(service, { store: workflowOptions.store, log: this.log });
-    }
+    this.inbox = new LarkTaskInbox(workflowOptions.store);
+    this.workflows = new LarkWorkflowInteractions(workflowOptions.store, runtime, service, workflowOptions.broker,
+      (record, actor, action) => this.authorizeInteraction(record, actor, action),
+      { log: this.log, deferredCloseMs: workflowOptions.deferredCloseMs, approverCandidates: record => this.groupManager?.highRiskOpenIds(record.appId, record.event.chatId) ?? Promise.resolve([]),
+        onPlanDecision: record => this.submitPlanDecision(record),
+        onConfirmation: record => this.submitConfirmation(record), confirmationAvailable: (record, checkAccess) => this.confirmationAvailable(record, checkAccess),
+        ...(workflowOptions.workspaceApprovals ? { workspaceApprovals: workflowOptions.workspaceApprovals, authorizeWorkspaceRule: (record, actor) => this.authorizeWorkspaceRule(record, actor) } : {}) });
+    const unregister = workflowOptions.broker?.addDeferredHandler((input, context) => this.deferConfirmation(input, context));
+    if (unregister) this.turnCleanups.add(unregister);
+    // 置顶记录必须持久化：进程崩在长任务中间时，只有账本能让重启后的对账认出僵尸置顶。
+    this.pins = new LarkPinManager(service, { store: workflowOptions.store, log: this.log });
   }
 
   /**
@@ -202,7 +200,7 @@ export abstract class LarkCoordinatorCore {
    * 升级本身不能替用户打开任何一个。
    */
   protected applyReminderSettings(config: StoredLarkConfig) {
-    this.workflows?.configureUrgent(config.urgentEnabled === true
+    this.workflows.configureUrgent(config.urgentEnabled === true
       ? {
         enabled: true,
         ...(config.urgentThresholdMs !== undefined ? { thresholdMs: config.urgentThresholdMs } : {}),
@@ -231,7 +229,7 @@ export abstract class LarkCoordinatorCore {
   }
 
   protected async authorizeFinalRelay(scope: import('./explicit-final.js').ExplicitFinalScope, actorId: string) {
-    const stored = this.workflowOptions.store && await readLarkConfig(this.workflowOptions.store, scope.app_id);
+    const stored = await readLarkConfig(this.workflowOptions.store, scope.app_id);
     const config = stored && (await this.groupManager?.resolved(stored, scope.chat_id) ?? stored);
     if (!config || !config.listening || !config.groupToolsEnabled || !config.groupToolsAllowSend
       || !await this.isOperatorAllowed(config, actorId, scope.chat_id, scope.session_id, actorId, 'group_tools.send')) {
@@ -261,21 +259,21 @@ export abstract class LarkCoordinatorCore {
     return allowedHighRiskActor(config, actor, id => this.service.getUserEmails(id), this.log);
   }
 
-  async repairClosedCards(appId: string) { await this.workflows?.repairClosedCards(appId); }
+  async repairClosedCards(appId: string) { await this.workflows.repairClosedCards(appId); }
   async endDurableConfirmations(appId: string) {
-    for (const record of await this.workflows?.list(appId) ?? []) {
-      if (record.durable && ['pending', 'resolving'].includes(record.state)) await this.workflows!.endConfirmation(appId, record.id);
+    for (const record of await this.workflows.list(appId)) {
+      if (record.durable && ['pending', 'resolving'].includes(record.state)) await this.workflows.endConfirmation(appId, record.id);
     }
   }
   protected async confirmationInputAllowed(inbox: LarkInboxRecord | undefined) {
     if (!inbox?.event.messageId.startsWith('confirmation_') || !inbox.workflowRequestId) return true;
-    const record = (await this.workflows?.list(inbox.appId))?.find(item => item.id === inbox.workflowRequestId && item.durable);
+    const record = (await this.workflows.list(inbox.appId)).find(item => item.id === inbox.workflowRequestId && item.durable);
     const allowed = Boolean(record && ['resolving', 'answered'].includes(record.state) && inbox.sessionId === record.sessionId
       && inbox.event.senderOpenId === record.actorId && record.actorId && await this.confirmationAvailable(record)
       && await this.authorizeInteraction(record, record.actorId, 'run.interrupt'));
     if (!allowed) {
-      await this.workflows?.endConfirmation(inbox.appId, inbox.workflowRequestId);
-      if (this.inbox && inbox.state === 'received') await this.inbox.update(inbox, { state: 'failed', error: '已结束，未执行' });
+      await this.workflows.endConfirmation(inbox.appId, inbox.workflowRequestId);
+      if (inbox.state === 'received') await this.inbox.update(inbox, { state: 'failed', error: '已结束，未执行' });
     }
     return allowed;
   }
@@ -291,7 +289,7 @@ export abstract class LarkCoordinatorCore {
   protected async isDeferredTask(sessionId: string, taskId: string) {
     // Confirmations registered before the host marker was introduced still own their original request.
     const appId = this.reconcileConfig?.appId;
-    if (appId && (await this.workflows?.list(appId))?.some(record => record.kind === 'ask' && record.durable
+    if (appId && (await this.workflows.list(appId)).some(record => record.kind === 'ask' && record.durable
       && record.sessionId === sessionId && record.taskId === taskId)) return true;
     if (this.runtime.getDeferredConfirmationId) return Boolean(await this.runtime.getDeferredConfirmationId(sessionId, taskId));
     if (!this.runtime.getEvents && !this.runtime.getRecentEvents) return false;
@@ -311,7 +309,7 @@ export abstract class LarkCoordinatorCore {
 
   protected async prepareConfirmationTitle(task: LarkTask) {
     if (task.config.adhdMode !== true || !task.id.startsWith('confirmation_')) return;
-    const record = (await this.workflows?.list(task.config.appId))?.find(item => item.durable
+    const record = (await this.workflows.list(task.config.appId)).find(item => item.durable
       && item.id === task.inbox?.workflowRequestId && task.id === `confirmation_${item.id}` && item.sessionId === task.inbox?.sessionId);
     const original = record?.durable?.snapshot?.prompt;
     task.displayName = typeof original === 'string' && original.trim() && !original.startsWith('持久确认记录 ID：')
@@ -320,13 +318,13 @@ export abstract class LarkCoordinatorCore {
 
   private async deferConfirmation(input: RelayDeferredAsk, context: RelayAskContext) {
     const appId = this.reconcileConfig?.appId;
-    if (this.stopped || !appId || !this.workflows || !this.inbox) return undefined;
+    if (this.stopped || !appId) return undefined;
     const config = await readLarkConfig(this.workflowOptions.store, appId);
     if (!config?.listening || config.adhdMode !== true) return undefined;
     const session = await this.runtime.getSession(input.sessionId);
     if (session?.source !== 'lark' || parseLarkSourceId(session.sourceId).appId !== appId) return undefined;
     if (!context.taskId || context.signal?.aborted) throw new LarkServiceError('LARK_CONFIRMATION_ENDED', '已结束，未执行', 409);
-    const mapping = (await this.cardMappings?.list(larkCardChannel(appId)))?.find(item => item.sessionId === input.sessionId
+    const mapping = (await this.cardMappings.list(larkCardChannel(appId))).find(item => item.sessionId === input.sessionId
       && parseCardTask(item.extra ?? '{}').runtime_task_id === context.taskId);
     if (!mapping) throw new LarkServiceError('LARK_CONFIRMATION_ENDED', '已结束，未执行', 409);
     const saved = parseCardTask(mapping.extra ?? '{}');
@@ -340,7 +338,7 @@ export abstract class LarkCoordinatorCore {
   protected async authorizeInteraction(record: LarkInteraction, actor: string, action: PolicyAction) {
     const config = await readLarkConfig(this.workflowOptions.store, record.appId);
     if (!config?.listening || !record.event.senderOpenId) return false;
-    const mapping = await this.cardMappings?.get(larkCardChannel(record.appId), record.event.messageId);
+    const mapping = await this.cardMappings.get(larkCardChannel(record.appId), record.event.messageId);
     if (!mapping || mapping.sessionId !== record.sessionId) return false;
     const saved = parseCardTask(mapping.extra ?? '{}');
     if (saved.app_id !== record.appId || saved.chat_id !== record.event.chatId || saved.runtime_task_id !== record.taskId
@@ -455,7 +453,7 @@ export abstract class LarkCoordinatorCore {
       && task.config.appId === config.appId && task.event.chatId === chatId);
     if (live?.event.senderOpenId) return { requester: live.event.senderOpenId, title: this.taskTitle(live, live.prompt, config), startedAt: live.startedAt,
       ...(config.adhdMode === true && live.id.startsWith('confirmation_') ? { confirmation: true } : {}) };
-    for (const mapping of await this.cardMappings?.list(larkCardChannel(config.appId)) ?? []) {
+    for (const mapping of await this.cardMappings.list(larkCardChannel(config.appId))) {
       if (mapping.sessionId !== target.sessionId) continue;
       const saved = parseCardTask(mapping.extra ?? '{}');
       if (saved.app_id === config.appId && saved.chat_id === chatId && saved.runtime_task_id === target.id) {
@@ -657,7 +655,7 @@ export abstract class LarkCoordinatorCore {
       task.contextReadAbort?.abort(new DOMException('Lark coordinator is stopped', 'AbortError'));
       void this.clearAcknowledgementReaction(task);
     }
-    this.workflows?.close();
+    this.workflows.close();
     for (const cleanup of this.turnCleanups) cleanup();
     if (this.reconcileTimer) clearTimeout(this.reconcileTimer);
     this.reconcileTimer = undefined;

@@ -1,3 +1,4 @@
+import { createTestLarkCoordinator } from './coordinator-test-fixture.js';
 import { readTestAcceptanceByKey } from './runtime-test-fixture.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { installLarkHook } from './security-hooks.js';
@@ -44,7 +45,7 @@ it('checks durable confirmation ownership without reading the historical task wi
     getEvents: vi.fn(async () => { throw new Error('historical events must not be read'); }),
     getRecentEvents: vi.fn(async () => { throw new Error('historical events must not be read'); })
   };
-  const coordinator = new LarkMessageCoordinator(runtime as any, {} as any, { warn: vi.fn(), info: vi.fn(), error: vi.fn() });
+  const coordinator = createTestLarkCoordinator(config, runtime as any, {} as any, { warn: vi.fn(), info: vi.fn(), error: vi.fn() });
   expect(await (coordinator as any).isDeferredTask('session', 'deferred')).toBe(true);
   expect(await (coordinator as any).isDeferredTask('session', 'queued')).toBe(false);
   expect(runtime.getDeferredConfirmationId.mock.calls).toEqual([['session', 'deferred'], ['session', 'queued']]);
@@ -141,8 +142,7 @@ function cardService() {
 const silentLog = () => ({ info: vi.fn(), warn: vi.fn(), error: vi.fn() });
 
 const coordinatorFor = (runtime: unknown, service: unknown, cardMappings?: unknown) =>
-  new LarkMessageCoordinator(
-    runtime as any, service as any, silentLog(), Math.random, 'ou_bot',
+  createTestLarkCoordinator(config, runtime as any, service as any, silentLog(), Math.random, 'ou_bot',
     undefined, cardMappings as any
   );
 
@@ -164,7 +164,7 @@ describe('飞书命令在 coordinator 重建后的会话定位', () => {
     const subscription = { id: 'ci_1', revision: 3, provider: 'test-ci', repository: { slug: 'owner/repo' }, headSha: 'a'.repeat(40), expiresAt: '2026-09-13T00:00:00.000Z', status: 'waiting' };
     const automation = { ciConfigured: true, listCiProviders: () => [{ id: 'test-ci', displayName: 'Test CI', polling: true, webhook: false }], subscribeCi: vi.fn(async () => subscription), listBySession: vi.fn(async () => ({ subscriptions: [subscription] })), cancelCi: vi.fn(async () => ({ ...subscription, status: 'cancelled' })) };
     const service = cardService();
-    const coordinator = new LarkMessageCoordinator(runtime as any, service as any, silentLog(), Math.random, 'ou_bot', undefined, undefined, undefined, undefined, undefined, { automation: automation as any });
+    const coordinator = createTestLarkCoordinator(config, runtime as any, service as any, silentLog(), Math.random, 'ou_bot', undefined, undefined, undefined, undefined, undefined, { automation: automation as any });
     try {
       await coordinator.handle(dm('om_ci_wait', '/ci wait ci.yml'), config);
       await vi.waitFor(() => expect(automation.subscribeCi).toHaveBeenCalledWith('ses_1', { workflow: 'ci.yml' }, 'ou_user_a'));
@@ -187,7 +187,7 @@ describe('飞书命令在 coordinator 重建后的会话定位', () => {
     const ciWebhook = { subscribe: vi.fn(async () => item), get: vi.fn(async (id: string) => id === 'ciw_1' ? item : undefined), cancel: vi.fn(async () => {}), listBySession: vi.fn(async () => []) };
     const automation = { ciConfigured: true, ciWebhook, listCiProviders: () => [], subscribeCi: vi.fn(), listBySession: vi.fn(async () => ({ subscriptions: [] })) };
     const service = cardService();
-    const coordinator = new LarkMessageCoordinator(runtime as any, service as any, silentLog(), Math.random, 'ou_bot', undefined, undefined, undefined, undefined, undefined, { automation: automation as any });
+    const coordinator = createTestLarkCoordinator(config, runtime as any, service as any, silentLog(), Math.random, 'ou_bot', undefined, undefined, undefined, undefined, undefined, { automation: automation as any });
     try {
       await coordinator.handle(dm('om_ci_fix', '/ci fix'), config);
       await vi.waitFor(() => expect(service.send).toHaveBeenCalledWith(expect.objectContaining({ taskName: '等待 Fake CI', markdown: expect.stringContaining('失败时自动交给 Agent 修复') })));
@@ -205,7 +205,7 @@ describe('飞书命令在 coordinator 重建后的会话定位', () => {
     const { runtime } = persistentRuntime();
     const automation = { ciConfigured: false, subscribeCi: vi.fn(), listBySession: vi.fn() };
     const service = cardService();
-    const coordinator = new LarkMessageCoordinator(runtime as any, service as any, silentLog(), Math.random, 'ou_bot', undefined, undefined, undefined, undefined, undefined, { automation: automation as any });
+    const coordinator = createTestLarkCoordinator(config, runtime as any, service as any, silentLog(), Math.random, 'ou_bot', undefined, undefined, undefined, undefined, undefined, { automation: automation as any });
     try {
       await coordinator.handle(dm('om_ci_unconfigured', '/ci wait'), config);
       await vi.waitFor(() => expect(service.send).toHaveBeenCalledWith(expect.objectContaining({ taskName: '/ci 未执行' })));
@@ -226,7 +226,7 @@ describe('飞书命令在 coordinator 重建后的会话定位', () => {
       get: vi.fn(async (id: string) => id === 'ciw_1' ? { id: 'ciw_1', sessionId: 'ses_ci' } : undefined),
       requestFix: vi.fn(async () => '已交给 Agent 修复（第 1/3 轮）。')
     };
-    const coordinator = new LarkMessageCoordinator(runtime as any, cardService() as any, silentLog(), Math.random, 'ou_bot', undefined, undefined, undefined, undefined, undefined, { store: repos.config, automation: { ciWebhook } as any });
+    const coordinator = new LarkMessageCoordinator(runtime as any, cardService() as any, silentLog(), Math.random, 'ou_bot', undefined, repos.channelMappings, undefined, undefined, undefined, { store: repos.config, automation: { ciWebhook } as any });
     try {
       await coordinator.initializeWorkflows(config);
       const value = { dutydeck_ci_fix: 'ciw_1', failure: 'failure_key' };
@@ -255,7 +255,7 @@ describe('飞书命令在 coordinator 重建后的会话定位', () => {
     };
     const pullRequests = { availability: () => ({ available: true }), prepare: vi.fn(async () => proposal), attachCard: vi.fn(async () => {}), confirm: vi.fn() };
     const service = cardService();
-    const coordinator = new LarkMessageCoordinator(runtime as any, service as any, silentLog(), Math.random, 'ou_bot', undefined, undefined, undefined, undefined, undefined, { automation: { pullRequests } as any });
+    const coordinator = createTestLarkCoordinator(config, runtime as any, service as any, silentLog(), Math.random, 'ou_bot', undefined, undefined, undefined, undefined, undefined, { automation: { pullRequests } as any });
     try {
       await coordinator.handle(dm('om_pr', '/pr Fix login'), config);
       await vi.waitFor(() => expect(pullRequests.attachCard).toHaveBeenCalledWith('pr_1', 'om_card'));
@@ -270,7 +270,7 @@ describe('飞书命令在 coordinator 重建后的会话定位', () => {
     } finally { first.stop(); coordinator.stop(); }
 
     const unconfigured = cardService();
-    const without = new LarkMessageCoordinator(runtime as any, unconfigured as any, silentLog(), Math.random, 'ou_bot', undefined, undefined, undefined, undefined, undefined, { automation: { pullRequests: { availability: () => ({ available: false }), prepare: vi.fn() } } as any });
+    const without = createTestLarkCoordinator(config, runtime as any, unconfigured as any, silentLog(), Math.random, 'ou_bot', undefined, undefined, undefined, undefined, undefined, { automation: { pullRequests: { availability: () => ({ available: false }), prepare: vi.fn() } } as any });
     try {
       await without.handle(dm('om_pr_unconfigured', '/pr'), config);
       await vi.waitFor(() => expect(unconfigured.send).toHaveBeenCalledWith(expect.objectContaining({ markdown: expect.stringContaining('dutydeck plugin install') })));
@@ -292,7 +292,7 @@ describe('飞书命令在 coordinator 重建后的会话定位', () => {
     const proposal = { ...followed, id: 'pr_1', status: 'proposed', claimed: undefined, branch: 'dutydeck/follow-up-later-0a1b2c3d', expiresAt: '2026-10-13T00:30:00.000Z' };
     const pullRequests = { availability: () => ({ available: true }), follow: vi.fn(async () => followed), prepare: vi.fn(async () => proposal), attachCard: vi.fn(async () => {}) };
     const service = cardService();
-    const coordinator = new LarkMessageCoordinator(runtime as any, service as any, silentLog(), Math.random, 'ou_bot', undefined, undefined, undefined, undefined, undefined, { automation: { pullRequests } as any });
+    const coordinator = createTestLarkCoordinator(config, runtime as any, service as any, silentLog(), Math.random, 'ou_bot', undefined, undefined, undefined, undefined, undefined, { automation: { pullRequests } as any });
     try {
       await coordinator.handle(dm('om_follow', '/pr follow https://github.com/acme/app/pull/12'), config);
       await vi.waitFor(() => expect(service.send).toHaveBeenCalledWith(expect.objectContaining({ taskName: '已跟进 #12' })));
@@ -304,7 +304,7 @@ describe('飞书命令在 coordinator 重建后的会话定位', () => {
       await coordinator.handle(dm('om_title', '/pr follow up later'), config);
       await vi.waitFor(() => expect(pullRequests.prepare).toHaveBeenCalledWith('ses_1', { title: 'follow up later' }, 'ou_user_a'));
       expect(pullRequests.follow).toHaveBeenCalledOnce();
-      await coordinator.handle(dm('om_denied', '/pr follow #12'), { ...config, allowedUsers: [{ openId: 'ou_carol', name: 'Carol' }] });
+      await coordinator.handleWithBotConfig(dm('om_denied', '/pr follow #12'), { ...config, allowedUsers: [{ openId: 'ou_carol', name: 'Carol' }] });
       await vi.waitFor(() => expect(service.send).toHaveBeenCalledWith(expect.objectContaining({ taskName: '/pr 未执行', markdown: expect.stringContaining('无法执行 /pr') })));
       expect(pullRequests.follow).toHaveBeenCalledOnce();
     } finally { first.stop(); coordinator.stop(); }
@@ -322,7 +322,7 @@ describe('飞书命令在 coordinator 重建后的会话定位', () => {
       answer: vi.fn(async () => '已记下：按评论修改。'),
       forcePush: vi.fn(async () => '已确认，仍然推送这一轮的改动，推送前的其余核对照做，完成后会通知。')
     };
-    const coordinator = new LarkMessageCoordinator(runtime as any, cardService() as any, silentLog(), Math.random, 'ou_bot', undefined, undefined, undefined, undefined, undefined, { store: repos.config, automation: { pullRequests } as any });
+    const coordinator = new LarkMessageCoordinator(runtime as any, cardService() as any, silentLog(), Math.random, 'ou_bot', undefined, repos.channelMappings, undefined, undefined, undefined, { store: repos.config, automation: { pullRequests } as any });
     try {
       await coordinator.initializeWorkflows(config);
       const context = { messageId: 'om_pr_card', chatId: 'oc_group' };
@@ -495,7 +495,7 @@ describe('飞书命令在 coordinator 重建后的会话定位', () => {
 
     const service = cardService();
     const restricted = { ...config, allowedEmails: ['allowed@example.com'] };
-    await coordinatorFor(runtime, service).handle(dm('om_deny', '/new 偷偷换个会话'), restricted);
+    await coordinatorFor(runtime, service).handleWithBotConfig(dm('om_deny', '/new 偷偷换个会话'), restricted);
 
     await vi.waitFor(() => expect(service.send).toHaveBeenCalledWith(expect.objectContaining({
       state: 'failed', readOnly: true, markdown: expect.stringContaining('白名单')
@@ -595,7 +595,7 @@ describe('飞书命令在 coordinator 重建后的会话定位', () => {
     await live.handle(dm('om_first', '先跑一轮'), config);
     await vi.waitFor(() => expect(runtime.send).toHaveBeenCalledOnce());
 
-    await live.handle(dm('om_status', '/status'), { ...config, defaultAgentId: 'claude', workspace: '/another-workspace' });
+    await live.handleWithBotConfig(dm('om_status', '/status'), { ...config, defaultAgentId: 'claude', workspace: '/another-workspace' });
 
     await vi.waitFor(() => expect(service.send).toHaveBeenCalledWith(expect.objectContaining({ taskName: '任务状态' })));
     const markdown = statusMarkdown(service);
@@ -614,7 +614,7 @@ describe('飞书命令在 coordinator 重建后的会话定位', () => {
     // 重启后只剩持久化查询，而 codex 的会话不属于 claude 配置——诚实说没有会话，
     // 不能把别的 Agent 的上下文认成自己的。
     const service = cardService();
-    await coordinatorFor(runtime, service).handle(dm('om_status', '/status'), { ...config, defaultAgentId: 'claude' });
+    await coordinatorFor(runtime, service).handleWithBotConfig(dm('om_status', '/status'), { ...config, defaultAgentId: 'claude' });
 
     await vi.waitFor(() => expect(service.send).toHaveBeenCalledWith(expect.objectContaining({ taskName: '任务状态' })));
     const markdown = statusMarkdown(service);
@@ -629,9 +629,9 @@ describe('私聊话题与 App 的持久化隔离', () => {
   it('p2pMode=thread 时每个私聊话题各自持久化，/status 只看到本话题', async () => {
     const { runtime } = persistentRuntime();
     const seed = coordinatorFor(runtime, cardService());
-    await seed.handle(dm('om_topic_a', '话题 A'), threadConfig);
+    await seed.handleWithBotConfig(dm('om_topic_a', '话题 A'), threadConfig);
     await vi.waitFor(() => expect(runtime.send).toHaveBeenCalledOnce());
-    await seed.handle(dm('om_topic_b', '话题 B'), threadConfig);
+    await seed.handleWithBotConfig(dm('om_topic_b', '话题 B'), threadConfig);
     await vi.waitFor(() => expect(runtime.send).toHaveBeenCalledTimes(2));
 
     // 两个顶层 DM 必须是两条会话，且 sourceId 不同——否则话题 B 会读到话题 A 的上下文。
@@ -640,7 +640,7 @@ describe('私聊话题与 App 的持久化隔离', () => {
     expect(runtime.start.mock.calls[1]?.[0].sourceId).toBe('cli_test:ou_user_a:p2p:thread:om_topic_b');
 
     const service = cardService();
-    await coordinatorFor(runtime, service).handle(
+    await coordinatorFor(runtime, service).handleWithBotConfig(
       dm('om_status_a', '/status', { rootId: 'om_topic_a', threadId: 'omt_a' }),
       threadConfig
     );
@@ -663,11 +663,11 @@ describe('私聊话题与 App 的持久化隔离', () => {
     const seed = coordinatorFor(runtime, cardService());
     await seed.handle(dm('om_a', '本 App'), config);
     await vi.waitFor(() => expect(runtime.send).toHaveBeenCalledOnce());
-    await seed.handle(dm('om_b', '另一个 App'), otherApp);
+    await seed.handleWithBotConfig(dm('om_b', '另一个 App'), otherApp);
     await vi.waitFor(() => expect(runtime.send).toHaveBeenCalledTimes(2));
 
     const service = cardService();
-    await coordinatorFor(runtime, service).handle(dm('om_new', '/new'), otherApp);
+    await coordinatorFor(runtime, service).handleWithBotConfig(dm('om_new', '/new'), otherApp);
     await vi.waitFor(() => expect(service.send).toHaveBeenCalledWith(expect.objectContaining({ taskName: '/new 已受理' })));
     expect(runtime.stop).toHaveBeenCalledWith('ses_2', { kind: 'channel', id: 'ou_user_a', appId: 'cli_other' });
     expect(runtime.stop).not.toHaveBeenCalledWith('ses_1', { kind: 'channel', id: 'ou_user_a', appId: 'cli_other' });
@@ -845,15 +845,15 @@ describe('/cancel 在 coordinator 重建后', () => {
     const threadConfig = { ...config, p2pMode: 'thread' as const };
     const { runtime, tasks } = persistentRuntime();
     const seed = coordinatorFor(runtime, cardService());
-    await seed.handle(dm('om_topic_a', '话题 A'), threadConfig);
+    await seed.handleWithBotConfig(dm('om_topic_a', '话题 A'), threadConfig);
     await vi.waitFor(() => expect(runtime.send).toHaveBeenCalledOnce());
-    await seed.handle(dm('om_topic_b', '话题 B'), threadConfig);
+    await seed.handleWithBotConfig(dm('om_topic_b', '话题 B'), threadConfig);
     await vi.waitFor(() => expect(runtime.send).toHaveBeenCalledTimes(2));
     // 只有话题 A 有在跑的任务；在话题 B 里发 /cancel 不得动它。
     tasks.set('ses_1', [runtimeTask({ id: 'rt_a', sessionId: 'ses_1', status: 'running' })]);
 
     const service = cardService();
-    await coordinatorFor(runtime, service).handle(
+    await coordinatorFor(runtime, service).handleWithBotConfig(
       dm('om_cancel_b', '/cancel', { rootId: 'om_topic_b', threadId: 'omt_b' }),
       threadConfig
     );
@@ -869,7 +869,7 @@ describe('/cancel 在 coordinator 重建后', () => {
     tasks.set('ses_1', [runtimeTask({ id: 'rt_running', sessionId: 'ses_1', status: 'running' })]);
 
     const service = cardService();
-    await coordinatorFor(runtime, service).handle(
+    await coordinatorFor(runtime, service).handleWithBotConfig(
       dm('om_cancel', '/cancel'), { ...config, allowedEmails: ['allowed@example.com'] }
     );
 
@@ -933,7 +933,7 @@ describe('/retry 在 coordinator 重建后', () => {
       ...config, workspace: await readyHookWorkspace(), riskControlMode: 'enforced' as const,
       highRiskAllowedUsers: [{ openId: 'ou_privileged', name: '有权限的人' }]
     };
-    await coordinatorFor(runtime, cardService()).handle(
+    await coordinatorFor(runtime, cardService()).handleWithBotConfig(
       dm('om_first', '危险操作', { senderOpenId: 'ou_privileged' }), risky
     );
     await vi.waitFor(() => expect(runtime.send).toHaveBeenCalledOnce());
@@ -947,7 +947,7 @@ describe('/retry 在 coordinator 重建后', () => {
 
     // 另一个人来重试：必须按他自己的权限重新判定。
     const service = cardService();
-    await coordinatorFor(runtime, service, mappings.repository).handle(
+    await coordinatorFor(runtime, service, mappings.repository).handleWithBotConfig(
       dm('om_retry', '/retry', { senderOpenId: 'ou_plain' }), risky
     );
 
@@ -998,14 +998,14 @@ describe('/retry 在 coordinator 重建后', () => {
     const live = coordinatorFor(runtime, service);
     // 让这一轮真的失败，内存 task 停在 failed。
     runtime.send.mockRejectedValueOnce(new Error('这一轮炸了'));
-    await live.handle(dm('om_alice', '危险操作', { senderOpenId: 'ou_alice' }), risky);
+    await live.handleWithBotConfig(dm('om_alice', '危险操作', { senderOpenId: 'ou_alice' }), risky);
     await vi.waitFor(() => expect(runtime.send).toHaveBeenCalledOnce());
     expect(runtime.send.mock.calls[0]?.[3]).toMatchObject({ authorized: true });
     const cardsBefore = service.send.mock.calls.length;
     // Alice 自己那一轮的失败收据已经写完；只看 Bob 发 /retry 之后还动了哪些卡。
     const updatesBefore = service.update.mock.calls.length;
 
-    await live.handle(dm('om_bob_retry', '/retry', { senderOpenId: 'ou_bob' }), risky);
+    await live.handleWithBotConfig(dm('om_bob_retry', '/retry', { senderOpenId: 'ou_bob' }), risky);
 
     await vi.waitFor(() => expect(runtime.send).toHaveBeenCalledTimes(2));
     // 关键：按 Bob 重算，不是继承 Alice 的 authorized:true。
@@ -1121,7 +1121,7 @@ describe('/retry 在 coordinator 重建后', () => {
     }]);
 
     const service = cardService();
-    await coordinatorFor(runtime, service, mappings.repository).handle(
+    await coordinatorFor(runtime, service, mappings.repository).handleWithBotConfig(
       dm('om_retry', '/retry'), { ...config, allowedEmails: ['allowed@example.com'] }
     );
 

@@ -53,7 +53,7 @@ const harness = async (records: Array<{ event: LarkMessageEvent; state?: 'comman
   const runtime = { getSession: vi.fn(async () => undefined), listSessions: vi.fn(async () => []), subscribe: vi.fn(() => vi.fn()) };
   const log = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
   const coordinator = new LarkMessageCoordinator(runtime as any, service as any, log, Math.random, 'ou_bot',
-    undefined, undefined, undefined, undefined, groupManager as any, { store: repos.config });
+    undefined, repos.channelMappings, undefined, undefined, groupManager as any, { store: repos.config });
   const stored = async (messageId: string) => JSON.parse((await repos.config.get(`lark.inbox.${config.appId}.${messageId}`))!);
   return { repos, coordinator, service, groupManager, log, stored, close: () => { coordinator.stop(); repos.close(); } };
 };

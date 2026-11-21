@@ -128,15 +128,15 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
     this.registerAgentCommandConfirm(config.appId);
     this.registerAgentSettingsConfirm(config.appId);
     this.registerReactionTaskConfirm(config.appId);
-    await this.workflows?.initialize(config.appId);
+    await this.workflows.initialize(config.appId);
     await this.recoverAutoVerifications(config).catch(error => this.log.warn({ error, appId: config.appId }, '重启后收尾自动验证失败'));
-    if (this.inbox) await this.pruneIgnoredInbox(config.appId);
+    await this.pruneIgnoredInbox(config.appId);
     // 入站恢复仍在监听建连之前、逐条完成：上次没处理完的旧请求先排进各自会话的队列，建连后新到的消息
     // （包括 /new）排在它们后面，不会反过来插队。单条记录失败只影响这一条，不让初始化抛出、不阻止建连；
     // 瞬时失败的记录交还后在后台重试，不占着建连。
-    for (const record of await this.inbox?.orphanedCommands(config.appId) ?? []) {
+    for (const record of await this.inbox.orphanedCommands(config.appId)) {
       try {
-        await this.inbox!.update(record, { state: 'failed', error: '重启后无法确认命令是否完成；如未生效，请重新发送。' });
+        await this.inbox.update(record, { state: 'failed', error: '重启后无法确认命令是否完成；如未生效，请重新发送。' });
         const actor = record.event.senderOpenId;
         // 旧命令（larkRecoveryNoticeExpired）只记失败，不在群里回复。
         const receivedAt = Number(record.event.createTime) || Date.parse(record.receivedAt ?? '');
@@ -147,14 +147,14 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
         this.log.warn({ error, messageId: record.event.messageId }, '重启后收尾命令记录失败，跳过这一条');
       }
     }
-    for (const record of await this.inbox?.recoverable(config.appId) ?? []) await this.recoverInbound(record, config);
+    for (const record of await this.inbox.recoverable(config.appId)) await this.recoverInbound(record, config);
     await this.recoverAcceptedCards(config);
   }
 
   protected async recoverAcceptedCards(config: StoredLarkConfig, only?: ReadonlySet<string>) {
     const held = new Set<string>();
-    if (!this.inbox || !this.workflows || !this.cardMappings || !this.runtime.getAcceptedTask) return held;
-    const records = only ? await Promise.all([...only].map(id => this.inbox!.lookup(config.appId, id))) : await this.inbox.cardRecoveryRecords(config.appId);
+    if (!this.runtime.getAcceptedTask) return held;
+    const records = only ? await Promise.all([...only].map(id => this.inbox.lookup(config.appId, id))) : await this.inbox.cardRecoveryRecords(config.appId);
     for (const record of records) {
       if (this.stopped || !record?.sessionId) continue;
       if (record.state === 'failed' && record.error === larkTurnIdentityError) {
@@ -214,7 +214,7 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
     }
     if (live) return (await this.saveCardTask(live)).saved;
     const effective = event.chatType === 'group' && this.groupManager ? await this.groupManager.resolved(config, event.chatId) : config;
-    const adopted = await this.inbox!.adoptAccepted(record);
+    const adopted = await this.inbox.adoptAccepted(record);
     if (!adopted || this.stopped || this.tasks.has(id)) return;
     const key = larkGroupKey(event, scopeId, config.appId);
     const group = this.groups.get(key) ?? { tail: Promise.resolve() };
@@ -257,14 +257,14 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
       const hours = larkRedispatchMaxAgeMs / 3_600_000;
       try {
         if (record.state === 'unrouted') {
-          await this.inbox!.update(record, { state: 'ignored', reason: 'backlog_expired' });
+          await this.inbox.update(record, { state: 'ignored', reason: 'backlog_expired' });
           this.scheduleIgnoredPrune(config.appId);
           return;
         }
         const accepted = await this.inboundTurnAccepted(record, config);
         if (accepted !== true) {
           const unknown = accepted === undefined;
-          await this.inbox!.update(record, { state: 'failed', reason: 'backlog_expired',
+          await this.inbox.update(record, { state: 'failed', reason: 'backlog_expired',
             error: unknown ? `重启后超过 ${hours} 小时，无法确认是否已执行，不再自动执行。` : `重启后超过 ${hours} 小时仍未执行，不再自动执行。` });
           const actor = record.event.senderOpenId;
           if (actor && !larkRecoveryNoticeExpired(receivedAt) && await this.currentAccess(config, record.event.chatId, record.event.chatType, actor, 'task.view_result')) {
@@ -288,16 +288,16 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
     } catch (error) {
       try {
         // 失败可能发生在路由或认领前后：仅交还库中仍待处理的 unrouted/received。
-        const current = await this.inbox!.reload(record);
+        const current = await this.inbox.reload(record);
         if (current?.state !== 'received' && current?.state !== 'unrouted') return;
         const reason = error instanceof Error ? error.message : String(error);
         if (isLarkDeterministicFailure(error)) {
           this.inboundRecoveryRetries.delete(messageId);
-          await this.inbox!.update(current, { state: 'failed', error: reason });
+          await this.inbox.update(current, { state: 'failed', error: reason });
           this.log.warn({ error, messageId }, '重启恢复的入站消息被飞书明确拒绝，已标记失败');
           return;
         }
-        const released = await this.inbox!.release(current);
+        const released = await this.inbox.release(current);
         if (!released) return;
         const attempt = (this.inboundRecoveryRetries.get(messageId) ?? 0) + 1;
         this.inboundRecoveryRetries.set(messageId, attempt);
@@ -307,7 +307,7 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
           cancel();
           void this.enqueueInbound(released.event.chatId, async () => {
             if (this.stopped) return;
-            const latest = await this.inbox!.reload(released);
+            const latest = await this.inbox.reload(released);
             // 等待期间被别的路径认领（例如同一条消息被再次推送）或已收口：不再重试。
             if (this.stopped || (latest?.state !== 'received' && latest?.state !== 'unrouted') || latest.boot) return;
             this.handledMessages.delete(messageId);
@@ -369,9 +369,9 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
    * 且只看 /tasks 已经按发送人权限筛出来的那些会话。这些对象的按钮绑在各自的原卡上，所以只给跳转。
    */
   private async taskDashboardDecisions(event: LarkMessageEvent, config: StoredLarkConfig, sessions: Map<string, { session: Session; url: string }>): Promise<LarkTaskDashboardDecision[]> {
-    if (!this.workflowOptions.store || !event.senderOpenId) return [];
+    if (!event.senderOpenId) return [];
     const actorId = event.senderOpenId;
-    const interactions = await this.workflows?.list(config.appId).catch(() => []) ?? [];
+    const interactions = await this.workflows.list(config.appId).catch(() => []);
     const items = await collectInbox({
       runtime: {
         getTasks: id => this.runtime.getTasks?.(id) ?? Promise.resolve([]),
@@ -397,10 +397,10 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
     if (!event.senderOpenId) throw new LarkServiceError('LARK_IDENTITY_REQUIRED', '缺少当前成员身份。', 403);
     const entries: LarkTaskDashboardEntry[] = [];
     const sessions = new Map<string, { session: Session; url: string }>();
-    const interactions = await this.workflows?.list(config.appId) ?? [];
+    const interactions = await this.workflows.list(config.appId);
     // Agent 显示名只查一次；查不到名字就退化成 agentId，绝不留空让读者猜是谁在跑。
     const agentNames = new Map((await this.runtime.listAgents?.().catch(() => []) ?? []).map(agent => [agent.id, agent.name] as const));
-    for (const mapping of await this.cardMappings?.list(larkCardChannel(config.appId)) ?? []) {
+    for (const mapping of await this.cardMappings.list(larkCardChannel(config.appId))) {
       const saved = parseCardTask(mapping.extra ?? '{}');
       if (saved.app_id !== config.appId || !saved.runtime_task_id) continue;
       if (event.chatType === 'group' ? saved.chat_id !== event.chatId : saved.sender_open_id !== event.senderOpenId) continue;
@@ -412,7 +412,7 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
       const task = (await this.runtime.getTasks?.(mapping.sessionId))?.find(task => task.id === saved.runtime_task_id);
       if (!session || !task) continue;
       const taskReport = await this.runtime.getSessionTaskReport?.(mapping.sessionId);
-      const pending = interactions.find(item => item.taskId === task.id && item.state === 'pending' && item.kind !== 'result' && item.boot === this.workflows?.boot);
+      const pending = interactions.find(item => item.taskId === task.id && item.state === 'pending' && item.kind !== 'result' && item.boot === this.workflows.boot);
       const result = interactions.find(item => item.taskId === task.id && item.kind === 'result');
       const host = config.brand === 'lark' ? 'applink.larksuite.com' : 'applink.feishu.cn';
       const url = new URL(`https://${host}/client/${saved.thread_id ? 'thread' : 'chat'}/open`);
@@ -463,7 +463,6 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
   }
 
   private async routeWorkflow(event: LarkMessageEvent, config: StoredLarkConfig, prompt: string, scope: { id: string; prompt?: string }, receipts?: LarkCommandReceipts): Promise<boolean> {
-    if (!this.workflows) return false;
     const parsed = parseSlashCommand(prompt);
     const quoted = await this.workflows.quoted(config.appId, event);
     const names = ['tasks', 'answer', 'approve', 'reject'];
@@ -490,11 +489,11 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
       }
       if (quoted?.kind === 'result' && (!parsed || !names.includes(parsed.name))) {
         if (!event.senderOpenId || !await this.authorizeInteraction(quoted, event.senderOpenId, 'run.interrupt')) throw new LarkServiceError('LARK_INTERACTION_DENIED', '当前账号无权修改此任务。', 403);
-        const mapping = (await this.cardMappings!.get(larkCardChannel(config.appId), quoted.event.messageId))!;
+        const mapping = (await this.cardMappings.get(larkCardChannel(config.appId), quoted.event.messageId))!;
         const saved = parseCardTask(mapping.extra!);
         if (!saved.scope_id) throw new LarkServiceError('LARK_CONTEXT_MISSING', '原任务上下文不可恢复，请发送新的任务目标。', 409);
         if (quoted.state === 'pending') {
-          await this.workflows!.respond({ appId: config.appId, chatId: event.chatId, actorId: event.senderOpenId, requestId: quoted.id, action: 'changes' });
+          await this.workflows.respond({ appId: config.appId, chatId: event.chatId, actorId: event.senderOpenId, requestId: quoted.id, action: 'changes' });
           await this.refreshResultFeedback(config, quoted.id).catch(error => this.log.warn({ error }, '修改要求已记录，卡片刷新失败'));
         }
         // A follow-up after acceptance is a new task in the same context; the
@@ -512,7 +511,7 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
   private async pendingAskCandidates(event: LarkMessageEvent, config: StoredLarkConfig, scopeId: string): Promise<LarkInteraction[]> {
     const candidates: LarkInteraction[] = [];
     let continued: Promise<string | undefined> | undefined;
-    for (const record of await this.workflows?.pendingAsks(config.appId) ?? []) {
+    for (const record of await this.workflows.pendingAsks(config.appId)) {
       // 话题续接了发起人顶层任务的会话：那个会话里等着的提问，也收本人在这个话题里的回答。
       continued ??= this.threadContinuation(event, config, scopeId).then(session => session?.id);
       if (record.sessionId === await continued && record.event.chatId === event.chatId && record.event.senderOpenId === event.senderOpenId) { candidates.push(record); continue; }
@@ -562,18 +561,18 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
   }
 
   private async continuesPendingAsk(event: LarkMessageEvent, config: StoredLarkConfig, durable = false): Promise<boolean> {
-    if (!this.workflows || !event.senderOpenId || event.senderType !== 'user' || !['text', 'post', 'rich_text'].includes(event.messageType)
+    if (!event.senderOpenId || event.senderType !== 'user' || !['text', 'post', 'rich_text'].includes(event.messageType)
       || event.parentId && (!event.threadId || event.parentId !== event.rootId)) return false;
     try {
       const { prompt, resources } = await parsePrompt(event, this.botOpenId);
       if (!prompt.trim() || resources.length || parseSlashCommand(prompt)) return false;
       const scopeId = await resolveLarkScopeId(event, config, this.chatModeResolver);
-      return (await this.pendingAskCandidates(event, config, scopeId)).some(record => this.workflows!.acceptsReply(record, prompt));
+      return (await this.pendingAskCandidates(event, config, scopeId)).some(record => this.workflows.acceptsReply(record, prompt));
     } catch (error) { if (durable) throw error; return false; }
   }
 
   private async routePendingAsk(event: LarkMessageEvent, config: StoredLarkConfig, prompt: string, resources: LarkMessageResource[], scope: { id: string; prompt?: string }, inbox: LarkInboxRecord | undefined, recovering: boolean): Promise<boolean> {
-    if (!this.workflows || !event.senderOpenId || event.senderType !== 'user' || !['text', 'post', 'rich_text'].includes(event.messageType)
+    if (!event.senderOpenId || event.senderType !== 'user' || !['text', 'post', 'rich_text'].includes(event.messageType)
       || !prompt.trim() || resources.length || parseSlashCommand(prompt)
       // Ordinary topic replies point at the topic root. A different parent
       // is an explicit quote and must retain its existing routing semantics.
@@ -583,17 +582,17 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
       // Recovery must not reinterpret an old message as a reply to a new ask.
       if (recovering) return false;
       // 带选项的提问只认对得上某个选项的回复，其余文字按普通消息处理。
-      const candidates = (await this.pendingAskCandidates(event, config, scope.id)).filter(record => this.workflows!.acceptsReply(record, prompt));
+      const candidates = (await this.pendingAskCandidates(event, config, scope.id)).filter(record => this.workflows.acceptsReply(record, prompt));
       if (!candidates.length) return false;
       if (candidates.length > 1) {
-        if (inbox) await this.inbox!.update(inbox, { state: 'command' });
+        if (inbox) await this.inbox.update(inbox, { state: 'command' });
         await this.workflowReply(event, config, '当前有多个问题等待回答，请引用要回答的提问卡片回复。');
         return true;
       }
       requestId = candidates[0]!.id;
       // Pin the waiter before answering: if acknowledgement fails or the
       // daemon restarts, this message can never answer a later question.
-      if (inbox) await this.inbox!.update(inbox, { workflowRequestId: requestId });
+      if (inbox) await this.inbox.update(inbox, { workflowRequestId: requestId });
     }
     try {
       const result = await this.workflows.respond({ appId: config.appId, chatId: event.chatId, actorId: event.senderOpenId, requestId, action: 'answer', answer: prompt });
@@ -626,7 +625,7 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
    */
   async pollLarkTaskDispatches(config: StoredLarkConfig): Promise<number> {
     const store = this.workflowOptions.store;
-    if (this.stopped || !store) return 0;
+    if (this.stopped) return 0;
     if (this.taskAgentRun) return this.taskAgentRun;
     const run = (async () => {
       // 定时器和事件带的可能是启动时的旧配置：监听开关与白名单门按当前保存的配置判断，与 handle 同口径。
@@ -682,14 +681,14 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
     if (!explicit || this.handledMessages.has(event.messageId)) return;
     this.handledMessages.add(event.messageId);
     if (this.handledMessages.size > 5_000) this.handledMessages.delete(this.handledMessages.values().next().value!);
-    const inbox = await this.inbox?.claim(config.appId, event, true);
-    if (this.inbox && !inbox) return;
+    const inbox = await this.inbox.claim(config.appId, event, true);
+    if (!inbox) return;
     await sendTaskCard(this.service, event, {
       state: 'failed', readOnly: true, retryable: false, taskId: event.messageId, taskName: '请求未执行',
       markdown: `**请求未执行，Agent 尚未启动。**\n\n${reason}\n\n请联系此机器人的管理员检查群配置、运行权限和你的访问授权，确认生效后重新发送。`,
       idempotencyKey: `input_denied_${event.messageId}`.slice(0, 50)
     }, this.log).catch(error => this.log.warn({ error, messageId: event.messageId }, '发送未执行回执失败'));
-    if (inbox) await this.inbox!.update(inbox, { state: 'failed', error: reason });
+    if (inbox) await this.inbox.update(inbox, { state: 'failed', error: reason });
   }
 
   /** Confirmation checks the clicker's current task permissions, never the original sender's. */
@@ -725,10 +724,6 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
 
   /** SDK 只等待本地接收。同群路由保持接收顺序，其他群不受慢权限查询影响。 */
   async receive(event: LarkMessageEvent, config: StoredLarkConfig, trustedReplyMessageId?: string) {
-    if (!this.inbox) {
-      void this.handle(event, config).catch(error => this.log.error({ error, messageId: event.messageId }, '处理飞书消息事件失败'));
-      return;
-    }
     const record = await this.inbox.capture(config.appId, event, trustedReplyMessageId);
     if (!record) return;
     void this.enqueueInbound(record.event.chatId, () => this.recoverInbound(record, config))
@@ -746,8 +741,8 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
 
   handleEdited(event: LarkMessageEvent, config: StoredLarkConfig) {
     return this.enqueueInbound(event.chatId, async () => {
-      await this.inbox?.reopenIgnored(config.appId, event);
-      const record = await this.inbox?.capture(config.appId, event);
+      await this.inbox.reopenIgnored(config.appId, event);
+      const record = await this.inbox.capture(config.appId, event);
       if (record) return this.recoverInbound(record, config);
       return this.handle(event, config);
     });
@@ -756,7 +751,7 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
   async handleReaction(messageId: string, emoji: string, actor: string, config: StoredLarkConfig) {
     const { store, participation } = this.workflowOptions;
     const confirmations = participation?.confirmations;
-    if (this.stopped || !this.inbox || !store?.compareAndSet || !confirmations || !config.listening || emoji !== config.reactionTriggerEmoji) return;
+    if (this.stopped || !store.compareAndSet || !confirmations || !config.listening || emoji !== config.reactionTriggerEmoji) return;
     try {
       const message = await withLarkContextReadTimeout(signal => this.service.getMessage(messageId, signal), '读取表情来源消息');
       const { chatId, sender, messageType, threadId, rootId } = message;
@@ -818,7 +813,7 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
       },
       apply: async (record, actor) => {
         const config = await readLarkConfig(this.workflowOptions.store, appId);
-        if (this.stopped || !this.inbox || !record.cardMessageId || !config?.listening) throw new LarkServiceError('LARK_REACTION_TASK_UNAVAILABLE', '确认暂不可用，请稍后重试。', 409);
+        if (this.stopped || !record.cardMessageId || !config?.listening) throw new LarkServiceError('LARK_REACTION_TASK_UNAVAILABLE', '确认暂不可用，请稍后重试。', 409);
         const originalId = record.replyTo.messageId;
         const original = await withLarkContextReadTimeout(signal => this.service.getMessage(originalId, signal), '核对表情来源消息')
           .catch((error: unknown) => {
@@ -845,14 +840,14 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
 
   private async routeCaptured(record: LarkInboxRecord, config: StoredLarkConfig) {
     if (this.stopped) return;
-    const owned = await this.inbox!.ownUnrouted(record);
+    const owned = await this.inbox.ownUnrouted(record);
     if (!owned) return;
     // 尚未路由的记录重新走正常唤醒和当前权限；既不 adopt，也不跳过 live ask/request continuation。
     await this.handle(owned.event, config, false, false, undefined, owned);
     if (this.stopped) return;
-    const current = await this.inbox!.reload(record);
+    const current = await this.inbox.reload(record);
     if (current?.state !== 'unrouted') return;
-    await this.inbox!.update(current, { state: 'ignored', ...(!current.reason ? { reason: 'not_addressed' as const } : {}) });
+    await this.inbox.update(current, { state: 'ignored', ...(!current.reason ? { reason: 'not_addressed' as const } : {}) });
     this.scheduleIgnoredPrune(config.appId);
   }
 
@@ -864,7 +859,7 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
 
   private pruneIgnoredInbox(appId: string) {
     this.ignoredPruneState(appId).lastRunAt = Date.now();
-    return timeLoop('lark.inbox.prune', this.log, () => this.inbox!.pruneIgnored(appId), undefined, appId);
+    return timeLoop('lark.inbox.prune', this.log, () => this.inbox.pruneIgnored(appId), undefined, appId);
   }
 
   /** 保留期按天计，不必每条忽略消息都清：实时路径上每个机器人每小时至多清理一次（启动时已清过一轮）。 */
@@ -885,9 +880,9 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
 
   /** retrying：首卡重试重新走入站处理时传入原任务，按它触发时的 epoch 判断 /new。 */
   async handle(event: LarkMessageEvent, config: StoredLarkConfig, recovering = false, adopted = false, retrying?: LarkTask, captured?: LarkInboxRecord, adoption?: LarkInboxAdoption) {
-    const note = async (reason: Disposition['reason'], detail?: string) => { if (this.workflowOptions.store) await annotateDisposition(this.workflowOptions.store, config.appId, event.messageId, { schemaVersion: 1, reason, ...(detail ? { detail: detail.slice(0, 500) } : {}) }, this.log); };
-    const persisted = captured ?? await this.inbox?.lookup(config.appId, event.messageId);
-    if (this.inbox && adoption?.confirmedInputDigest && (!persisted || larkConfirmationInputDigest(persisted.event) !== adoption.confirmedInputDigest)) {
+    const note = async (reason: Disposition['reason'], detail?: string) => { await annotateDisposition(this.workflowOptions.store, config.appId, event.messageId, { schemaVersion: 1, reason, ...(detail ? { detail: detail.slice(0, 500) } : {}) }, this.log); };
+    const persisted = captured ?? await this.inbox.lookup(config.appId, event.messageId);
+    if (adoption?.confirmedInputDigest && (!persisted || larkConfirmationInputDigest(persisted.event) !== adoption.confirmedInputDigest)) {
       throw new RuntimeError('LARK_CONFIRMATION_INPUT_CHANGED', '原消息已修改，请重新确认', 409);
     }
     if (persisted && !await this.confirmationInputAllowed(persisted)) { await note('input_rejected'); return; }
@@ -905,15 +900,13 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
     const adoptedScenario = adoption || persisted?.state === 'received' ? larkScenarioAdoptionOf(event) : undefined;
     const scenario = adoptedScenario?.mode === 'direct' ? adoptedScenario : undefined;
     if (scenario) adopted = true;
-    if (this.workflowOptions.store) {
-      const current = await readLarkConfig(this.workflowOptions.store, config.appId);
-      if (!current?.listening) { await note('listening_disabled'); return; }
-      // 任务通道的认领可能早于名单被清空：按这份配置快照再判一次，不落进普通私聊「空名单对所有人开放」。
-      // 不建入站记录直接返回，认领由轮询退回，通道重新开放后再派。
-      if (larkTaskAgentGuid(event.messageId) && !larkTaskAgentAllowlistConfigured(current)) return;
-      config = current;
-    }
-    const quotedWorkflow = await this.workflows?.quoted(config.appId, event);
+    const current = await readLarkConfig(this.workflowOptions.store, config.appId);
+    if (!current?.listening) { await note('listening_disabled'); return; }
+    // 任务通道的认领可能早于名单被清空：按这份配置快照再判一次，不落进普通私聊「空名单对所有人开放」。
+    // 不建入站记录直接返回，认领由轮询退回，通道重新开放后再派。
+    if (larkTaskAgentGuid(event.messageId) && !larkTaskAgentAllowlistConfigured(current)) return;
+    config = current;
+    const quotedWorkflow = await this.workflows.quoted(config.appId, event);
     const mentionsBot = this.botOpenId ? event.mentions.some(mention => mention.openId === this.botOpenId) : event.mentions.some(mention => mention.mentionedType === 'bot');
     if (this.stopped) return;
     const botSender = isBotSenderType(event.senderType);
@@ -1001,8 +994,8 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
       await this.rejectIncoming(event, config, error instanceof Error ? error.message : '机器人尚未获得运行权限。', addressed);
       return;
     }
-    const inbox = await this.inbox?.claim(config.appId, event, adopted, adoption);
-    if (this.inbox && !inbox) return;
+    const inbox = await this.inbox.claim(config.appId, event, adopted, adoption);
+    if (!inbox) return;
     if (inbox) event = inbox.event;
     const explicitVia = larkTaskAgentGuid(event.messageId) ? 'task_channel' as const
       : recognizedCommand ? 'command' as const : event.chatType !== 'group' ? 'direct' as const
@@ -1014,7 +1007,7 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
       : explicitVia ? { strength: 'explicit' as const, via: explicitVia }
       : { strength: 'inferred' as const, via: 'group_rule' as const };
     event = { ...event, authorization: source };
-    if (inbox) await this.inbox!.update(inbox, { event });
+    if (inbox) await this.inbox.update(inbox, { event });
     // 原任务还留在 tasks 里，/new 按它作废入站记录：新认领要立刻交给它，否则 CAS 对不上。
     if (retrying && inbox) retrying.inbox = inbox;
     // 先标记已处理，避免异步解析期间同一条消息被重复入队。
@@ -1048,7 +1041,7 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
           ...(config.webBaseUrl ? { webBaseUrl: config.webBaseUrl } : {})
         }, this.log).catch(cardError => this.log.error({ error: cardError, messageId: event.messageId }, '发送飞书解析失败回执失败'));
         await clearAcknowledgement();
-        if (inbox) await this.inbox!.update(inbox, { state: 'failed', error: '消息解析失败' });
+        if (inbox) await this.inbox.update(inbox, { state: 'failed', error: '消息解析失败' });
         return;
       }
       if (scenario) prompt = directScenarioPrompt(scenario, prompt);
@@ -1066,7 +1059,7 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
       const workflowScope: { id: string; prompt?: string } = { id: scopeId };
       if (!inbox?.request && (await this.routeWorkflow(event, config, prompt, workflowScope)
         || await this.routePendingAsk(event, config, prompt, resources, workflowScope, inbox, recovering))) {
-        if (inbox) await this.inbox!.update(inbox, { state: 'accepted', reason: 'workflow_handled' });
+        if (inbox) await this.inbox.update(inbox, { state: 'accepted', reason: 'workflow_handled' });
         await clearAcknowledgement();
         return;
       }
@@ -1085,20 +1078,20 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
         const continued = await this.threadContinuation(event, config, scopeId);
         if (continued && !group.retiredSessionIds?.has(continued.id)) { group.sessionId = continued.id; group.sessionConfigKey = larkSessionConfigKey(config); }
       }
-      if (inbox && !inbox.request && (parseSlashCommand(prompt) || resolveLarkPluginQuery(prompt, { botAppId: config.appId, cwd: config.workspace }))) await this.inbox!.update(inbox, { state: 'command' });
+      if (inbox && !inbox.request && (parseSlashCommand(prompt) || resolveLarkPluginQuery(prompt, { botAppId: config.appId, cwd: config.workspace }))) await this.inbox.update(inbox, { state: 'command' });
       let commandRoute = inbox?.request ? undefined : await this.routeChatCommand(event, config, prompt, group, scopeId, acknowledgement);
       // C2：机器人话题里的「继续」「停」「重来」先按控制处理，不适用时照常当普通消息。
       const control = !inbox?.request && commandRoute === undefined ? larkControlPhrase(prompt) : undefined;
       if (control) {
         // 与斜杠命令同规则：执行期间重启，入站记录不能被当成普通消息重放（重放会再停一次或再执行一次）。
-        if (inbox) await this.inbox!.update(inbox, { state: 'command' });
+        if (inbox) await this.inbox.update(inbox, { state: 'command' });
         commandRoute = await this.routeControlPhrase(control, event, config, prompt, group, scopeId, acknowledgement);
         // 不按控制处理时就是普通消息，改回 received，重启后照常恢复。
-        if (inbox && commandRoute === undefined) await this.inbox!.update(inbox, { state: 'received' });
+        if (inbox && commandRoute === undefined) await this.inbox.update(inbox, { state: 'received' });
       }
       if (commandRoute === 'handled') {
         await clearAcknowledgement();
-        if (inbox) await this.inbox!.update(inbox, { state: 'accepted', ...((await this.inbox!.reload(inbox))?.reason !== 'command_rejected' ? { reason: 'command_handled' as const } : {}) });
+        if (inbox) await this.inbox.update(inbox, { state: 'accepted', ...((await this.inbox.reload(inbox))?.reason !== 'command_rejected' ? { reason: 'command_handled' as const } : {}) });
         return;
       }
       const busy = config.busyTriage === true && !recovering && !inbox?.request && !commandRoute && !control
@@ -1109,7 +1102,7 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
           return undefined;
         }) : undefined;
       if (busy === 'handled') {
-        if (inbox) await this.inbox!.update(inbox, { state: 'accepted', reason: 'busy_supplement' });
+        if (inbox) await this.inbox.update(inbox, { state: 'accepted', reason: 'busy_supplement' });
         await clearAcknowledgement();
         return;
       }
@@ -1118,11 +1111,11 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
       let commandEpoch: number | undefined;
       if (typeof commandRoute === 'string') prompt = commandRoute;
       else if (commandRoute) { prompt = commandRoute.prompt; retryMaterialPrompt = commandRoute.materialPrompt; launchOptions = commandRoute.launchOptions; commandEpoch = commandRoute.epoch; }
-      if (inbox && commandRoute && typeof commandRoute !== 'string' && commandRoute.lineage) await this.inbox!.update(inbox, { lineage: commandRoute.lineage });
-      if (inbox && !inbox.request) await this.inbox!.update(inbox, { state: 'received', request: { prompt, scopeId, resources, ...(retryMaterialPrompt ? { materialPrompt: retryMaterialPrompt } : {}), ...(launchOptions ? { launchOptions } : {}) } });
+      if (inbox && commandRoute && typeof commandRoute !== 'string' && commandRoute.lineage) await this.inbox.update(inbox, { lineage: commandRoute.lineage });
+      if (inbox && !inbox.request) await this.inbox.update(inbox, { state: 'received', request: { prompt, scopeId, resources, ...(retryMaterialPrompt ? { materialPrompt: retryMaterialPrompt } : {}), ...(launchOptions ? { launchOptions } : {}) } });
       // 首卡重试从触发到这里有多步异步操作，期间用户可能发了 /new 或 /cancel。
       if (retrying && (retrying.cancelRequested || retrying.epoch !== (group.epoch ?? 0) || (inbox?.sessionId && group.retiredSessionIds?.has(inbox.sessionId)))) {
-        if (inbox?.state === 'received') await this.inbox!.update(inbox, { state: 'failed', error: retrying.cancelRequested ? larkCancelledBeforeSubmit : '请求在执行前被 /new 作废' });
+        if (inbox?.state === 'received') await this.inbox.update(inbox, { state: 'failed', error: retrying.cancelRequested ? larkCancelledBeforeSubmit : '请求在执行前被 /new 作废' });
         await clearAcknowledgement();
         return;
       }
@@ -1141,7 +1134,7 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
           await this.retryUndeliveredInbound(task, inbox, config, recovering, adopted, error);
           return;
         }
-        if (inbox?.state === 'received') await this.inbox!.update(inbox, { state: 'failed', error: error instanceof Error ? error.message : String(error) });
+        if (inbox?.state === 'received') await this.inbox.update(inbox, { state: 'failed', error: error instanceof Error ? error.message : String(error) });
         // group.tail 是同一会话的排队链，收尾再抛出会让下一条消息跳过 runTurn。
       }).catch(error => this.log.error({ error, messageId: event.messageId }, '收尾失败的飞书请求出错'));
     } finally {
@@ -1160,18 +1153,16 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
     if (!running) return;
     const epoch = group.epoch;
     const decision = await participation.triageBusy(config, event, prompt, running.prompt);
-    if (this.workflowOptions.store) {
-      const current = await readLarkConfig(this.workflowOptions.store, config.appId);
-      if (!current?.listening || current.busyTriage !== true) return;
-      config = event.chatType === 'group' && this.groupManager ? await this.groupManager.resolved(current, event.chatId) : current;
-    }
+    const current = await readLarkConfig(this.workflowOptions.store, config.appId);
+    if (!current?.listening || current.busyTriage !== true) return;
+    config = event.chatType === 'group' && this.groupManager ? await this.groupManager.resolved(current, event.chatId) : current;
     const access = event.chatType === 'group' ? await this.groupManager?.authorize(config.appId, event.chatId, event.senderOpenId, 'task.create') : undefined;
     if (access ? !access.allowed : !await this.isStaticOperatorAllowed(config, event.senderOpenId, event.chatId)) return;
     // 判定期间上一轮可能完成、被中断或换会话；不能把补充交给另一轮。
     const tasks = await this.runtime.getTasks(sessionId);
     if (this.stopped || group.sessionId !== sessionId || group.epoch !== epoch || !tasks.some(task => task.id === running.id && task.currentAttemptId === running.currentAttemptId && task.status === 'running')) return;
     if (decision.kind === 'queue') return;
-    if (decision.kind === 'supplement') return this.runtime.injectQueued ? { taskId: running.id, ...(running.currentAttemptId ? { attemptId: running.currentAttemptId } : {}) } : undefined;
+    if (decision.kind === 'supplement') return { taskId: running.id, ...(running.currentAttemptId ? { attemptId: running.currentAttemptId } : {}) };
     const reply = async (markdown: string, elements?: LarkCardElement[]) => sendTaskCard(this.service, event, {
       taskId: event.messageId, taskName: '忙时消息', state: 'completed', readOnly: true, retryable: false,
       markdown, ...(elements?.length ? { elements: [{ tag: 'markdown', content: '按控制操作处理。' }, ...elements] } : {}), idempotencyKey: `busy_${event.messageId}`.slice(0, 50)
@@ -1241,11 +1232,11 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
         await this.service.replyText({ messageId: larkMessageAnchor(task.event), ...(task.event.threadId ? { replyInThread: true } : {}), text: '这条请求没有执行，请重发。', idempotencyKey: `request_not_run_${task.id}`.slice(0, 50) })
           .catch(replyError => this.log.warn({ error: replyError, messageId: task.id }, '发送「请求没有执行」提示失败'));
       }
-      await this.inbox!.update(inbox, { state: 'failed', error: error instanceof Error ? error.message : String(error) })
+      await this.inbox.update(inbox, { state: 'failed', error: error instanceof Error ? error.message : String(error) })
         .catch(updateError => this.log.error({ error: updateError, messageId: task.id }, '标记入站请求失败出错'));
       return;
     }
-    const released = await this.inbox!.release(inbox).catch(() => undefined);
+    const released = await this.inbox.release(inbox).catch(() => undefined);
     // 记录已被改动，说明别的路径接手了这条消息。
     if (!released) return;
     // 任务上持有的认领要换成交还后的这份：等待期间 /new 按它把记录标成不再执行，旧对象的 CAS 会失败。
@@ -1285,11 +1276,11 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
     const superseded = task.epoch !== (task.group.epoch ?? 0) || Boolean(sessionId && task.group.retiredSessionIds?.has(sessionId));
     if (superseded || task.cancelRequested) {
       this.undeliveredRetries.delete(key);
-      if (await this.inbox!.unclaimed(released)) await this.inbox!.update(released, { state: 'failed', error: superseded ? '请求在执行前被 /new 作废' : larkCancelledBeforeSubmit });
+      if (await this.inbox.unclaimed(released)) await this.inbox.update(released, { state: 'failed', error: superseded ? '请求在执行前被 /new 作废' : larkCancelledBeforeSubmit });
       return;
     }
     // 等待期间已被别的路径接手（例如重启恢复，或同一条消息被再次推送），或已不是 received，不再重试。
-    if (!await this.inbox!.unclaimed(released)) {
+    if (!await this.inbox.unclaimed(released)) {
       this.undeliveredRetries.delete(key);
       return;
     }
@@ -1302,7 +1293,7 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
       && plainText(other) && (other.inbox?.state === 'accepted' || Boolean(other.runtimeTaskId)));
     if (resent) {
       this.undeliveredRetries.delete(key);
-      await this.inbox!.update(released, { state: 'failed', error: '用户已重新发送同一请求' });
+      await this.inbox.update(released, { state: 'failed', error: '用户已重新发送同一请求' });
       return;
     }
     this.handledMessages.delete(task.id);
@@ -1329,12 +1320,12 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
       pr: Boolean(this.workflowOptions.automation?.pullRequests?.availability().available),
       schedule: Boolean(this.workflowOptions.automation),
       work: Boolean(this.workflowOptions.workbench),
-      tasks: Boolean(this.workflows && this.cardMappings && this.runtime.getTasks),
-      answer: Boolean(this.workflows && this.workflowOptions.broker),
-      approval: Boolean(this.workflows && this.runtime.resolvePermission && this.runtime.getPendingPermissions),
+      tasks: Boolean(this.runtime.getTasks),
+      answer: Boolean(this.workflowOptions.broker),
+      approval: true,
       memory: Boolean(this.workflowOptions.memory),
       groupPolicy: Boolean(this.groupManager),
-      plan: Boolean(this.workflows && this.inbox && this.cardMappings)
+      plan: true
     };
   }
 
@@ -1353,12 +1344,12 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
     if (query) {
       // A durable command claim already exists before routing. Never fall through to an Agent on failure.
       try {
-        if (!this.inbox || !this.workflowOptions.store || event.senderType !== 'user' || !event.senderOpenId || event.scenario || larkTaskAgentGuid(event.messageId)) throw new Error('PLUGIN_COMMAND_IDENTITY_REQUIRED');
+        if (event.senderType !== 'user' || !event.senderOpenId || event.scenario || larkTaskAgentGuid(event.messageId)) throw new Error('PLUGIN_COMMAND_IDENTITY_REQUIRED');
         const claim = await this.inbox.lookup(config.appId, event.messageId);
         if (claim?.state !== 'command' || claim.event.chatId !== event.chatId || claim.event.senderOpenId !== event.senderOpenId) throw new Error('PLUGIN_COMMAND_CLAIM_REQUIRED');
         const revision = config.revision;
         const assertCurrent = async () => {
-          const current = await readLarkConfig(this.workflowOptions.store!, config.appId);
+          const current = await readLarkConfig(this.workflowOptions.store, config.appId);
           if (this.stopped || !current?.listening || current.revision !== revision || !await this.currentAccess(current, event.chatId, event.chatType, event.senderOpenId!, 'task.view_result')) throw new Error('PLUGIN_COMMAND_AUTHORITY_CHANGED');
         };
         await callLarkPluginQuery(query, { identity: {
@@ -1429,8 +1420,8 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
       return 'handled';
     }
     if (route.kind === 'denied' || route.kind === 'unavailable') {
-      const record = await this.inbox?.lookup(config.appId, event.messageId);
-      if (record) await this.inbox!.update(record, { reason: 'command_rejected', detail: route.reason.slice(0, 500) });
+      const record = await this.inbox.lookup(config.appId, event.messageId);
+      if (record) await this.inbox.update(record, { reason: 'command_rejected', detail: route.reason.slice(0, 500) });
       await replyCard(`/${route.command} 未执行`, route.reason, { failed: true });
       this.log.info({ messageId: event.messageId, command: route.command, kind: route.kind }, '飞书命令未执行');
       return 'handled';
@@ -1451,7 +1442,7 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
     const boundSessionId = group.sessionId && !group.retiredSessionIds?.has(group.sessionId) ? group.sessionId : undefined;
     const sessionId = boundSessionId ?? (await this.findScopeSession(config, event, scopeId, group).catch(() => undefined))?.id;
     // 首轮还没建出会话时，准备中的请求只能靠「停」叫住：有这样的请求就按 /cancel 处理，不把「停」建成一条新请求。
-    if (kind === 'stop' && (sessionId && this.runtime.getTasks || [...this.tasks.values()].some(task => task.group === group && !task.cancelRequested && this.preparingTurn(task)))) {
+    if (kind === 'stop' && (sessionId || [...this.tasks.values()].some(task => task.group === group && !task.cancelRequested && this.preparingTurn(task)))) {
       return await this.routeChatCommand(event, config, '/cancel', group, scopeId, acknowledgement) === 'handled' ? 'handled' : undefined;
     }
     if (!sessionId || !this.runtime.getTasks) return undefined;
@@ -1459,7 +1450,7 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
       text, idempotencyKey: `control_${event.messageId}`.slice(0, 50) }).catch(error => this.log.warn({ error, messageId: event.messageId }, '控制语回执发送失败'));
     try {
       const tasks = await this.runtime.getTasks(sessionId);
-      const unresolved = this.runtime.inspectExecutionRecovery ? await this.unresolvedTurns(sessionId) : [];
+      const unresolved = await this.unresolvedTurns(sessionId);
       const last = tasks.at(-1);
       if (kind === 'continue') {
         if (unresolved.length) {
@@ -1606,7 +1597,6 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
    */
   private async pinSwitchedSession(config: StoredLarkConfig, session: Session): Promise<boolean> {
     if (!session.sourceId || larkSessionMatchesScope(session, config, session.sourceId)) return true;
-    if (!this.cardMappings) return false;
     const mappings = this.cardMappings, sourceId = session.sourceId;
     try {
       // 与 /new 写事项边界串行：/new 已结束这条会话时不再改绑定，否则会抹掉它刚写的边界。
@@ -1698,7 +1688,7 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
     const window = sessionId && recent.length && this.runtime.getRecentEvents
       ? await this.runtime.getRecentEvents(sessionId, larkHandoffEventLimit).catch(() => []) : [];
     const store = this.workflowOptions.store;
-    const cards = store && sessionId && recent.length ? await this.cardMappings?.list(larkCardChannel(config.appId)).catch(() => undefined) : undefined;
+    const cards = sessionId && recent.length ? await this.cardMappings.list(larkCardChannel(config.appId)).catch(() => undefined) : undefined;
     const explicitFinal = async (task: TaskRecord) => {
       const matches = (cards ?? []).flatMap(row => {
         try {
@@ -1707,7 +1697,7 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
         } catch { return []; }
       });
       const context = matches.length === 1 ? explicitFinalContext(matches[0]!.row, matches[0]!.saved, task.currentAttemptId) : undefined;
-      const content = store && context ? (await readExplicitFinal(store, context).catch(() => undefined))?.trim() : undefined;
+      const content = context ? (await readExplicitFinal(store, context).catch(() => undefined))?.trim() : undefined;
       return content ? redactTraceText(content) : undefined;
     };
     const title = async (task: TaskRecord) => (await this.larkTaskOrigin(config, event.chatId, task).catch(() => undefined))?.title ?? larkTaskTitle(task.prompt, config.name);
@@ -1818,7 +1808,7 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
     }
     // 结果没送达的轮次：任务本身已经结束，只是结论没能发到飞书，读者在群里看不到它。
     try {
-      const issues = larkResultDeliveryIssues((await this.cardMappings?.list(larkCardChannel(config.appId)) ?? []).filter(mapping => mapping.sessionId === sessionId));
+      const issues = larkResultDeliveryIssues((await this.cardMappings.list(larkCardChannel(config.appId))).filter(mapping => mapping.sessionId === sessionId));
       for (const issue of issues.slice(0, 3)) {
         const reason = larkCommandEcho(issue.error ?? '未记录', 200);
         lines.push(issue.state === 'failed'
@@ -1840,8 +1830,8 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
     if (!(await this.runtime.getTasks?.(sessionId))?.some(task => task.status === 'queued')) return undefined;
     const permissions = await this.runtime.getPendingPermissions?.(sessionId) ?? [];
     if (!permissions.length) return undefined;
-    const record = (await this.workflows?.list(appId))?.find(item => item.kind === 'permission' && item.state === 'pending' && item.sessionId === sessionId
-      && item.boot === this.workflows?.boot && permissions.some(permission => permission.id === item.nativeId));
+    const record = (await this.workflows.list(appId)).find(item => item.kind === 'permission' && item.state === 'pending' && item.sessionId === sessionId
+      && item.boot === this.workflows.boot && permissions.some(permission => permission.id === item.nativeId));
     return { record };
   }
 
@@ -1857,7 +1847,7 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
    */
   private async handleDetailLogin(operatorOpenId?: string, context?: { messageId?: string; chatId?: string }, target?: { taskId: string; turn?: number }) {
     const links = this.workflowOptions.loginLinks;
-    if (!operatorOpenId || !context?.messageId || !context.chatId || !this.reconcileConfig || !this.cardMappings || !this.workflowOptions.store) {
+    if (!operatorOpenId || !context?.messageId || !context.chatId || !this.reconcileConfig) {
       return { type: 'error', content: '详情入口已失效，请在最新的任务卡片上操作。' };
     }
     try {
@@ -1973,8 +1963,8 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
   /** 代办命令的出处：按这一轮的卡片记录找回请求消息、会话 scope 和机器人配置。 */
   private async agentCommandOrigin(request: { sessionId: string; taskId: string }) {
     const store = this.workflowOptions.store;
-    const current = this.reconcileConfig && store ? await readLarkConfig(store, this.reconcileConfig.appId) : undefined;
-    if (!current?.listening || !store || !this.cardMappings) throw new RuntimeError('AGENT_COMMAND_UNAVAILABLE', '机器人当前不在监听，现在不能代办命令。', 503);
+    const current = this.reconcileConfig ? await readLarkConfig(store, this.reconcileConfig.appId) : undefined;
+    if (!current?.listening) throw new RuntimeError('AGENT_COMMAND_UNAVAILABLE', '机器人当前不在监听，现在不能代办命令。', 503);
     let origin: { externalId: string; saved: PersistedLarkCardTask } | undefined;
     for (const mapping of await this.cardMappings.list(larkCardChannel(current.appId))) {
       const saved = mapping.sessionId === request.sessionId ? parseOptionalCardTask(mapping.extra) : undefined;
@@ -2066,7 +2056,6 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
     const command = { status: '/status', agents: '/agents', tasks: '/tasks', queue: '/queue', schedules: '/schedule', ci: '/ci' }[request.view];
     const event = this.agentCommandEvent(config, { ...place, messageId: requested.messageId }, request.actorId, command, []);
     if (request.view === 'tasks') {
-      if (!this.workflows) throw new RuntimeError('AGENT_COMMAND_UNAVAILABLE', '当前机器人无法查询任务列表。', 409);
       const { entries, sessions } = await this.taskDashboardData(event, config);
       const { page, totalPages, entries: items } = pageLarkTaskDashboard(entries, request.page ?? 1);
       const decisions = await this.taskDashboardDecisions(event, config, sessions);
@@ -2196,12 +2185,12 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
           if (parsed.name === 'fork' && operator !== record.requesterId) throw new RuntimeError('AGENT_COMMAND_FORBIDDEN', '分身需要原请求人自己确认。', 403);
         }
         // 先落库再回卡片：执行中进程退出的话，重启后在这张卡下回执无法确认是否完成。
-        const started = await this.inbox?.startCommand(config.appId, event);
+        const started = await this.inbox.startCommand(config.appId, event);
         if (!started) throw new RuntimeError('AGENT_COMMAND_UNAVAILABLE', '这条命令已经执行过或无法登记，没有再执行。', 409);
         // 卡片回调要在 3 秒内返回：命令放到后台执行，结果和失败由命令自己的回执写在这张卡下面。
         void this.runAgentCommand(event, config, command, String(record.payload.scope_id), started).catch(async error => {
           this.log.error({ error, messageId: event.messageId }, '执行代办命令失败');
-          await this.inbox?.update(started, { state: 'failed', error: error instanceof Error ? error.message : String(error) }).catch(() => undefined);
+          await this.inbox.update(started, { state: 'failed', error: error instanceof Error ? error.message : String(error) }).catch(() => undefined);
         });
         return `已确认执行 ${larkCommandEcho(command, 120)}，结果会发在这张卡下面。`;
       }
@@ -2233,8 +2222,8 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
       route = await this.routeChatCommand(event, config, command, group, scopeId, undefined, receipts);
     }
     // 只取回执的查看命令不带出新一轮。
-    if (route === 'handled' || route === undefined || !this.inbox || receipts?.capture) {
-      if (started) await this.inbox!.update(started, { state: 'accepted' });
+    if (route === 'handled' || route === undefined || receipts?.capture) {
+      if (started) await this.inbox.update(started, { state: 'accepted' });
       return;
     }
     // /new 带任务、/retry、/plan：按这条消息登记成一条请求交给 handle，授权、排队和卡片照常；进程退出的话重启后接着执行。
@@ -2326,7 +2315,7 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
       ? await this.restoreQueuedCardAction(taskId, parsed.turn, context)
       : action === 'verify' || action === 'use_verification_command' ? await this.restoreVerifyCardAction(taskId, parsed.turn, context) : undefined);
     if (!task && action === 'retry' && this.reconcileConfig) {
-      const mapping = await this.cardMappings?.get(larkCardChannel(this.reconcileConfig.appId), taskId);
+      const mapping = await this.cardMappings.get(larkCardChannel(this.reconcileConfig.appId), taskId);
       const saved = mapping && parseOptionalCardTask(mapping.extra);
       if (mapping && saved?.runtime_task_id && await this.isDeferredTask(mapping.sessionId, saved.runtime_task_id)) return { type: 'warning', content: '确认已登记，请使用原确认卡。' };
     }
@@ -2346,8 +2335,8 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
     if (actionStale()) return { type: 'warning', content: '任务已开始新一轮，请在最新的卡片上操作' };
 
     // 中断按钮单独校验发起人/管理员；其他操作沿用机器人访问权限。
-    const currentConfig = this.workflowOptions.store ? await readLarkConfig(this.workflowOptions.store, task.config.appId) : task.config;
-    if (!currentConfig || (this.workflowOptions.store && !currentConfig.listening)) return { type: 'warning', content: '机器人已停用，无法执行此操作' };
+    const currentConfig = await readLarkConfig(this.workflowOptions.store, task.config.appId);
+    if (!currentConfig || !currentConfig.listening) return { type: 'warning', content: '机器人已停用，无法执行此操作' };
     const effectiveConfig = task.event.chatType === 'group' && this.groupManager ? await this.groupManager.resolved(currentConfig, task.event.chatId) : currentConfig;
     const allowed = action === 'interrupt'
       ? await this.isInterruptOperatorAllowed(effectiveConfig, operatorOpenId, task.event.chatId, task.sessionId, task.event.senderOpenId)

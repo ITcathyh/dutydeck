@@ -1,7 +1,7 @@
+import { createTestLarkCoordinator } from './coordinator-test-fixture.js';
 import Fastify from 'fastify';
 import { registerLarkRoutes } from './routes.js';
 import { LarkLongConnectionListener } from './listener.js';
-import { LarkMessageCoordinator } from './coordinator.js';
 import type { StoredLarkConfig } from './config.js';
 import { createServer, type Server, type ServerResponse } from 'node:http';
 import { once } from 'node:events';
@@ -210,14 +210,15 @@ it('bounds actual coordinator terminal PATCH retries while persisting the indepe
   const client = service({ LARK_API_REQUEST_TIMEOUT_MS: '1000' });
   const saved: any[] = [];
   const mappings = { list: vi.fn(async () => []), get: vi.fn(), save: vi.fn(async (entry: any) => { saved.push(JSON.parse(entry.extra)); }) };
-  const coordinator = new LarkMessageCoordinator(runtime as any, client, { info: vi.fn(), warn: vi.fn(), error: vi.fn() }, Math.random, 'ou_bot', undefined, mappings as any);
-  const reconcile = vi.spyOn(coordinator as any, 'scheduleReconcile').mockImplementation(() => {});
-  try {
-    await coordinator.handle({ messageId: 'om_input', chatId: 'oc_test', chatType: 'p2p', messageType: 'text', content: '{"text":"run"}', mentions: [] }, {
+  const botConfig = {
       appId: 'cli_deadline', appSecret: 'synthetic', workspace: '/tmp', defaultAgentId: 'mock', listening: true, permissionMode: 'ask',
       groupToolsEnabled: false, groupToolsAllowSend: false, pushIntervalMs: 1000, hideTraceOnComplete: false,
       allowedUsers: [], allowedEmails: [], highRiskAllowedUsers: [], highRiskAllowedEmails: [], highRiskPattern: '', riskControlMode: 'off'
-    } as StoredLarkConfig);
+    } as StoredLarkConfig;
+  const coordinator = createTestLarkCoordinator(botConfig, runtime as any, client, { info: vi.fn(), warn: vi.fn(), error: vi.fn() }, Math.random, 'ou_bot', undefined, mappings as any);
+  const reconcile = vi.spyOn(coordinator as any, 'scheduleReconcile').mockImplementation(() => {});
+  try {
+    await coordinator.handle({ messageId: 'om_input', chatId: 'oc_test', chatType: 'p2p', messageType: 'text', content: '{"text":"run"}', mentions: [] }, botConfig);
     await vi.waitFor(() => expect(saved.some(entry => entry.final_delivery_state === 'delivered' && entry.final_message_id === 'om_result'), JSON.stringify({ paths, saved })).toBe(true));
     expect(paths.filter(path => path === '/open-apis/im/v1/messages/om_running')).toHaveLength(4);
     expect(reconcile).toHaveBeenCalled();

@@ -89,6 +89,7 @@ export async function createLarkManagementHarness(
         await saveLarkConfig(repositories.config, repositories.agents, {
           appId,
           appSecret: `synthetic_${appId}`,
+          listening: true,
           name: index ? '评审助手' : '开发助手',
           defaultAgentId: agents[index]!.id,
           workspace: workspaces[index],
@@ -142,7 +143,7 @@ export async function createLarkManagementHarness(
     await runtime.initialize(agents);
     const log = { info() {}, warn(details: unknown) { failures.push(details); }, error(details: unknown) { failures.push(details); } };
     for (const appId of ['cli_one', 'cli_two']) {
-      coordinators.set(appId, new LarkMessageCoordinator(runtime, client(appId), log, Math.random, `ou_bot_${appId}`, undefined, repositories.channelMappings, async () => 'group', undefined, manager));
+      coordinators.set(appId, new LarkMessageCoordinator(runtime, client(appId), log, Math.random, `ou_bot_${appId}`, undefined, repositories.channelMappings, async () => 'group', undefined, manager, { store: repositories.config }));
     }
 
     app = await buildApp(runtime, {
@@ -151,7 +152,7 @@ export async function createLarkManagementHarness(
       sessionNames: { authorize: async () => true },
       system: { directoryRoots: async () => workspaces },
       auth: { mode: 'local', localOnly: true, getToken: async () => null },
-      lark: { config: repositories.config, agents: repositories.agents, runtime, groupManager: manager, listeningDisabled: true, ...larkOptions },
+      lark: { config: repositories.config, agents: repositories.agents, cardMappings: repositories.channelMappings, runtime, groupManager: manager, listeningDisabled: true, ...larkOptions },
       executionPolicy: { authorize: async (_request, sessionId, _boundary, action) => await manager.authorizeSession(sessionId, action, true) ?? { allowed: true, action, code: 'local_owner', reason: 'Synthetic acceptance owner', source: 'owner' } }
     });
 
