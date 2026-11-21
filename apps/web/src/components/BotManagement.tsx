@@ -1,3 +1,4 @@
+import { larkConfigQuery, managementGroupsQuery, queryKeys, systemCapabilitiesQuery } from '../queries';
 import { draftFromBot, saveBodyFromDraft } from '../bot-settings-form';
 import { ReplyPolishSettings } from './ReplyPolishSettings';
 import { ReactionTriggerSetting } from './ReactionTriggerSetting';
@@ -148,24 +149,12 @@ export function BotManagement({
   const clearBotDraft = useDraftStore(state => state.clearBotDraft);
   const setBotConflict = useDraftStore(state => state.setBotConflict);
 
-  const larkConfig = useQuery({
-    queryKey: ['lark-config'],
-    queryFn: api.larkConfig,
-    staleTime: 30_000
-  });
+  const larkConfig = useQuery(larkConfigQuery());
 
-  const managedGroups = useQuery({
-    queryKey: ['lark-management-groups'],
-    queryFn: api.managementGroups,
-    staleTime: 30_000
-  });
+  const managedGroups = useQuery(managementGroupsQuery());
 
   // 原生目录对话框只在 macOS 可用；Linux 上按真实能力隐藏，避免摆一颗必然失败的按钮。
-  const systemCapabilities = useQuery({
-    queryKey: ['system-capabilities'],
-    queryFn: api.systemCapabilities,
-    staleTime: Infinity
-  });
+  const systemCapabilities = useQuery(systemCapabilitiesQuery());
 
   const bots = useMemo(() => larkConfig.data?.bots ?? [], [larkConfig.data]);
 
@@ -316,8 +305,8 @@ export function BotManagement({
         setBotDraft(appId, { ...latest, baseRevision: savedRevision ?? latest.baseRevision });
         setBotConflict(appId, undefined);
       }
-      if (nextConfig) qc.setQueryData(['lark-config'], nextConfig);
-      void qc.invalidateQueries({ queryKey: ['lark-config'] });
+      if (nextConfig) qc.setQueryData(queryKeys.larkConfig(), nextConfig);
+      void qc.invalidateQueries({ queryKey: queryKeys.larkConfig() });
       toastStore.push({
         kind: 'success',
         key: `save-bot-${appId}`,
@@ -391,8 +380,8 @@ export function BotManagement({
     mutationFn: (appId: string) => api.deleteLarkConfig(appId),
     onSuccess: (nextConfig) => {
       setDeleteConfirmAppId(null);
-      if (nextConfig) qc.setQueryData(['lark-config'], nextConfig);
-      void qc.invalidateQueries({ queryKey: ['lark-config'] });
+      if (nextConfig) qc.setQueryData(queryKeys.larkConfig(), nextConfig);
+      void qc.invalidateQueries({ queryKey: queryKeys.larkConfig() });
       toastStore.push({ kind: 'success', key: 'delete-bot', title: '机器人已移除' });
     }
   });

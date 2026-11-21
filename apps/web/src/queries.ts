@@ -38,3 +38,22 @@ export const tasksQuery = (sessionId: string | undefined, { attempts, instance }
       && !finishedTaskStatuses.includes(query.state.data?.find(task => task.id === attempt.taskId)?.status ?? '')) ? 5_000 : false;
   }
 });
+
+export const larkConfigQuery = () => queryOptions({
+  queryKey: queryKeys.larkConfig(),
+  queryFn: api.larkConfig,
+  staleTime: 0,
+  refetchOnWindowFocus: true
+});
+
+export const systemCapabilitiesQuery = () => queryOptions({
+  queryKey: queryKeys.systemCapabilities(),
+  queryFn: api.systemCapabilities,
+  staleTime: 0
+});
+
+export const managementGroupsQuery = () => queryOptions({
+  queryKey: queryKeys.managementGroups(),
+  queryFn: api.managementGroups,
+  staleTime: 15_000
+});

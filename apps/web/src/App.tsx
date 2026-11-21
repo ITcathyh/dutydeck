@@ -1,4 +1,4 @@
-import { queryKeys, sessionsQuery, tasksQuery } from './queries';
+import { larkConfigQuery, queryKeys, sessionsQuery, systemCapabilitiesQuery, tasksQuery } from './queries';
 import { backgroundKindFor } from '@dutydeck/shared';
 import { settingsSearchActions } from './settings-search';
 import { ConfigurationExplanationPanel } from './components/ConfigurationExplanationPanel';
@@ -133,8 +133,8 @@ export default function App() {
   const summaries = useQuery({ queryKey: ['run-summaries'], queryFn: api.runSummaries, refetchInterval: 15_000, refetchIntervalInBackground: false });
   const inbox = useQuery({ queryKey: ['inbox'], queryFn: api.inbox, refetchInterval: 15_000, refetchIntervalInBackground: false, retry: false });
   const workspaceGroups = useQuery({ queryKey: ['workspace-groups'], queryFn: api.workspaceGroups, refetchInterval: 15_000, refetchIntervalInBackground: false });
-  const larkConfig = useQuery({ queryKey: ['lark-config'], queryFn: api.larkConfig, staleTime: 30_000, refetchOnWindowFocus: true });
-  const systemCapabilities = useQuery({ queryKey: ['system-capabilities'], queryFn: api.systemCapabilities, staleTime: Infinity });
+  const larkConfig = useQuery(larkConfigQuery());
+  const systemCapabilities = useQuery(systemCapabilitiesQuery());
   const authStatus = useQuery({ queryKey: ['auth-status'], queryFn: api.authStatus, staleTime: Infinity, retry: false });
   const peerInstances = useQuery({ queryKey: ['instances'], queryFn: api.instances, staleTime: Infinity, retry: false });
 

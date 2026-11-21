@@ -1,3 +1,4 @@
+import { larkConfigQuery, managementGroupsQuery, queryKeys, systemCapabilitiesQuery } from '../queries';
 import { useState, useMemo, useEffect, useRef } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
@@ -298,25 +299,13 @@ export function GroupManagement({
   }, [selectedAppId]);
 
   // 拉取全部 Managed Groups
-  const groupsQuery = useQuery({
-    queryKey: ['lark-management-groups'],
-    queryFn: api.managementGroups,
-    staleTime: 15_000
-  });
+  const groupsQuery = useQuery(managementGroupsQuery());
 
   // 拉取全部 Bot 配置，用于获得 Bot 默认值与 Label
-  const larkConfig = useQuery({
-    queryKey: ['lark-config'],
-    queryFn: api.larkConfig,
-    staleTime: 30_000
-  });
+  const larkConfig = useQuery(larkConfigQuery());
 
   // 原生目录对话框只在 macOS 可用；Linux 上按真实能力隐藏。
-  const systemCapabilities = useQuery({
-    queryKey: ['system-capabilities'],
-    queryFn: api.systemCapabilities,
-    staleTime: Infinity
-  });
+  const systemCapabilities = useQuery(systemCapabilitiesQuery());
 
   const botsMap = useMemo(() => {
     const map = new Map<string, LarkBotConfig>();
@@ -542,7 +531,7 @@ export function GroupManagement({
         });
         setGroupBotConflict(key, undefined);
       }
-      void qc.invalidateQueries({ queryKey: ['lark-management-groups'] });
+      void qc.invalidateQueries({ queryKey: queryKeys.managementGroups() });
       if (!result) return;
       toastStore.push({
         kind: result.applied ? 'success' : 'info',
@@ -606,8 +595,8 @@ export function GroupManagement({
     },
     onSuccess: async ({ total, failures }, { appIds, automatic }) => {
       // 无论成败都刷新一次：成功的那几个 Bot 的群必须立刻可见。
-      await qc.cancelQueries({ queryKey: ['lark-management-groups'] });
-      await qc.invalidateQueries({ queryKey: ['lark-management-groups'] });
+      await qc.cancelQueries({ queryKey: queryKeys.managementGroups() });
+      await qc.invalidateQueries({ queryKey: queryKeys.managementGroups() });
       setSyncFailures(previous => [...previous.filter(failure => !appIds.includes(failure.appId)), ...failures]);
       if (failures.length === 0) {
         if (automatic) return;
@@ -687,7 +676,7 @@ export function GroupManagement({
     本群参与强度：一个选项同时写群级唤醒方式覆盖和本群参与模式，选后立即生效。
     两个底层字段仍可在「提及唤醒规则」和下方协作设置里分别调整。与协作面板共用同一份概览查询。
   */
-  const levelOverviewQuery = useQuery<CollaborationOverview>({
+  const levelOverviewQuery = useQuery({
     queryKey: ['collaboration-overview', editingAppId, activeChatId],
     queryFn: () => collaborationApi.getOverview(editingAppId!, activeChatId!),
     enabled: Boolean(editingAppId && activeChatId),
@@ -721,7 +710,7 @@ export function GroupManagement({
       }
     },
     onSuccess: (_result, variables) => {
-      void qc.invalidateQueries({ queryKey: ['lark-management-groups'] });
+      void qc.invalidateQueries({ queryKey: queryKeys.managementGroups() });
       void qc.invalidateQueries({ queryKey: ['collaboration-overview', variables.appId, variables.chatId] });
       showLevelSuccess(variables);
     },
@@ -729,7 +718,7 @@ export function GroupManagement({
       const { cause, routingSaved } = failure as { cause: unknown; routingSaved: boolean };
       const message = cause instanceof Error ? cause.message : String(cause);
       if (!routingSaved) {
-        void qc.invalidateQueries({ queryKey: ['lark-management-groups'] });
+        void qc.invalidateQueries({ queryKey: queryKeys.managementGroups() });
         void qc.invalidateQueries({ queryKey: ['collaboration-overview', variables.appId, variables.chatId] });
         toastStore.push({ kind: 'error', key: `level-${variables.appId}-${variables.chatId}`, title: '接话方式没有改成', description: message });
         return;
@@ -739,7 +728,7 @@ export function GroupManagement({
           api.managementGroups(),
           collaborationApi.getOverview(variables.appId, variables.chatId)
         ]);
-        qc.setQueryData(['lark-management-groups'], latestGroups);
+        qc.setQueryData(queryKeys.managementGroups(), latestGroups);
         qc.setQueryData(['collaboration-overview', variables.appId, variables.chatId], latestOverview);
         const group = latestGroups.groups.find(item => variables.groupKey ? item.key === variables.groupKey : item.chatId === variables.chatId && item.bots.some(bot => bot.appId === variables.appId));
         const entry = group?.bots.find(bot => bot.appId === variables.appId);

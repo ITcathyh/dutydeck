@@ -1,3 +1,4 @@
+import { managementGroupsQuery } from '../queries';
 import { useRef, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import type { UsageBackgroundBudget, UsageCap, UsageCategory } from '@dutydeck/shared';
@@ -37,7 +38,7 @@ export function UsageOverview({ bots, initialView = 'cost', onViewChange, onOpen
   const [view, setView] = useState<UsageView>(initialView);
   const [range, setRange] = useState<UsageRange>('month');
   const summary = useQuery({ queryKey: ['usage-summary'], queryFn: api.usageSummary, retry: false, refetchInterval: 30_000, refetchIntervalInBackground: false });
-  const groups = useQuery({ queryKey: ['lark-management-groups'], queryFn: api.managementGroups, staleTime: 30_000, enabled: bots.length > 0 });
+  const groups = useQuery({ ...managementGroupsQuery(), enabled: bots.length > 0 });
   const botName = (appId?: string) => appId ? bots.find(bot => bot.appId === appId)?.name ?? appId : '未归属 Bot（Web 任务等）';
   const chatName = (chatId?: string) => chatId ? groups.data?.groups.find(group => group.chatId === chatId)?.name ?? chatId : '';
 
