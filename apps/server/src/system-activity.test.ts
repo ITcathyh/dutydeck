@@ -110,7 +110,7 @@ describe('GET /api/system/activity', () => {
     });
 
     const drivers = new Map<string, Pick<AgentDriver, 'hasBackgroundWork'>>();
-    Object.defineProperty(fakeRuntime, 'drivers', { value: drivers });
+    Object.defineProperty(fakeRuntime, 'supervisor', { value: { drivers } });
 
     expect(fakeRuntime.getRunningTaskCount()).toBe(2);
     // 排除其中一个 running 会话后只剩 1（Agent 在自己会话里重启时排除本会话）

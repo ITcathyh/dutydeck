@@ -1,3 +1,4 @@
+import { runtimeComponents } from '../test-support/components.js';
 import { createHash } from 'node:crypto';
 import { describe, expect, it, vi } from 'vitest';
 import { createRepositories } from '@dutydeck/storage';
@@ -443,8 +444,8 @@ describe('runtime lifecycle acceptance', () => {
     try {
       const sent = h.runtime.send(session.id, 'request');
       await entered.promise;
-      const internals = h.runtime as unknown as { lastActivity: Map<string, number>; turnProgressAt: Map<string, number> };
-      internals.lastActivity.set(session.id, 100); internals.turnProgressAt.set(session.id, 200);
+      const internals = h.runtime as unknown as { turnProgressAt: Map<string, number> };
+      runtimeComponents(h.runtime).supervisor.lastActivity.set(session.id, 100); internals.turnProgressAt.set(session.id, 200);
       const before = await h.runtime.getSession(session.id);
       const append = h.bound().appendEvent.bind(h.bound());
       vi.spyOn(h.bound(), 'appendEvent').mockImplementation((fence, event) => {
@@ -455,7 +456,7 @@ describe('runtime lifecycle acceptance', () => {
       h.emit({ type: 'status', data: { ...data, stage: 'pty_routing' } });
       h.emit({ type: 'status', data });
       await vi.waitFor(async () => expect((await h.runtime.getEvents(session.id)).some(event => (event.data as any)?.stage === 'pty_input')).toBe(true));
-      expect(internals.lastActivity.get(session.id)).toBe(100);
+      expect(runtimeComponents(h.runtime).supervisor.lastActivity.get(session.id)).toBe(100);
       expect(internals.turnProgressAt.get(session.id)).toBe(200);
       expect(await h.runtime.getSession(session.id)).toEqual(before);
       gate.resolve();

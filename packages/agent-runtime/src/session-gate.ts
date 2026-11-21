@@ -5,7 +5,7 @@ type BlockedDriver = { driver: AgentDriver; reason: string };
 type Recheck = { timer: ReturnType<typeof setTimeout>; since: string };
 type StopRecord = { block?: StopBlock; driver?: BlockedDriver; recheck?: Recheck };
 
-class DriverStopState {
+export class DriverStopState {
   private readonly records = new Map<string, StopRecord>();
   // A clear must invalidate reads already in flight, even after removing the last fact.
   private readonly versions = new Map<string, number>();
@@ -55,9 +55,10 @@ type ReadFact = (id: string, driver?: AgentDriver) => boolean;
 type ExternalFacts = Record<Exclude<Code, 'stop_unverified' | 'blocked_driver' | 'background_work' | 'driver_detached' | 'driver_not_idle'>, ReadFact>;
 
 export class SessionGate {
-  readonly stops = new DriverStopState();
+  get stops() { return this.stopFacts(); }
   constructor(private readonly facts: ExternalFacts, private readonly hasDriver: (id: string) => boolean,
-    private readonly taskStatus: (id: string) => TaskRecord['status'] | undefined) {}
+    private readonly taskStatus: (id: string) => TaskRecord['status'] | undefined,
+    private readonly stopFacts: () => Pick<DriverStopState, 'block' | 'driver' | 'reason' | 'recheckingReason'>) {}
 
   reasons(id: string, purpose: Purpose, options: { driver?: AgentDriver; firstOnly?: boolean } = {}): GateReason[] {
     const result: GateReason[] = [];

@@ -40,7 +40,9 @@ interface RecoveryDependencies {
   localResources: LocalDriverLedger;
   configurations: DriverConfigurationLedger;
   gate: SessionGate;
-  drivers: Map<string, AgentDriver>;
+  adoptDriver(id: string, driver: AgentDriver): void;
+  clearRecoveredStop(id: string): void;
+  drivers: ReadonlyMap<string, AgentDriver>;
   queueBlocked: ReadonlySet<string>;
   runtimeInstanceId: string;
   claim(): RuntimeControlClaim | undefined;
@@ -135,7 +137,7 @@ export class RecoveryService {
           ? this.deps.bound().adoptIdleTmux(this.deps.fence(session), resource.resourceId, resource.revision, raw, observation)
           : this.deps.bound().observed(this.deps.fence(session), resource.resourceId, resource.revision, observation);
         this.deps.localResources.adopt(this.deps.fence(session), options, observed, driver!);
-        this.deps.drivers.set(session.id, driver!); this.deps.attachedTerminals.add(driver!);
+        this.deps.adoptDriver(session.id, driver!); this.deps.attachedTerminals.add(driver!);
       });
       // attach 采纳提交后 flush 启动期 pending 观察。
       this.deps.flushInsightSources(driver);
@@ -179,7 +181,7 @@ export class RecoveryService {
   }
 
   inspectAgentQuiescence(id: string): 'idle' | 'busy' | 'unknown' {
-    if (this.mutations.owners.attempt(id) || this.deps.hasActiveTurn(id) || this.deps.hasDrain(id)) return 'busy';
+    if (this.mutations.attempts.get(id) || this.deps.hasActiveTurn(id) || this.deps.hasDrain(id)) return 'busy';
     const driver = this.deps.drivers.get(id);
     if (driver) return !driver.isDetachedForShutdown?.() && driver.isIdle?.() ? 'idle' : 'unknown';
     if (this.deps.gate.stops.driver(id)) return 'unknown';
@@ -309,8 +311,7 @@ export class RecoveryService {
       const cleared = await this.mutations.write(session.id, async () => this.deps.bound().clearVerifiedStopBlock(this.deps.fence(session), raw));
       if (cleared) {
 
-        this.deps.gate.stops.setBlock(session.id);
-        this.deps.drivers.delete(session.id); this.deps.gate.stops.setDriver(session.id); this.deps.wakeResourceQueues();
+        this.deps.clearRecoveredStop(session.id);
       }
       return cleared;
     } catch (error) {

@@ -1,3 +1,4 @@
+import { runtimeComponents } from '../test-support/components.js';
 import { afterEach, expect, it, vi } from 'vitest';
 import { execFileSync } from 'node:child_process';
 import { mkdtemp, rm } from 'node:fs/promises';
@@ -84,7 +85,7 @@ it('does not rerun blocked same-workspace admission for each event of the runnin
   await vi.waitFor(()=>expect(h.sent).toEqual(['long-turn']));
   let claims=0;h.onClaim(()=>{claims++;});
   const queued=[];for(const session of waiting)queued.push(await h.runtime.dispatch(session.id,`behind-${session.id}`));
-  await vi.waitFor(()=>{for(const session of waiting){expect(runtime.resourceQueueBlocked.has(session.id)).toBe(true);expect(runtime.drains.has(session.id)).toBe(false);}});
+  await vi.waitFor(()=>{for(const session of waiting){expect(runtime.resourceQueueBlocked.has(session.id)).toBe(true);expect(runtimeComponents(runtime).mutations.drains.has(session.id)).toBe(false);}});
   const before=claims;
   for(let i=0;i<40;i++)h.emitters.get(one.id)!({type:'thinking',data:{text:`step ${i}`}});
   await vi.waitFor(async()=>expect((await h.runtime.getEvents(one.id)).filter(event=>event.type==='thinking')).toHaveLength(40));

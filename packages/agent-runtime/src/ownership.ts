@@ -1,5 +1,5 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
-import { RuntimeError } from '@dutydeck/shared';
+import { RuntimeError, type AttemptRef, type SessionFence } from '@dutydeck/shared';
 
 export type RevocationReason = { code: string; by: string };
 
@@ -100,6 +100,12 @@ export class SessionMutations {
 
 /** Resolve the runtime's shared session owners at the point an operation starts. */
 export class RuntimeSessionMutations extends SessionMutations {
+  readonly attempts = new Map<string, Owner>();
+  readonly drains = new Map<string, Owner>();
+  readonly attemptRefs = new WeakMap<Owner, AttemptRef & SessionFence>();
+
+  turnOwner(id: string) { return owner(id, this.owners.lifecycle(id)); }
+
   async scoped<T>(id: string, operation: () => Promise<T>) {
     this.assertReady();
     return this.run(this.owners.lifecycle(id), operation);
@@ -117,6 +123,5 @@ export class RuntimeSessionMutations extends SessionMutations {
     ownerOf(id: string): Owner;
     transition(id: string, reason?: RevocationReason): Owner;
     renew(id: string, parent: Owner): Owner;
-    attempt(id: string): Owner | undefined;
   }) { super(assertControl); }
 }

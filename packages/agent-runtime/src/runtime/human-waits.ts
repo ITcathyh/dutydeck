@@ -146,7 +146,7 @@ export class HumanWaits {
     }
   }
   async autoApproveAgentCommand(sessionId: string, kind: string, command: string): Promise<boolean> {
-    const owner = this.mutations.owners.attempt(sessionId);
+    const owner = this.mutations.attempts.get(sessionId);
     const task = this.deps.activeTasks.get(sessionId);
     if (this.deps.shuttingDown() || !owner || !task || !this.mutations.valid(owner)) return false;
     const session = await this.deps.repos.sessions.get(sessionId);
@@ -162,7 +162,7 @@ export class HumanWaits {
         ? await this.deps.options.resolveRiskPolicy(sessionId, task.executionContext?.riskPolicy) : task.executionContext?.riskPolicy;
       if (policy?.enabled && !policy.authorized && await testRegexWithTimeout(policy.pattern, command)) return false;
     } catch { return false; }
-    if (this.mutations.owners.attempt(sessionId) !== owner || !this.mutations.valid(owner)) return false;
+    if (this.mutations.attempts.get(sessionId) !== owner || !this.mutations.valid(owner)) return false;
     this.deps.options.log?.info?.({ sessionId, taskId: task.id }, agentCommandApprovalReason);
     return true;
   }
@@ -172,7 +172,7 @@ export class HumanWaits {
    * 返回驱动给出的裁决；否则返回 undefined，调用方保留 CLI 的原生确认。
    */
   requestDriverPermission(sessionId: string, request: Omit<PermissionRequestData, 'id' | 'status'>) {
-    if (this.deps.shuttingDown() || !this.mutations.owners.attempt(sessionId) || !this.mutations.valid(this.mutations.owners.lifecycle(sessionId))) return undefined;
+    if (this.deps.shuttingDown() || !this.mutations.attempts.get(sessionId) || !this.mutations.valid(this.mutations.owners.lifecycle(sessionId))) return undefined;
     return this.deps.drivers.get(sessionId)?.requestPermission?.(request);
   }
 
