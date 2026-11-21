@@ -1,3 +1,5 @@
+import { execFileSync } from 'node:child_process';
+import { secretGuardScriptPath } from '@dutydeck/shared/secret-guard';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -480,11 +482,19 @@ describe.each(['group', 'collaboration', 'work item'] as const)('%s high-risk ac
         policy = await f.groups.riskPolicy(session.id);
       } else if (caller === 'collaboration') {
         vi.spyOn(f.collaboration.background, 'authorizeTool').mockResolvedValue({ actorId });
-        policy = (await f.collaboration.riskPolicy(session.id))?.policy;
+        await f.runtime.setRiskPolicy(session.id);
+        policy = JSON.parse(await readFile(join(session.cwd, '.dutydeck', 'security', 'sessions', session.id + '.json'), 'utf8'));
       } else {
         policy = await workItemRiskPolicy(f.repos, f.groups, session.id, actorId);
       }
-      expect(policy).toMatchObject({ enabled: true, authorized: allowed, pattern: 'rm\\s' });
+      const blockAll = caller === 'collaboration' && name === 'directory unavailable';
+      if (blockAll) {
+        const decision = execFileSync(process.execPath, [secretGuardScriptPath()], { cwd: session.cwd,
+          env: { ...process.env, DUTYDECK_POLICY_ROOT: session.cwd, dutydeck_session_id: session.id },
+          input: JSON.stringify({ tool_name: 'Bash', tool_input: { command: 'pwd' } }), encoding: 'utf8' });
+        expect(decision).toContain('"permissionDecision":"deny"');
+      }
+      expect(policy).toMatchObject({ enabled: true, authorized: allowed, pattern: blockAll ? '.*' : 'rm\\s' });
       expect(lookupEmails).toHaveBeenCalledTimes(lookup ? 1 : 0);
       if (lookup) expect(lookupEmails).toHaveBeenCalledWith(actorId);
       expect(warning).toHaveBeenCalledTimes(name === 'directory unavailable' ? 1 : 0);

@@ -1,10 +1,10 @@
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { agentConfigSchema, installationOwnerTaskActor, workPlanConfirmationRequired, type AgentConfig, type AgentDriver } from '@dutydeck/shared';
 import { createRepositories } from '@dutydeck/storage';
-import { DutydeckRuntime } from '@dutydeck/runtime';
+import { DutydeckRuntime, type RuntimeOptions } from '@dutydeck/runtime';
 import { RelayAskBroker, RelayCapabilityRegistry } from '@dutydeck/relay';
 import { WorkItemService } from './work-items.js';
 import { WorkItemInteractions } from './work-item-interactions.js';
@@ -12,6 +12,10 @@ import { LeaderDelegationService, layeredPlan, parseLeaderResult } from './leade
 import { LeaderModeService } from './leader-mode.js';
 import { LarkWorkbench, reviewStatusLabel, workItemElements } from './lark/workbench.js';
 import { larkBotsConfigKey, type StoredLarkConfig } from './lark/config.js';
+import { capturedRiskPolicy, workItemRiskPolicy } from './work-item-policy.js';
+import { LarkGroupManager } from './lark/group-management.js';
+import { LarkCardService } from './lark/service.js';
+import * as securityHooks from './lark/security-hooks.js';
 import { LarkMessageCoordinator } from './lark/coordinator.js';
 import type { LarkMessageEvent } from './lark/listener.js';
 import { LarkAgentToolCapabilityRegistry, LarkAgentToolsService } from './lark/agent-tools.js';
@@ -35,7 +39,7 @@ type Fixture = Awaited<ReturnType<typeof fixture>>;
 const planningMarker = '负责把接待转来的目标拆成步骤';
 const arbitrationMarker = '替用户判断 Worker 的一个请求';
 type WorkerMode = 'done' | 'ask' | 'permission';
-async function fixture(executionMode: StoredLarkConfig['executionMode'] = 'layered', options: { planningTimeoutMs?: number; arbitrationTimeoutMs?: number; permissionMode?: 'ask' | 'full-trust'; leaderAgent?: Pick<AgentConfig, 'protocol' | 'permissionMode'>; leaderSkill?: string; worker?: WorkerMode } = {}) {
+async function fixture(executionMode: StoredLarkConfig['executionMode'] = 'layered', options: { planningTimeoutMs?: number; arbitrationTimeoutMs?: number; permissionMode?: 'ask' | 'full-trust'; leaderAgent?: Pick<AgentConfig, 'protocol' | 'permissionMode'>; leaderSkill?: string; worker?: WorkerMode; resolveRiskPolicy?: RuntimeOptions['resolveRiskPolicy'] } = {}) {
   const directory = await mkdtemp(join(tmpdir(), 'dutydeck-delegation-'));
   const repos = createRepositories(join(directory, 'state.db'), { newDatabaseAuthority: 'ledger_v1' });
   const cards: Array<{ messageId: string; input: any }> = [];
@@ -56,6 +60,7 @@ async function fixture(executionMode: StoredLarkConfig['executionMode'] = 'layer
   let tools!: LarkAgentToolsService;
   const runtime = new DutydeckRuntime(repos, {
     cleanupIntervalMs: 0,
+    resolveRiskPolicy: options.resolveRiskPolicy,
     probe: agent => ({ protocol: agent.protocol === 'pty-cli' ? 'pty-cli' : 'acp', available: true, pause: false, resume: true }),
     authorizeTask: (session, task, phase) => work.authorizeTask(session, task, phase),
     authorizeExecution: async (id, actor) => { await work.authorizeExecution(id, actor); },
@@ -112,7 +117,7 @@ async function fixture(executionMode: StoredLarkConfig['executionMode'] = 'layer
   const replyText = vi.fn(async (_input: { messageId: string; replyInThread?: boolean; text: string; idempotencyKey?: string }) => ({ messageId: 'om_text' }));
   const client = { send: createCard, reply: createCard, replyText, uploadFile: vi.fn(async () => 'file_result'), sendFile: createCard, replyFile: createCard,
     update: vi.fn(async (input: any) => ({ messageId: input.messageId })), addReaction: vi.fn(async () => ({ reactionId: 'reaction' })), deleteReaction: vi.fn(async () => {}),
-    getUserEmails: vi.fn(async () => []), listChatMessages: vi.fn(async () => ({ items: [], hasMore: false })) };
+    getUserEmails: vi.fn(async (_id: string): Promise<string[]> => []), listChatMessages: vi.fn(async () => ({ items: [], hasMore: false })) };
   const log = { warn: vi.fn(), info: vi.fn(), error: vi.fn() };
   let interactions!: WorkItemInteractions;
   const authorize = async (_id: string, actor?: string) => !revoked.has(actor ?? '') && ['ou_alice', 'installation_owner'].includes(actor ?? '');
@@ -530,6 +535,42 @@ describe('Leader 模式：接待交接、Leader 规划、Worker 执行、Leader 
     await f.tickUntil(() => expect(escalated()).toBeDefined());
     expect(f.permissionCalls).toEqual([]);
     expect((await f.leaderRecord(delegated.workId)).rulings).toEqual([expect.objectContaining({ decision: 'escalate', escalation: expect.objectContaining({ reason: expect.stringContaining('这个任务发起时没有高危授权') }) })]);
+  });
+
+  it.each([false, true])('carries the email-only member grant from the Lark task to the work-item Worker (access also needs email: %s)', async accessNeedsEmail => {
+    const resolveRiskPolicy = vi.fn<NonNullable<RuntimeOptions['resolveRiskPolicy']>>();
+    const f = await fixture('layered', { worker: 'permission', resolveRiskPolicy });
+    const groups = new LarkGroupManager(f.repos);
+    resolveRiskPolicy.mockImplementation(async (sessionId, fallback) => {
+      const binding = await f.work.parentForSession(sessionId);
+      return binding ? workItemRiskPolicy(f.repos, groups, binding.parentSessionId, binding.actorId, fallback,
+        {}, fetch, capturedRiskPolicy(f.repos, binding.parentTaskId)) : fallback;
+    });
+    const hookStatus = vi.spyOn(securityHooks, 'larkHookStatus').mockResolvedValue({ supported: true, installed: true, writable: true, trustRequired: false });
+    const email = 'member@example.com';
+    const childDirectory = vi.spyOn(LarkCardService.prototype, 'getUserEmails').mockResolvedValue([email]);
+    try {
+      f.config.highRiskAllowedUsers = [{ openId: 'ou_other', name: 'Other' }];
+      f.config.highRiskAllowedEmails = [email];
+      f.config.allowedEmails = accessNeedsEmail ? [email] : [];
+      f.config.riskControlMode = 'enforced';
+      await f.setConfig(f.config);
+      f.client.getUserEmails.mockResolvedValue([email]);
+      f.leader.ruling = '{"decision":"approve","basis":"用户已授权"}';
+      const { turn, delegated } = await f.delegateGoal('om_email_grant', '检查工作区');
+      const { parentTaskId } = await f.leaderRecord(delegated.workId);
+      const parent = f.repos.execution.getAcceptedTask(parentTaskId);
+      expect(parent?.task.executionContext?.riskPolicy).toMatchObject({ enabled: true, authorized: true, actorEmail: email });
+      expect(f.client.getUserEmails.mock.calls).toEqual([['ou_alice']]);
+      await f.tickUntil(async () => expect((await f.work.get(turn.parent.id, delegated.workId, 'ou_alice')).status).toBe('completed'));
+      expect(f.permissionCalls).toEqual([[expect.stringMatching(/^permit_ses_work_/), true]]);
+      const workerId = f.prompts.find(p => p.agentId === 'worker')!.sessionId;
+      const worker = (await f.runtime.getSession(workerId))!;
+      const binding = await f.work.parentForSession(workerId);
+      expect(binding).toMatchObject({ parentTaskId, parentSessionId: turn.parent.id, actorId: 'ou_alice' });
+      const policyFile = join(worker.cwd, '.dutydeck/security/sessions', workerId + '.json');
+      expect(JSON.parse(await readFile(policyFile, 'utf8'))).toMatchObject({ enabled: true, authorized: true });
+    } finally { childDirectory.mockRestore(); hookStatus.mockRestore(); }
   });
 
   it('approves a tool call for the Worker without a card when the requester may approve it', async () => {
