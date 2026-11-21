@@ -22,3 +22,6 @@ export function larkAgentUnavailableReason(failure: unknown): string | undefined
 export const larkFallbackHasActivity = (event: AgentEvent) => (event.type === 'status'
   && (event.data as { programState?: string; kind?: string })?.programState === 'blocked' && (event.data as { kind?: string }).kind === 'permission') || !['status', 'task', 'error', 'usage', 'commands', 'completed', 'raw_terminal'].includes(event.type)
   && !(event.type === 'text' && (event.data as { role?: string })?.role === 'user');
+
+export const larkFallbackNoteElements = (note?: string) =>
+  note ? [{ tag: 'markdown', element_id: 'agent_fallback_note', content: note, text_size: 'notation' }] : [];

@@ -79,6 +79,7 @@ pnpm exec playwright show-trace artifacts/e2e/<run-id>/test-results/<case>/trace
 
 ### 合成飞书套件（Synthetic Lark）
 
+- 群消息重启场景使用本地飞书 WebSocket 和 OpenAPI 替身。打包后的服务接到群内 @ 消息、发出过程卡并收到假 CLI 的输入回执后，测试对服务发 SIGKILL。重启后放行同一 CLI，核对结果卡或原消息上的完成表情，再重启对账，检查没有重复投递或执行。
 - 基于合成 transport 与模拟平台，覆盖 Lark 机器人管理、App 一键创建默认流程及 pending-review 审核流。
 - `scripts/e2e-bot-settings.mts` 为 `settings-cli.ts` 的全部机器人设置键维护显式矩阵；新增键未入矩阵会失败。每项经真实 settings CLI 和 HTTP 保存，对比公开返回与磁盘存储，再关闭并重建服务验证持久化。姓名输入按解析后的名单断言，密钥只在存储中校验，明确清空与归一化单独断言。
 - 设置场景还用真实 Chromium 操作机器人详情与绑定向导，验证草稿跨导航、保存与重载、版本冲突、失败保留草稿，以及按未保存工作区准备 Hook。Codex 原生信任探测通过 stdio JSON-RPC fixture 分别返回未信任、已信任状态：安装文件不改配置版本，未信任仍拒绝保存，信任后重新检查才能保存强制风控。无效路由、枚举、权限组合、分层协作前提和数值范围必须拒绝且不改存储。

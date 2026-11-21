@@ -177,6 +177,22 @@ describe('saveCardTask 的合并语义', () => {
     expect(after.last_successful_elements).toEqual(before.last_successful_elements);
   });
 
+  it('从卡片记录接回换过 Agent 的轮次，后续保存保留首次锚点', async () => {
+    const h = await harness();
+    await h.coordinator.handle({ ...event('om_request'), replyMessageId: 'om_anchor' }, h.config);
+    const first = await h.resultCard();
+    expect(first.anchor_message_id).toBe('om_anchor');
+    const note = '已切换到兜底 Agent spare。';
+    await h.patchPersisted({ reply_message_id: 'om_old_reply', fallback_note: note });
+    const [mapping] = await h.repos.channelMappings.list(h.channel);
+    const restored = (h.coordinator as any).restoredCardTask(h.config, mapping!, await h.persisted());
+    expect(restored.event.replyMessageId).toBe('om_anchor');
+    expect(restored.fallbackNote).toBe(note);
+    restored.event.replyMessageId = 'om_later';
+    await (h.coordinator as any).persistCardTask(restored, 'completed');
+    expect(await h.persisted()).toMatchObject({ anchor_message_id: 'om_anchor', fallback_note: note });
+  });
+
   it('推进到新一轮时不合并：上一轮的卡片归属与终态一律清掉', async () => {
     const h = await harness({ fail: true });
     await h.coordinator.handle(event('om_1'), h.config);

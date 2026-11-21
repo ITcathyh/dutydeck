@@ -595,6 +595,7 @@ describe('Bot Agent fallback with real Runtime and SQLite', () => {
     expect(JSON.stringify((await h.resultCard())?.card)).toContain('兜底 Agent spare');
     const inbox = JSON.parse((await h.repos.config.get('lark.inbox.app.om_first'))!);
     expect(inbox).toMatchObject({ sessionId: first.sessionId, taskId: first.saved.runtime_task_id, state: 'accepted' });
+    expect(first.saved.fallback_note).toBe(inbox.fallbackNote);
     const originSessionId = h.prompts[0]!.sessionId;
     const originTask = (await h.runtime.getTasks(originSessionId))[0]!;
     expect(inbox.request.materialPrompt).toContain(`来源 session=${originSessionId}`);

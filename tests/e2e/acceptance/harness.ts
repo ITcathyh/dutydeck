@@ -1,3 +1,4 @@
+import { once } from 'node:events';
 import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -44,7 +45,8 @@ export function writeMockCli(binDir: string, claudeDataDir: string): string {
   writeFileSync(
     path,
     `#!/usr/bin/env node
-import { appendFileSync, mkdirSync, realpathSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, realpathSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import { join } from 'node:path';
 
 if (process.argv.includes('--version')) {
@@ -53,6 +55,7 @@ if (process.argv.includes('--version')) {
 }
 
 const dataDir = process.env.MOCK_CLAUDE_DATA_DIR;
+const releaseFile = process.env.MOCK_CLAUDE_RELEASE_FILE;
 const freshIndex = process.argv.indexOf('--session-id');
 const resumeIndex = process.argv.indexOf('--resume');
 const resumed = resumeIndex >= 0;
@@ -66,6 +69,10 @@ const file = join(dir, \`\${sessionArg ?? 'mock'}.jsonl\`);
 const write = entry => appendFileSync(file, JSON.stringify(entry) + '\\n');
 appendFileSync(file, '');
 
+// Keep long injected group instructions on one physical row in this simple mock composer.
+if (releaseFile) {
+  execFileSync(${JSON.stringify(join(binDir, 'tmux'))}, ['resize-window', '-x', '1024']);
+}
 // 完整空 composer 沿用 claude-family.test.ts 实采底部结构，供同目录 idle 准入核验。
 process.stdout.write('Claude Code v2.1.267 (mock)' + (resumed ? ' (resumed)' : '') + '\\r\\n────────────────────────\\r\\n\\u276f\\r\\n────────────────────────\\r\\n⏵⏵ bypass permissions on (shift to cycle)');
 
@@ -83,11 +90,15 @@ const submitPrompt = rawPrompt => {
   const currentTurn = ++turn;
   write({ type: 'user', sessionId: sessionArg, timestamp: new Date().toISOString(), message: { role: 'user', content: rawPrompt } });
   process.stdout.write('\\r\\nworking\\r\\n');
-  setTimeout(() => {
+  setTimeout(function finish() {
+    if (releaseFile && !existsSync(releaseFile)) {
+      setTimeout(finish, 50);
+      return;
+    }
     write({ type: 'assistant', message: { role: 'assistant', content: [{ type: 'thinking', thinking: 'mock thinking block' }] } });
     const marker = resumed ? 'MOCK_RESUMED' : currentTurn > 1 ? 'MOCK_CONTINUED' : 'MOCK_REPLY';
     // 真实 Claude 的收尾回复带 stop_reason；缺了它驱动要多等一轮空闲复核（约 3 秒）。
-    write({ type: 'assistant', message: { role: 'assistant', stop_reason: 'end_turn', content: [{ type: 'text', text: marker + ': ' + prompt }] } });
+    write({ type: 'assistant', message: { role: 'assistant', stop_reason: 'end_turn', content: [{ type: 'text', text: releaseFile ? marker : marker + ': ' + prompt }] } });
     process.stdout.write('\\u001b[2J\\u001b[HClaude Code v2.1.267 (mock)\\r\\n\\u2733 Worked for 1s\\r\\n────────────────────────\\r\\n\\u276f\\r\\n────────────────────────\\r\\n⏵⏵ bypass permissions on (shift to cycle)');
   }, 300);
 };
@@ -150,12 +161,14 @@ export interface TestServerInstance {
   baseUrl: string;
   serverLog: string[];
   server: ChildProcess;
+  crashAndRestart: () => Promise<void>;
   cleanup: () => Promise<void>;
   request: (method: string, path: string, body?: unknown) => Promise<{ status: number; headers: Headers; json?: any; text: string }>;
 }
 
 export interface LaunchIsolatedTestServerOptions {
   prefix?: string;
+  listenLark?: boolean;
   extraEnv?: NodeJS.ProcessEnv;
   agents?: any[];
   serverArgs?: string[];
@@ -180,7 +193,9 @@ export async function launchIsolatedTestServer(
   const claudeDataDir = join(dataDir, 'claude');
   const tmuxTmpDir = join(dataDir, 'tmux-tmp');
   const sourceRepo = join(dataDir, 'source-repo');
-  const socket = join(dataDir, 'tmux.sock');
+  // The recovery probe derives this same private socket from TMUX_TMPDIR.
+  const tmuxSocketDir = join(tmuxTmpDir, `tmux-${process.getuid!()}`);
+  const socket = join(tmuxSocketDir, 'default');
 
   let server: ChildProcess | undefined;
   let serverExited = false;
@@ -234,6 +249,8 @@ export async function launchIsolatedTestServer(
     for (const dir of [serverHome, binDir, claudeDataDir, tmuxTmpDir, sourceRepo]) {
       mkdirSync(dir, { recursive: true });
     }
+
+    mkdirSync(tmuxSocketDir, { mode: 0o700 });
 
     // 初始化真实 Git 源码仓库，包含 baseline 提交
     const git = (args: string[]) => gitIn(sourceRepo, args);
@@ -290,80 +307,84 @@ export async function launchIsolatedTestServer(
     const port = await getAvailablePort();
     const baseUrl = `http://127.0.0.1:${port}`;
 
-    server = spawn(
-      process.execPath,
-      [
-        SERVER_ENTRY,
-        '--local-only',
-        '--port',
-        String(port),
-        '--cwd',
-        sourceRepo,
-        '--database',
-        join(dataDir, 'dutydeck.db'),
-        '--no-lark-listen',
-        ...resolvedServerArgs
-      ],
-      {
-        cwd: sourceRepo,
-        env: serverEnv,
-        stdio: ['ignore', 'pipe', 'pipe'],
-        detached: true
-      }
-    );
-
-    let serverStdout = '';
-    server.stdout?.on('data', chunk => {
-      const text = String(chunk);
-      serverStdout += text;
-      serverLog.push(text);
-    });
-    server.stderr?.on('data', chunk => {
-      serverLog.push(String(chunk));
-    });
-
-    server.on('exit', code => {
-      serverExited = true;
-      exitCode = code;
-    });
-
-    // 等待 server 自己输出 listening（必须来自 stdout 中的完整成功监听串 + 本轮端口）
-    const deadline = Date.now() + 30_000;
-    let listened = false;
-    while (Date.now() < deadline) {
-      if (serverExited) {
-        throw new Error(`Server process exited prematurely with code ${exitCode}:\n${serverLog.join('')}`);
-      }
-      if (serverStdout.includes('Dutydeck UI and API listening on') && serverStdout.includes(String(port))) {
-        listened = true;
-        break;
-      }
-      await new Promise(r => setTimeout(r, 100));
-    }
-
-    if (!listened) {
-      throw new Error(`Server did not log listening on port ${port} within 30s. Logs:\n${serverLog.join('')}`);
-    }
-
-    // 确认 /health 就绪
-    let healthy = false;
-    while (Date.now() < deadline) {
-      try {
-        const res = await fetch(`${baseUrl}/health`);
-        if (res.status === 200) {
-          const json = await res.json() as any;
-          if (json?.ok) {
-            healthy = true;
-            break;
-          }
+    const startServer = async () => {
+      serverExited = false;
+      server = spawn(
+        process.execPath,
+        [
+          SERVER_ENTRY,
+          '--local-only',
+          '--port',
+          String(port),
+          '--cwd',
+          sourceRepo,
+          '--database',
+          join(dataDir, 'dutydeck.db'),
+          ...(options.listenLark ? [] : ['--no-lark-listen']),
+          ...resolvedServerArgs
+        ],
+        {
+          cwd: sourceRepo,
+          env: serverEnv,
+          stdio: ['ignore', 'pipe', 'pipe'],
+          detached: true
         }
-      } catch {}
-      await new Promise(r => setTimeout(r, 150));
-    }
+      );
 
-    if (!healthy) {
-      throw new Error(`Server healthcheck failed on ${baseUrl}/health. Logs:\n${serverLog.join('')}`);
-    }
+      let serverStdout = '';
+      server.stdout?.on('data', chunk => {
+        const text = String(chunk);
+        serverStdout += text;
+        serverLog.push(text);
+      });
+      server.stderr?.on('data', chunk => {
+        serverLog.push(String(chunk));
+      });
+
+      server.on('exit', code => {
+        serverExited = true;
+        exitCode = code;
+      });
+
+      // 等待 server 自己输出 listening（必须来自 stdout 中的完整成功监听串 + 本轮端口）
+      const deadline = Date.now() + 30_000;
+      let listened = false;
+      while (Date.now() < deadline) {
+        if (serverExited) {
+          throw new Error(`Server process exited prematurely with code ${exitCode}:\n${serverLog.join('')}`);
+        }
+        if (serverStdout.includes('Dutydeck UI and API listening on') && serverStdout.includes(String(port))) {
+          listened = true;
+          break;
+        }
+        await new Promise(r => setTimeout(r, 100));
+      }
+
+      if (!listened) {
+        throw new Error(`Server did not log listening on port ${port} within 30s. Logs:\n${serverLog.join('')}`);
+      }
+
+      // 确认 /health 就绪
+      let healthy = false;
+      while (Date.now() < deadline) {
+        try {
+          const res = await fetch(`${baseUrl}/health`);
+          if (res.status === 200) {
+            const json = await res.json() as any;
+            if (json?.ok) {
+              healthy = true;
+              break;
+            }
+          }
+        } catch {}
+        await new Promise(r => setTimeout(r, 150));
+      }
+
+      if (!healthy) {
+        throw new Error(`Server healthcheck failed on ${baseUrl}/health. Logs:\n${serverLog.join('')}`);
+      }
+    };
+    await startServer();
 
     const request = async (method: string, path: string, body?: unknown) => {
       const res = await fetch(`${baseUrl}${path}`, {
@@ -388,7 +409,14 @@ export async function launchIsolatedTestServer(
       port,
       baseUrl,
       serverLog,
-      server,
+      get server() { return server!; },
+      async crashAndRestart() {
+        const exited = once(server!, 'exit');
+        server!.kill('SIGKILL');
+        const [, signal] = await exited;
+        if (signal !== 'SIGKILL') throw new Error(`Unexpected server exit: ${signal}`);
+        await startServer();
+      },
       cleanup,
       request
     };

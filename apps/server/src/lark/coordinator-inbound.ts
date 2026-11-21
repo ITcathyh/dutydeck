@@ -214,11 +214,14 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
         const key = larkGroupKey(stored.event, saved.scope_id, config.appId);
         const group = this.groups.get(key) ?? { tail: Promise.resolve() };
         this.groups.set(key, group);
-        const task: LarkTask = { id: mapping.externalId, event: stored.event, config: effective, prompt: saved.prompt, resources: [],
+        const anchor = saved.anchor_message_id ?? saved.reply_message_id ?? larkMessageAnchor(stored.event);
+        const task: LarkTask = { id: mapping.externalId,
+          event: { ...stored.event, replyMessageId: anchor !== mapping.externalId ? anchor : undefined },
+          config: effective, prompt: saved.prompt, resources: [],
           group, inbox: adopted, state: 'queued', events: [], turn: (saved.turn ?? 1) - 1, scopeId: saved.scope_id, epoch: group.epoch ?? 0,
           retryMaterialPrompt: saved.retry_material_prompt, sessionId: mapping.sessionId, cardMessageId: saved.card_message_id,
           runtimeTaskId: runtimeTask.id, startedAt: saved.started_at, lastSuccessfulElements: saved.last_successful_elements,
-          launcherRecoveryNote: saved.launcher_recovery_note,
+          fallbackNote: saved.fallback_note, launcherRecoveryNote: saved.launcher_recovery_note,
           progressFrozen: saved.progress_frozen, resumeTask: runtimeTask, restoring: true };
         this.tasks.set(task.id, task);
         this.handledMessages.add(task.id);
