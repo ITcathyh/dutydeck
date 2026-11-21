@@ -8,7 +8,9 @@ import { isRestartInterruption, larkHeldReason, larkInterruptionSummary, type La
 import type { LarkCardInput, LarkCardService, LarkWriteGuard } from './service.js';
 import { isLarkMessageUnupdatable } from './card-renderer.js';
 import type { LarkUrgentManager } from './workflow-urgent.js';
-import type { LarkRuntime } from './listener.js';
+import type { LarkQueries, LarkRecovery } from './runtime.js';
+
+type RecoveryQueries = Pick<LarkQueries, 'getTasks' | 'getTurnStall' | 'isQueueHeld'> & Pick<LarkRecovery, 'getTaskRecovery'>;
 
 const explanations: Record<string, string> = {
   DRIVER_RESOURCE_UNSAFE: '上一轮的 Agent 还没确认停下',
@@ -47,16 +49,6 @@ export const larkQuietSettledNote = (cause: { code?: string; agent?: string }) =
 /** 旧的一轮在对账时自动结束：不发结果卡，原来的过程卡原地改成终态，写上这一句。 */
 export const larkStaleSettledNote = '服务重启前没有完成，已自动结束。';
 
-/** 运行时上这次新增的可选能力。listener.ts 的 LarkRuntime 不在这次改动范围内，按可选能力读取。 */
-export type LarkRuntimeReliability = {
-  getAgentAvailability?(agentId: string): { reason: string; remedy: string; at: string } | undefined;
-  checkAgentAvailability?(agentId: string, options?: { force?: boolean }): Promise<{ reason: string; remedy: string; at: string } | undefined>;
-  inspectAgentQuiescence?(sessionId: string): 'idle' | 'busy' | 'unknown';
-  settleIdleAttempt?(sessionId: string, input: { taskId: string; decisionId: string; outcome: 'unknown' | 'interrupted' | 'failed'; evidenceRefs: string[] },
-    actor: { kind: 'installation_owner'; id: string }): Promise<unknown>;
-};
-export const larkReliability = (runtime: LarkRuntime) => runtime as LarkRuntime & LarkRuntimeReliability;
-
 /** Agent 不可用时在话题里回的那句话（A1）。 */
 export const larkAgentUnavailableText = (botName: string, unavailable: { reason: string; remedy: string }) =>
   `${botName} 现在用不了：${unavailable.reason}。${unavailable.remedy}。修好后重发这条消息即可。`;
@@ -80,7 +72,7 @@ export const larkStallNote = (stall: { silentMs: number; queued: number; cpu: 'i
  * buttons 是卡上有没有「重新执行」「放弃」。
  * 排在一轮可能卡住的任务后面（stalled）只是提示：不算受阻、不发恢复提醒，但同样给转到新会话的按钮——它从未执行，换过去不会重复任何操作。
  */
-export async function describeLarkTaskRecovery(runtime: LarkRuntime, sessionId: string, taskId: string, status: string, queuedAhead?: number,
+export async function describeLarkTaskRecovery(runtime: RecoveryQueries, sessionId: string, taskId: string, status: string, queuedAhead?: number,
   options: { relaunch?: boolean; webBaseUrl?: string; interrupted?: LarkHeldCause & { buttons?: boolean }; continueInPlace?: boolean } = {}) {
   const recovery = await runtime.getTaskRecovery?.(sessionId, taskId);
   status = recovery?.status ?? status;
@@ -136,7 +128,7 @@ export async function describeLarkTaskRecovery(runtime: LarkRuntime, sessionId: 
 
 /** One durable exception notice per accepted task/turn, updated independently of business-final delivery. */
 export async function notifyLarkTaskRecovery(input: {
-  runtime: LarkRuntime; status: string;
+  runtime: RecoveryQueries; status: string;
   service: LarkCardService; store?: ConfigRepository; log: { warn: (...args: any[]) => void };
   appId: string; sessionId: string; taskId: string; turn?: number; target: DeliveryTarget;
   /** 只收敛已有提醒，不为可正常更新的过程卡另发消息。 */
@@ -297,7 +289,7 @@ export async function urgeLarkUnknownTask(input: {
 }
 
 /** Only a ledger-backed manual completion can supersede historical open tools. */
-export async function verifiedLarkRecoveryOutput(runtime: LarkRuntime, sessionId: string, taskId: string, events: AgentEvent[]) {
+export async function verifiedLarkRecoveryOutput(runtime: RecoveryQueries, sessionId: string, taskId: string, events: AgentEvent[]) {
   const verified = (await runtime.getTaskRecovery?.(sessionId, taskId))?.verifiedOutput;
   if (!verified) return;
   const event = events.find(item => item.id === verified.eventId && item.type === 'text');

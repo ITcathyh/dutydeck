@@ -17,7 +17,7 @@ import { redactTraceText } from './secret-redaction.js';
 import { OnlineProcessCard, type CardUpdateOutcome } from './online-process-card.js';
 import { completeExplicitFinal, explicitFinalContext, hasExplicitFinal, withExplicitFinalLock } from './explicit-final.js';
 import { mergeGroupTaskWatermark } from './group-task-context.js';
-import { describeLarkTaskRecovery, larkAgentUnavailableText, larkQuietSettledNote, larkReliability, larkStallNote, larkSteeringUnknownNote, notifyLarkTaskRecovery, verifiedLarkRecoveryOutput } from './task-recovery.js';
+import { describeLarkTaskRecovery, larkAgentUnavailableText, larkQuietSettledNote, larkStallNote, larkSteeringUnknownNote, notifyLarkTaskRecovery, verifiedLarkRecoveryOutput } from './task-recovery.js';
 import { validateLarkLaunchOptions, type LarkLaunchOptions } from './new-session.js';
 import { collectLarkTaskContext, larkMaterialMessageIds } from './task-context.js';
 import type { LarkScenarioRecallLine } from './scenario-recall.js';
@@ -1290,7 +1290,7 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
     }
     // A1：Agent 已知不可用（没登录、凭据失效）时不开新一轮，直接在话题里说清楚怎么修。
     // 每次有新消息（用户重发）都先跑一次不调模型的状态命令复查，修好了就照常执行。
-    const reliability = larkReliability(this.runtime);
+    const reliability = this.runtime;
     const previous = accepted?.task ?? resumeTask;
     const unavailable = !previous && reliability.getAgentAvailability?.(session.agentId)
       ? await reliability.checkAgentAvailability?.(session.agentId).catch(() => reliability.getAgentAvailability?.(session!.agentId)) : undefined;

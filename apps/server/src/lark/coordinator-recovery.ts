@@ -5,7 +5,7 @@ import { TRANSCRIPT_ADAPTER_IDS } from '@dutydeck/pty-driver/support';
 import { readTaskAuthorization, recordTaskAuthorization } from '../task-authorization.js';
 import { randomUUID } from 'node:crypto';
 import { explicitFinalTextReceiptReader } from './explicit-final.js';
-import { describeLarkTaskRecovery, larkContinuePrompt, larkIdleTimeoutMinutes, larkQuietSettledNote, larkRecoveryRetainedNote, larkReliability, larkStaleSettledNote,
+import { describeLarkTaskRecovery, larkContinuePrompt, larkIdleTimeoutMinutes, larkQuietSettledNote, larkRecoveryRetainedNote, larkStaleSettledNote,
   larkUnknownTaskNoticeKey, larkUnknownTaskNoticeRecordKey, notifyLarkUnknownTask, urgeLarkUnknownTask, type LarkUnknownTaskNotice } from './task-recovery.js';
 import { isBotSenderType } from './card-mentions.js';
 import { larkNotice } from './notify-tier.js';
@@ -232,7 +232,7 @@ export abstract class LarkCoordinatorRecovery extends LarkCoordinatorCards {
     this.scheduleTaskAgentPoll(config);
     // 服务启动时查一次默认 Agent 的登录状态（不调模型）：没登录就先记上，第一条请求直接得到说明，不用白等。
     const agentId = config.defaultAgentId;
-    if (agentId) void larkReliability(this.runtime).checkAgentAvailability?.(agentId, { force: true })
+    if (agentId) void this.runtime.checkAgentAvailability?.(agentId, { force: true })
       ?.catch(error => this.log.warn({ error, agentId }, 'Agent 登录状态检查失败'));
     const unresolved = await this.reconcile(config);
     if (unresolved > 0) this.scheduleReconcile('steady');
@@ -732,7 +732,7 @@ export abstract class LarkCoordinatorRecovery extends LarkCoordinatorCards {
         decisionId, action: 'confirm_result', outcome, evidenceRefs: [evidence], resourceChecks: inspection.resourceChecks }, larkRecoveryOwner);
     } catch (error) {
       // 会话的驱动还连着（没重启过）：账本把它算作没停下的进程。驱动确认空闲时改由运行时按空闲收口，否则照旧报错。
-      const settleIdle = larkReliability(this.runtime).settleIdleAttempt;
+      const settleIdle = this.runtime.settleIdleAttempt;
       if (!settleIdle || (error as { code?: unknown }).code !== 'SESSION_RESOURCE_BLOCKED') throw error;
       await settleIdle.call(this.runtime, sessionId, { taskId, decisionId, outcome, evidenceRefs: [evidence] }, larkRecoveryOwner);
     }
@@ -764,7 +764,7 @@ export abstract class LarkCoordinatorRecovery extends LarkCoordinatorCards {
     return loadLarkTaskEvents(this.runtime, sessionId, taskId, 500);
   }
 
-  private agentQuiet(sessionId: string) { return larkReliability(this.runtime).inspectAgentQuiescence?.(sessionId) === 'idle'; }
+  private agentQuiet(sessionId: string) { return this.runtime.inspectAgentQuiescence?.(sessionId) === 'idle'; }
 
   /**
    * 旧的一轮（larkRecoveryNoticeExpired）。最后一次活动与重投同一个取法：这一轮执行记录的事件，没有就用开始时间；

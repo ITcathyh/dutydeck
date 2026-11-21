@@ -13,7 +13,7 @@ import { larkElapsedLabel } from './card-status.js';
 import { agentSettingsConfirmKind, parseAgentSettings, showAgentSettings } from './agent-settings.js';
 import { createHash } from 'node:crypto';
 import { jsonSha256 } from '../hash.js';
-import { describeLarkTaskRecovery, larkContinuePrompt, larkReliability } from './task-recovery.js';
+import { describeLarkTaskRecovery, larkContinuePrompt } from './task-recovery.js';
 import type { LarkInteraction } from './workflow-interactions.js';
 import { formatUnknownTaskTime as deadlineText } from '../task-resolution.js';
 import type { LarkInboxAdoption, LarkInboxRecord } from './task-inbox.js';
@@ -1743,7 +1743,7 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
    */
   /** /status 的 Agent 状态行（A1）。不可用标记超过 5 分钟先复查一次（不调模型）。 */
   private async agentAvailabilityLine(agentId: string) {
-    const reliability = larkReliability(this.runtime);
+    const reliability = this.runtime;
     if (!reliability.getAgentAvailability) return undefined;
     let mark = reliability.getAgentAvailability(agentId);
     if (mark && Date.now() - Date.parse(mark.at) > 5 * 60_000 && reliability.checkAgentAvailability) mark = await reliability.checkAgentAvailability(agentId).catch(() => mark);

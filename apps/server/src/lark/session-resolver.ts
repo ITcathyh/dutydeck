@@ -1,6 +1,5 @@
 import { redactTraceText } from './secret-redaction.js';
 import { larkAgentUnavailableReason } from './agent-fallback.js';
-import { larkReliability } from './task-recovery.js';
 import { larkMessageAnchor } from './message-anchor.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { realpathSync } from 'node:fs';
@@ -543,7 +542,7 @@ export async function resolveLarkSession(
   let automaticFallback = false;
   const canFallback = !explicitAgentId && !launchOptions?.useAgentDefaults && config.fallbackAgentId && config.fallbackAgentId !== agentId;
   const start = async (): Promise<Session> => {
-    const reliability = larkReliability(runtime);
+    const reliability = runtime;
     const known = reliability.getAgentAvailability?.(agentId!)
       ? await reliability.checkAgentAvailability?.(agentId!).catch(() => reliability.getAgentAvailability?.(agentId!)) : undefined;
     if (known) throw new LarkServiceError('AGENT_UNAVAILABLE', known.reason, 503);

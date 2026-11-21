@@ -1,3 +1,4 @@
+import type { LarkPermissionControl, LarkQueries, LarkRecovery } from './runtime.js';
 import { clearTaskReportSafely } from '@dutydeck/shared';
 import { formatUnknownTaskTime as deadlineText } from '../task-resolution.js';
 import { larkMessageAnchor } from './message-anchor.js';
@@ -6,7 +7,7 @@ import { cleanPermissionRejectReason, freeTextInputMaxBytes, freeTextInputMaxLen
 import { createHash, randomUUID } from 'node:crypto';
 import type { AgentEvent, ConfigRepository, PermissionRequestData, PolicyAction } from '@dutydeck/shared';
 import type { RelayAskBroker, RelayAskChoice, RelayDeferredAsk } from '@dutydeck/relay';
-import type { LarkMessageEvent, LarkRuntime, ListenerLog } from './listener.js';
+import type { LarkMessageEvent, ListenerLog } from './listener.js';
 import { LarkServiceError, buildLarkCard, larkCardSafeLimits, larkCardRequestBytes } from './service.js';
 import type { LarkCardService } from './service.js';
 import { safeLarkWebUrl } from './card-actions.js';
@@ -358,7 +359,7 @@ export class LarkWorkflowInteractions {
   private readonly planTimers = new Map<string, NodeJS.Timeout>();
   constructor(
     private readonly store: ConfigRepository,
-    private readonly runtime: LarkRuntime,
+    private readonly runtime: LarkPermissionControl & Pick<LarkQueries, 'getEvents' | 'getTasks' | 'isQueueHeld' | 'getTurnStall'> & Pick<LarkRecovery, 'getTaskRecovery'>,
     private readonly service: LarkCardService,
     private readonly broker: RelayAskBroker | undefined,
     private readonly authorize: (record: LarkInteraction, actor: string, action: PolicyAction) => Promise<boolean>,
