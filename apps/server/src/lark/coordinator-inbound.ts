@@ -2293,6 +2293,7 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
       executeRepairFlight: this.executeRepairFlight.bind(this),
       isOperatorAllowed: this.isOperatorAllowed.bind(this),
       isRepairOperatorAllowed: this.isRepairOperatorAllowed.bind(this),
+      larkRouteCapabilities: this.larkRouteCapabilities.bind(this),
       log: this.log,
       memory: this.memory,
       get reconcileConfig() { return host.reconcileConfig; },
@@ -2300,6 +2301,7 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
       repairInFlight: this.repairInFlight,
       runtime: this.runtime,
       service: this.service,
+      taskDashboard: this.taskDashboard.bind(this),
       tasks: this.tasks,
       automation: this.workflowOptions.automation,
       participation: this.workflowOptions.participation,
@@ -2314,53 +2316,6 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
       if (callback) {
         const [key, , handle] = callback;
         return handle(this.buttonDependencies(), { key, workflow, operatorOpenId, context });
-      }
-    }
-    // S2：/help 只读翻页。帮助内容与用户身份无关，无需持久化原消息；门禁与 /help 命令同权。
-    if (workflow && typeof workflow === 'object' && 'dutydeck_help_page' in workflow) {
-      const pageValue = parseLarkHelpPageValue(value);
-      if (!pageValue) return { type: 'error', content: '无法识别帮助页码。' };
-      if (!context?.messageId || !context.chatId || !operatorOpenId || !this.reconcileConfig || !this.workflowOptions.store) {
-        return { type: 'error', content: '帮助卡片已失效，请重新发送 /help。' };
-      }
-      try {
-        const config = await readLarkConfig(this.workflowOptions.store, this.reconcileConfig.appId);
-        if (!config?.listening) return { type: 'warning', content: '机器人已停用，无法查看命令帮助。' };
-        if (!await this.isOperatorAllowed(config, operatorOpenId, context.chatId)) {
-          return { type: 'warning', content: '当前账号无权使用命令帮助。' };
-        }
-        const pluginCommands = larkPluginCommandHelp({ botAppId: config.appId, ...(config.workspace ? { cwd: config.workspace } : {}) });
-        const help = renderLarkCommandHelp(this.larkRouteCapabilities(), { page: pageValue.page, ...(pluginCommands.length ? { pluginCommands } : {}) });
-        await this.service.update({ messageId: context.messageId, taskId: context.messageId, taskName: help.title,
-          state: 'completed', readOnly: true, permissionMode: larkPermissionMode(config), markdown: help.text, elements: help.elements });
-        return { type: 'success', content: `帮助第 ${help.page}/${help.totalPages} 页。` };
-      } catch (error) {
-        this.log.warn({ error }, '翻页命令帮助失败');
-        return { type: 'error', content: '翻页失败，请稍后重试或重新发送 /help。' };
-      }
-    }
-    if (workflow && typeof workflow === 'object' && 'dutydeck_task_dashboard' in workflow) {
-      if (workflow.dutydeck_task_dashboard !== 'page' || typeof workflow.page !== 'number'
-        || !Number.isSafeInteger(workflow.page) || workflow.page < 1) return { type: 'error', content: '无法识别任务列表页码。' };
-      if (!context?.messageId || !context.chatId || !operatorOpenId || !this.reconcileConfig || !this.workflowOptions.store) {
-        return { type: 'error', content: '任务列表已失效，请重新发送 /tasks。' };
-      }
-      try {
-        const saved = await this.workflowOptions.store.get(`lark.task_dashboard.${this.reconcileConfig.appId}.${context.messageId}`);
-        if (!saved) return { type: 'warning', content: '任务列表已失效，请重新发送 /tasks。' };
-        const event = JSON.parse(saved) as LarkMessageEvent;
-        if (event.chatId !== context.chatId || event.senderOpenId !== operatorOpenId) {
-          return { type: 'warning', content: '请发送 /tasks 查看你自己的任务列表。' };
-        }
-        const config = await readLarkConfig(this.workflowOptions.store, this.reconcileConfig.appId);
-        if (!config?.listening) return { type: 'warning', content: '机器人已停用，无法刷新任务列表。' };
-        const elements = await this.taskDashboard(event, config, workflow.page);
-        await this.service.update({ messageId: context.messageId, taskId: event.messageId, taskName: '任务导航',
-          state: 'completed', readOnly: true, permissionMode: larkPermissionMode(config), elements });
-        return { type: 'success', content: '任务列表已更新。' };
-      } catch (error) {
-        this.log.warn({ error }, '刷新任务列表失败');
-        return { type: 'error', content: '刷新失败，请稍后重试或重新发送 /tasks。' };
       }
     }
     // CI 失败卡「交给 Agent 修」：与 /ci 命令同一道权限门，卡片须是该订阅最新发出的失败卡。
