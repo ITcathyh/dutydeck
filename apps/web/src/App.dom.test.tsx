@@ -3,7 +3,7 @@ import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest';
 import { act, fireEvent, cleanup, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { api, agentModelSettingsApi, foundationApi, insightApi, scheduleApi, terminalSettingsApi, type Agent, type DockEvent, type RunSummary, type Session } from './api';
+import { ApiError, api, agentModelSettingsApi, foundationApi, insightApi, scheduleApi, terminalSettingsApi, type Agent, type DockEvent, type RunSummary, type Session } from './api';
 import type { SessionInsightDetailsResponse } from '@dutydeck/shared';
 import App from './App';
 import { AuthGate } from './components/AuthGate';
@@ -1378,9 +1378,9 @@ describe('App 会话分析深链与导航', () => {
 describe('App pending composer mutations', () => {
   const queuedTask = (id: string) => ({ id, sessionId: 's1', prompt: id, status: 'queued', createdAt: '2026-08-30T00:00:00Z', updatedAt: '2026-08-30T00:00:00Z' });
 
-  function setup() {
-    window.history.replaceState(null, '', '/sessions/s1');
-    mockAppApi({ sessions: [session('s1', 'thinking'), session('s2')], summaries: [summary('s1', 'first session'), summary('s2', 'second session')] });
+  function setup(sessionId = 's1') {
+    window.history.replaceState(null, '', `/sessions/${sessionId}`);
+    mockAppApi({ sessions: [session(sessionId, 'thinking'), session('s2')], summaries: [summary(sessionId, 'first session'), summary('s2', 'second session')] });
   }
 
   it.each([
@@ -1537,6 +1537,58 @@ describe('App pending composer mutations', () => {
     expect(screen.queryByRole('button', { name: '编辑' })).toBeNull();
     await userEvent.click(screen.getByRole('button', { name: '加入队列' }));
     await waitFor(() => expect(send).toHaveBeenCalledExactlyOnceWith('s1', `已有草稿\n\n${queued.prompt}`, 'queue', [review], expect.any(String)));
+  });
+
+  it.each(['EXECUTION_OPERATION_CONFLICT', 'TASK_NOT_QUEUED'])('removes the queued edit retry after a 409 (%s)', async code => {
+    const sessionId = `conflicting-edit-${code}`;
+    setup(sessionId);
+    const queued = { ...queuedTask('conflicting-edit'), sessionId };
+    vi.mocked(api.tasks).mockResolvedValue([queued]);
+    const message = 'The original cancellation could not be replayed';
+    const cancel = vi.spyOn(api, 'cancelQueued')
+      .mockRejectedValueOnce(new TypeError('network response lost'))
+      .mockRejectedValueOnce(new ApiError(message, code, 409));
+    const { client } = renderApp();
+    const input = await screen.findByRole<HTMLTextAreaElement>('textbox', { name: '消息' });
+    fireEvent.change(input, { target: { value: '已有草稿' } });
+    await userEvent.click(await screen.findByRole('button', { name: '编辑' }));
+    expect(await screen.findByText('取消待执行指令失败')).toBeTruthy();
+
+    const snapshot = code === 'EXECUTION_OPERATION_CONFLICT' ? [{ ...queued, status: 'cancelled' }] : [];
+    vi.mocked(api.tasks).mockResolvedValue(snapshot);
+    act(() => client.setQueryData(['tasks', sessionId], snapshot));
+    await waitFor(() => expect(screen.queryByRole('button', { name: `取消排队：${queued.prompt}` })).toBeNull());
+    await userEvent.click(screen.getByRole('button', { name: '编辑' }));
+    expect(await screen.findAllByText(message)).not.toHaveLength(0);
+    expect(cancel).toHaveBeenCalledTimes(2);
+    expect(cancel.mock.calls[1]).toEqual(cancel.mock.calls[0]);
+    await waitFor(() => expect(screen.queryByRole('button', { name: '编辑' })).toBeNull());
+    expect(input.value).toBe('已有草稿');
+  });
+
+  it.each(['running', 'completed'])('discards the queued edit operation when the task becomes %s', async status => {
+    const sessionId = `started-edit-${status}`;
+    setup(sessionId);
+    const queued = { ...queuedTask('started-edit'), sessionId };
+    vi.mocked(api.tasks).mockResolvedValue([queued]);
+    const cancel = vi.spyOn(api, 'cancelQueued').mockRejectedValueOnce(new TypeError('request did not reach the service'));
+    const { client } = renderApp();
+    await userEvent.click(await screen.findByRole('button', { name: '编辑' }));
+    expect(await screen.findByText('取消待执行指令失败')).toBeTruthy();
+
+    const started = { ...queued, status };
+    vi.mocked(api.tasks).mockResolvedValue([started]);
+    act(() => client.setQueryData(['tasks', sessionId], [started]));
+    await waitFor(() => expect(screen.queryByRole('button', { name: `取消排队：${queued.prompt}` })).toBeNull());
+    expect(screen.queryByRole('button', { name: '编辑' })).toBeNull();
+
+    // Once execution was observed, a later snapshot omitting the task must not revive the retry row.
+    const next = { ...queuedTask('another-queued-task'), sessionId };
+    vi.mocked(api.tasks).mockResolvedValue([next]);
+    act(() => client.setQueryData(['tasks', sessionId], [next]));
+    const nextCancel = await screen.findByRole('button', { name: `取消排队：${next.prompt}` });
+    expect(screen.getAllByRole('button', { name: '编辑' })).toEqual([within(nextCancel.parentElement!).getByRole('button', { name: '编辑' })]);
+    expect(cancel).toHaveBeenCalledTimes(1);
   });
 
   it.each(['text', 'references', 'new references', 'unchanged', 'failure', 'session'] as const)('preserves the appropriate draft after a delayed send: %s', async change => {
