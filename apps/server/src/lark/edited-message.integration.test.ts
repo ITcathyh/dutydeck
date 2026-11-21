@@ -26,7 +26,7 @@ async function harness() {
   const session = { id: 'ses_edited', agentId: 'codex', state: 'idle', cwd: directory, protocol: 'acp', permissionMode: 'ask', createdAt: '', updatedAt: '' };
   const runtime = {
     start: vi.fn(async () => session), getSession: vi.fn(async () => session), subscribe: vi.fn(() => vi.fn()),
-    dispatch: vi.fn(async (..._args: unknown[]) => ({ id: 'task_edited', sessionId: session.id, status: 'queued', queuedAhead: 0 })),
+    getAcceptedTask: vi.fn(), dispatchRequest: vi.fn(async (_request: import('@dutydeck/shared').TaskRequestV1, _material: import('@dutydeck/runtime').TaskRequestMaterial) => ({ id: 'task_edited', sessionId: session.id, status: 'queued', queuedAhead: 0 })),
     send: vi.fn(), interrupt: vi.fn()
   };
   const createCard = vi.fn(async () => ({ messageId: `om_card_${randomUUID()}` }));
@@ -79,7 +79,7 @@ describe('edited-message real coordinator and SQLite inbox', () => {
     const h = await harness();
     const event = await edited({ threadId: 'omt_topic', rootId: 'om_root', parentId: 'om_parent' });
     await h.coordinator.handle({ ...event, mentions: [], content: '{"text":"original without mention"}' }, h.config);
-    expect(h.runtime.dispatch).not.toHaveBeenCalled();
+    expect(h.runtime.dispatchRequest).not.toHaveBeenCalled();
     expect(await h.inbox(event.messageId)).toBeUndefined();
 
     await Promise.all([
@@ -88,11 +88,11 @@ describe('edited-message real coordinator and SQLite inbox', () => {
       h.coordinator.handle({ ...event, content: '{"text":"@_user_1 duplicate receive"}' }, h.config)
     ]);
     await vi.waitFor(async () => expect(await h.inbox(event.messageId)).toMatchObject({ state: 'accepted' }));
-    expect(h.runtime.dispatch).toHaveBeenCalledOnce();
+    expect(h.runtime.dispatchRequest).toHaveBeenCalledOnce();
     expect(await h.inbox(event.messageId)).toMatchObject({ event: {
       messageId: event.messageId, senderOpenId: 'ou_author', threadId: 'omt_topic', rootId: 'om_root', parentId: 'om_parent'
     } });
-    expect(h.runtime.dispatch.mock.calls[0]?.[5]).toBe('ou_author');
+    expect(h.runtime.dispatchRequest.mock.calls[0]?.[0].actor).toMatchObject({ id: 'ou_author' });
     expect(h.service.listChatMessages).toHaveBeenCalledWith(expect.objectContaining({ threadId: 'omt_topic' }), expect.any(AbortSignal));
     expect((h.service.listChatMessages.mock.calls[0] as unknown as [unknown, AbortSignal])[1].aborted).toBe(false);
     expect(h.service.getMessageItems).toHaveBeenCalledWith('om_parent', expect.any(AbortSignal));
@@ -101,7 +101,7 @@ describe('edited-message real coordinator and SQLite inbox', () => {
     h.restart();
     await h.coordinator.initializeWorkflows(h.config);
     await Promise.all([h.coordinator.handle(event, h.config), h.coordinator.handle(event, h.config)]);
-    expect(h.runtime.dispatch).toHaveBeenCalledOnce();
+    expect(h.runtime.dispatchRequest).toHaveBeenCalledOnce();
     expect(await h.inbox(event.messageId)).toMatchObject({ state: 'accepted' });
   });
 
@@ -112,7 +112,7 @@ describe('edited-message real coordinator and SQLite inbox', () => {
     await h.repositories.config.set(larkBotsConfigKey, JSON.stringify([{ ...h.config, allowedUsers: [{ openId: 'ou_other', name: 'Other' }] }]));
     await h.coordinator.handle(event, h.config);
     await vi.waitFor(() => expect(h.service.reply).toHaveBeenCalledWith(expect.objectContaining({ taskName: '访问被拒绝' })));
-    expect(h.runtime.dispatch).not.toHaveBeenCalled();
+    expect(h.runtime.dispatchRequest).not.toHaveBeenCalled();
     expect(h.runtime.start).not.toHaveBeenCalled();
   });
 
@@ -126,12 +126,12 @@ describe('edited-message real coordinator and SQLite inbox', () => {
 
     await h.coordinator.handle(event, h.config);
     await vi.waitFor(async () => expect(await h.inbox(event.messageId)).toMatchObject({ state: 'accepted' }));
-    expect(h.runtime.dispatch).toHaveBeenCalledOnce();
+    expect(h.runtime.dispatchRequest).toHaveBeenCalledOnce();
     const stored = await h.inbox(event.messageId);
     expect(stored.resourceDirectories).toHaveLength(1);
     const resourcesPath = stored.resourceDirectories[0];
     expect(resourcesPath).toContain(`/attachments/${event.messageId}-`);
-    const agentPrompt = String(h.runtime.dispatch.mock.calls[0]?.[3]);
+    const agentPrompt = String(h.runtime.dispatchRequest.mock.calls[0]?.[1].agentPrompt);
     if (messageType !== 'file') {
       expect(h.service.downloadMessageResource).toHaveBeenCalledWith(event.messageId, 'img_edit', 'image', expect.any(AbortSignal));
       expect((h.service.downloadMessageResource.mock.calls[0] as unknown as [string, string, string, AbortSignal])[3].aborted).toBe(false);

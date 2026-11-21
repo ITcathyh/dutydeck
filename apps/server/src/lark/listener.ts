@@ -157,6 +157,8 @@ export interface LarkRuntime {
   stop?(id: string, actor?: ExecutionActor): Promise<unknown>;
   send(id: string, prompt: string, agentPrompt?: string, riskPolicy?: ToolRiskPolicy, actorId?: string): Promise<unknown>;
   dispatch?(id: string, prompt: string, mode?: 'queue' | 'interrupt', agentPrompt?: string, riskPolicy?: ToolRiskPolicy, actorId?: string, idempotencyKey?: string, skillRequests?: string[], supplied?: import('@dutydeck/shared').TaskRequestV1, idleCompactHours?: number, promptParts?: import('@dutydeck/shared').PromptPart[], permissionMode?: PermissionMode): Promise<{ id: string; status: string; queuedAhead?: number; replayed?: boolean }>;
+  dispatchRequest?: import('@dutydeck/runtime').DutydeckRuntime['dispatchRequest'];
+  getAcceptedTask?: import('@dutydeck/runtime').DutydeckRuntime['getAcceptedTask'];
   getPendingPermissions?(id: string): PermissionRequestData[] | Promise<PermissionRequestData[]>;
   resolvePermission?(id: string, requestId: string, approved: boolean, reason?: string, annotation?: Pick<PermissionRequestData, 'workspaceRule'>): Promise<unknown>;
   getSessionTaskReport?(id: string): Promise<import('@dutydeck/shared').TaskReport | undefined>;

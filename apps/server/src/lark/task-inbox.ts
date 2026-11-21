@@ -8,6 +8,8 @@ import type { LarkMessageEvent } from './listener.js';
 import type { LarkRedispatchInfo } from './turn-redispatch.js';
 import { isBotSenderType } from './card-mentions.js';
 
+export const larkTurnIdentityError = '这条消息的执行记录对不上，系统没有自动重发。请在网页控制台核对这一轮。';
+
 export type LarkInboxAdoption = Pick<LarkMessageEvent, 'senderOpenId' | 'senderType' | 'scenario' | 'authorization' | 'rootId' | 'threadId' | 'parentId'> & { confirmedInputDigest?: string };
 const stableStringify = (value: object) => JSON.stringify(value, (_key, item) => item && typeof item === 'object' && !Array.isArray(item)
   ? Object.fromEntries(Object.entries(item).sort(([a], [b]) => a.localeCompare(b))) : item);
@@ -226,6 +228,10 @@ export class LarkTaskInbox {
   private async inState(appId: string, states: LarkInboxRecord['state'][]): Promise<LarkInboxRecord[]> {
     const rows = this.store.listByJsonField ? await this.store.listByJsonField(prefix(appId), { field: 'state', values: states }) : await this.store.list!(prefix(appId));
     return rows.map(row => JSON.parse(row.value) as LarkInboxRecord).filter(record => states.includes(record.state));
+  }
+  async cardRecoveryRecords(appId: string) {
+    return (await this.inState(appId, ['accepted', 'failed'])).filter(record =>
+      record.sessionId && (record.state === 'accepted' || record.error === larkTurnIdentityError));
   }
   async orphanedCommands(appId: string): Promise<LarkInboxRecord[]> {
     return (await this.inState(appId, ['command'])).filter(record => record.boot !== this.boot);

@@ -10,7 +10,7 @@ import { describeLarkTaskRecovery, larkContinuePrompt, larkRecoveryRetainedNote,
 import type { LarkInteraction } from './workflow-interactions.js';
 import { formatUnknownTaskTime as deadlineText } from '../task-resolution.js';
 import type { LarkInboxAdoption, LarkInboxRecord } from './task-inbox.js';
-import { larkConfirmationInputDigest, isLarkFirstCardUndelivered } from './task-inbox.js';
+import { larkTurnIdentityError, larkConfirmationInputDigest, isLarkFirstCardUndelivered } from './task-inbox.js';
 import { larkForkWorkspaceMode, larkNativeForkId, larkResumeUnavailable } from './session-branches.js';
 import { parseLarkNewSession, validateLarkLaunchOptions } from './new-session.js';
 import type { AgentModelsResult } from '../agent-models.js';
@@ -23,7 +23,7 @@ import { buildLarkTaskDashboard, pageLarkTaskDashboard, type LarkTaskDashboardDe
 import { collectInbox } from '../inbox.js';
 import { isRunnable } from '../ci-common.js';
 import { isLarkGroupChatMemoryPool, isLarkGroupMemoryPool, isLarkPerGroupMemoryPool, isLarkMemoryId, isLarkMemoryIgnoreRuleId, larkMemoryLimits, larkMemoryScope, renderLarkMemoryList, renderLarkMemoryStatusLine } from './memory.js';
-import { deferredConfirmationId, describeScheduleTrigger, scenarioPolicyVersion, parseLarkSourceId, resolveParticipation, normalizeSessionName, RuntimeError, SESSION_NAME_MAX_LENGTH, timeLoop, type AgentConfig, type PolicyAction, type Session, type TaskRecord } from '@dutydeck/shared';
+import { deferredConfirmationId, describeScheduleTrigger, scenarioPolicyVersion, parseLarkSourceId, resolveParticipation, normalizeSessionName, RuntimeError, SESSION_NAME_MAX_LENGTH, timeLoop, type AgentConfig, type ChannelMapping, type PolicyAction, type Session, type TaskRecord } from '@dutydeck/shared';
 import { decideWake, isExplicitWake, wakeSignals, type WakeFacts } from './wake-decision.js';
 import { directScenarioPrompt } from './scenario-direct.js';
 import { larkScenarioAdoptionOf } from './scenario-legacy.js';
@@ -66,7 +66,7 @@ import type { LarkMessageEvent } from './listener.js';
 import type { LarkGroup, LarkTask, PersistedLarkCardTask } from './coordinator.js';
 import { parseCardTask, parseOptionalCardTask } from './persisted-card-task.js';
 import { type LarkCommandPrompt, larkCardChannel, larkHumanTaskAllowed, type LarkRelaunchClaim, larkTaskTitle, sendTaskCard } from './coordinator-core.js';
-import { LarkCoordinatorDispatch, larkCancelledBeforeSubmit, larkTurnRuntimeTaskId } from './coordinator-dispatch.js';
+import { LarkCoordinatorDispatch, larkCancelledBeforeSubmit, larkTurnRequest, larkTurnRuntimeTaskId } from './coordinator-dispatch.js';
 import { planPrompt } from '../plan-mode.js';
 import { planReplyAction } from './plan-flow.js';
 import { AgentCommandParamError, agentCommandConfirmSummary, agentCommandPlan, larkAgentCommandKind, type LarkAgentCommandRequest, type LarkAgentViewRequest, type LarkAgentSettingsRequest } from './agent-command.js';
@@ -194,42 +194,88 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
       }
     }
     for (const record of await this.inbox?.recoverable(config.appId) ?? []) await this.recoverInbound(record, config);
-    // Queued Runtime tasks can start before the Feishu listener. Reattach their
-    // original cards and query live waiters as well as subscribing to future events.
-    if (!this.workflows || !this.runtime.getTasks) return;
-    for (const mapping of await this.cardMappings?.list(larkCardChannel(config.appId)) ?? []) {
-      if (this.tasks.has(mapping.externalId)) continue;
+    await this.recoverAcceptedCards(config);
+  }
+
+  protected async recoverAcceptedCards(config: StoredLarkConfig, only?: ReadonlySet<string>) {
+    const held = new Set<string>();
+    if (!this.inbox || !this.workflows || !this.cardMappings || !this.runtime.getAcceptedTask) return held;
+    const records = only ? await Promise.all([...only].map(id => this.inbox!.lookup(config.appId, id))) : await this.inbox.cardRecoveryRecords(config.appId);
+    for (const record of records) {
+      if (this.stopped || !record?.sessionId) continue;
+      if (record.state === 'failed' && record.error === larkTurnIdentityError) {
+        held.add(record.event.messageId);
+        continue;
+      }
+      if (record.state !== 'accepted') continue;
+      const id = record.event.messageId;
       try {
-        const saved = parseCardTask(mapping.extra ?? '{}');
-        if (!saved.runtime_task_id || !saved.scope_id || !saved.sender_open_id) continue;
-        const runtimeTask = (await this.runtime.getTasks(mapping.sessionId)).find(task => task.id === saved.runtime_task_id);
-        if (!runtimeTask || !['running', 'queued'].includes(runtimeTask.status)) continue;
-        const raw = await this.workflowOptions.store!.get(`lark.inbox.${config.appId}.${mapping.externalId}`);
-        if (!raw) continue;
-        const stored = JSON.parse(raw) as LarkInboxRecord;
-        if (stored.state !== 'accepted' || stored.sessionId !== mapping.sessionId || stored.event.chatId !== saved.chat_id) continue;
-        const adopted = await this.inbox!.adoptAccepted(stored);
-        if (!adopted) continue;
-        const effective = stored.event.chatType === 'group' && this.groupManager ? await this.groupManager.resolved(config, saved.chat_id) : config;
-        const key = larkGroupKey(stored.event, saved.scope_id, config.appId);
-        const group = this.groups.get(key) ?? { tail: Promise.resolve() };
-        this.groups.set(key, group);
-        const anchor = saved.anchor_message_id;
-        const task: LarkTask = { id: mapping.externalId,
-          event: anchor === undefined ? stored.event : { ...stored.event, replyMessageId: anchor !== mapping.externalId ? anchor : undefined },
-          config: effective, prompt: saved.prompt, resources: [],
-          group, inbox: adopted, state: 'queued', events: [], turn: (saved.turn ?? 1) - 1, scopeId: saved.scope_id, epoch: group.epoch ?? 0,
-          retryMaterialPrompt: saved.retry_material_prompt, sessionId: mapping.sessionId, cardMessageId: saved.card_message_id,
-          runtimeTaskId: runtimeTask.id, startedAt: saved.started_at, lastSuccessfulElements: saved.last_successful_elements,
-          fallbackNote: saved.fallback_note, launcherRecoveryNote: saved.launcher_recovery_note,
-          progressFrozen: saved.progress_frozen, resumeTask: runtimeTask, restoring: true };
-        this.tasks.set(task.id, task);
-        this.handledMessages.add(task.id);
-        group.tail = group.tail.then(() => this.runTurn(task)).catch(error => this.log.error({ error, taskId: task.id }, '恢复飞书任务交互失败'));
+        const mapping = await this.cardMappings.get(larkCardChannel(config.appId), id);
+        if (await this.recoverAcceptedCard(config, record, mapping) === false) held.add(id);
       } catch (error) {
-        this.log.warn({ error, messageId: mapping.externalId }, '重启后接回飞书任务卡失败，跳过这一条');
+        held.add(id);
+        this.log.warn({ error, messageId: id }, '接回飞书任务卡失败，稍后重试');
       }
     }
+    return held;
+  }
+
+  private async recoverAcceptedCard(config: StoredLarkConfig, record: LarkInboxRecord, mapping?: ChannelMapping) {
+    const { event, sessionId } = record;
+    const id = event.messageId;
+    const saved = parseOptionalCardTask(mapping?.extra);
+    const taskId = record.taskId ?? saved?.runtime_task_id;
+    const turn = record.turn ?? saved?.turn ?? 1;
+    const scopeId = record.request?.scopeId ?? saved?.scope_id;
+    const prompt = record.request?.prompt ?? saved?.prompt;
+    if (!sessionId || !taskId) return;
+    if (!scopeId || !event.senderOpenId || prompt === undefined) return false;
+    const live = this.tasks.get(id);
+    if (live && (live.runtimeTaskId !== taskId || live.turn !== turn || live.sessionId !== sessionId)) return;
+    const mappingMatches = !mapping || saved && mapping.sessionId === sessionId && saved.app_id === config.appId
+      && saved.chat_id === event.chatId && saved.sender_open_id === event.senderOpenId && saved.scope_id === scopeId
+      && (saved.turn ?? 1) === turn && (!saved.runtime_task_id || saved.runtime_task_id === taskId)
+      && (!saved.card_message_id || !record.cardId || saved.card_message_id === record.cardId);
+    if (mappingMatches && saved?.runtime_task_id === taskId && (live || terminalTaskStates.has(saved.state))) return;
+    const request = larkTurnRequest(sessionId, config.appId, event, turn, prompt);
+    const accepted = this.readAcceptedTurn(taskId, request);
+    const runtimeTask = accepted.task;
+    if (runtimeTask && !['running', 'queued'].includes(runtimeTask.status)) return;
+    if (!mappingMatches) {
+      this.log.warn({ appId: config.appId, messageId: id, turn, taskId }, '飞书入站记录与卡片归属不符，等待核对');
+      return false;
+    }
+    if (!runtimeTask) return accepted.mismatch ? false : undefined;
+    const source = await this.runtime.getSession(sessionId);
+    const chat = parseLarkSourceId(source?.sourceId);
+    if (accepted.mismatch || record.appId !== config.appId || source?.source !== 'lark'
+      || chat.appId !== config.appId || chat.chatId !== event.chatId || chat.chatType !== event.chatType
+      || taskId !== larkTurnRuntimeTaskId(sessionId, config.appId, id, turn)) {
+      this.log.warn({ appId: config.appId, messageId: id, turn, taskId, mismatch: accepted.mismatch }, '飞书入站记录与执行归属不符，等待核对');
+      return false;
+    }
+    if (live) return (await this.saveCardTask(live)).saved;
+    const effective = event.chatType === 'group' && this.groupManager ? await this.groupManager.resolved(config, event.chatId) : config;
+    const adopted = await this.inbox!.adoptAccepted(record);
+    if (!adopted || this.stopped || this.tasks.has(id)) return;
+    const key = larkGroupKey(event, scopeId, config.appId);
+    const group = this.groups.get(key) ?? { tail: Promise.resolve() };
+    this.groups.set(key, group);
+    const anchor = saved?.anchor_message_id;
+    const task: LarkTask = { id, event: anchor === undefined ? event : { ...event, replyMessageId: anchor !== id ? anchor : undefined },
+      config: effective, prompt, resources: [], group, inbox: adopted, state: 'queued', events: [], turn: turn - 1,
+      scopeId, epoch: group.epoch ?? 0, retryMaterialPrompt: saved?.retry_material_prompt ?? record.request?.materialPrompt,
+      sessionId, cardMessageId: saved?.card_message_id ?? record.cardId, runtimeTaskId: taskId,
+      startedAt: saved?.started_at ?? Date.parse(runtimeTask.createdAt), lastSuccessfulElements: saved?.last_successful_elements,
+      fallbackNote: saved?.fallback_note ?? record.fallbackNote, launcherRecoveryNote: saved?.launcher_recovery_note,
+      progressFrozen: saved?.progress_frozen, resumeTask: runtimeTask, restoring: true };
+    this.tasks.set(id, task);
+    this.handledMessages.add(id);
+    group.tail = group.tail.then(() => this.runTurn(task)).catch(error => {
+      if (this.tasks.get(id) === task) this.tasks.delete(id);
+      this.log.warn({ error, taskId }, '恢复飞书任务交互失败');
+      this.scheduleReconcile();
+    });
   }
 
   /** 启动恢复里瞬时失败、正在等待重试的入站消息，按消息记已重试次数。 */
@@ -328,11 +374,11 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
   private async inboundTurnAccepted(record: LarkInboxRecord, config: StoredLarkConfig): Promise<boolean | undefined> {
     const { sessionId, turn } = record;
     if (!sessionId || !turn) return false;
-    if (!this.runtime.dispatch || !this.runtime.getTasks) return undefined;
+    if (!this.runtime.getAcceptedTask) return undefined;
     try {
       if (!await this.runtime.getSession(sessionId)) return undefined;
       const taskId = larkTurnRuntimeTaskId(sessionId, config.appId, record.event.messageId, turn);
-      return (await this.runtime.getTasks(sessionId)).some(task => task.id === taskId);
+      return Boolean(this.runtime.getAcceptedTask(taskId));
     } catch (error) {
       this.log.warn({ error, messageId: record.event.messageId }, '重启后查询入站请求的执行记录失败，按结果未知处理');
       return undefined;
