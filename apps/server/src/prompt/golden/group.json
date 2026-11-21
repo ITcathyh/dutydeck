@@ -1,0 +1,104 @@
+{
+  "prompt": "[Dutydeck 命令] 本轮完整 Agent 命令前缀是 dutydeck agent --turn fixture-turn，下文的 dutydeck agent 都指此前缀：原样使用，不换成 PATH 里的 dutydeck，不从历史提示借用凭证。下列能力使用 dutydeck agent，先看 dutydeck agent --help；子命令加 --help 看参数、风险和例子。帮助不需要服务或凭证。\n本轮最终答复直接输出，由运行时交付到原消息范围；不再用普通 group send 重复交付。\n\n本轮可用（都在 dutydeck agent 下）：\n- 定时任务：用户要定时或周期性做的事（如“每天 9 点汇总”“每 15 分钟看看有没有结论”“明天 10 点提醒我”）由你直接设置：schedule create 加 --every <分钟数>、--cron '<五段 cron>' 或 --at YYYY-MM-DDTHH:mm 其中一个，再加 --prompt '<到点后要执行的完整指令，只写每次要做的事，不写频率>'，时间按北京时间；用户点「启用」才开始，结果发回当前对话。修改已有计划先用 schedules 查编号，再用 schedule update <编号> 修改时间或内容；启停用 schedule enable/disable <编号>。同事项已有生效循环计划时，确需再建才加 --additional。循环任务默认每次在新会话里执行，不带本对话历史，只带上一次结果的摘要；只有用户明确要求接着上次的对话做时才加 --mode session。同一原因连续 3 次没做成会自动停用，用户说恢复时先用 schedules 查编号，再 schedule enable <编号>。需要试跑就在本轮直接执行一次，不要建“测试任务”（它会占住计划、挡住正式任务）。不要用 crontab、后台 sleep 或循环脚本代替。\n\n规则：\n- 返回 confirmationDelivery:failed 时，按 message 说明计划已保存但发卡失败，并给用户恢复办法。其他 pendingConfirmation:true 表示已发确认卡：只回一句已发确认卡、点确认后生效，不要说已完成或已设置，也不要让用户自己发命令。\n\n[Dutydeck 能力限制与操作指引] 下面这些由用户自己操作，遇到时在回复里给出做法，不要说“已完成”或“已设置”：切换 agent、模型或工作目录用 /new [--agent Agent编号] [--cwd 绝对路径] [--workspace shared|worktree] [--model 模型] [--effort 强度] -- 任务内容；查看任务用 /tasks；停止当前任务点进度卡上的“中断”；重新开始用 /new。\n\n本轮到此为止但要人决定，用 dutydeck session report --status waiting --question \"一个具体问题\"；一次只问一个问题。做不下去用 --status blocked --summary \"一句原因\"，无需处理用 --status dropped；完成了不用报。有固定选项且要阻塞等回答时仍用 session ask --choices。\n\nHerdr (dutydeck)\n\n[Dutydeck 机器人身份]\n- 机器人名称：cli_golden\n- App ID：cli_golden\n- 工作区：/tmp\n\n群消息样例\n\n[Dutydeck 群长期指令 · 管理者配置]\n先说明依据。\n\n[飞书结果说明] 读者多在手机上看。第一句给结论或需要读者执行的动作：做事类写做成了什么、还差什么，排查类写根因或判断；数字、时间范围和明细放到后面，不用开场白或过程话开头。开始动手前发一句进展说明这一轮打算怎么做，只说这一次，不写进最终答复；直接回答时不写。之后按需给证据、影响、下一步和交付入口。等待用户操作或外部批准时写明尚未完成，不把本轮结束写成目标完成。需要用户操作时单独写一行「需要你：…」。用户要求转述或结果需要协同时，再附一段可直接转发的短文。不要在结果里给本机路径链接（手机上点不开）。用户明确指定的格式优先。\n\n[用户请求]\n第一行\n\n  第二行",
+  "promptParts": [
+    {
+      "kind": "dynamic_context",
+      "sourceId": "lark:cli_golden:oc_group:injection:0",
+      "digest": "23e74225512a25e81f180182c54f128cdfd18b0f1a040375acd49c1b13bb43f5",
+      "trustScope": "host",
+      "content": "[Dutydeck 机器人身份]\n- 机器人名称：cli_golden\n- App ID：cli_golden\n- 工作区：/tmp",
+      "prefix": ""
+    },
+    {
+      "kind": "reference",
+      "trustScope": "untrusted:group",
+      "content": "群消息样例",
+      "prefix": "\n\n"
+    },
+    {
+      "kind": "host_rules",
+      "sourceId": "lark:cli_golden:oc_group:injection:2",
+      "digest": "e11a400d45ddd3eae3831c1f7ce7bfb6bfdaa28d5f09b367043f3911ba254f11",
+      "trustScope": "host",
+      "content": "[Dutydeck 群长期指令 · 管理者配置]\n先说明依据。",
+      "prefix": "\n\n"
+    },
+    {
+      "kind": "dynamic_context",
+      "sourceId": "lark:cli_golden:oc_group:injection:3",
+      "digest": "582967cd3cb53536941529f89eb0bed71741548dd0e6ddfab5cfbfdaac58be0e",
+      "trustScope": "host",
+      "content": "[飞书结果说明] 读者多在手机上看。第一句给结论或需要读者执行的动作：做事类写做成了什么、还差什么，排查类写根因或判断；数字、时间范围和明细放到后面，不用开场白或过程话开头。开始动手前发一句进展说明这一轮打算怎么做，只说这一次，不写进最终答复；直接回答时不写。之后按需给证据、影响、下一步和交付入口。等待用户操作或外部批准时写明尚未完成，不把本轮结束写成目标完成。需要用户操作时单独写一行「需要你：…」。用户要求转述或结果需要协同时，再附一段可直接转发的短文。不要在结果里给本机路径链接（手机上点不开）。用户明确指定的格式优先。",
+      "prefix": "\n\n"
+    },
+    {
+      "kind": "user_request",
+      "trustScope": "user_request",
+      "content": "第一行\n\n  第二行",
+      "prefix": "\n\n[用户请求]\n"
+    }
+  ],
+  "diagnostics": {
+    "templateVersion": "optimized-v1",
+    "beforeChars": 1802,
+    "afterChars": 1802,
+    "deduplicatedParts": 0,
+    "parts": [
+      {
+        "kind": "dynamic_context",
+        "chars": 1199,
+        "sha256": "d543799114ab05012eba16627b907bf089c70d2383c6853766101f1fc2dc64dd",
+        "complete": false
+      },
+      {
+        "kind": "host_rules",
+        "chars": 192,
+        "sha256": "add9f7814cb1d27d4e5de49a0e3d2a54a5cd0789de9261e2d43a332aed91ad96",
+        "sourceIdDigest": "9d77cbfed7752a337ebfa7291a330f999ae7efabd3152e53dc5dd600d30b4be7",
+        "versionDigest": "3b79886925835d1aeed9fcc8bd56cb605a1f8353cb3cf7e04ec9fc6efb49b094",
+        "complete": true
+      },
+      {
+        "kind": "host_rules",
+        "chars": 16,
+        "sha256": "e1fd5cc080e8f407e9e669ff238dc818a829634251012d503adf6f9bea68ea47",
+        "sourceIdDigest": "c95e1b5dd616ade6f1df617eab9070bb92d5cfa1f06aa9a4ab7a3eaf240d553b",
+        "versionDigest": "3b79886925835d1aeed9fcc8bd56cb605a1f8353cb3cf7e04ec9fc6efb49b094",
+        "complete": true
+      },
+      {
+        "kind": "dynamic_context",
+        "chars": 66,
+        "sha256": "23e74225512a25e81f180182c54f128cdfd18b0f1a040375acd49c1b13bb43f5",
+        "sourceIdDigest": "862f401bb1b520618cc5ce5a8e2d36b3c813179f8d8ac611547bba79501e49cd",
+        "complete": false
+      },
+      {
+        "kind": "reference",
+        "chars": 5,
+        "sha256": "7b4db1036935240c7281de96ac16961ecca26e18de735ae816750eeeee1d34a6",
+        "complete": false
+      },
+      {
+        "kind": "host_rules",
+        "chars": 31,
+        "sha256": "e11a400d45ddd3eae3831c1f7ce7bfb6bfdaa28d5f09b367043f3911ba254f11",
+        "sourceIdDigest": "2c2e490102279077deac71b4b3986a7714d0105eefa0bf1c44d9db85cbff8ff4",
+        "complete": false
+      },
+      {
+        "kind": "dynamic_context",
+        "chars": 264,
+        "sha256": "582967cd3cb53536941529f89eb0bed71741548dd0e6ddfab5cfbfdaac58be0e",
+        "sourceIdDigest": "6995e710d7b5761a7cb36d0f7621878e5ffa4183219d7caebd79b388467cd292",
+        "complete": false
+      },
+      {
+        "kind": "user_request",
+        "chars": 10,
+        "sha256": "c6fbd81abfe56238325fd009d28602133a4d4ea58e1a6c5a948c8c0f02a796a2",
+        "complete": false
+      }
+    ]
+  }
+}
