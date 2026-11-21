@@ -1460,6 +1460,9 @@ export class PtyCliDriver implements AgentDriver {
     if (this.turnActive) return { state: 'busy', evidence: 'turn_active' };
     if (this.activeSubmission) return { state: 'busy', evidence: 'submission_active' };
     const screen = this.snapshot?.viewportText({ preserveStructure: true });
+    if (screen && this.adapter.isBusyScreen?.(screen)) return { state: 'busy', evidence: 'adapter_busy_screen' };
+    const detected = this.idleDetector?.busyEvidence();
+    if (detected) return { state: 'busy', evidence: detected };
     if (!screen) return { state: 'unknown', evidence: 'no_snapshot' };
     const { screenActivityPattern: activity, backgroundWaitPattern: background, completionPattern: completion, screenCancelledPattern: cancelled } = this.adapter;
     const lines = screen.split('\n');

@@ -59,5 +59,6 @@ export function createPiAdapter(): CliAdapter {
 
     busyPattern: PI_WORKING_PATTERN,
     idleToBusyPattern: PI_WORKING_PATTERN,
+    screenBusyPattern: /^[ \t]*Working\.\.\.[ \t]*$/m,
   };
 }

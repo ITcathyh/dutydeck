@@ -1,6 +1,6 @@
 import type { AdapterSessionContext, CliAdapter, PtyLike } from '../types.js';
 import { isDutydeckSessionId, usableResumeId } from '../resume-id.js';
-import { pollScreenReady } from './screen-ready-helper.js';
+import { CODEX_BUSY_FOOTER, pollScreenReady } from './screen-ready-helper.js';
 import { buildCwdTrustArgs } from './cwd-trust.js';
 import { secretGuardHookCommand, secretGuardToolMatcher } from '@dutydeck/shared/secret-guard';
 import { pasteAndSubmit, waitForQuietScreen } from './input-settle.js';
@@ -98,6 +98,7 @@ export function createCodexAdapter(): CliAdapter {
 
     busyPattern: CODEX_ACTIVE_BUSY_PATTERN,
     idleToBusyPattern: CODEX_ACTIVE_BUSY_PATTERN,
+    screenBusyPattern: CODEX_BUSY_FOOTER,
     // 更新选择器也渲染 `› 1. Update now`，裸 › 会把菜单当成 composer，
     // 所以排除带序号的菜单行。
     readyPattern: /[›»](?!\s*\d+\.)|\d+% left/,

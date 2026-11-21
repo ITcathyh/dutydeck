@@ -2,6 +2,7 @@ import { afterEach, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { createCliAdapter } from '@dutydeck/cli-adapters';
 import { TerminalSnapshot } from '@dutydeck/terminal-renderer';
+import { IdleDetector } from './idle-detector.js';
 import { PtyCliDriver } from './driver.js';
 
 const snapshots: TerminalSnapshot[] = [];
@@ -61,4 +62,39 @@ it('distinguishes no screen from a human prompt on an adapter without an idle ma
   expect(pty.quiescence()).toEqual({ state: 'busy', evidence: 'human_prompt' });
   Object.assign(pty, { snapshot: undefined });
   expect(pty.quiescence()).toEqual({ state: 'unknown', evidence: 'no_snapshot' });
+});
+
+it.each([
+  ['codex', '• Working (2s • esc to interrupt)'],
+  ['pi', 'Working...'],
+])('recognizes the current %s activity marker after a turn loses its receipt', async (id, status) => {
+  const snapshot = new TerminalSnapshot(120, 30); snapshots.push(snapshot);
+  await snapshot.writeAndFlush(status);
+  const pty = driver(snapshot, id);
+  expect(pty.quiescence().state).toBe('busy');
+  await snapshot.writeAndFlush('\x1b[2J\x1b[H❯ Explain ' + status);
+  expect(pty.quiescence().state).toBe('unknown');
+});
+
+it.each(['static queue', 'program status', 'busy transition'] as const)('keeps %s busy until its explicit clear', async source => {
+  const snapshot = new TerminalSnapshot(120, 30); snapshots.push(snapshot);
+  const id = source === 'program status' ? 'claude-code' : 'traex';
+  const detector = new IdleDetector(createCliAdapter(id));
+  const pty = driver(snapshot, id);
+  Object.assign(pty, { idleDetector: detector });
+  try {
+    if (source === 'static queue') detector.feed('Queued for capacity');
+    else if (source === 'busy transition') {
+      detector.fireIdle();
+      detector.feed('⠋ Thinking…');
+    } else {
+      detector.enableProgramStatus(() => {});
+      detector.observeProgramStatus({ app: 'claude-code', state: 'working' });
+    }
+    expect(pty.quiescence().state).toBe('busy');
+    if (source === 'static queue') detector.feed('❯ ');
+    else if (source === 'busy transition') detector.fireIdle();
+    else detector.observeProgramStatus({ app: 'claude-code', state: 'done' });
+    expect(pty.quiescence().state).toBe('unknown');
+  } finally { detector.dispose(); }
 });

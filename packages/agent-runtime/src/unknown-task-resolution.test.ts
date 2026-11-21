@@ -203,12 +203,15 @@ it.each(['live', 'probe error'])('keeps the stop block and original decision ope
     if (!gone && failure === 'probe error') throw new Error('exit probe unavailable');
     return gone;
   } } });
+  const exited = vi.fn();
+  const unsubscribe = h.runtime.onDriverExit(h.session.id, exited);
   try {
     await expect(h.runtime.resolveUnknownTask(h.session.id, await h.resolution('failed'), owner)).rejects.toMatchObject({ code: 'DRIVER_STOP_UNVERIFIED' });
+    expect(exited).not.toHaveBeenCalled();
     expect((await h.runtime.inspectExecutionRecovery(h.session.id, owner)).stopBlock).toBeTruthy();
     expect(await h.status(h.first.id)).toBe('reconcile_required');
     expect(await h.status(h.second.id)).toBe('queued');
-  } finally { gone = true; }
+  } finally { unsubscribe(); gone = true; }
 });
 
 it('dispatches messages arriving during exit verification after settlement', async () => {

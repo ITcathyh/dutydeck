@@ -1786,6 +1786,8 @@ export class DutydeckRuntime {
         if (driver) {
           this.nextSessionGeneration(id);
           await this.stopDriver(id, driver);
+          // The original exit callback was fenced before stopping. Close its terminal streams after verified exit.
+          this.notifyDriverExit(id, null);
         }
         await this.observeAbandonedResources(session);
         await this.clearVerifiedStopBlock(session);

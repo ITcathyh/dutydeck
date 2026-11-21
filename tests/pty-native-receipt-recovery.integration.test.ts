@@ -28,6 +28,7 @@ afterEach(async () => {
 });
 const submitted = (root: string) => existsSync(join(root, 'submissions.jsonl')) ? readFileSync(join(root, 'submissions.jsonl'), 'utf8').trim().split('\n').length : 0;
 function open(root: string, failAfterWrite = false) {
+  let failNextWrite = failAfterWrite;
   const repos = createRepositories(join(root, 'state.db'), { newDatabaseAuthority: 'ledger_v1' });
   const runtime = new DutydeckRuntime(repos, { cleanupIntervalMs: 0, driverIdleTimeoutMs: 0, terminalBackend: async () => 'tmux',
     probe: () => ({ available: true, protocol: 'pty-cli', pause: false, resume: true }),
@@ -39,7 +40,10 @@ function open(root: string, failAfterWrite = false) {
         adapter: { ...builtin, buildArgs: () => [], prepareInput: undefined, injectSessionContext: () => '',
           async writeInput(backend, prompt) {
             await backend.write(JSON.stringify(prompt) + '\n');
-            if (failAfterWrite) throw new PromptNotWrittenError('Composer could not be verified after the write');
+            if (failNextWrite) {
+              failNextWrite = false;
+              throw new PromptNotWrittenError('Composer could not be verified after the write');
+            }
           }, completionPattern: /FIXTURE_DONE/ },
         backend: createDutydeckPersistentBackend(sessionId), sessionId, onEvent, onExit,
         ...(failAfterWrite ? { processProbe: { identify: childProcessIdentity, observe: observeProcess } } : {}) });
@@ -70,12 +74,31 @@ tmuxDescribe('native receipt + real persistent PTY + reopened SQLite', () => {
     await vi.waitFor(() => expect(submitted(root)).toBe(1));
     await vi.waitFor(() => expect(h.runtime.inspectAgentQuiescence(session.id)).toBe('unknown'));
     expect(() => process.kill(pid, 0)).not.toThrow();
+    const oldDriver = await h.runtime.getTerminalDriver(session.id);
+    const exited = vi.fn();
+    const unsubscribe = h.runtime.onDriverExit(session.id, exited);
     const result = await h.runtime.resolveUnknownTask(session.id, { taskId: task.id, target: attempt.attemptId, decisionId: 'mark-failed',
       action: 'failed', evidenceRefs: ['operator:checked'] }, { kind: 'installation_owner', id: 'installation_owner' });
     expect(result).toMatchObject({ stoppedOriginal: true, task: { status: 'failed' } });
     expect(() => process.kill(pid, 0)).toThrow(expect.objectContaining({ code: 'ESRCH' }));
     expect(h.repos.execution.getResources(session.id).find(r => r.kind === 'local_only')?.observations.at(-1)?.state).toBe('gone');
     expect(submitted(root)).toBe(1);
+    expect(exited.mock.calls).toEqual([[null]]);
+    unsubscribe();
+
+    const next = await h.runtime.dispatch(session.id, 'next message');
+    await vi.waitFor(() => expect(submitted(root)).toBe(2), { timeout: 5_000 });
+    const replacement = await h.runtime.getTerminalDriver(session.id);
+    expect(replacement).not.toBe(oldDriver);
+    const stream = replacement!.createTerminalStream!();
+    const output: string[] = [];
+    stream.onData(data => output.push(data), snapshot => output.push(snapshot.data));
+    try {
+      await vi.waitFor(() => expect(output.join('')).toContain('FIXTURE_WORKING'), { timeout: 5_000 });
+      writeFileSync(join(root, 'receipt'), 'release'); writeFileSync(join(root, 'final'), 'release');
+      await vi.waitFor(() => expect(output.join('')).toContain('FIXTURE_DONE'), { timeout: 5_000 });
+      await vi.waitFor(() => expect(h.repos.execution.getTaskExecution(next.id)?.task.status).toBe('completed'), { timeout: 8_000 });
+    } finally { stream.dispose(); }
   }, 20_000);
 
   it('does not retype input or advance queued work after a daemon restart before receipt', async () => {
