@@ -10,7 +10,7 @@ import type { PersistedLarkCardTask } from './turn-record.js';
 
 export type TerminalState = 'completed' | 'failed' | 'interrupted' | 'cancelled';
 type TerminalFacts = {
-  state: TerminalState; now: number; explicit?: boolean; quiet?: boolean; hasReport?: boolean; steered?: boolean;
+  state: TerminalState; agentName?: string; now: number; explicit?: boolean; quiet?: boolean; hasReport?: boolean; steered?: boolean;
   interruptedByUser?: boolean; receiptOnly?: boolean; resultDue?: boolean;
 };
 
@@ -28,9 +28,10 @@ export function planTerminalDelivery(record: PersistedLarkCardTask, messageId: s
   const reaction = kind === 'reaction' || kind === 'result' && facts.state !== 'cancelled' && !facts.interruptedByUser && !larkTaskAgentGuid(messageId)
     ? { appId: record.app_id, messageId: anchor, completed } : undefined;
   return {
-    kind, reaction, target: persistedReplyTarget(record),
+    kind, reaction, resultOptions: { state: facts.state, agentName: facts.agentName },
+    target: record.anchor_message_id !== undefined && record.chat_type === 'p2p' ? { chatId: record.chat_id } : persistedReplyTarget(record),
     closeProcess: Boolean(record.card_message_id) && !record.progress_frozen,
-    resultFollows: kind === 'result' || kind === 'delivered' && record.final_delivery_state === 'delivered',
+    resultFollows: !(completed && config.completionReactionOnly) && (kind === 'result' || kind === 'delivered' && record.final_delivery_state === 'delivered'),
     key: larkResultKey(record.card_message_id ?? larkSilentResultAnchor(messageId, record.turn)),
     mention, mentionElements: mention ? [{ tag: 'markdown', element_id: 'group_mention', content: mention }] : [],
     fallbackElements: larkFallbackNoteElements(record.fallback_note),

@@ -98,11 +98,10 @@ export class LarkTaskInbox {
       const raw = await this.store.get(key);
       const old = raw ? JSON.parse(raw) as LarkInboxRecord : undefined;
       if (old && (old.state !== 'unrouted' || old.boot === this.boot)) {
-        {
-          const next = { ...old, duplicateCount: (old.duplicateCount ?? 0) + 1 };
-          if (!await this.store.compareAndSet!(key, raw, JSON.stringify(next))) continue;
-        }
-        return undefined;
+        const next = { ...old, duplicateCount: (old.duplicateCount ?? 0) + 1 };
+        if (!await this.store.compareAndSet!(key, raw, JSON.stringify(next))) continue;
+        // A released request can re-enter routing. claim() arbitrates concurrent redeliveries.
+        return next.state === 'received' && !next.boot ? next : undefined;
       }
       const next: LarkInboxRecord = { ...(old ?? { appId, event: trustedReplyMessageId ? { ...original, replyMessageId: trustedReplyMessageId } : original,
         state: 'unrouted', receivedAt: new Date().toISOString(), receiptOrder: ++this.receiptOrder }), boot: this.boot };

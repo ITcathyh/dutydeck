@@ -226,6 +226,10 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
     const { event, sessionId } = record;
     const id = event.messageId;
     const saved = parseOptionalCardTask(mapping?.extra);
+    if (record.taskId && saved?.runtime_task_id && record.taskId !== saved.runtime_task_id) {
+      this.log.warn({ appId: config.appId, messageId: id, taskId: record.taskId, mappedTaskId: saved.runtime_task_id }, '飞书入站记录与卡片归属不符，等待核对');
+      return false;
+    }
     const taskId = record.taskId ?? saved?.runtime_task_id;
     const turn = record.turn ?? saved?.turn ?? 1;
     const scopeId = record.request?.scopeId ?? saved?.scope_id;
@@ -236,7 +240,7 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
     if (live && (live.runtimeTaskId !== taskId || live.turn !== turn || live.sessionId !== sessionId)) return;
     const mappingMatches = !mapping || saved && mapping.sessionId === sessionId && saved.app_id === config.appId
       && saved.chat_id === event.chatId && saved.sender_open_id === event.senderOpenId && saved.scope_id === scopeId
-      && (saved.turn ?? 1) === turn && (!saved.runtime_task_id || saved.runtime_task_id === taskId)
+      && (saved.turn ?? 1) === turn
       && (!saved.card_message_id || !record.cardId || saved.card_message_id === record.cardId);
     if (mappingMatches && saved?.runtime_task_id === taskId && (live || terminalTaskStates.has(saved.state))) return;
     const request = larkTurnRequest(sessionId, config.appId, event, turn, prompt);

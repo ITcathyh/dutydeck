@@ -1701,3 +1701,82 @@ it('creates the missing process card for an accepted queued turn before it start
     expect(h.send).toHaveBeenCalledOnce();
   } finally { restored.stop(); }
 });
+
+it('quarantines a legacy same-text card binding before either terminal shortcut', async () => {
+  const answerChunks = ['第一条请求的结果'];
+  const h = await harness('normal', { answerChunks });
+  await h.coordinator.handle(event('om_task', '相同正文'), h.config);
+  await h.completed();
+  h.coordinator.stop();
+  const channel = 'lark-card:' + h.config.appId;
+  const first = (await h.repos.channelMappings.get(channel, 'om_task'))!;
+  const saved = JSON.parse(first.extra!);
+  answerChunks[0] = '第二条请求的结果';
+  const other = await h.runtime.dispatch(first.sessionId, saved.prompt, 'queue', undefined, undefined, 'ou_bob', 'second-request');
+  await vi.waitFor(async () => expect((await h.runtime.getTasks(first.sessionId)).find(t => t.id === other.id)?.status).toBe('completed'));
+  expect(other.id).not.toBe(saved.runtime_task_id);
+  // This historical process card has no delivery receipt.
+  const key = 'lark.inbox.cli_workflows.om_task';
+  const inbox = JSON.parse((await h.repos.config.get(key))!);
+  const cardId = 'om_legacy_card';
+  await h.repos.config.set(key, JSON.stringify({ ...inbox, cardId }));
+  await h.repos.channelMappings.save({ ...first, extra: JSON.stringify({ ...saved, card_message_id: cardId, runtime_task_id: other.id,
+    state: 'running', progress_frozen: false, final_message_id: undefined, final_delivery_state: undefined }) });
+  const restored = h.createCoordinator();
+  try {
+    h.service.reply.mockClear();
+    h.service.update.mockClear();
+    await restored.startReconciliation(h.config);
+    expect(h.service.reply).not.toHaveBeenCalledWith(expect.objectContaining({ messageId: 'om_task', cardKind: 'result' }));
+    expect(h.service.update).not.toHaveBeenCalledWith(expect.objectContaining({ messageId: cardId }));
+    expect(JSON.parse((await h.repos.channelMappings.get(channel, 'om_task'))!.extra!).final_delivery_state).toBeUndefined();
+  } finally { restored.stop(); }
+});
+
+it('rechecks a transient acceptance read on the same listener before dispatching once', async () => {
+  const h = await harness();
+  vi.spyOn(h.runtime, 'getAcceptedTask').mockImplementationOnce(() => { throw new Error('ledger busy'); });
+  await h.coordinator.receive(event('om_task', '执行一次'), h.config);
+  await h.completed();
+  await h.coordinator.receive(event('om_task', '执行一次'), h.config);
+  expect(h.send).toHaveBeenCalledOnce();
+  expect(JSON.parse((await h.repos.config.get('lark.inbox.cli_workflows.om_task'))!)).toMatchObject({ state: 'accepted', duplicateCount: 1 });
+});
+
+it('releases an unreadable acceptance with a review notice and no dispatch', async () => {
+  const h = await harness();
+  const read = vi.spyOn(h.runtime, 'getAcceptedTask').mockImplementation(() => { throw new Error('ledger unavailable'); });
+  await h.coordinator.receive(event('om_task', '核对执行记录'), h.config);
+  await vi.waitFor(async () => expect(JSON.parse((await h.repos.config.get('lark.inbox.cli_workflows.om_task'))!)).toMatchObject({
+    state: 'received', boot: '' }), { timeout: 5_000 });
+  expect(read.mock.calls.length).toBeGreaterThan(1);
+  expect(h.send).not.toHaveBeenCalled();
+  await vi.waitFor(() => expect([...h.cards.values()]).toContainEqual(expect.objectContaining({
+    state: 'reconcile_required', markdown: '请求结果未知' })));
+  read.mockRestore();
+  await h.coordinator.receive(event('om_task', '核对执行记录'), h.config);
+  await h.completed();
+  expect(h.send).toHaveBeenCalledOnce();
+});
+
+it('reattaches by ID even when the agent can no longer log in', async () => {
+  const h = await harness('normal', { participationMode: 'observe' });
+  await h.coordinator.handle(event('om_task', '接回原任务'), h.config);
+  await h.completed();
+  h.coordinator.stop();
+  const key = 'lark.inbox.cli_workflows.om_task';
+  const original = JSON.parse((await h.repos.config.get(key))!);
+  await h.repos.config.set(key, JSON.stringify({ ...original, state: 'received', taskId: undefined, boot: 'previous' }));
+  vi.spyOn(h.runtime, 'getAgentAvailability').mockReturnValue({ reason: '登录失效', remedy: '重新登录', at: new Date().toISOString() });
+  const recheck = vi.spyOn(h.runtime, 'checkAgentAvailability').mockRejectedValue(new Error('login required'));
+  vi.spyOn(h.participation!, 'taskContext').mockRejectedValue(new Error('new group material unavailable'));
+  const dispatch = vi.spyOn(h.runtime, 'dispatchRequest');
+  const restored = h.createCoordinator();
+  try {
+    await restored.initializeWorkflows(h.config);
+    await vi.waitFor(async () => expect(JSON.parse((await h.repos.config.get(key))!)).toMatchObject({ state: 'accepted', taskId: original.taskId }));
+    expect(recheck).not.toHaveBeenCalled();
+    expect(dispatch).not.toHaveBeenCalled();
+    expect(h.send).toHaveBeenCalledOnce();
+  } finally { restored.stop(); }
+});

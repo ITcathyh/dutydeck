@@ -86,6 +86,8 @@ When a queued task is held back by an unresolved task or a leftover terminal in 
 
 After a restart, a replay of the same Lark message and turn uses the context and tool policy saved at acceptance. If the prompt or sender differs from the execution record, the turn stops for review in the web console. For queued or running tasks, reconciliation can restore the card from the inbox record. Messages with identical text are tracked separately. When a failed, interrupted, or cancelled turn needs a separate result card after restart, its process card collapses to a one-line receipt, just as it does during live delivery.
 
+If an older card points to a different task ID than the inbox record, delivery to that card pauses. Dutydeck retries a temporary error reading the execution record. If the record still cannot be read, the request stays pending and the bot reports its outcome as unknown. An accepted task can reconnect even if the Agent login has expired. A failed result card includes the last unresolved tool failure. After you confirm a task in a private chat, its result card arrives as a separate message.
+
 Admins can clear blockers with `dutydeck recovery` (local runtime only):
 - `inspect <session-id>` shows blockers and the run ID.
 - `retire-pty <session-id> --file <decision>` retires a leftover terminal. When neither the original tmux name nor its owner marker matches a session, and the old service process that recorded it has exited, it is recorded as gone; renaming a session does not make it gone. If the socket file is missing, retirement requires Linux to confirm that no service still binds that path; uncertain cases remain blocked. The service also retires such records at startup.
