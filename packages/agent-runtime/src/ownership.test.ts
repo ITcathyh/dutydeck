@@ -399,10 +399,8 @@ it('clears a held permission on stop and never submits a stale approval after it
 it('drains registered task continuations when a separate cleanup makes shutdown reject', async () => {
   const h = await fixture();
   const entered = deferred(), gate = deferred();
-  const internal = h.runtime as unknown as {
-    executeTask(id: string, task: import('@dutydeck/shared').TaskRecord): Promise<import('@dutydeck/shared').PublicTaskRecord>;
-  };
-  const execute = internal.executeTask.bind(h.runtime);
+  const internal = runtimeComponents(h.runtime).runner;
+  const execute = internal.executeTask.bind(internal);
   internal.executeTask = async (id, task) => {
     const result = await execute(id, task);
     entered.resolve(); await gate.promise;

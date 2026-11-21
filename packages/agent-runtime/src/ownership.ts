@@ -111,7 +111,7 @@ export class RuntimeSessionMutations extends SessionMutations {
     return this.run(this.owners.lifecycle(id), operation);
   }
 
-  // Deferred human decisions must check the same owner that registered the request.
+  // Deferred callbacks must check the same owner that registered them.
   private readonly captured = new WeakMap<object, Owner | undefined>();
   capture(entry: object) { this.captured.set(entry, this.current()); }
   validCaptured(entry: object) { return this.valid(this.captured.get(entry)); }
