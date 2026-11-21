@@ -5,7 +5,7 @@ import { larkMessageAnchor } from '../message-anchor.js';
 import { RuntimeError, serialByKey, COLLABORATION_LIST_LIMIT, DECISION_BUDGET_GATE, DECISION_WINDOW_LIMIT, USAGE_CAP_GATE, countDecisionUsage, listWindowIncomplete, type ListedItems } from '@dutydeck/shared';
 import { BOT_LOOP_DEPTH_LIMIT, BOT_LOOP_GATE, BOT_TURN_RECORD } from '@dutydeck/shared';
 import { DECIDER_META_KEY, INTRUSIVE_FEEDBACK_PREFIX, MISSED_FEEDBACK_PREFIX, deciderMetaOf, isDecisionGate, participationLevelBehaviors, participationLevelLabels, participationLevelPhraseHint, participationLevelPhrases, participationLevels, resolveParticipation } from '@dutydeck/shared';
-import { resolveScenarioParams, scenarioBindingStatus, scenarioMajorVersion, scenarioRecordOf, scenarioSourceBots, scenarioTriggerSources, type UpdateCollaborationDutyRequest, type ScenarioPreviewInput, type ScenarioPreview, type CollaborationDuty, type ResponderAnnouncement, type ScenarioBinding, type ScenarioBotRef, type ScenarioMessage, type ScenarioPack } from '@dutydeck/shared';
+import { resolveScenarioParams, scenarioRecordOf, scenarioTriggerSources, type UpdateCollaborationDutyRequest, type ScenarioPreviewInput, type ScenarioPreview, type CollaborationDuty, type ResponderAnnouncement, type ScenarioBotRef, type ScenarioMessage } from '@dutydeck/shared';
 import { jsonSha256 as digest } from '../../hash.js';
 import type { CollaborationRepository, CollaborationScope, CollaborationFollowup, CollaborationSnapshot, CollaborationObservation, CollaborationDecision, CollaborationAction, CollaborationTeamContext, CollaborationDeciderMeta, CollaborationScenarioSnapshot, CollaborationSettings, ParticipationLevel } from '@dutydeck/shared';
 import { larkMemoryEnabled, type StoredLarkConfig } from '../config.js';
@@ -20,9 +20,9 @@ import { responderAnnouncementOf, responderClaimText, responderIntentOf, respond
 import { LarkScenarios, type ScenarioMatch, type ScenarioPhrase } from '../group-scenarios.js';
 import { runDirectScenario, type LarkScenarioAdoption } from '../scenario-direct.js';
 import { SCENARIO_REF_PREFIX, freezeScenario, freezeScenarioSkills, humanScenarioMessage, modelScenarioExecution, scenarioContextLimits, type ModelScenarioExecution } from '../scenario-model.js';
-import { findScenarioRecall, materialEntries, type LarkScenarioRecall } from '../scenario-recall.js';
+import { findScenarioRecall, type LarkScenarioRecall } from '../scenario-recall.js';
 import { legacyConfirmAliases } from '../scenario-legacy.js';
-import { renderScenarioTemplate, scenarioParamValues, scenarioSummary, templateText, type TemplateValues } from '../scenario-template.js';
+import { renderScenarioTemplate, templateText } from '../scenario-template.js';
 import type { ScenarioRegistry } from '../../plugins/scenario-registry.js';
 import { formatParticipationBehavior, formatRoleStatusLine } from '../role-format.js';
 import { LarkConfirmCards, type LarkConfirmRecord } from '../confirm-cards.js';
@@ -32,6 +32,7 @@ import { withLarkContextReadTimeout } from '../context-read-timeout.js';
 import { renderGroupTaskContext, TASK_CONTEXT_WINDOW, type GroupTaskContext, type GroupTaskContextRequest } from '../group-task-context.js';
 import { previewScenario, previewUnavailable, scenarioHistoryFailure } from '../scenario-preview.js';
 import { evaluateParticipation } from '../participation-evaluate.js';
+import { ParticipationScenarioAdmin, activeModes, confirmValues } from './scenario-admin.js';
 
 export interface GroupParticipationOptions {
   repository: CollaborationRepository;
@@ -102,7 +103,6 @@ const OWNED_TOPIC_REF = 'dutydeck:owned-topic';
 type BotMember = { name: string; appId?: string; openId?: string };
 /** complete 为 false：读失败、没权限或被安全策略截断，没有人数；名单是截断前读到的或上次读全的，可能缺机器人。 */
 type Members = { complete: true; humans: number; botList: BotMember[] } | { complete: false; botList: BotMember[] };
-const activeModes = new Set(['selective', 'eager']);
 /** 多机器人群里没接时，除了指定接话人，配负责范围也能让本机器人按范围接没 @ 的消息。 */
 const scopeSetupHint = '也可以在 Dutydeck Web「机器人管理」的「负责范围」里写清我负责的事，范围内没 @ 的消息我会判断后接。';
 /** 当不了接话人的档（只在 @ 时、话题内免 @）怎么跟人说。 */
@@ -125,12 +125,6 @@ const snapshotScenario = (item: Pick<CollaborationDecision, 'inputSnapshot'>) =>
 
 /** 会接话的机器人：群里的机器人去掉本群场景包绑定的来源机器人，它们只发通知，不算多机器人群里的另一个。 */
 const talkingBots = (members: Members, sources: ReadonlySet<string>) => members.botList.filter(item => !item.appId || !sources.has(item.appId));
-/** 包没写说明文案时核心的说法。 */
-const jsonRecord = (value: unknown): Record<string, unknown> | undefined => {
-  try { const parsed: unknown = JSON.parse(String(value)); return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed as Record<string, unknown> : undefined; } catch { return undefined; }
-};
-/** 确认卡模板的变量：{summary} 和各个参数。 */
-const confirmValues = (pack: ScenarioPack, params: Readonly<Record<string, unknown>>): TemplateValues => ({ ...scenarioParamValues(pack, params), summary: templateText(scenarioSummary(pack, params)) });
 const defaultExplain = { acted: '{time} 那条消息已经起了任务，结果在它的话题里。', skipped: '{time} 那条消息我没处理：{reason}。', note: '另外，{time} 那条「{snippet}」我没处理：{reason}。' };
 /** 判定 id 含触发消息：前一条还在判定时后一条已经入库，两条判定看到的快照版本相同。 */
 const decisionIdOf = (scope: CollaborationScope, triggerId: string, snapshot: CollaborationSnapshot) => `decision_${digest([scope, triggerId, snapshot.contextRevision, snapshot.settings.policyVersion])}`;
@@ -182,8 +176,10 @@ export class LarkGroupParticipation {
   /** 群级变更的确认卡。参与强度、接话人和每个场景包的开关各注册一种。 */
   readonly confirmations: LarkConfirmCards;
   readonly scenarios: LarkScenarios;
+  private readonly scenarioAdmin: ParticipationScenarioAdmin;
   constructor(private readonly options: GroupParticipationOptions) {
     this.scenarios = new LarkScenarios(options.scenarios, undefined, options.log);
+    this.scenarioAdmin = new ParticipationScenarioAdmin(options, this.scenarios);
     this.bootstrapper = new LarkContextBootstrap({ ...options, authorize: scope => options.authorize(scope, undefined, 'observe') });
     this.confirmations = new LarkConfirmCards({ repository: options.repository, readConfig: options.readConfig, now: options.now, log: options.log,
       serviceFor: config => {
@@ -221,11 +217,11 @@ export class LarkGroupParticipation {
     const operate = async (record: { scope: CollaborationScope; requesterId: string }, operator: string) => await this.options.canOperate?.(record.scope, operator, record.requesterId)
       ? true as const : '只有发起人本人、本群的操作员或管理员能确认。';
     for (const { pack } of this.scenarios.registry.list()) {
-      this.confirmations.register(scenarioConfirmKind(pack.id), { authorize: operate, apply: (record, operator) => this.applyScenarioConfirm(pack.id, record, operator) });
+      this.confirmations.register(scenarioConfirmKind(pack.id), { authorize: operate, apply: (record, operator) => this.scenarioAdmin.applyScenarioConfirm(pack.id, record, operator) });
     }
     // 升级前发出的确认卡：作为对应包确认卡的别名，payload 是旧格式。
     for (const alias of legacyConfirmAliases.filter(item => this.scenarios.registry.has(item.packId))) {
-      this.confirmations.register(alias.kind, { authorize: operate, apply: (record, operator) => this.applyScenarioConfirm(alias.packId, record, operator, alias.params) });
+      this.confirmations.register(alias.kind, { authorize: operate, apply: (record, operator) => this.scenarioAdmin.applyScenarioConfirm(alias.packId, record, operator, alias.params) });
     }
     this.confirmations.register(RESPONDER_CONFIRM_KIND, {
       authorize: operate,
@@ -1123,105 +1119,20 @@ export class LarkGroupParticipation {
     const responderEvent = patch.responder === undefined || emptyLocalRelease ? undefined : this.localResponderEvent(current,
       patch.responder === null ? current.responder!.appId : scope.appId,
       patch.responder === null ? 'release' : 'claim', patch.responder === null ? undefined : botName(config));
-    const scenarios = patch.scenarios && Object.fromEntries(Object.entries(patch.scenarios).map(([id, value]) => [id, value && this.webBinding(scope, config, id, value, current.scenarios?.[id])]));
+    const scenarios = patch.scenarios && Object.fromEntries(Object.entries(patch.scenarios).map(([id, value]) => [id, value && this.scenarioAdmin.webBinding(scope, config, id, value, current.scenarios?.[id])]));
     const duty = await repo.updateDuty(scope, { expectedRevision: current.revision, ...(emptyLocalRelease ? { responder: null } : {}), ...(responderEvent ? { responderEvent } : {}), ...(scenarios ? { scenarios } : {}) }, actorId);
     const announced = patch.responder === 'self' && !wasSelf ? await this.announce(scope, config, responderClaimText(botName(config)))
       : patch.responder === null && wasSelf ? await this.announce(scope, config, responderReleaseText(botName(config))) : undefined;
     return { duty, ...(announced === undefined ? {} : { announced }) };
   }
-  /** Web 改一个场景包的绑定：参数按包默认 → 已有绑定 → 这次的值合并校验，确认人和包版本沿用已有的。 */
-  private webBinding(scope: CollaborationScope, config: StoredLarkConfig, id: string, value: { enabled: boolean; params?: Record<string, unknown> }, current?: ScenarioBinding): ScenarioBinding {
-    const pack = this.scenarios.entries(config).find(entry => entry.pack.id === id)?.pack;
-    if (!pack) throw new RuntimeError('COLLABORATION_SCENARIO_UNKNOWN', `没有可用的场景包 ${id}。`, 400);
-    const { params, issues } = resolveScenarioParams(pack, current?.params, value.params);
-    if (issues.length) throw new RuntimeError('COLLABORATION_SCENARIO_INVALID', `${pack.title}的设置不对：${issues.join('；')}`, 400);
-    // 开启或这次改了来源时才查：升级上来的旧订阅来源里可能有本机器人，不改来源要能关掉。
-    const sourcesChanged = Boolean(pack.trigger.sourceBotsParam && value.params && Object.hasOwn(value.params, pack.trigger.sourceBotsParam));
-    if ((value.enabled || sourcesChanged) && scenarioSourceBots(pack, { params }).some(source => source.appId === scope.appId)) throw new RuntimeError('COLLABORATION_SCENARIO_SELF_SOURCE', `${pack.title}的来源不能是本机器人自己。`, 400);
-    if (value.enabled && pack.mode === 'direct' && !current?.requesterId) {
-      throw new RuntimeError('COLLABORATION_SCENARIO_REQUESTER_REQUIRED', `${pack.title}要以在群里确认过的人的名义发起。${pack.web?.enableHint ?? '请先在群里 @机器人 说开启并点确认，之后可以在这里改设置。'}`, 409);
-    }
-    if (value.enabled && current && scenarioMajorVersion(current.packVersion) !== scenarioMajorVersion(pack.version)) {
-      throw new RuntimeError('COLLABORATION_SCENARIO_VERSION_STALE', `${pack.title}的场景包已升级到 v${pack.version}，要先在群里重新确认才能开启。`, 409);
-    }
-    return { enabled: value.enabled, params, ...(current?.requesterId ? { requesterId: current.requesterId } : {}), packVersion: current?.packVersion ?? pack.version };
+  previewScenario(scope: CollaborationScope, id: string, input: ScenarioPreviewInput): Promise<ScenarioPreview> {
+    return this.scenarioAdmin.previewScenario(scope, id, input);
   }
-  async previewScenario(scope: CollaborationScope, id: string, input: ScenarioPreviewInput): Promise<ScenarioPreview> {
-    const config = await this.options.readConfig(scope.appId, scope.chatId, true).catch(() => undefined);
-    if (!config) return { status: 'unavailable', message: '暂时无法读取机器人或群配置，请检查群配置后重试。' };
-    const duty = await this.options.repository.getDuty(scope);
-    const entry = this.scenarios.entries(config).find(item => item.pack.id === id);
-    if (!entry) throw new RuntimeError('COLLABORATION_SCENARIO_UNKNOWN', `没有可用的场景包 ${id}。`, 400);
-    const { params, issues } = resolveScenarioParams(entry.pack, duty.scenarios?.[id]?.params, input.params);
-    if (issues.length) throw new RuntimeError('COLLABORATION_SCENARIO_INVALID', `${entry.pack.title}的设置不对：${issues.join('；')}`, 400);
-    if (scenarioSourceBots(entry.pack, { params }).some(source => source.appId === scope.appId)) throw new RuntimeError('COLLABORATION_SCENARIO_SELF_SOURCE', `${entry.pack.title}的来源不能是本机器人自己。`, 400);
-    // 初次开通也可预演。确认人仅是本次推算的前提，启用仍由群里的确认卡授权。
-    const binding = { enabled: true, packVersion: entry.pack.version, params, requesterId: duty.scenarios?.[id]?.requesterId ?? 'preview' };
-    return this.previewDraft(scope, config, duty, { entry, binding }, input.limit);
+  scenarioOverview(scope: CollaborationScope) {
+    return this.scenarioAdmin.scenarioOverview(scope);
   }
-
-  private async previewDraft(scope: CollaborationScope, config: StoredLarkConfig, duty: CollaborationDuty,
-    target: Parameters<typeof previewScenario>[0]['target'], limit?: number, timeoutMs?: number): Promise<ScenarioPreview> {
-    const settings = target.entry.pack.mode === 'model'
-      ? await (this.options.readPreviewSettings?.(scope) ?? this.options.repository.getSettings(scope)) : undefined;
-    const modelActive = Boolean(settings && activeModes.has(resolveParticipation({ mentionPolicy: config.mentionPolicy, participation: settings.participation }).level));
-    const canObserve = settings && modelActive
-      ? await (this.options.authorizePreviewObservation?.(scope, settings) ?? this.options.authorize(scope, undefined, 'observe')) : false;
-    return previewScenario({ scenarios: this.scenarios, scope, config, duty, target, modelActive, canObserve, service: this.options.serviceFor(config), limit, timeoutMs });
-  }
-
-  /** 群设置页列出的场景包：作用域适用于本机器人的包、本群绑定和状态。 */
-  async scenarioOverview(scope: CollaborationScope) {
-    const config = await this.options.readConfig(scope.appId, scope.chatId).catch(() => undefined);
-    const duty = await this.options.repository.getDuty(scope);
-    return this.scenarios.entries({ appId: scope.appId, ...(config?.workspace ? { workspace: config.workspace } : {}) }).map(({ pack, plugin, builtin }) => {
-      const binding = duty.scenarios?.[pack.id];
-      const params = binding?.params ?? resolveScenarioParams(pack).params;
-      // 说明里写着确认人；还没在群里确认过时不给，免得显示一对空括号。
-      const webDescription = pack.web && binding?.requesterId ? renderScenarioTemplate(pack.web.description, { ...scenarioParamValues(pack, params), requesterId: templateText(binding.requesterId) }) : undefined;
-      return { id: pack.id, title: pack.title, version: pack.version, description: pack.description, mode: pack.mode, params: pack.params, ...(binding ? { binding } : {}),
-        requiresRequester: pack.mode === 'direct', versionStale: Boolean(binding && scenarioBindingStatus(pack, binding) === 'stale'),
-        ...(webDescription ? { webDescription } : {}), ...(pack.web?.enableHint ? { enableHint: pack.web.enableHint } : {}), plugin, builtin };
-    });
-  }
-  /** 这一轮材料关联到的上一轮（见 scenario-recall.ts）。correlation.scope 为 enabled 的包只在本群绑定开着时参与。 */
-  async scenarioRecall(scope: CollaborationScope, config: StoredLarkConfig, input: Omit<Parameters<typeof findScenarioRecall>[0], 'packs' | 'chatId' | 'log'>): Promise<LarkScenarioRecall | undefined> {
-    const packs = this.scenarios.entries(config).filter(entry => entry.pack.correlation);
-    if (!packs.length || !materialEntries(input.materialPrompt).length) return undefined;
-    const duty = packs.some(entry => entry.pack.correlation!.scope === 'enabled') ? await this.options.repository.getDuty(scope) : undefined;
-    const applicable = packs.filter(({ pack }) => {
-      const binding = duty?.scenarios?.[pack.id];
-      return pack.correlation!.scope === 'always' || Boolean(binding && scenarioBindingStatus(pack, binding) === 'enabled');
-    });
-    return findScenarioRecall({ ...input, packs: applicable, chatId: scope.chatId, ...(this.options.log ? { log: this.options.log } : {}) });
-  }
-  /** 场景包开关确认卡点了确认。legacyParams 是升级前的确认卡的 payload 转换（见 scenario-legacy.ts）。 */
-  private async applyScenarioConfirm(packId: string, record: LarkConfirmRecord, operator: string, legacyParams?: (payload: LarkConfirmRecord['payload']) => Record<string, unknown> | undefined): Promise<string> {
-    const pack = this.scenarios.pack(packId);
-    if (!pack) throw new RuntimeError('COLLABORATION_SCENARIO_UNKNOWN', '这个场景包已经不可用。', 409);
-    const repo = this.options.repository;
-    const duty = await repo.getDuty(record.scope);
-    const binding = duty.scenarios?.[pack.id];
-    if (record.payload.enabled === false) {
-      if (!binding?.enabled) return `本群本来就没开${pack.title}。`;
-      await repo.updateDuty(record.scope, { expectedRevision: duty.revision, scenarios: { [pack.id]: { ...binding, enabled: false } } }, operator);
-      return pack.confirm.disabledResult;
-    }
-    // 卡上记着发卡时的包版本；没记的（升级前的告警确认卡、早于这个字段的卡）按 1.0.0。期间包升了大版本就要在群里重新说一次。
-    const cardVersion = typeof record.payload.packVersion === 'string' ? record.payload.packVersion : '1.0.0';
-    if (scenarioMajorVersion(cardVersion) !== scenarioMajorVersion(pack.version)) {
-      throw new RuntimeError('COLLABORATION_SCENARIO_VERSION_STALE', `${pack.title}的场景包已升级到 v${pack.version}，这张确认卡已经失效，请在群里重新说一次。`, 409);
-    }
-    if (pack.mode === 'direct' && duty.responder && duty.responder.appId !== record.scope.appId) {
-      throw new RuntimeError('COLLABORATION_NOT_RESPONDER', `本群接话人是「${duty.responder.name ?? duty.responder.appId}」，${pack.title}只由接话人做。`, 409);
-    }
-    const raw = legacyParams ? legacyParams(record.payload) : jsonRecord(record.payload.params);
-    const { params, issues } = resolveScenarioParams(pack, undefined, raw);
-    if (!raw || issues.length) throw new RuntimeError('COLLABORATION_SCENARIO_INVALID', `确认卡上的设置已经不能用了，请在群里重新说一次。${issues.join('；')}`, 409);
-    if (scenarioSourceBots(pack, { params }).some(source => source.appId === record.scope.appId)) throw new RuntimeError('COLLABORATION_SCENARIO_SELF_SOURCE', `${pack.title}的来源不能是本机器人自己。`, 409);
-    // 任务以点确认的人的名义发起：他为这份绑定负责，任务也按他的权限执行。
-    await repo.updateDuty(record.scope, { expectedRevision: duty.revision, scenarios: { [pack.id]: { enabled: true, params, requesterId: operator, packVersion: pack.version } } }, operator);
-    return renderScenarioTemplate(pack.confirm.enabledResult, confirmValues(pack, params));
+  scenarioRecall(scope: CollaborationScope, config: StoredLarkConfig, input: Omit<Parameters<typeof findScenarioRecall>[0], 'packs' | 'chatId' | 'log'>): Promise<LarkScenarioRecall | undefined> {
+    return this.scenarioAdmin.scenarioRecall(scope, config, input);
   }
   private async acknowledge(scope: CollaborationScope, messageId: string, replyActionId: string, config: StoredLarkConfig): Promise<CollaborationAction> {
     const repo = this.options.repository;
@@ -1554,7 +1465,7 @@ export class LarkGroupParticipation {
     const record = await this.confirmations.request({ kind: scenarioConfirmKind(pack.id), scope, requesterId: sender, replyTo, title: pack.confirm.enableTitle,
       summary: `${renderScenarioTemplate(pack.confirm.enableSummary, confirmValues(pack, params))}${others.length
         ? `最近在本群发过消息的机器人还有：${others.map(item => item.name ?? item.appId).join('、')}；来源不对可以在 Dutydeck Web 的群设置里改。` : ''}`,
-      preview: () => this.previewDraft(scope, config, duty, { entry: phrase.entry, binding: { enabled: true, packVersion: pack.version, params, requesterId: sender } }, undefined, 3_000)
+      preview: () => this.scenarioAdmin.previewDraft(scope, config, duty, { entry: phrase.entry, binding: { enabled: true, packVersion: pack.version, params, requesterId: sender } }, undefined, 3_000)
         .catch(() => previewUnavailable()),
       payload: { enabled: true, params: JSON.stringify(params), packVersion: pack.version } });
     if (!record) await this.replyText(config, event, '确认卡没发出去，请稍后再说一次，或在 Dutydeck Web 的群设置里开启。', key);
