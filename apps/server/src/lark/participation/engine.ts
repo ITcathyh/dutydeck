@@ -4,7 +4,7 @@ import type { ConfigRepository } from '@dutydeck/shared';
 import { larkMessageAnchor } from '../message-anchor.js';
 import { RuntimeError, serialByKey, COLLABORATION_LIST_LIMIT, DECISION_BUDGET_GATE, DECISION_WINDOW_LIMIT, USAGE_CAP_GATE, countDecisionUsage, listWindowIncomplete, type ListedItems } from '@dutydeck/shared';
 import { BOT_LOOP_DEPTH_LIMIT, BOT_LOOP_GATE, BOT_TURN_RECORD } from '@dutydeck/shared';
-import { DECIDER_META_KEY, INTRUSIVE_FEEDBACK_PREFIX, MISSED_FEEDBACK_PREFIX, deciderMetaOf, isDecisionGate, participationLevelBehaviors, participationLevelLabels, participationLevelPhraseHint, participationLevelPhrases, participationLevels, resolveParticipation } from '@dutydeck/shared';
+import { DECIDER_META_KEY, INTRUSIVE_FEEDBACK_PREFIX, MISSED_FEEDBACK_PREFIX, deciderMetaOf, isDecisionGate, participationLevelBehaviors, participationLevelLabels, participationLevelPhraseHint, participationLevelPhrases, resolveParticipation } from '@dutydeck/shared';
 import { resolveScenarioParams, scenarioRecordOf, scenarioTriggerSources, type UpdateCollaborationDutyRequest, type ScenarioPreviewInput, type ScenarioPreview, type CollaborationDuty, type ResponderAnnouncement, type ScenarioBotRef, type ScenarioMessage } from '@dutydeck/shared';
 import { jsonSha256 as digest } from '../../hash.js';
 import type { CollaborationRepository, CollaborationScope, CollaborationFollowup, CollaborationSnapshot, CollaborationObservation, CollaborationDecision, CollaborationAction, CollaborationTeamContext, CollaborationDeciderMeta, CollaborationScenarioSnapshot, CollaborationSettings, ParticipationLevel } from '@dutydeck/shared';
@@ -21,7 +21,6 @@ import { LarkScenarios, type ScenarioMatch, type ScenarioPhrase } from '../group
 import { runDirectScenario, type LarkScenarioAdoption } from '../scenario-direct.js';
 import { SCENARIO_REF_PREFIX, freezeScenario, freezeScenarioSkills, humanScenarioMessage, modelScenarioExecution, scenarioContextLimits, type ModelScenarioExecution } from '../scenario-model.js';
 import { findScenarioRecall, type LarkScenarioRecall } from '../scenario-recall.js';
-import { legacyConfirmAliases } from '../scenario-legacy.js';
 import { renderScenarioTemplate, templateText } from '../scenario-template.js';
 import type { ScenarioRegistry } from '../../plugins/scenario-registry.js';
 import { formatParticipationBehavior, formatRoleStatusLine } from '../role-format.js';
@@ -33,6 +32,7 @@ import { renderGroupTaskContext, TASK_CONTEXT_WINDOW, type GroupTaskContext, typ
 import { previewScenario, previewUnavailable, scenarioHistoryFailure } from '../scenario-preview.js';
 import { evaluateParticipation } from '../participation-evaluate.js';
 import { ParticipationScenarioAdmin, activeModes, confirmValues } from './scenario-admin.js';
+import { createParticipationConfirmations, ACT_CONFIRM_KIND, LEVEL_CONFIRM_KIND, RESPONDER_CONFIRM_KIND, scenarioConfirmKind } from './confirmations.js';
 
 export interface GroupParticipationOptions {
   repository: CollaborationRepository;
@@ -93,11 +93,6 @@ const WHY_WINDOW_MS = HOUR_MS;
 const MEMBER_CACHE_MS = 10 * 60_000;
 /** 场景来源开的话题最多读几页（每页 50 条）看有没有别的机器人接过。 */
 const THREAD_CLAIM_PAGES = 4;
-const LEVEL_CONFIRM_KIND = 'participation_level';
-const ACT_CONFIRM_KIND = 'participation_act';
-/** 场景包开关的确认卡种类：scenario:<包 id>。 */
-const scenarioConfirmKind = (packId: string) => `scenario:${packId}`;
-const RESPONDER_CONFIRM_KIND = 'group_responder';
 /** 观察 refs 里的标记：这条消息在本机器人接手的话题里（coordinator 按话题会话判断）。 */
 const OWNED_TOPIC_REF = 'dutydeck:owned-topic';
 type BotMember = { name: string; appId?: string; openId?: string };
@@ -181,67 +176,12 @@ export class LarkGroupParticipation {
     this.scenarios = new LarkScenarios(options.scenarios, undefined, options.log);
     this.scenarioAdmin = new ParticipationScenarioAdmin(options, this.scenarios);
     this.bootstrapper = new LarkContextBootstrap({ ...options, authorize: scope => options.authorize(scope, undefined, 'observe') });
-    this.confirmations = new LarkConfirmCards({ repository: options.repository, readConfig: options.readConfig, now: options.now, log: options.log,
-      serviceFor: config => {
-        const service = options.serviceFor(config);
-        if (!service.reply || !service.update) throw new RuntimeError('LARK_CARD_UNAVAILABLE', '当前连接不能发送卡片', 503);
-        return { reply: service.reply.bind(service), update: service.update.bind(service) };
-      } });
-    this.confirmations.register(ACT_CONFIRM_KIND, {
-      authorize: async (record, actor) => await this.dispatchAuthorizers.get(record.scope.appId)?.(record.scope, actor)
-        ? true : '你没有此群的任务创建权限。',
-      apply: async (record, actor) => {
-        const dispatch = this.dispatchers.get(record.scope.appId);
-        const config = await this.options.readConfig(record.scope.appId, record.scope.chatId);
-        if (this.closed || !dispatch || !config?.listening) throw new RuntimeError('LARK_CONFIG_NOT_FOUND', '机器人已停用，没有执行。', 409);
-        // Recheck after claiming the card; permissions may have changed while it was pending.
-        if (!await this.dispatchAuthorizers.get(record.scope.appId)?.(record.scope, actor)) throw new RuntimeError('FORBIDDEN', '你没有此群的任务创建权限。', 403);
-        const event = JSON.parse(String(record.payload.event)) as LarkMessageEvent;
-        await dispatch({ ...event, senderOpenId: actor, senderType: 'user', authorization: {
-          ...event.authorization!, strength: 'explicit', via: 'participation_confirmed'
-        } }, config);
-        return '已确认，按你的身份处理，结果会发在原消息下。';
-      }
-    });
-    this.confirmations.register(LEVEL_CONFIRM_KIND, {
-      authorize: async (record, operator) => await this.options.canOperate?.(record.scope, operator, record.requesterId)
-        ? true : '只有发起人本人、本群的操作员或管理员能确认。',
-      apply: async (record, operator) => {
-        const level = participationLevels.find(item => item === record.payload.level);
-        if (!level || !this.options.applyLevel) throw new RuntimeError('COLLABORATION_LEVEL_UNAVAILABLE', '这个群暂时不能在群里改参与强度，请在 Dutydeck Web 的群设置里调整。', 409);
-        await this.options.applyLevel(record.scope, level, operator);
-        const config = await this.options.readConfig(record.scope.appId, record.scope.chatId).catch(() => undefined);
-        return `本群已改成「${participationLevelLabels[level]}」：${formatParticipationBehavior(level, config)}。${await this.levelResponder(record, level, operator)}`;
-      }
-    });
-    const operate = async (record: { scope: CollaborationScope; requesterId: string }, operator: string) => await this.options.canOperate?.(record.scope, operator, record.requesterId)
-      ? true as const : '只有发起人本人、本群的操作员或管理员能确认。';
-    for (const { pack } of this.scenarios.registry.list()) {
-      this.confirmations.register(scenarioConfirmKind(pack.id), { authorize: operate, apply: (record, operator) => this.scenarioAdmin.applyScenarioConfirm(pack.id, record, operator) });
-    }
-    // 升级前发出的确认卡：作为对应包确认卡的别名，payload 是旧格式。
-    for (const alias of legacyConfirmAliases.filter(item => this.scenarios.registry.has(item.packId))) {
-      this.confirmations.register(alias.kind, { authorize: operate, apply: (record, operator) => this.scenarioAdmin.applyScenarioConfirm(alias.packId, record, operator, alias.params) });
-    }
-    this.confirmations.register(RESPONDER_CONFIRM_KIND, {
-      authorize: operate,
-      apply: async (record, operator) => {
-        const config = await this.options.readConfig(record.scope.appId, record.scope.chatId);
-        if (!config) throw new RuntimeError('LARK_CONFIG_NOT_FOUND', '机器人配置已不可用。', 409);
-        // 卡上说了先调到按需：接话人要收得到没 @ 的消息。调档失败就整张卡不生效，不留下收不到消息的接话人。
-        const raise = record.payload.level === 'selective' && !activeModes.has(await this.level(record.scope));
-        if (raise) {
-          if (!this.options.applyLevel) throw new RuntimeError('COLLABORATION_LEVEL_UNAVAILABLE', '这个群暂时不能在群里改参与强度，请在 Dutydeck Web 的群设置里调整。', 409);
-          await this.options.applyLevel(record.scope, 'selective', operator);
-        }
-        const announced = await this.claimResponder(record.scope, config, operator, record.replyTo);
-        const scopeText = config.roleScope?.trim();
-        const takeover = scopeText
-          ? '本群没 @ 机器人的消息改由我按负责范围判断是否接，明确叫我照常处理。'
-          : '本群没 @ 机器人的消息改由我接。';
-        const selectiveNote = raise ? `本群已改成「按需」：${formatParticipationBehavior('selective', config)}。` : '';
-        return `${selectiveNote}${takeover}${announced ? '已在群里发了声明，其他 Dutydeck 机器人收到后只接 @ 和自己接手的话题。' : '群里的声明没发出去，其他机器人可能还不知道；请稍后 @我 再说一次「你负责接话」，我会重发声明。'}`;
-      }
+    this.confirmations = createParticipationConfirmations(options, {
+      scenarios: this.scenarios, scenarioAdmin: this.scenarioAdmin,
+      dispatchers: this.dispatchers, dispatchAuthorizers: this.dispatchAuthorizers,
+      isClosed: () => this.closed, level: scope => this.level(scope),
+      levelResponder: (...args) => this.levelResponder(...args),
+      claimResponder: (...args) => this.claimResponder(...args)
     });
   }
   private track<T>(operation: () => Promise<T>): Promise<T> {
