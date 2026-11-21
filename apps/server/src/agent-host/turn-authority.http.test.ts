@@ -85,12 +85,12 @@ it.each(scenarios)('preserves tool family HTTP responses for %s', async scenario
     await repos.channelMappings.save({ id: 'mapping', channel: 'lark-card:cli_bot', externalId: 'om_origin', sessionId: session.id, createdAt: '',
       extra: JSON.stringify({ runtime_task_id: active.taskId, app_id: 'cli_bot', chat_id: 'oc_chat', chat_type: 'group', turn: 1, task_name: 'Test', reply_in_thread: false, reply_message_id: 'om_origin' }) });
     const adapter = new LarkPluginResultAdapter({ capabilities: turns, repositories: repos, runtime,
-      authorizePolicy: async () => ({ allowed: scenario !== 'revoked' }), groupManager: { authorize: async () => ({ allowed: true }), resolved: async c => c } as any,
+      authorizePolicy: async () => ({ allowed: scenario !== 'revoked' }), groupManager: { authorize: async () => ({ allowed: true }), resolved: async (c: object) => c } as any,
       client: () => ({ getMessage: async () => ({ messageId: 'om_origin', chatId: 'oc_chat', sender: { type: 'user', id: active.actorId } }) }) as any,
       identity: { redirectUri: async () => 'https://local.test/api/plugin-results/oauth/callback' } as any });
     registerPluginResultRoutes(app, { service: new PluginResultService(repos.pluginResults, new PluginResultToolRegistry(), adapter), viewer: {} as any });
     const identity = new TaskPluginToolIdentity(repos, relay, turns, runtime);
-    registerPluginBusinessToolRoutes(app, { service: { list: (token, turn) => identity.resolve(token, turn) } } as any);
+    registerPluginBusinessToolRoutes(app, { service: { list: (token?: string, turn?: string) => identity.resolve(token, turn) } } as any);
     const target = scenario === 'other session' ? other : session;
     const channelToken = turns.environmentFor(target).dutydeck_group_tools_token;
     const turn = turns.finalTurnToken(session.id, scenario === 'old task' ? 'previous' : active.taskId,

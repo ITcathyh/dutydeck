@@ -1,10 +1,10 @@
 import { createHash } from 'node:crypto';
-import type { FastifyInstance } from 'fastify';
+import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import type { DutydeckRuntime } from '@dutydeck/runtime';
 import { createWorkItemSchema, reviseWorkPlanSchema, RuntimeError, toPublicAgent } from '@dutydeck/shared';
 import type { LarkAgentToolsService } from './lark/agent-tools.js';
-import { agentGroupToolBearerToken } from './lark/agent-tools.js';
+import { resolveActorTurn } from './agent-host/turn-authority.js';
 import { delegationBriefSchema, type LeaderDelegationService } from './leader-delegation.js';
 import { discoverSkillCatalog } from './skill-catalog.js';
 import type { WorkItemService } from './work-items.js';
@@ -16,57 +16,52 @@ const requestKey = (taskId: string, key: string) => createHash('sha256').update(
 export interface WorkItemToolsOptions { runtime: DutydeckRuntime; work: WorkItemService; tools: LarkAgentToolsService; delegations?: LeaderDelegationService }
 
 export async function registerWorkItemTools(app: FastifyInstance, options: WorkItemToolsOptions) {
-  const context = async (authorization?: string, turn?: string | string[]) => {
-    const scope = await options.tools.workbenchContext(agentGroupToolBearerToken(authorization));
-    const active = options.runtime.getActiveTaskContext(scope.sessionId);
-    if (!active?.actorId) throw new RuntimeError('WORK_ITEM_ACTIVE_ACTOR_REQUIRED', '编排工具只接受当前正在执行的飞书指令', 403);
-    options.tools.assertWorkbenchTurn(scope.sessionId, active.taskId, active.attemptId, typeof turn === 'string' ? turn : undefined);
-    return { sessionId: scope.sessionId, actorId: active.actorId, taskId: active.taskId };
-  };
+  const context = (request: FastifyRequest) => resolveActorTurn(request, 'work', options.runtime,
+    options.tools.capabilities, token => options.tools.workbenchContext(token));
   const base = '/api/lark/agent-tools/work-items';
   app.get(`${base}/agents`, async request => {
-    const scope = await context(request.headers.authorization, request.headers['x-dutydeck-work-turn']);
+    const scope = await context(request);
     await options.work.listBySession(scope.sessionId, scope.actorId);
     return { agents: (await options.runtime.listAgents()).map(toPublicAgent), readiness: 'configured; execution checks availability, tools and credentials remain provider-specific' };
   });
   app.get(`${base}/skills`, async request => {
-    const scope = await context(request.headers.authorization, request.headers['x-dutydeck-work-turn']);
+    const scope = await context(request);
     await options.work.listBySession(scope.sessionId, scope.actorId);
     const session = await options.runtime.getSession(scope.sessionId);
     return { ...(await discoverSkillCatalog(session!.cwd)), delivery: 'prompt snapshot at step acceptance; tool authorization is checked separately' };
   });
   app.get(base, async request => {
-    const scope = await context(request.headers.authorization, request.headers['x-dutydeck-work-turn']);
+    const scope = await context(request);
     return { items: await options.work.listBySession(scope.sessionId, scope.actorId), templates: await options.work.listTemplates(scope.sessionId, scope.actorId) };
   });
   app.post(base, async request => {
-    const scope = await context(request.headers.authorization, request.headers['x-dutydeck-work-turn']);
+    const scope = await context(request);
     const input = workInput(createWorkItemSchema, request.body);
     return options.work.create(scope.sessionId, { ...input, idempotencyKey: requestKey(scope.taskId, input.idempotencyKey) }, scope.actorId);
   });
   app.post(`${base}/delegations`, async request => {
-    const scope = await context(request.headers.authorization, request.headers['x-dutydeck-work-turn']);
+    const scope = await context(request);
     if (!options.delegations) throw new RuntimeError('LEADER_DELEGATION_DISABLED', '当前实例未启用 Leader 模式', 409);
     const input = workInput(delegationBriefSchema, request.body);
     return options.delegations.delegate(scope.sessionId, scope.actorId, scope.taskId, { ...input, idempotencyKey: requestKey(scope.taskId, input.idempotencyKey) });
   });
   app.get<{ Params: { id: string } }>(`${base}/:id`, async request => {
-    const scope = await context(request.headers.authorization, request.headers['x-dutydeck-work-turn']);
+    const scope = await context(request);
     return options.work.get(scope.sessionId, request.params.id, scope.actorId);
   });
   // Agent 修订只能收窄计划；扩大范围或目标本身要求确认时记为待确认修订，由人工确认后生效。dryRun 只返回影响预览。
   app.post<{ Params: { id: string } }>(`${base}/:id/revise`, async request => {
-    const scope = await context(request.headers.authorization, request.headers['x-dutydeck-work-turn']);
+    const scope = await context(request);
     const { dryRun, ...input } = workInput(agentReviseInput, request.body);
     return dryRun ? options.work.previewRevision(scope.sessionId, request.params.id, input, scope.actorId, 'agent')
       : options.work.revise(scope.sessionId, request.params.id, input, scope.actorId, 'agent');
   });
   app.post<{ Params: { id: string } }>(`${base}/:id/template`, async request => {
-    const scope = await context(request.headers.authorization, request.headers['x-dutydeck-work-turn']);
+    const scope = await context(request);
     return options.work.saveTemplate(scope.sessionId, request.params.id, workInput(templateNameInput, request.body).name, scope.actorId);
   });
   app.post<{ Params: { id: string } }>(`${base}/templates/:id/run`, async request => {
-    const scope = await context(request.headers.authorization, request.headers['x-dutydeck-work-turn']);
+    const scope = await context(request);
     const input = workInput(runTemplateInput, request.body);
     return options.work.runTemplate(scope.sessionId, request.params.id, input.version, input.goal, requestKey(scope.taskId, input.idempotencyKey), scope.actorId);
   });

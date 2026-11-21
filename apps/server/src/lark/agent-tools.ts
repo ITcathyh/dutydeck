@@ -1,6 +1,7 @@
 import type { ReplyPolish } from './reply-polish.js';
 import { OrdinarySendError, sendOrdinaryMessage } from './ordinary-send.js';
-import { AsyncLocalStorage } from 'node:async_hooks';
+import { AgentGroupToolError } from '../agent-host/turn-token.js';
+import { TurnAuthority, larkAgentSessionBinding, type LarkAgentSessionBinding } from '../agent-host/turn-authority.js';
 import { clock } from './group-task-context.js';
 import { sleep } from '../daemon/time.js';
 import { commitLarkAgentReply } from './agent-reply-delivery.js';
@@ -12,7 +13,7 @@ import { readExplicitFinal, resolveExplicitFinalContext, sendExplicitFinal, with
 import { collaborationAgentPrompt } from '../collaboration-cli.js';
 import { layeredWorkbenchPrompt, workbenchAgentPrompt } from '../work-item-tools.js';
 import type { LarkGroupManager } from './group-management.js';
-import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
+import { createHash } from 'node:crypto';
 import { resolve } from 'node:path';
 import { deliverArtifact, type ArtifactClient } from './artifact-delivery.js';
 import { parseLarkSourceId, shellQuote, workPlanConfirmationRequired, type ChannelMapping, type ChannelMappingRepository, type CollaborationObservation, type CollaborationScope, type CollaborationTeamContext, type ConfigRepository, type PolicyAction, type PolicyDecision, type Session, type SessionRepository, type TaskRecord, type TaskRepository } from '@dutydeck/shared';
@@ -37,141 +38,14 @@ import {
   type LarkMessageResult
 } from './service.js';
 
-const groupToolPath = '/api/lark/agent-tools';
-export const groupToolsSigningSecretConfigKey = 'lark.group_tools.signing_secret';
 const maxMessageLimit = 50;
 const maxWaitTimeoutMs = 30_000;
 const historyScanLimit = 500;
 const teamSearchEntryLimit = 30;
 const teamSearchTextLimit = 8_000;
 
-export interface LarkAgentSessionBinding { sessionId: string; appId: string; chatId: string; chatType: 'group' | 'p2p'; threadId?: string; threadRootMessageId?: string }
-
-export function larkAgentSessionBinding(session: Pick<Session, 'id' | 'source' | 'sourceId'>): LarkAgentSessionBinding | undefined {
-  if (session.source !== 'lark' || !session.sourceId) return;
-  const { appId, chatId, chatType, scope: rest } = parseLarkSourceId(session.sourceId);
-  if (appId === undefined || chatId === undefined || chatType === undefined) return;
-  if (!appId.startsWith('cli_')) return;
-  // 飞书 message event 的 chat_id（包括 p2p）是 oc_*；兼容早期把对方 open_id
-  // 持久化为 chatId 的 ou_* 记录，避免升级后旧会话突然失去工具能力。
-  if (chatType === 'group') {
-    if (!chatId.startsWith('oc_')) return;
-    // thread 路由可锚到根消息 om_*，不能直接作为原生话题 omt_* 查询。
-    const scope = rest[0] === 'thread' ? rest[1] : undefined;
-    return { sessionId: session.id, appId, chatId, chatType: 'group',
-      ...(scope?.startsWith('om_') ? { threadRootMessageId: scope } : scope ? { threadId: scope } : {}) };
-  }
-  if (chatType === 'p2p') {
-    if (!chatId.startsWith('oc_') && !chatId.startsWith('ou_')) return;
-    return { sessionId: session.id, appId, chatId, chatType: 'p2p' };
-  }
-  return;
-}
-
-export class AgentGroupToolError extends Error {
-  constructor(
-    public readonly code: string,
-    message: string,
-    public readonly statusCode = 400,
-    public readonly details?: Record<string, unknown>
-  ) {
-    super(message);
-    this.name = 'AgentGroupToolError';
-  }
-
-  response() {
-    return { error: { ...this.details, code: this.code, message: this.message } };
-  }
-}
-
-type Capability = LarkAgentSessionBinding & { token: string };
-
-export class LarkAgentToolCapabilityRegistry {
-  private readonly byToken = new Map<string, Capability>();
-  private readonly bySession = new Map<string, Capability>();
-
-  constructor(
-    private readonly sessions: SessionRepository,
-    private readonly apiBaseUrl: string,
-    private readonly signingSecret = randomBytes(32).toString('base64url'),
-    private readonly command = 'dutydeck'
-  ) {}
-
-  private tokenFor(binding: LarkAgentSessionBinding) {
-    const digest = createHmac('sha256', this.signingSecret)
-      .update(`dutydeck-group-tools-v1\0${binding.sessionId}\0${binding.appId}\0${binding.chatId}`)
-      .digest('base64url');
-    return `v1.${digest}`;
-  }
-
-  finalTurnToken(sessionId: string, taskId: string, attemptId: string) {
-    return createHmac('sha256', this.signingSecret).update(`dutydeck-final-turn-v1\0${sessionId}\0${taskId}\0${attemptId}`).digest('base64url');
-  }
-
-  assertFinalTurn(sessionId: string, taskId: string, attemptId: string, presented?: string) {
-    const expected = Buffer.from(this.finalTurnToken(sessionId, taskId, attemptId));
-    const actual = Buffer.from(typeof presented === 'string' ? presented : '');
-    if (actual.length !== expected.length || !timingSafeEqual(actual, expected)) throw new AgentGroupToolError('FINAL_TURN_EXPIRED', '最终答复凭证不属于当前任务轮次，请使用本轮提供的命令。', 403);
-  }
-
-  workbenchTurnToken(sessionId: string, taskId: string, attemptId: string) {
-    return this.finalTurnToken(sessionId, taskId, attemptId);
-  }
-
-  assertWorkbenchTurn(sessionId: string, taskId: string, attemptId: string | undefined, presented?: string) {
-    const expected = Buffer.from(attemptId ? this.workbenchTurnToken(sessionId, taskId, attemptId) : '');
-    const actual = Buffer.from(typeof presented === 'string' ? presented : '');
-    if (!attemptId || !actual.length || actual.length !== expected.length || !timingSafeEqual(actual, expected)) throw new AgentGroupToolError('WORK_ITEM_TURN_EXPIRED', '工具凭证不属于当前任务尝试，请使用本轮提供的完整 agent --turn 命令前缀。', 403);
-  }
-
-  environmentFor(session: Session): Record<string, string> {
-    const binding = larkAgentSessionBinding(session);
-    if (!binding) return {};
-    const existing = this.bySession.get(session.id);
-    const capability = existing?.appId === binding.appId && existing.chatId === binding.chatId
-      ? existing
-      : { ...binding, token: this.tokenFor(binding) };
-    if (existing && existing !== capability) this.byToken.delete(existing.token);
-    this.bySession.set(session.id, capability);
-    this.byToken.set(capability.token, capability);
-    return {
-      dutydeck_group_tools_url: `${this.apiBaseUrl.replace(/\/$/, '')}${groupToolPath}`,
-      dutydeck_group_tools_token: capability.token,
-      dutydeck_group_tools_command: stableMemoryCommand(this.command)
-    };
-  }
-
-  async resolve(token: string | undefined): Promise<LarkAgentSessionBinding> {
-    const capability = token ? this.byToken.get(token) : undefined;
-    if (!capability) throw new AgentGroupToolError('GROUP_TOOL_UNAUTHORIZED', '群协作工具凭证缺失或无效。该工具只能在 Dutydeck 飞书会话内使用。', 401);
-    const session = await this.sessions.get(capability.sessionId);
-    const binding = session ? larkAgentSessionBinding(session) : undefined;
-    if (!session || !binding || binding.appId !== capability.appId || binding.chatId !== capability.chatId || session.archivedAt || ['failed', 'stopped'].includes(session.state)) {
-      throw new AgentGroupToolError('GROUP_TOOL_SESSION_EXPIRED', '当前 Dutydeck 飞书会话已结束，群协作工具凭证不再有效。', 401);
-    }
-    return binding;
-  }
-
-  async resolveSession(token: string | undefined): Promise<{ binding: LarkAgentSessionBinding; session: Session }> {
-    const binding = await this.resolve(token);
-    const session = await this.sessions.get(binding.sessionId);
-    if (!session) throw new AgentGroupToolError('GROUP_TOOL_SESSION_EXPIRED', '当前 Dutydeck 飞书会话已结束，群协作工具凭证不再有效。', 401);
-    return { binding, session };
-  }
-
-  close() {
-    this.byToken.clear();
-    this.bySession.clear();
-  }
-}
-
-export async function loadOrCreateGroupToolsSigningSecret(configs: ConfigRepository) {
-  const existing = (await configs.get(groupToolsSigningSecretConfigKey))?.trim();
-  if (existing) return existing;
-  const created = randomBytes(32).toString('base64url');
-  await configs.set(groupToolsSigningSecretConfigKey, created);
-  return created;
-}
+export { AgentGroupToolError, groupToolsSigningSecretConfigKey, loadOrCreateGroupToolsSigningSecret, TurnTokens } from '../agent-host/turn-token.js';
+export { TurnAuthority as LarkAgentToolCapabilityRegistry, larkAgentSessionBinding, agentGroupToolBearerToken, type LarkAgentSessionBinding } from '../agent-host/turn-authority.js';
 
 export interface LarkGroupToolClient {
   getBotInfo(): Promise<LarkBotInfo>;
@@ -511,10 +385,7 @@ export const deterministicAgentActionKey = (input: {
   return `${prefix}${hash.slice(0, 42)}`;
 };
 
-interface AgentToolTurn { sessionId: string; taskId: string; attemptId: string; actorId?: string }
-
 export class LarkAgentToolsService {
-  private readonly requestTurns = new AsyncLocalStorage<{ turn?: AgentToolTurn }>();
   private readonly clients = new Map<string, { secret: string; domain: string; client: LarkGroupToolClient }>();
   private readonly identities = new Map<string, { secret: string; domain: string; info: Promise<LarkBotInfo> }>();
   private readonly pollIntervalMs: number;
@@ -522,31 +393,17 @@ export class LarkAgentToolsService {
   readonly commands = new LarkAgentCommands();
 
   constructor(
-    private readonly capabilities: LarkAgentToolCapabilityRegistry,
+    readonly capabilities: TurnAuthority,
     private readonly configs: ConfigRepository,
     private readonly options: LarkAgentToolsOptions = {}
   ) {
     this.pollIntervalMs = Math.max(50, options.pollIntervalMs ?? 1_000);
   }
 
-  runInRequestScope(next: () => void) { this.requestTurns.run({}, next); }
+  runInRequestScope(next: () => void) { this.capabilities.runInRequestScope(next); }
 
-  async bindRequestTurn(token: string | undefined, presented?: string) {
-    const binding = await this.capabilities.resolve(token);
-    const active = this.options.workbenchTask?.(binding.sessionId);
-    this.capabilities.assertWorkbenchTurn(binding.sessionId, active?.taskId ?? '', active?.attemptId, presented);
-    const scope = this.requestTurns.getStore();
-    if (scope) scope.turn = { sessionId: binding.sessionId, taskId: active!.taskId, attemptId: active!.attemptId!, actorId: active!.actorId };
-  }
-
-  requestTurn(sessionId: string) {
-    const turn = this.requestTurns.getStore()?.turn;
-    if (!turn) return;
-    const active = this.options.workbenchTask?.(sessionId);
-    if (sessionId !== turn.sessionId || active?.taskId !== turn.taskId || active?.attemptId !== turn.attemptId || active?.actorId !== turn.actorId) {
-      throw new AgentGroupToolError('WORK_ITEM_TURN_EXPIRED', '任务尝试已结束，请使用本轮提供的完整 agent --turn 命令前缀。', 403);
-    }
-    return turn;
+  bindRequestTurn(token: string | undefined, presented?: string) {
+    return this.capabilities.bindRequestTurn(token, presented, this.options.workbenchTask);
   }
 
   private clientFor(config: StoredLarkConfig) {
@@ -571,7 +428,7 @@ export class LarkAgentToolsService {
 
   private async context(token: string | undefined, action: 'group_tools.read' | 'group_tools.discover' | 'group_tools.send'): Promise<ToolContext> {
     const binding = await this.capabilities.resolve(token);
-    const turn = this.requestTurn(binding.sessionId);
+    const turn = this.capabilities.requestTurn(binding.sessionId);
     const toolAuthority = await this.options.authorizeTool?.(binding.sessionId, action);
     if (this.options.executionPolicy) {
       const decision = await this.options.executionPolicy.authorize('group_tools', action);
@@ -591,15 +448,15 @@ export class LarkAgentToolsService {
       config = await this.options.groupManager.resolved(config, binding.chatId);
     }
     if (!config.groupToolsEnabled) throw new AgentGroupToolError('GROUP_TOOLS_DISABLED', '当前飞书机器人的 Agent 群协作工具已被管理员关闭。', 403);
-    this.requestTurn(binding.sessionId);
+    this.capabilities.requestTurn(binding.sessionId);
     return { ...binding, config, client: this.clientFor(config) };
   }
 
   private async authorized<T>(context: ToolContext, operation: keyof typeof operationScopes, action: () => Promise<T>) {
     try {
-      this.requestTurn(context.sessionId);
+      this.capabilities.requestTurn(context.sessionId);
       const result = await action();
-      this.requestTurn(context.sessionId);
+      this.capabilities.requestTurn(context.sessionId);
       return result;
     }
     catch (error) {
@@ -611,8 +468,6 @@ export class LarkAgentToolsService {
       throw error;
     }
   }
-
-  assertWorkbenchTurn(sessionId: string, taskId: string, attemptId: string | undefined, presented?: string) { this.requestTurn(sessionId); this.capabilities.assertWorkbenchTurn(sessionId, taskId, attemptId, presented); }
 
   async workbenchContext(token?: string) {
     const context = await this.context(token, 'group_tools.read');
@@ -637,7 +492,7 @@ export class LarkAgentToolsService {
    */
   async memoryContext(token?: string): Promise<LarkAgentSessionBinding & { groupMemoryScope?: LarkGroupMemoryScope }> {
     const binding = await this.capabilities.resolve(token);
-    this.requestTurn(binding.sessionId);
+    this.capabilities.requestTurn(binding.sessionId);
     await this.options.authorizeTool?.(binding.sessionId, 'memory');
     const config = await readLarkConfig(this.configs, binding.appId);
     if (!config) {
@@ -646,7 +501,7 @@ export class LarkAgentToolsService {
     if (!larkMemoryEnabled(config)) {
       throw new AgentGroupToolError('MEMORY_DISABLED', '当前飞书机器人已关闭会话记忆。', 403);
     }
-    this.requestTurn(binding.sessionId);
+    this.capabilities.requestTurn(binding.sessionId);
     return { ...binding, groupMemoryScope: config.groupMemoryScope };
   }
 
@@ -1237,7 +1092,7 @@ export class LarkAgentToolsService {
       });
     }
     if (content.length > 20_000) throw new AgentGroupToolError('INVALID_GROUP_MESSAGE', 'content 不能超过 20000 个字符。', 400);
-    const turn = this.requestTurn(context.sessionId) ?? this.options.workbenchTask?.(context.sessionId);
+    const turn = this.capabilities.requestTurn(context.sessionId) ?? this.options.workbenchTask?.(context.sessionId);
     const idempotencyKey = input.idempotencyKey?.trim() || deterministicSendUuid({
       sessionId: context.sessionId,
       taskId: turn?.taskId,
@@ -1316,7 +1171,7 @@ export class LarkAgentToolsService {
       sendFile: value => value.replyTo ? this.authorized(context, 'reply', () => client.replyFile!({ messageId: value.replyTo!, replyInThread: value.inThread, fileKey: value.fileKey, idempotencyKey: value.idempotencyKey })) : this.authorized(context, 'send', () => client.sendFile!({ chatId: value.chatId, fileKey: value.fileKey, idempotencyKey: value.idempotencyKey })),
       sendImage: value => value.replyTo ? this.authorized(context, 'reply', () => client.replyImage!({ messageId: value.replyTo!, replyInThread: value.inThread, imageKey: value.imageKey, idempotencyKey: value.idempotencyKey })) : this.authorized(context, 'send', () => client.sendImage!({ chatId: value.chatId, imageKey: value.imageKey, idempotencyKey: value.idempotencyKey }))
     };
-    const turn = this.requestTurn(context.sessionId) ?? this.options.workbenchTask?.(context.sessionId);
+    const turn = this.capabilities.requestTurn(context.sessionId) ?? this.options.workbenchTask?.(context.sessionId);
     return deliverArtifact({ configs: this.configs, sessionId: context.sessionId, cwd: session.cwd, client: artifactClient, path, target, image: input.image === true, idempotencyKey: input.idempotencyKey, turn, privatePaths: this.options.artifactPrivatePaths });
   }
 
@@ -1549,8 +1404,3 @@ export const larkGroupToolsPrompt = (allowSend: boolean, access = { read: true, 
   ...(access.discover ? ['发现成员/机器人：group peers/members/bots。'] : []),
   ...(allowSend ? ['发送独立消息/文件：group send/send-file。交付文件用 send-file；要接在某条消息下用 --reply-to <om_* message_id> --in-thread。'] : [])
 ].map((line, index) => index ? line : `[Dutydeck 飞书会话工具] ${line}`);
-
-export const agentGroupToolBearerToken = (authorization?: string) => {
-  const match = authorization?.match(/^Bearer\s+(.+)$/i);
-  return match?.[1]?.trim();
-};
