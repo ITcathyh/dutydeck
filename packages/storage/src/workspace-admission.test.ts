@@ -136,6 +136,45 @@ it('derives preexisting unknown ownership, keeps it through reopen and stop, and
   expect(()=>x.settleAttempt(af(a),'late-result',{kind:'driver_result',submissionId:'original-send',outcome:'completed',outputDigest:digest('late'),stopReason:'end_turn',complete:true})).toThrow();
   const integrity=new Database(h.path);expect(integrity.pragma('foreign_key_check')).toEqual([]);integrity.close();
 });
+it.each(['gone', 'one live', 'missing', 'preparing', 'active', 'steering unknown', 'stop block'] as const)(
+  'checks physical exit and remaining holds when another session claims: %s', async scenario => {
+    const h = fixture(), origin = h.session('origin', h.root), target = h.session('target', h.root);
+    h.accept(origin);
+    let attempt = h.x.claimNext(origin)!.attempt!;
+    const checks = [];
+    for (const id of scenario === 'missing' ? [] : ['first', 'second']) {
+      let r = h.x.beforeCreate(origin, { resourceId: id, kind: 'local_only' });
+      r = h.x.spawned(origin, id, r.revision, { identityId: id, kind: 'local_only', locator: { driver: id } });
+      r = h.x.creationFinished(origin, id, r.revision, 'created');
+      const live = scenario === 'one live' && id === 'second';
+      r = h.x.observed(origin, id, r.revision, { observationId: id, identityId: id, state: live ? 'live' : 'gone', observedAt: new Date().toISOString(), evidenceRef: 'fixture' });
+      if (live) checks.push({ resourceId: id, expectedRevision: r.revision, observationId: id });
+    }
+    if (scenario !== 'preparing') {
+      attempt = h.x.markSubmissionPending(af(attempt), { submissionId: 'send', inputDigest: digest('input'), resourceRefs: [], authorizationRefs: [] }).attempt!;
+      if (scenario === 'steering unknown') {
+        const task = h.accept(origin, 'steer');
+        h.x.beginQueuedSteering(origin, task.id, task.revision, { operationId: 'steer', actor, target: { taskId: attempt.taskId, attemptId: attempt.attemptId } });
+        h.x.resolveQueuedSteering(origin, 'steer', h.repos.execution.getTaskExecution(task.id)!.steering!.controller, 'unknown');
+      }
+      if (scenario !== 'active') h.x.markReconcileRequired(af(attempt), { reasonId: 'lost', code: 'DISCONNECTED', evidenceRefs: [] });
+    }
+    if (scenario === 'stop block') await h.repos.config.set('runtime_driver_stop_block:origin', '{}');
+    expect(h.x.canPrepareWorkspace(h.root)).toBe(scenario === 'gone');
+    h.accept(origin, 'next');
+    expect(h.x.canPrepareWorkspace(h.root)).toBe(false);
+    const task = h.accept(target);
+    if (scenario === 'gone') {
+      expect(() => h.x.claimNext(origin)).toThrow(expect.objectContaining({ code: 'SESSION_EXECUTION_BUSY' }));
+      expect(h.x.claimNext(target)?.task.id).toBe(task.id);
+      expect(h.repos.execution.getTaskExecution(attempt.taskId)?.task.status).toBe('reconcile_required');
+    } else {
+      expect(h.repos.execution.getTaskExecution(task.id, { claim: h.claim, idleResources: checks })?.blockers)
+        .toContainEqual(expect.objectContaining({ code: 'WORKSPACE_EXECUTION_BUSY', sessionId: origin.sessionId }));
+      expect(() => h.x.claimNext(target, checks)).toThrow(expect.objectContaining({ code: 'WORKSPACE_RESOURCE_BLOCKED' }));
+    }
+  }
+);
 it('only computes workspace admission for queued tasks while validating every read claim', () => {
   const h=fixture(),cwd=h.repo('repo'),target=h.session('target',cwd),foreign=h.session('foreign',cwd);
   const task=h.accept(target),a=h.x.claimNext(target)!.attempt!;
