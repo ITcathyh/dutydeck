@@ -2,7 +2,7 @@ import { readLarkConfig } from '../config.js';
 import { parseRepairCardActionValue } from '../repair.js';
 import type { CallbackHandler } from './button-context.js';
 
-export const repair: CallbackHandler = async (ctx, { operatorOpenId, context }) => {
+export const repair: CallbackHandler = async (ctx, { workflow, operatorOpenId, context }) => {
   const parsedRepair = parseRepairCardActionValue(workflow);
   if (!parsedRepair) return { type: 'error', content: '修复操作无法识别，请重新发送 /repair。' };
   if (!ctx.reconcileConfig || parsedRepair.appId !== ctx.reconcileConfig.appId) {

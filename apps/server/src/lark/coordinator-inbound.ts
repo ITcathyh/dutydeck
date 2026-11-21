@@ -1,3 +1,5 @@
+import { storedButtons } from './handlers/stored-buttons.js';
+import { taskButtons } from './handlers/task-buttons.js';
 import { resolveCallback } from './handlers/callbacks.js';
 import { turnDecisionKey } from './recovery-decision.js';
 import { fromRecord } from './turn-record.js';
@@ -2287,6 +2289,25 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
   private buttonDependencies() {
     const host = this;
     return {
+      capabilitiesForTask: this.capabilitiesForTask.bind(this),
+      continueInPlaceAction: this.continueInPlaceAction.bind(this),
+      currentTurnInterruptDenial: this.currentTurnInterruptDenial.bind(this),
+      handleDetailLogin: this.handleDetailLogin.bind(this),
+      inbox: this.inbox,
+      interruptedTurnAction: this.interruptedTurnAction.bind(this),
+      isDeferredTask: this.isDeferredTask.bind(this),
+      pushTaskError: this.pushTaskError.bind(this),
+      queuedSteerCapabilities: this.queuedSteerCapabilities.bind(this),
+      refreshResultVerification: this.refreshResultVerification.bind(this),
+      relaunchCardAction: this.relaunchCardAction.bind(this),
+      retryInFlight: this.retryInFlight,
+      runTurn: this.runTurn.bind(this),
+      scheduleResultDaily: this.scheduleResultDaily.bind(this),
+      steerQueuedTurn: this.steerQueuedTurn.bind(this),
+      submitResultFollowUp: this.submitResultFollowUp.bind(this),
+      unknownTaskAction: this.unknownTaskAction.bind(this),
+      verificationView: this.verificationView.bind(this),
+      verifyInFlight: this.verifyInFlight,
       cardMappings: this.cardMappings,
       commandAllowlisted: this.commandAllowlisted.bind(this),
       currentAccess: this.currentAccess.bind(this),
@@ -2328,17 +2349,11 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
     // 不存在「一端认、另一端不认」的权限缝隙。同时兼容线上遗留的 {action, task_id}。
     const parsed = parseLarkCardActionValue(value);
     if (!parsed) return { type: 'error', content: '无法识别卡片操作' };
-    // 结果卡续问行：任务从持久化映射取，不依赖内存里还有没有这条任务，重启后照样能点。
-    if (parsed.action === 'ask_plain' || parsed.action === 'ask_reply' || parsed.action === 'ask_detail') return this.submitResultFollowUp(parsed, operatorOpenId, context);
-    if (parsed.action === 'schedule_daily') return this.scheduleResultDaily(parsed, operatorOpenId, context);
-    // 查看详情只读账本、不碰内存任务：重启后老卡片上的按钮同样可用。
-    if (parsed.action === 'detail') return this.handleDetailLogin(operatorOpenId, context, parsed);
-    const action = parsed.action;
-    const taskId = parsed.taskId;
-    if (action === 'run_in_new_session' || action === 'rerun_in_new_session') return this.relaunchCardAction(action, taskId, parsed.turn, operatorOpenId, context);
-    if (action === 'replay_turn' || action === 'abandon_turn') return this.interruptedTurnAction(action, taskId, parsed.turn, operatorOpenId, context);
-    if (action === 'continue_in_place') return this.continueInPlaceAction(taskId, parsed.turn, operatorOpenId, context);
-    if (action === 'resolve_retry' || action === 'resolve_completed' || action === 'resolve_failed') return this.unknownTaskAction(action, taskId, parsed.turn, parsed.target, operatorOpenId, context);
+    const { action, taskId } = parsed;
+    const deps = this.buttonDependencies();
+    if (Object.hasOwn(storedButtons, action)) {
+      return storedButtons[action as keyof typeof storedButtons](deps, parsed, operatorOpenId, context);
+    }
     const task = this.tasks.get(taskId) ?? (action === 'cancel'
       ? await this.restoreQueuedCardAction(taskId, parsed.turn, context)
       : action === 'verify' || action === 'use_verification_command' ? await this.restoreVerifyCardAction(taskId, parsed.turn, context) : undefined);
@@ -2381,99 +2396,6 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
     // 鉴权本身是异步的，期间同样可能翻页。
     if (actionStale()) return { type: 'warning', content: '任务已开始新一轮，请在最新的卡片上操作' };
 
-    // 刷新：卡片心跳受频率限制（含 per-app 限流），用户看到的可能是滞后画面。
-    // 这里强制重绘一次当前状态，不改变任务状态机，因此对终态卡片无意义（按钮也不渲染）。
-    if (action === 'refresh') {
-      if (!isLarkCardActionAvailable('refresh', {
-        state: task.state, taskId: task.id, turn: task.turn,
-        ...(task.retryable !== undefined ? { retryable: task.retryable } : {}),
-        capabilities: this.capabilitiesForTask(task)
-      })) {
-        return { type: 'warning', content: '当前状态无法刷新，任务已结束或心跳已停止' };
-      }
-      try {
-        await task.requestUpdate?.(task.state === 'queued' ? 'queued' : 'running', false);
-        return { type: 'success', content: '已拉取最新状态' };
-      } catch (error) {
-        this.log.warn({ error, taskId }, '刷新飞书卡片失败');
-        return { type: 'error', content: '刷新失败，请稍后重试或前往 Dutydeck Web 查看' };
-      }
-    }
-
-    // 排队卡的「中断当前这一轮，先做这条」「插进当前这一轮」：与 /steer 同一段逻辑，只是分别只做提升或只做插话。
-    // 按钮可用与否按此刻的队列重算（与渲染同一个判断）；会动正在执行的那一轮，所以另过一道中断门。
-    // 插话可能要等 Agent 回应，超出卡片回调时限：门禁同步走完，执行放后台，结果写回这张排队卡。
-    if (action === 'steer_promote' || action === 'steer_inject') {
-      const sessionId = task.sessionId;
-      const runtimeTaskId = task.runtimeTaskId;
-      if (!sessionId || !runtimeTaskId || !isLarkCardActionAvailable(action, {
-        state: task.state, taskId: task.id, turn: task.turn,
-        capabilities: { ...this.capabilitiesForTask(task), ...(await this.queuedSteerCapabilities(task)) }
-      })) {
-        return { type: 'warning', content: '这条已不在紧挨着当前这一轮的位置，无法插队；请发送 /status 查看最新状态' };
-      }
-      const actor = { ...task.event, senderOpenId: operatorOpenId };
-      const denial = await this.currentTurnInterruptDenial(effectiveConfig, actor, sessionId);
-      if (denial) return { type: 'warning', content: denial };
-      void (async () => {
-        const steering = await this.steerQueuedTurn(effectiveConfig, actor, sessionId, { id: runtimeTaskId, status: 'queued' }, action === 'steer_inject' ? 'inject' : 'promote')
-          .catch(error => { this.log.warn({ error, taskId }, '排队卡插队失败'); return { steered: undefined, note: '插队没有成功：这条内容按正常顺序排队。' }; });
-        if (actionStale()) return;
-        if (steering.steered) task.steered = steering.steered;
-        task.steerNote = steering.note;
-        if (action === 'steer_promote') task.promoted = true;
-        await task.requestUpdate?.(task.state === 'running' ? 'running' : 'queued').catch(() => undefined);
-      })();
-      return { type: 'success', content: action === 'steer_inject' ? '正在把这条插进当前这一轮' : '正在把这条提到队首' };
-    }
-
-    // 使用推断出的验证命令：只把命令存进机器人配置并重绘这张卡，卡上已交付的结论不变。
-    // 命令取自落库的卡片入参，不信回调里的值；改机器人配置按 channel_bot.update 再判一次权限。
-    if (action === 'use_verification_command') {
-      const command = (await this.verificationView(task, effectiveConfig, task.state)).capabilities.verificationSuggestion;
-      if (!command) return { type: 'warning', content: '这个机器人已经配置了验证命令，或这张卡没有可用的候选命令。' };
-      if (!await this.isOperatorAllowed(effectiveConfig, operatorOpenId, task.event.chatId, task.sessionId, task.event.senderOpenId, 'channel_bot.update')) {
-        return { type: 'warning', content: '当前账号没有修改机器人配置的权限。' };
-      }
-      try {
-        await saveLarkConfig(this.workflowOptions.store, undefined, { originalAppId: currentConfig.appId, expectedRevision: currentConfig.revision ?? 1, verificationCommand: command });
-      } catch (error) {
-        this.log.warn({ error, taskId }, '保存验证命令失败');
-        return { type: 'error', content: '保存失败：机器人配置可能刚被修改过，请稍后重试或在 Web 端配置。' };
-      }
-      void this.refreshResultVerification(task, { ...effectiveConfig, verificationCommand: command })
-        .catch(error => this.log.warn({ error, taskId }, '验证命令已保存，结果卡未能更新'));
-      return { type: 'success', content: '已保存验证命令，之后改了代码会自动验证。' };
-    }
-
-    // 运行验证：只读收据上唯一允许的操作。它在工作目录执行管理员配置的验证命令，
-    // 新增一条带退出码与代码指纹的独立记录，卡上已交付的结论一个字都不改。
-    // 命令必然超出卡片回调 3 秒 SLA，所以门禁同步走完、执行放后台，完成后重绘同一张卡。
-    if (action === 'verify') {
-      // 与渲染端同一个判断：verificationView 内部就走 isLarkCardActionAvailable，
-      // 所以「界面上出现的按钮」与「后端接受的回调」严格等价，不存在死按钮也不存在旁路。
-      if (!(await this.verificationView(task, effectiveConfig, task.state)).canRun) {
-        return { type: 'warning', content: '当前没有可运行的验证命令，或这份验证记录已能证明当前代码。' };
-      }
-      if (this.verifyInFlight.has(task.id)) {
-        return { type: 'warning', content: '验证正在执行中，完成后会更新这张卡片，请勿重复点击。' };
-      }
-      this.verifyInFlight.add(task.id);
-      const command = effectiveConfig.verificationCommand!.trim();
-      void (async () => {
-        // 带上点击人：管理群的执行授权要求验证有可核验的发起人。
-        try { await this.runtime.runVerification!(task.sessionId!, { command }, operatorOpenId); }
-        catch (error) { this.log.warn({ error, taskId: task.id }, '运行验证失败，卡片按最新记录呈现'); }
-        finally {
-          // 先把卡刷成最新结论再放开重入：否则这段空档里的第二次点击会再起一个真实进程。
-          await this.refreshResultVerification(task, effectiveConfig)
-            .catch(error => this.log.warn({ error, taskId: task.id }, '验证结果未能更新到结果卡'));
-          this.verifyInFlight.delete(task.id);
-        }
-      })();
-      return { type: 'success', content: '已开始运行验证，完成后会更新这张卡片。' };
-    }
-
     // 旧版排队卡片会发 interrupt，仍按安全的单轮次取消处理，不中断当前运行任务。
     // P0-1：有权限取消/中断/重试他人发起的任务时，要求二次点击确认。
     // 键绑定 操作人+任务+轮次+动作，60 秒内同一按钮第二次点击才真正执行，过期需重新确认。
@@ -2483,120 +2405,10 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
         return { type: 'warning', content: '该任务由他人发起，再次点击同一按钮以确认操作' };
       }
     }
-
-    if (action === 'cancel' || (action === 'interrupt' && task.state === 'queued')) {
-      if (task.state !== 'queued') return { type: 'warning', content: '任务已不在排队中' };
-      if (!task.sessionId || !task.runtimeTaskId || !this.runtime.cancelQueued) return { type: 'warning', content: '排队任务当前不可取消' };
-      task.state = 'interrupting';
-      const sessionId = task.sessionId;
-      const runtimeTaskId = task.runtimeTaskId;
-      const cancelQueued = this.runtime.cancelQueued.bind(this.runtime);
-      void (async () => {
-        try {
-          await cancelQueued(sessionId, runtimeTaskId, operatorOpenId);
-          // 取消这一轮的排队期间可能已经 /retry 开了新一轮：旧点击不得改写新一轮状态，
-          // 也不得触发新卡重绘。这一轮的实际终态由它自己的事件流负责。
-          if (actionStale()) {
-            this.log.info({ taskId, turn: actionTurn }, '排队取消完成时任务已进入新一轮，跳过旧轮次的状态改写');
-            return;
-          }
-          task.state = 'cancelled';
-          await task.requestUpdate?.('cancelled', false);
-        } catch (error) {
-          // 排队任务可能在点击时已转为运行态；绝不回退中断 Session，交由任务事件流对账实际状态。
-          this.log.warn({ error, taskId, sessionId, runtimeTaskId }, '取消飞书排队任务失败');
-          if (actionStale()) return;
-          if (task.state === 'interrupting') task.state = 'queued';
-          this.pushTaskError(task, `取消排队任务失败：${error instanceof Error ? error.message : String(error)}`);
-          await task.requestUpdate?.(task.state === 'running' ? 'running' : 'queued', false).catch(() => undefined);
-        }
-      })();
-      return { type: 'success', content: '正在取消排队任务' };
+    const button = action === 'interrupt' && task.state === 'queued' ? 'cancel' : action;
+    if (Object.hasOwn(taskButtons, button)) {
+      return taskButtons[button as keyof typeof taskButtons](deps, { task, taskId, action, actionTurn, actionStale, effectiveConfig, operatorOpenId });
     }
-
-    if (action === 'interrupt') {
-      if (!task.sessionId || task.state !== 'running') return { type: 'warning', content: '任务当前不可中断' };
-      const runtimeTaskId = task.runtimeTaskId;
-      if (this.runtime.dispatch && !runtimeTaskId) return { type: 'warning', content: '任务尚未完成接收，请稍后再试' };
-      task.state = 'interrupting';
-      task.interruptRequested = true;
-      const sessionId = task.sessionId;
-      void (async () => {
-        try {
-          if (runtimeTaskId) await this.runtime.interrupt(sessionId, runtimeTaskId, operatorOpenId);
-          else await this.runtime.interrupt(sessionId, undefined, operatorOpenId);
-          // 中断返回时可能已经 /retry：新一轮正在跑，旧点击不能把它标成 interrupted。
-          if (actionStale()) {
-            this.log.info({ taskId, turn: actionTurn }, '中断完成时任务已进入新一轮，跳过旧轮次的状态改写');
-            return;
-          }
-          // The signal is only an intent. Runtime's task event supplies the
-          // confirmed terminal state; do not publish a cancellation receipt yet.
-          await task.requestUpdate?.('running', false);
-        } catch (error) {
-          this.log.warn({ error, taskId, sessionId }, '中断飞书任务失败');
-          if (actionStale()) return;
-          task.state = 'running';
-          task.interruptRequested = false;
-          this.pushTaskError(task, `中断任务失败：${error instanceof Error ? error.message : String(error)}`);
-          await task.requestUpdate?.('running', false).catch(() => undefined);
-        }
-      })();
-      return { type: 'success', content: '正在取消任务' };
-    }
-
-    if (action === 'retry') {
-      // 检查与 task.state = 'queued' 之间隔着 await：同步占位，第一次点击挂上 runTurn 或放弃之前，同一任务的其他点击一律拒绝。
-      if (this.retryInFlight.has(task.id)) return { type: 'warning', content: '正在重试，请勿重复点击' };
-      this.retryInFlight.add(task.id);
-      try {
-        if (deferredConfirmationId(task.events, task.runtimeTaskId ?? task.id) || task.sessionId && task.runtimeTaskId && await this.isDeferredTask(task.sessionId, task.runtimeTaskId)) return { type: 'warning', content: '确认已登记，请使用原确认卡。' };
-        if (task.state !== 'failed' && task.state !== 'interrupted' && task.state !== 'cancelled') return { type: 'warning', content: '只有失败、已中断或已取消的任务可以重试' };
-        // 与渲染端同一张表：标记为不可重试（例如旧对话启动器版本变化）时卡上没有「重试」，
-        // 回调端同样拒绝，不在旧会话上再跑一遍注定失败的请求。
-        if (!isLarkCardActionAvailable('retry', {
-          state: task.state, taskId: task.id, turn: task.turn,
-          ...(task.retryable !== undefined ? { retryable: task.retryable } : {}),
-          capabilities: this.capabilitiesForTask(task)
-        })) return { type: 'warning', content: '这个任务不能在当前对话重试，请按卡片上的说明处理' };
-        if (!operatorOpenId) return { type: 'warning', content: '缺少操作人身份，无法重试' };
-        // runtime 已接收过这一轮：只有它确认停在失败、中断或取消才重试；已执行、仍在跑或读不到都不重发。
-        if (task.sessionId && task.runtimeTaskId && this.runtime.getTasks) {
-          const runtimeTaskId = task.runtimeTaskId;
-          const status = (await this.runtime.getTasks(task.sessionId).catch(() => undefined))?.find(item => item.id === runtimeTaskId)?.status;
-          if (actionStale()) return { type: 'warning', content: '任务已开始新一轮，请在最新的卡片上操作' };
-          if (!status || !['failed', 'interrupted', 'cancelled'].includes(status)) return { type: 'warning', content: '这一轮在 Agent 那边已执行或结果未知，不能直接重试，请发送 /status 查看' };
-        }
-        const retryEvent = { ...task.event, senderOpenId: operatorOpenId, senderType: 'user', senderAppId: undefined };
-        const previousState = task.state;
-        task.state = 'queued';
-        try {
-          if (task.inbox) await this.inbox!.update(task.inbox, { event: retryEvent, state: 'received', turn: task.turn + 1, cardId: undefined, taskId: undefined, materials: undefined,
-            ...(task.inbox.request ? { request: { ...task.inbox.request, materialPrompt: task.retryMaterialPrompt ?? task.prompt } } : {}) });
-        } catch (error) {
-          if (!actionStale()) task.state = previousState;
-          return { type: 'warning', content: error instanceof Error ? error.message : '重试记录保存失败，请稍后重试' };
-        }
-        if (actionStale()) return { type: 'warning', content: '任务已开始新一轮，请在最新的卡片上操作' };
-        if (task.runtimeTaskId && this.workflowOptions.store) await clearTaskReportSafely(this.workflowOptions.store, task.runtimeTaskId);
-        task.event = retryEvent;
-        task.config = effectiveConfig;
-        task.cancelRequested = undefined;
-        task.recovered = undefined;
-        // 生命周期字段在 runTurn 递增 turn 后再重置，避免上一轮在途的
-        // 过程更新或结果发送把旧消息 ID 写进新一轮。
-        task.group.tail = task.group.tail.then(() => this.runTurn(task)).catch(error => {
-          this.log.error({ error, chatId: task.event.chatId, messageId: task.event.messageId }, '重试飞书任务失败');
-          this.pushTaskError(task, `重试任务失败：${errorMessage(error)}`);
-          task.state = 'failed';
-          task.requestUpdate?.('failed', false).catch(() => undefined);
-        });
-        return { type: 'success', content: '已开始重试' };
-      } finally {
-        this.retryInFlight.delete(task.id);
-      }
-    }
-
     return { type: 'error', content: '不支持的卡片操作' };
   }
 }

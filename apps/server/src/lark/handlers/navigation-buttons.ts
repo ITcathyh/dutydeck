@@ -4,7 +4,7 @@ import { larkPluginCommandHelp } from '../plugin-commands.js';
 import type { LarkMessageEvent } from '../listener.js';
 import type { CallbackHandler } from './button-context.js';
 
-export const helpPage: CallbackHandler = async (ctx, { operatorOpenId, context }) => {
+export const helpPage: CallbackHandler = async (ctx, { workflow, operatorOpenId, context }) => {
   const pageValue = parseLarkHelpPageValue(workflow);
   if (!pageValue) return { type: 'error', content: '无法识别帮助页码。' };
   if (!context?.messageId || !context.chatId || !operatorOpenId || !ctx.reconcileConfig || !ctx.store) {
