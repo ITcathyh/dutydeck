@@ -222,7 +222,7 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
     catch { return [{ code: 'WORKSPACE_RESOURCE_UNVERIFIABLE', sessionId }]; }
     const result: ExecutionBlocker[] = [];
     // 飞书记忆作业只写自己的记忆目录：不参与仓库互斥，只和在同一目录里执行的会话（包括其他记忆作业）互斥。
-    const selfSource = (cached('SELECT source FROM sessions WHERE id=?').get(sessionId) as {source:string|null}|undefined)?.source;
+    const selfSource = preparation ? 'work_item' : (cached('SELECT source FROM sessions WHERE id=?').get(sessionId) as {source:string|null}|undefined)?.source;
     const orchestrated = (source: string | null | undefined) => source === 'work_item' || source === 'lark-leader';
     // LIKE is ASCII case-insensitive and treats '_' as a wildcard. Preserve its candidates whenever
     // stop/verification evidence could make a LIKE-only orphan produce a blocker.

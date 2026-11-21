@@ -7,7 +7,7 @@ const STARTUP_TIMEOUT_MS = 30_000;
 
 const LOADING = /^│\s*(?:model|directory):\s*loading\b/i;
 const LOADED_BANNER = /^│[ \t]+model:[ \t]+(?!loading\b)[^│\s][^│\r\n]*│[ \t]*\n│[ \t]+directory:[ \t]+(?!loading\b)[^│\s][^│\r\n]*│$/im;
-const PENDING = /^(?:Resuming(?: session)?(?:…|\.{3})?|(?:[•⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]\s*)?Working[^\r\n]{0,160}esc to interrupt\)?|esc to interrupt|Queued for capacity|Too many requests right now(?:\. You're in the queue.*)?|Select permissions|Review hooks|Press enter to continue)$/i;
+export const CODEX_BUSY_FOOTER = /^[ \t]*(?:(?:[•⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏][ \t]*)?Working[^\r\n]{0,160}esc to interrupt\)?|esc to interrupt|Queued for capacity|Too many requests right now(?:\. You're in the queue.*)?)[ \t]*$/im;
 const STARTUP_PENDING = /^(?:Resuming(?: session)?(?:…|\.{3})?|Select permissions|Review hooks|Press enter to continue)$/i;
 const CODEX_BANNER = /^(?:Codex|│\s*>_ OpenAI Codex \(v[^\s()]+\)\s*│)$/i;
 const TRAEX_BANNER = /^(?:TraeX|TraeCode CLI)$/i;
@@ -113,8 +113,8 @@ export function isInputReady(screen: string, cli: 'Codex' | 'TraeX', busyPattern
   if (cli === 'TraeX' && isTraexBusyScreen(screen)) return false;
   const rows = screen.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, '').split(/\r?\n/);
   const lines = rows.map(line => line.trim()).filter(Boolean);
-  if (lines.some(line => LOADING.test(line) || (cli === 'TraeX' ? STARTUP_PENDING : PENDING).test(line)
-    || (cli !== 'TraeX' && busyPattern?.test(line)))) return false;
+  if (lines.some(line => LOADING.test(line) || STARTUP_PENDING.test(line)
+    || (cli === 'Codex' && (CODEX_BUSY_FOOTER.test(line) || busyPattern?.test(line))))) return false;
 
   const composerRows = cli === 'TraeX' ? rows : lines;
   let prompt = composerRows.length - 1;

@@ -132,19 +132,30 @@ export class IdleDetector {
     }
     this.clearTimer();
     this.isIdle = false;
-    this.busyTransitionArmed = false;
+    this.busyTransition = 'unarmed';
     if (this.programStatusTerminal()) this.fireIdle();
   }
 
   programStatusActive(): boolean { return this.programStatusAuthority; }
 
   programStatusTerminal(): boolean {
-    if (!this.programStatusAuthority || this.programStatusPending || this.programStatusEvictedBusy.size > 0) return false;
-    for (const rec of this.programStatusRecords.values()) {
-      if (rec.state === 'working' || rec.state === 'blocked') return false;
-    }
+    if (!this.programStatusAuthority || this.programStatusPending || this.hasBusyProgramStatus()) return false;
     const root = this.programStatusRecords.get('');
     return !!root && ['done', 'idle', 'error'].includes(root.state);
+  }
+
+  private hasBusyProgramStatus(): boolean {
+    if (this.programStatusEvictedBusy.size) return true;
+    for (const record of this.programStatusRecords.values()) {
+      if (record.state === 'working' || record.state === 'blocked') return true;
+    }
+    return false;
+  }
+
+  busyEvidence(): 'program_status_busy' | 'static_busy' | 'activity_transition' | undefined {
+    if (this.hasBusyProgramStatus()) return 'program_status_busy';
+    if (this.staticBusyLatch) return 'static_busy';
+    if (this.busyTransition === 'busy') return 'activity_transition';
   }
 
   programStatusBlock(): ProgramStatusEvent | undefined {
@@ -176,7 +187,7 @@ export class IdleDetector {
   /** Global copies built once for lastMatchIndex; the caller's RegExp objects are never mutated. */
   private staticBusyPattern: RegExp | undefined;
   private staticBusyClearPattern: RegExp | undefined;
-  private busyTransitionArmed = false;
+  private busyTransition: 'unarmed' | 'armed' | 'busy' = 'unarmed';
   private readyPattern: RegExp | undefined;
   private readySeen = false;
   /** Pre-idle latch for static busy screens (capacity queue). Set from PTY
@@ -260,14 +271,14 @@ export class IdleDetector {
     // matches — can be a transcript redraw, so they are insufficient evidence.
     // Keep the edge armed across chunks, then emit at most once per cycle.
     if (
-      this.busyTransitionArmed
+      this.busyTransition === 'armed'
       && this.idleToBusyPattern
       && (
         this.idleToBusyPattern.test(stripped)
         || this.idleToBusyPattern.test(this.outputTail)
       )
     ) {
-      this.busyTransitionArmed = false;
+      this.busyTransition = 'busy';
       this.busyCallback?.();
     }
 
@@ -352,7 +363,7 @@ export class IdleDetector {
 
   reset(): void {
     this.isIdle = false;
-    this.busyTransitionArmed = false;
+    this.busyTransition = 'unarmed';
     this.outputTail = '';
     this.readySeen = false;
     this.staticBusyLatch = false;
@@ -369,7 +380,7 @@ export class IdleDetector {
    */
   resetReadyEvidence(): void {
     this.isIdle = false;
-    this.busyTransitionArmed = false;
+    this.busyTransition = 'unarmed';
     this.outputTail = '';
     this.readySeen = false;
     this.staticBusyLatch = false;
@@ -394,7 +405,7 @@ export class IdleDetector {
     this.clearTimer();
     this.idleCallback = null;
     this.busyCallback = null;
-    this.busyTransitionArmed = false;
+    this.busyTransition = 'unarmed';
     this.staticBusyLatch = false;
     this.staticBusyClearTailPos = -1;
   }
@@ -423,7 +434,7 @@ export class IdleDetector {
     this.isIdle = true;
     // Arm before the callback: markPromptReady may synchronously flush queued
     // input and call reset(), which must win and disarm this edge.
-    this.busyTransitionArmed = true;
+    this.busyTransition = 'armed';
     this.outputTail = '';
     this.clearTimer();
     this.idleCallback?.(source);

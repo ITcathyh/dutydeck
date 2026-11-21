@@ -160,7 +160,7 @@ it.each(['gone', 'one live', 'missing', 'preparing', 'active', 'steering unknown
       if (scenario !== 'active') h.x.markReconcileRequired(af(attempt), { reasonId: 'lost', code: 'DISCONNECTED', evidenceRefs: [] });
     }
     if (scenario === 'stop block') await h.repos.config.set('runtime_driver_stop_block:origin', '{}');
-    expect(h.x.canPrepareWorkspace(h.root)).toBe(scenario === 'gone');
+    expect(h.x.canPrepareWorkspace(h.root)).toBe(false);
     h.accept(origin, 'next');
     expect(h.x.canPrepareWorkspace(h.root)).toBe(false);
     const task = h.accept(target);
