@@ -21,8 +21,8 @@
       "development": "./src/transcript-source.ts",
       "import": "./dist/transcript-source.js"
     },
-    "./mock-agent": "./agents/mock-acp.mjs",
-    "./claude-agent": "./agents/claude-acp.mjs"
+    "./mock-agent": { "development": "./agents/mock-acp.mjs", "default": "./agents/mock-acp.mjs" },
+    "./claude-agent": { "development": "./agents/claude-acp.mjs", "default": "./agents/claude-acp.mjs" }
   },
   "files": [
     "src/index.ts",

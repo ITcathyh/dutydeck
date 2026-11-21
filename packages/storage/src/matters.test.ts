@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { createRepositories } from './index.js';
+import { createRepositories, latestSchemaVersion } from './index.js';
 
 describe('matter storage and schema 44', () => {
   it('upgrades existing data, reopens idempotently and preserves foreign keys', async () => {
@@ -29,7 +29,7 @@ describe('matter storage and schema 44', () => {
       expect(repos.matters!.find('session', 'fork')?.id).toBe(first.id); repos.close();
       const check = new Database(file);
       expect(check.pragma('foreign_key_check')).toEqual([]);
-      expect(check.prepare('SELECT MAX(version) AS v FROM schema_migrations').get()).toEqual({ v: 51 }); check.close();
+      expect(check.prepare('SELECT MAX(version) AS v FROM schema_migrations').get()).toEqual({ v: latestSchemaVersion }); check.close();
     } finally { rmSync(dir, { recursive: true, force: true }); }
   });
   it('creates the source before a derived session first receives a task', () => {

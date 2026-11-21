@@ -331,9 +331,7 @@ export interface StartSessionInput { nativeForkSessionId?: string; agentId: stri
 export interface SendInput { prompt: string }
 export interface AgentCapabilities { protocol: Exclude<Protocol, 'auto'>; available: boolean; detail?: string; pause: boolean; resume: boolean }
 
-export class RuntimeError extends Error {
-  constructor(public readonly code: string, message: string, public readonly statusCode = 400) { super(message); this.name = 'RuntimeError'; }
-}
+export { RuntimeError } from './runtime-error.js';
 
 export interface AgentRepository {
   list(): Promise<AgentConfig[]>;
@@ -616,8 +614,6 @@ export * from './database-control.js';
 
 export * from './task-execution.js';
 
-export * from './bot-configuration.js';
-export * from './bot-configuration-scope.js';
 export * from './lark-config.js';
 
 export * from './driver-resources.js';

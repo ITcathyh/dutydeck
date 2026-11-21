@@ -11,8 +11,8 @@
       "development": "./src/index.ts",
       "import": "./dist/index.js"
     },
-    "./jsonl-agent": "./agents/jsonl-echo.mjs",
-    "./pty-agent": "./agents/pty-shell.mjs"
+    "./jsonl-agent": { "development": "./agents/jsonl-echo.mjs", "default": "./agents/jsonl-echo.mjs" },
+    "./pty-agent": { "development": "./agents/pty-shell.mjs", "default": "./agents/pty-shell.mjs" }
   },
   "files": [
     "src/index.ts",

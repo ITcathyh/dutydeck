@@ -39,3 +39,8 @@ export const agentWeightsSchema = z.array(z.object({
   if (!Number.isFinite(rows.reduce((total, row) => total + row.weight, 0))) context.addIssue({ code: z.ZodIssueCode.custom, message: 'Total weight must be finite' });
 });
 export type AgentWeight = z.infer<typeof agentWeightsSchema>[number];
+
+export const riskControlModes = ['off', 'guidance', 'enforced'] as const;
+export type RiskControlMode = (typeof riskControlModes)[number];
+
+export const sha256HexSchema = z.string().regex(/^[a-f0-9]{64}$/, 'Digest must be a lowercase SHA-256 64-hex string');

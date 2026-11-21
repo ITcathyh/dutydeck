@@ -1,9 +1,10 @@
 import { cpSync, existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
-import { basename, dirname, isAbsolute, resolve } from 'node:path';
+import { basename, dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { build } from 'esbuild';
+import { loadWorkspaceEntries } from '../../../scripts/workspace-entries.mjs';
 import { asciiBundle } from './ascii-bundle.mjs';
 import { missingRelativeImports } from '../src/daemon/import-closure.mjs';
 
@@ -11,38 +12,17 @@ const serverRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const workspaceRoot = resolve(serverRoot, '../..');
 const webDist = resolve(workspaceRoot, 'apps/web/dist');
 const publicDir = resolve(serverRoot, 'public');
-const aliases = new Map([
-  ['acpx/runtime', fileURLToPath(import.meta.resolve('acpx/runtime'))],
-  ['@dutydeck/acp-client', 'packages/acp-client/src/index.ts'],
-  ['@dutydeck/acp-client/regex-timeout', 'packages/acp-client/src/regex-timeout.ts'],
-  ['@dutydeck/acp-client/transcript-source', 'packages/acp-client/src/transcript-source.ts'],
-  ['@dutydeck/legacy-importer', 'packages/legacy-importer/src/index.ts'],
-  ['@dutydeck/cli-adapters', 'packages/cli-adapters/src/index.ts'],
-  ['@dutydeck/config', 'packages/config/src/index.ts'],
-  ['@dutydeck/plugin-sdk', 'packages/plugin-sdk/src/index.ts'],
-  ['@dutydeck/pty-driver', 'packages/pty-driver/src/index.ts'],
-  ['@dutydeck/pty-driver/support', 'packages/pty-driver/src/support.ts'],
-  ['@dutydeck/relay', 'packages/relay/src/index.ts'],
-  ['@dutydeck/runtime', 'packages/agent-runtime/src/index.ts'],
-  ['@dutydeck/runtime/digest', 'packages/agent-runtime/src/digest.ts'],
-  ['@dutydeck/secret-provider', 'packages/secret-provider/src/index.ts'],
-  ['@dutydeck/session-backends', 'packages/session-backends/src/index.ts'],
-  ['@dutydeck/shared', 'packages/shared/src/index.ts'],
-  ['@dutydeck/shared/child-environment', 'packages/shared/runtime/child-environment.mjs'],
-  ['@dutydeck/shared/secret-guard', 'packages/shared/runtime/secret-guard.mjs'],
-  ['@dutydeck/shared/safe-git', 'packages/shared/runtime/safe-git.mjs'],
-  ['@dutydeck/storage', 'packages/storage/src/index.ts'],
-  ['@dutydeck/storage/helpers', 'packages/storage/src/helpers.ts'],
-  ['@dutydeck/terminal-renderer', 'packages/terminal-renderer/src/index.ts'],
-  ['@dutydeck/transports', 'packages/transports/src/index.ts']
-]);
+const aliases = {
+  ...loadWorkspaceEntries(),
+  'acpx/runtime': fileURLToPath(import.meta.resolve('acpx/runtime'))
+};
 
 const workspacePlugins = [{
   name: 'dutydeck-workspace',
   setup(buildApi) {
     buildApi.onResolve({ filter: /^(?:acpx\/runtime|@dutydeck\/)/ }, args => {
-      const target = aliases.get(args.path);
-      return target ? { path: isAbsolute(target) ? target : resolve(workspaceRoot, target) } : undefined;
+      const path = aliases[args.path];
+      return path ? { path } : undefined;
     });
   }
 }];

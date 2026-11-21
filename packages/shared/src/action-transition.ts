@@ -1,5 +1,5 @@
 import type { ActionStatus } from './collaboration.js';
-import { RuntimeError } from './index.js';
+import { RuntimeError } from './runtime-error.js';
 
 /** Shared by the collaboration ledger and the channel-neutral plugin tool ledger. */
 export const actionTransitions: Readonly<Record<ActionStatus, readonly ActionStatus[]>> = {

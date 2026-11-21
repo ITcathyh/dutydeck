@@ -669,6 +669,8 @@ export const migrations: Migration[] = [
   } }
 ]
 
+export const latestSchemaVersion = migrations.at(-1)!.version
+
 /** v38：collaboration_duties 加 scenarios_json 列，把旧的 alarm_json 转进去。 */
 export function addCollaborationScenarios(db: Database.Database): void {
   db.exec('ALTER TABLE collaboration_duties ADD COLUMN scenarios_json TEXT CHECK (scenarios_json IS NULL OR json_valid(scenarios_json))')
@@ -848,9 +850,8 @@ function shellArgument(value: string): string {
 }
 
 function schemaTooNewError(db: Database.Database, actualVersion: number): Error {
-  const supportedVersion = migrations.at(-1)!.version
   const command = `dutydeck database execution-status --database ${shellArgument(db.name)}`
-  return new Error(`DATABASE_SCHEMA_TOO_NEW: database schema version ${actualVersion}; this build supports schema version ${supportedVersion}. Startup refuses the newer database and does not migrate or downgrade it.\nRead-only inspection:\n${command}\nUse a Dutydeck build that supports schema ${actualVersion}, or stop all writers and restore a known-good backup into a separate new directory with dutydeck backup restore --archive <backup-archive> --target <new-restored-directory>. Restoring a backup discards all writes made after that backup; switching to older code is not a database rollback.`)
+  return new Error(`DATABASE_SCHEMA_TOO_NEW: database schema version ${actualVersion}; this build supports schema version ${latestSchemaVersion}. Startup refuses the newer database and does not migrate or downgrade it.\nRead-only inspection:\n${command}\nUse a Dutydeck build that supports schema ${actualVersion}, or stop all writers and restore a known-good backup into a separate new directory with dutydeck backup restore --archive <backup-archive> --target <new-restored-directory>. Restoring a backup discards all writes made after that backup; switching to older code is not a database rollback.`)
 }
 
 function recordedMigrations(db: Database.Database): Map<number, string | null> {

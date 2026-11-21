@@ -5,9 +5,9 @@ import { createRequire } from 'node:module';
 import { Worker } from 'node:worker_threads';
 import type { RepositoryOpenOptions } from '@dutydeck/shared';
 import { canonicalDatabase, openDatabaseControl } from './database-control.js';
-import { migrations } from './migrations.js';
+import { latestSchemaVersion } from './migrations.js';
 
-export const BACKUP_SCHEMA_VERSION = migrations.at(-1)!.version;
+export const BACKUP_SCHEMA_VERSION = latestSchemaVersion;
 
 // Inline so bundled CLIs need no extra worker file. An eval worker resolves modules from the process cwd,
 // so the driver path is resolved here, next to this module (or the bundle), and passed in.

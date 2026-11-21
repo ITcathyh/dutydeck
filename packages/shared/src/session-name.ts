@@ -1,4 +1,4 @@
-import { RuntimeError } from './index.js';
+import { RuntimeError } from './runtime-error.js';
 
 export const SESSION_NAME_MAX_LENGTH = 80;
 export const SESSION_NAME_CONFIG_PREFIX = 'session_name:';

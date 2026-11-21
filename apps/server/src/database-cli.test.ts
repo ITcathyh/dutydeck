@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { bundleCliForTest, lazyBundleForTest } from '../../../tests/support/bundle-for-test.js';
-import { createRepositories } from '@dutydeck/storage';
+import { createRepositories, latestSchemaVersion } from '@dutydeck/storage';
 import { dutydeckPtySessionName } from '@dutydeck/pty-driver/support';
 import {
   DatabaseCliError,
@@ -148,7 +148,7 @@ describe('database-cli', () => {
       const result = await runDatabaseExecutionStatus({ database: dbPath });
       expect(result.status).toBe('legacy');
       expect(result.authority).toBe('legacy');
-      expect(schemaVersion).toBe(51);
+      expect(schemaVersion).toBe(latestSchemaVersion);
       expect(result.schemaVersion).toBe(schemaVersion);
       expect(result.counts?.tasks).toBe(1);
     });

@@ -1,5 +1,4 @@
-import type { AgentWeight } from './configuration-primitives.js';
-import type { RiskControlMode } from './bot-configuration.js';
+import type { AgentWeight, RiskControlMode } from './configuration-primitives.js';
 
 /** 飞书机器人配置的跨端契约：服务端存储形态、保存请求体与对外投影。 */
 
