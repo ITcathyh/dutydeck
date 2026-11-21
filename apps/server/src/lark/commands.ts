@@ -1,3 +1,4 @@
+import type { ChatCommandHandler } from './handlers/command-context.js';
 /**
  * 飞书聊天内命令层：形状校验（唯一校验器）+ 命令注册表 + 能力/权限判定 + /help 渲染。
  *
@@ -167,6 +168,7 @@ export type LarkCommandName = 'work' | 'schedule' | 'ci' | 'pr' | 'help' | 'repa
 
 export interface LarkCommandDefinition {
   name: LarkCommandName;
+  execute?: ChatCommandHandler;
   aliases?: string[];
   /** 简体中文摘要，「动作 + 对象 + 预期结果」，不用「处理」「继续」这类空动词。 */
   summary: string;
@@ -199,11 +201,11 @@ export interface LarkCommandDefinition {
  *             私聊为自己的池），注入由 runTurn 完成。
  */
 export const larkCommandRegistry: readonly LarkCommandDefinition[] = [
-  { name: 'work', summary: '查看目标、分配 Agent、回答步骤问题并复用工作流', usage: '/work；/work consult [--agents A,B] -- <问题>；/work research 目标；/work templates', mutating: true, requires: c => c.work === true, unavailableReason: '当前服务未接入目标工作台。' },
-  { name: 'schedule', summary: '查看、创建、启用或停用此话题的定时任务', usage: '/schedule；/schedule every 分钟 指令；/schedule enable 编号；/schedule disable 编号', mutating: true, requires: c => c.schedule === true, unavailableReason: '当前服务未接入定时任务。' },
-  { name: 'ci', summary: '等待当前提交的 CI（由已安装的 CI 插件提供）、按规则交给 Agent 修复失败、查看等待或取消续作', usage: '/ci；/ci wait [工作流]；/ci fix；/ci cancel <等待编号>', mutating: true, requires: c => c.ci === true,
+  { name: 'work', execute: async ctx => (await import('./handlers/automation.js')).handleWork(ctx), summary: '查看目标、分配 Agent、回答步骤问题并复用工作流', usage: '/work；/work consult [--agents A,B] -- <问题>；/work research 目标；/work templates', mutating: true, requires: c => c.work === true, unavailableReason: '当前服务未接入目标工作台。' },
+  { name: 'schedule', execute: async ctx => (await import('./handlers/automation.js')).handleSchedule(ctx), summary: '查看、创建、启用或停用此话题的定时任务', usage: '/schedule；/schedule every 分钟 指令；/schedule enable 编号；/schedule disable 编号', mutating: true, requires: c => c.schedule === true, unavailableReason: '当前服务未接入定时任务。' },
+  { name: 'ci', execute: async ctx => (await import('./handlers/automation.js')).handleCi(ctx), summary: '等待当前提交的 CI（由已安装的 CI 插件提供）、按规则交给 Agent 修复失败、查看等待或取消续作', usage: '/ci；/ci wait [工作流]；/ci fix；/ci cancel <等待编号>', mutating: true, requires: c => c.ci === true,
     unavailableReason: 'CI 续作未配置：还没有安装 CI 插件。安装方法：dutydeck plugin install <CI 插件目录或包> --yes，按插件说明用 dutydeck plugin config 填好令牌或 webhook 密钥，再执行 dutydeck restart 生效。用 webhook 的插件，把平台的 webhook 指向本服务的 /api/hooks/<插件提供方>。' },
-  { name: 'pr', summary: '把本会话的改动推到 dutydeck/ 分支并开 PR（先发确认卡，确认后才推送），或认领已有的 PR；之后跟进 CI 和评审意见', usage: '/pr [标题]；/pr follow <PR 链接或编号>', mutating: true, requires: c => c.pr === true,
+  { name: 'pr', execute: async ctx => (await import('./handlers/automation.js')).handlePr(ctx), summary: '把本会话的改动推到 dutydeck/ 分支并开 PR（先发确认卡，确认后才推送），或认领已有的 PR；之后跟进 CI 和评审意见', usage: '/pr [标题]；/pr follow <PR 链接或编号>', mutating: true, requires: c => c.pr === true,
     unavailableReason: '开 PR 未配置：没有安装支持开 PR 的 CI 插件。安装方法：dutydeck plugin install <插件目录> --yes（仓库自带的 plugins/github 支持），再用 dutydeck plugin config 填好访问令牌，执行 dutydeck restart 生效。' },
   { name: 'tasks', summary: '查看允许访问的待处理任务、运行进度和最近结果', usage: '/tasks [页码]', mutating: false, requires: c => c.tasks === true, unavailableReason: '当前机器人无法查询任务列表，/tasks 已停用。' },
   { name: 'answer', summary: '回答 Agent 的问题并继续原任务', usage: '/answer <问题编号> <回答>', mutating: true, requires: c => c.answer === true, unavailableReason: '当前机器人无法接收问题回答，/answer 已停用。' },
