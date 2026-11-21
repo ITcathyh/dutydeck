@@ -1,3 +1,4 @@
+import { approvalRulesQuery, queryKeys } from '../queries';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { ApiError, workspaceApprovalRulesApi } from '../api';
 import { currentInstance } from '../instance';
@@ -10,8 +11,8 @@ import { formatTime } from './SessionInsightShared';
  */
 export function WorkspaceApprovalRules() {
   const client = useQueryClient();
-  const key = ['workspace-approval-rules', currentInstance()];
-  const query = useQuery({ queryKey: key, queryFn: workspaceApprovalRulesApi.list, retry: false });
+  const key = queryKeys.approvalRules();
+  const query = useQuery(approvalRulesQuery());
   const remove = useMutation({ mutationFn: workspaceApprovalRulesApi.remove, onSuccess: () => client.invalidateQueries({ queryKey: key }) });
   const rules = query.data?.rules ?? [];
   return <Card padding="md" className="mt-4">

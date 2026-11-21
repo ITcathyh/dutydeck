@@ -1,4 +1,4 @@
-import { larkConfigQuery, queryKeys, systemCapabilitiesQuery } from '../queries';
+import { larkConfigQuery, openPlatformJobQuery, queryKeys, systemCapabilitiesQuery } from '../queries';
 import { draftFromBot, saveBodyFromDraft, msFromSeconds, secondsFromMs, type SharedBotDraft } from '../bot-settings-form';
 import { ReplyPolishSettings } from './ReplyPolishSettings';
 import { ReactionTriggerSetting } from './ReactionTriggerSetting';
@@ -212,12 +212,7 @@ export function LarkConfigModal({ agents, target, field, onLeaveGuardChange, onC
     return failed && routingAgentIds.length > 1 ? { ...failed, reason: `${failed.agentId}: ${failed.reason ?? '尚未配置可写 Hook'}` } : failed ?? statuses[0]!;
   }, enabled: Boolean(current && defaultAgentId && riskControlMode === 'enforced') });
   const agentOptions = useQuery({ queryKey: agentModelsQueryKey(defaultAgentId, defaultModel, current?.appId), queryFn: () => loadAgentModels(defaultAgentId, defaultModel || undefined, false, current?.appId), enabled: Boolean(defaultAgentId), initialData: () => current ? undefined : readCachedAgentModels(defaultAgentId, defaultModel || undefined), initialDataUpdatedAt: 0, refetchOnMount: 'always', staleTime: 5 * 60_000 });
-  const openPlatformJob = useQuery({
-    queryKey: ['lark-open-platform-job', openPlatformJobId],
-    queryFn: () => api.larkOpenPlatformSetupJob(openPlatformJobId),
-    enabled: Boolean(openPlatformJobId),
-    refetchInterval: query => ['preparing', 'waiting_for_scan', 'configuring'].includes(query.state.data?.status ?? '') ? 1_000 : false
-  });
+  const openPlatformJob = useQuery({ ...openPlatformJobQuery(openPlatformJobId), enabled: Boolean(openPlatformJobId) });
   useEffect(() => {
     const job = openPlatformJob.data;
     if (job?.status !== 'completed' || !job.slashCommands) return;
@@ -227,7 +222,7 @@ export function LarkConfigModal({ agents, target, field, onLeaveGuardChange, onC
   }, [openPlatformJob.data?.status, openPlatformJob.data?.appId, openPlatformJob.data?.slashCommands]);
   const startOpenPlatformSetup = useMutation({
     mutationFn: (forceLogin: boolean) => api.startLarkOpenPlatformSetup(appId.trim(), forceLogin),
-    onSuccess: job => { setOpenPlatformJobId(job.id); qc.setQueryData(['lark-open-platform-job', job.id], job); }
+    onSuccess: job => { setOpenPlatformJobId(job.id); qc.setQueryData(queryKeys.openPlatformJob(job.id), job); }
   });
   const enforcedHookReady = Boolean(hookStatus.data?.supported && hookStatus.data.installed && hookStatus.data.writable && hookStatus.data.nativeReady !== false);
   const legacyHighRiskNeedsMigration = Boolean(riskControlMode !== 'off' && current?.highRiskAllowedEmails.length && !highRiskAllowedUserNames.length);

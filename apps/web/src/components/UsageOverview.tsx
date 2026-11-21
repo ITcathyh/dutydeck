@@ -1,4 +1,4 @@
-import { managementGroupsQuery } from '../queries';
+import { managementGroupsQuery, queryKeys, usageSummaryQuery } from '../queries';
 import { useRef, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import type { UsageBackgroundBudget, UsageCap, UsageCategory } from '@dutydeck/shared';
@@ -37,7 +37,7 @@ export function UsageOverview({ bots, initialView = 'cost', onViewChange, onOpen
 }) {
   const [view, setView] = useState<UsageView>(initialView);
   const [range, setRange] = useState<UsageRange>('month');
-  const summary = useQuery({ queryKey: ['usage-summary'], queryFn: api.usageSummary, retry: false, refetchInterval: 30_000, refetchIntervalInBackground: false });
+  const summary = useQuery(usageSummaryQuery());
   const groups = useQuery({ ...managementGroupsQuery(), enabled: bots.length > 0 });
   const botName = (appId?: string) => appId ? bots.find(bot => bot.appId === appId)?.name ?? appId : '未归属 Bot（Web 任务等）';
   const chatName = (chatId?: string) => chatId ? groups.data?.groups.find(group => group.chatId === chatId)?.name ?? chatId : '';
@@ -114,7 +114,7 @@ function UsageCaps({ bots, caps, month, botName, chatName, groups }: { bots: Lar
   const [amount, setAmount] = useState('');
   const formRef = useRef({ scope, appId, chatId, amount });
   formRef.current = { scope, appId, chatId, amount };
-  const refresh = () => void qc.invalidateQueries({ queryKey: ['usage-summary'] });
+  const refresh = () => void qc.invalidateQueries({ queryKey: queryKeys.usageSummary() });
   const save = useMutation({
     mutationFn: (submitted: { input: Parameters<typeof api.setUsageCap>[0]; form: { scope: UsageCap['scope']; appId: string; chatId: string; amount: string } }) => api.setUsageCap(submitted.input),
     onSuccess: (_result, submitted) => {

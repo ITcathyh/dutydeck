@@ -1,3 +1,4 @@
+import { automationSchedulesQuery, instancesQuery, sessionQuery } from '../queries';
 import { useEffect, useState } from 'react';
 import { useQueries, useQuery, type Query } from '@tanstack/react-query';
 import type { AutomationScheduleSummary } from '@dutydeck/shared';
@@ -43,7 +44,7 @@ export function AutomationOverview({ sessions, summaries = {}, onSelectSession, 
   const [health, setHealth] = useState('');
   const [scope, setScope] = useState('all');
   const [pages, setPages] = useState<Record<string, number>>({});
-  const peers = useQuery({ queryKey: ['instances'], queryFn: api.instances, retry: false, staleTime: Infinity });
+  const peers = useQuery(instancesQuery());
   const sources = [{ id: '', name: '主实例' }, ...(peers.data?.instances ?? [])];
   if (currentInstance() && !sources.some(item => item.id === currentInstance())) sources.push({ id: currentInstance()!, name: '当前实例' });
   const visibleSources = sources.filter(item => scope === 'all' || item.id === (scope === 'main' ? '' : scope));
@@ -56,10 +57,10 @@ export function AutomationOverview({ sessions, summaries = {}, onSelectSession, 
     if (agentId.trim()) search.set('agentId', agentId.trim());
     if (enabled) search.set('enabled', enabled);
     if (health) search.set('health', health);
-    return { queryKey: ['automation-schedules', source.id || null, search.toString()], queryFn: () => api.automationSchedules(search, source.id || null), retry: false, enabled: !selected && !runOpen, refetchInterval: poll, refetchIntervalInBackground: false };
+    return { ...automationSchedulesQuery(source.id || null, search), enabled: !selected && !runOpen };
   }) });
   const selectedId = selected?.sessionId;
-  const selectedDetails = useQuery({ queryKey: ['session', currentInstance(), selectedId], queryFn: () => api.session(selectedId!), enabled: Boolean(selectedId) && !sessions.some(item => item.id === selectedId) && createdSession?.id !== selectedId, retry: false });
+  const selectedDetails = useQuery({ ...sessionQuery(currentInstance(), selectedId), enabled: Boolean(selectedId) && !sessions.some(item => item.id === selectedId) && createdSession?.id !== selectedId });
   const selectedSession = sessions.find(session => session.id === selectedId) ?? (createdSession?.id === selectedId ? createdSession : undefined) ?? selectedDetails.data;
   const failed = queries.filter(query => query.isError).length;
   const successful = queries.filter(query => query.isSuccess);

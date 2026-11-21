@@ -1,3 +1,4 @@
+import { automationQuery, ciProvidersQuery, queryKeys, workTemplatesQuery } from '../queries';
 import { useEffect, useRef, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { previewSessionSchedule, resolveScheduleDeadline, SCHEDULE_PRECONDITION_DEFAULT_TIMEOUT_SECONDS, SCHEDULE_PRECONDITION_MAX_TIMEOUT_SECONDS, type AutomationDeliveryTarget, type PublicSchedulePrecondition, type CreateSessionScheduleInput, type UpdateSessionScheduleInput, type PublicSessionSchedule as SessionSchedule } from '@dutydeck/shared';
@@ -81,9 +82,9 @@ export function scheduleDelivery(target: AutomationDeliveryTarget | undefined, s
 
 export function SessionAutomationPanel({ session, initialScheduleId, openCreateForm = false, taskTitle }: { session: Session; initialScheduleId?: string; openCreateForm?: boolean; taskTitle?: string }) {
   const qc = useQueryClient();
-  const queryKey = ['automation', currentInstance() ?? null, session.id];
-  const records = useQuery({ queryKey, queryFn: () => api.automation(session.id), retry: false, refetchInterval: query => query.state.error ? false : 10_000 });
-  const providers = useQuery({ queryKey: ['ci-providers', currentInstance() ?? null, session.id], queryFn: () => api.ciProviders(session.id), retry: false });
+  const queryKey = queryKeys.automation(session.id);
+  const records = useQuery(automationQuery(session.id));
+  const providers = useQuery(ciProvidersQuery(session.id));
   const [workflow, setWorkflow] = useState('');
   const [ciPrompt, setCiPrompt] = useState('');
   const [ttlHours, setTtlHours] = useState(24);
@@ -108,7 +109,7 @@ export function SessionAutomationPanel({ session, initialScheduleId, openCreateF
   const [template, setTemplate] = useState('');
   const [checkCommand, setCheckCommand] = useState('');
   const [checkTimeout, setCheckTimeout] = useState(String(SCHEDULE_PRECONDITION_DEFAULT_TIMEOUT_SECONDS));
-  const templates = useQuery({ queryKey: ['work-templates', currentInstance() ?? null, session.id], queryFn: () => api.workItems(session.id), retry: false, enabled: !isSessionActionDisabled(session) });
+  const templates = useQuery({ ...workTemplatesQuery(session.id), enabled: !isSessionActionDisabled(session) });
 
   const [notice, setNotice] = useState('');
   const [enabling, setEnabling] = useState<SessionSchedule>();
@@ -118,7 +119,7 @@ export function SessionAutomationPanel({ session, initialScheduleId, openCreateF
   const enablingTarget = enabling ? data?.deliveryTargets?.[enabling.id] : undefined;
   const readOnly = !data || isSessionActionDisabled(session);
   const canManageSchedule = (item: SessionSchedule) => !readOnly || item.mode === 'independent' || Boolean(item.executionContext);
-  const refresh = () => Promise.all([qc.invalidateQueries({ queryKey }), qc.invalidateQueries({ queryKey: ['automation-schedules'] }), qc.invalidateQueries({ queryKey: ['automation-history'] })]);
+  const refresh = () => Promise.all([qc.invalidateQueries({ queryKey }), qc.invalidateQueries({ queryKey: queryKeys.allAutomationSchedules() }), qc.invalidateQueries({ queryKey: queryKeys.allAutomationHistory() })]);
   // 只有能主动查询构建状态的 CI 插件支持在 Web 上等待构建；webhook 型的从飞书 /ci 发起。
   const pollingProviders = providers.data?.providers.filter(item => item.polling) ?? [];
   const providerName = (id?: string) => providers.data?.providers.find(item => item.id === id)?.displayName ?? id ?? 'CI';

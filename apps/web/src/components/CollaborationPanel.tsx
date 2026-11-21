@@ -1,3 +1,4 @@
+import { collaborationQuery, queryKeys } from '../queries';
 import { useState, useRef } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import {
@@ -210,13 +211,9 @@ function TriggerFields({ draft, disabled, cronHint, onChange }: {
  */
 function CollaborationPanelInner({ appId, chatId, groupName, botName }: CollaborationPanelProps) {
   const queryClient = useQueryClient();
-  const queryKey = ['collaboration-overview', appId, chatId];
+  const queryKey = queryKeys.collaboration(appId, chatId);
 
-  const overviewQuery = useQuery<CollaborationOverview>({
-    queryKey,
-    queryFn: () => collaborationApi.getOverview(appId, chatId),
-    retry: false
-  });
+  const overviewQuery = useQuery(collaborationQuery(appId, chatId));
 
   const [activeTab, setActiveTab] = useState<ActiveTab>('settings');
 

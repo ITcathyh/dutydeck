@@ -1,3 +1,4 @@
+import { managedMemoryQuery, projectMemoriesQuery, projectMemoryBindingQuery, queryKeys } from '../queries';
 import { sessionPath } from '../app-route';
 import { useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
@@ -16,11 +17,11 @@ export function MemoryManagementPanel({ session }: { session: Session }) {
   const qc = useQueryClient();
   const isLark = session.source === 'lark';
   const web = !session.source || session.source === 'web';
-  const projects = useQuery({ queryKey: ['projectMemories'], queryFn: api.projectMemories, enabled: open && web });
-  const binding = useQuery({ queryKey: ['projectMemoryBinding', session.id], queryFn: () => api.projectMemoryBinding(session.id), enabled: open && web });
+  const projects = useQuery({ ...projectMemoriesQuery(), enabled: open && web });
+  const binding = useQuery({ ...projectMemoryBindingQuery(session.id), enabled: open && web });
   const selected = projectId || binding.data?.projectId || '';
-  const pool = useQuery({ queryKey: ['managedMemory', session.id, selected, query], queryFn: () => isLark ? api.memoryPool(session.id, query) : api.projectMemory(selected, query), enabled: open && (isLark || Boolean(selected)) });
-  const refresh = async () => { await Promise.all([qc.invalidateQueries({ queryKey: ['managedMemory'] }), qc.invalidateQueries({ queryKey: ['projectMemories'] }), qc.invalidateQueries({ queryKey: ['projectMemoryBinding', session.id] }), qc.invalidateQueries({ queryKey: ['sessionMemory', session.id] })]); };
+  const pool = useQuery({ ...managedMemoryQuery(session.id, selected, query, isLark), enabled: open && (isLark || Boolean(selected)) });
+  const refresh = async () => { await Promise.all([qc.invalidateQueries({ queryKey: queryKeys.allManagedMemory() }), qc.invalidateQueries({ queryKey: queryKeys.projectMemories() }), qc.invalidateQueries({ queryKey: queryKeys.projectMemoryBinding(session.id) }), qc.invalidateQueries({ queryKey: queryKeys.sessionMemory(session.id) })]); };
   const action = useMutation({ mutationFn: (run: () => Promise<unknown>) => run(), onSuccess: refresh });
   const save = useMutation({
     mutationFn: async (submitted: NonNullable<typeof draft>): Promise<MemoryWriteResult> => {

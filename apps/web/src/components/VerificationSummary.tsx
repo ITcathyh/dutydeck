@@ -1,3 +1,4 @@
+import { sessionCapabilitiesQuery } from '../queries';
 import { useQuery } from '@tanstack/react-query';
 import { ShieldCheck } from 'lucide-react';
 import { api, type Session } from '../api';
@@ -6,7 +7,7 @@ import { verificationLabel } from './verification-presentation';
 import { useVerifications } from './useVerifications';
 
 export function VerificationSummary({ session, onOpenEvidence }: { session: Session; onOpenEvidence(): void }) {
-  const capabilities = useQuery({ queryKey: ['sessionCapabilities', session.id], queryFn: () => api.sessionCapabilities(session.id) });
+  const capabilities = useQuery(sessionCapabilitiesQuery(session.id));
   const evidence = useVerifications(session.id);
   const latest = evidence.data?.[0];
   const unavailable = capabilities.data?.verification === 'unavailable';

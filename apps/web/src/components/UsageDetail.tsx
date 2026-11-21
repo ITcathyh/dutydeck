@@ -1,3 +1,4 @@
+import { usageReportQuery, usageTasksQuery } from '../queries';
 import { useRef, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { usageUnknownModel, type UsageTaskRow } from '@dutydeck/shared';
@@ -94,8 +95,8 @@ export function UsageDetail({ botName, onOpenTask }: { botName(appId?: string): 
   const effectiveTo = to || defaultRange.current?.to || '';
   const invalidDateRange = Boolean(effectiveFrom && effectiveTo && effectiveFrom > effectiveTo);
   const query: UsageReportQuery = { from, to, ...filter };
-  const report = useQuery({ queryKey: ['usage-report', query], queryFn: () => api.usageReport(query), retry: false, placeholderData: previous => previous, enabled: !invalidDateRange });
-  const tasks = useQuery({ queryKey: ['usage-tasks', query, offset], queryFn: () => api.usageTasks({ ...query, limit: PAGE_SIZE, offset }), retry: false, placeholderData: previous => previous, enabled: !invalidDateRange });
+  const report = useQuery({ ...usageReportQuery(query), enabled: !invalidDateRange });
+  const tasks = useQuery({ ...usageTasksQuery(query, offset, PAGE_SIZE), enabled: !invalidDateRange });
   if (report.data && !report.isPlaceholderData && !query.from && !query.to) defaultRange.current = report.data.range;
   const data = report.data;
   const rangeFrom = from || data?.range.from || defaultRange.current?.from || '';

@@ -1,3 +1,4 @@
+import { foundationCapabilitiesQuery, groupMatrixQuery, queryKeys, scheduleCapabilitiesQuery, schedulesQuery, secretRefsQuery, terminalSettingsQuery } from '../queries';
 import { globalSettingFields, focusSettingField } from '../settings-search';
 import { PluginBindingsPanel } from './PluginBindingsPanel';
 import { ConfirmDialog } from './ConfirmDialog';
@@ -139,18 +140,18 @@ export function ControlCenterModal({
     return () => window.removeEventListener('beforeunload', beforeUnload);
   }, [open, modelDirty]);
 
-  const capabilities = useQuery({ queryKey: ['foundation-capabilities'], queryFn: foundationApi.capabilities, enabled: open && experimental, retry: false });
-  const matrix = useQuery({ queryKey: ['foundation-group-matrix'], queryFn: foundationApi.groupMatrix, enabled: open && experimental && capabilities.data?.repositoriesWired === true, retry: false });
-  const secretRefs = useQuery({ queryKey: ['foundation-secret-refs'], queryFn: foundationApi.secretRefs, enabled: open && experimental && capabilities.data?.repositoriesWired === true, retry: false });
-  const scheduleCapabilities = useQuery({ queryKey: ['schedule-capabilities'], queryFn: scheduleApi.capabilities, enabled: open && experimental, retry: false });
-  const schedules = useQuery({ queryKey: ['schedule-foundation-list'], queryFn: scheduleApi.list, enabled: open && experimental && scheduleCapabilities.data?.repositoriesWired === true, retry: false });
+  const capabilities = useQuery({ ...foundationCapabilitiesQuery(), enabled: open && experimental });
+  const matrix = useQuery({ ...groupMatrixQuery(), enabled: open && experimental && capabilities.data?.repositoriesWired === true });
+  const secretRefs = useQuery({ ...secretRefsQuery(), enabled: open && experimental && capabilities.data?.repositoriesWired === true });
+  const scheduleCapabilities = useQuery({ ...scheduleCapabilitiesQuery(), enabled: open && experimental });
+  const schedules = useQuery({ ...schedulesQuery(), enabled: open && experimental && scheduleCapabilities.data?.repositoriesWired === true });
   const createBot = useMutation({
     mutationFn: () => foundationApi.createChannelBot({ id: newId('channel-bot'), externalAppId: externalAppId.trim(), displayName: displayName.trim(), brand }),
     onSuccess: async () => {
       setDisplayName('');
       setExternalAppId('');
       setCreateOpen(false);
-      await queryClient.invalidateQueries({ queryKey: ['foundation-group-matrix'] });
+      await queryClient.invalidateQueries({ queryKey: queryKeys.groupMatrix() });
     }
   });
 
@@ -319,8 +320,8 @@ function AgentSection({ agents, legacyBots, modelReset, onModelDirtyChange, onCr
 
 function TerminalBackendSettings() {
   const client = useQueryClient();
-  const key = ['terminal-settings', currentInstance()];
-  const query = useQuery({ queryKey: key, queryFn: terminalSettingsApi.get, retry: false });
+  const key = queryKeys.terminalSettings();
+  const query = useQuery(terminalSettingsQuery());
   const [draft, setDraft] = useState<'tmux' | 'herdr' | undefined>();
   const save = useMutation({ mutationFn: terminalSettingsApi.set, onSuccess: data => { client.setQueryData(key, data); setDraft(undefined); } });
   const value = draft ?? query.data?.terminalBackend;

@@ -1,4 +1,4 @@
-import { larkConfigQuery, queryKeys, sessionsQuery, systemCapabilitiesQuery, tasksQuery } from './queries';
+import { agentsQuery, authStatusQuery, inboxQuery, instancesQuery, larkConfigQuery, pluginCommandsQuery, queryKeys, runSummariesQuery, sessionUsageQuery, sessionsQuery, skillsQuery, systemCapabilitiesQuery, tasksQuery, workspaceGroupsQuery } from './queries';
 import { backgroundKindFor } from '@dutydeck/shared';
 import { settingsSearchActions } from './settings-search';
 import { ConfigurationExplanationPanel } from './components/ConfigurationExplanationPanel';
@@ -127,16 +127,16 @@ export default function App() {
   };
 
 
-  const agents = useQuery({ queryKey: ['agents'], queryFn: api.agents, staleTime: 5 * 60_000 });
+  const agents = useQuery(agentsQuery());
   // 非当前任务没有 SSE，低频同步用于捕获飞书创建等外部变化；当前任务状态仍由 SSE 即时写入缓存。
   const sessions = useQuery(sessionsQuery());
-  const summaries = useQuery({ queryKey: ['run-summaries'], queryFn: api.runSummaries, refetchInterval: 15_000, refetchIntervalInBackground: false });
-  const inbox = useQuery({ queryKey: ['inbox'], queryFn: api.inbox, refetchInterval: 15_000, refetchIntervalInBackground: false, retry: false });
-  const workspaceGroups = useQuery({ queryKey: ['workspace-groups'], queryFn: api.workspaceGroups, refetchInterval: 15_000, refetchIntervalInBackground: false });
+  const summaries = useQuery(runSummariesQuery());
+  const inbox = useQuery(inboxQuery());
+  const workspaceGroups = useQuery(workspaceGroupsQuery());
   const larkConfig = useQuery(larkConfigQuery());
   const systemCapabilities = useQuery(systemCapabilitiesQuery());
-  const authStatus = useQuery({ queryKey: ['auth-status'], queryFn: api.authStatus, staleTime: Infinity, retry: false });
-  const peerInstances = useQuery({ queryKey: ['instances'], queryFn: api.instances, staleTime: Infinity, retry: false });
+  const authStatus = useQuery(authStatusQuery());
+  const peerInstances = useQuery(instancesQuery());
 
   const taskCreation = useNewSession({ agents: agents.data ?? [], onCreated: (session, task) => {
     setRunSummaries(current => ({ ...current, [session.id]: { sessionId: session.id, taskId: task.id, prompt: task.prompt, status: task.status, queuedCount: task.status === 'queued' ? 1 : 0, updatedAt: task.updatedAt || task.createdAt } }));
@@ -226,7 +226,7 @@ export default function App() {
   useEffect(() => { if (activeSessionId && sessions.isPending) void qc.prefetchQuery(historyOutlineQuery(activeSessionId, HISTORY_TURN_PAGE_SIZE)); }, [activeSessionId, sessions.isPending, qc]);
   const events = useEventHistory(activeSessionId, Boolean(active), HISTORY_TURN_PAGE_SIZE);
   const tasks = useQuery({ ...tasksQuery(activeSessionId), enabled: Boolean(active) });
-  const sessionUsage = useQuery({ queryKey: ['session-usage', activeSessionId], queryFn: () => api.sessionUsage(activeSessionId!), enabled: Boolean(active), retry: false, refetchInterval: 15_000, refetchIntervalInBackground: false });
+  const sessionUsage = useQuery({ ...sessionUsageQuery(activeSessionId), enabled: Boolean(active) });
   const missingActiveSession = Boolean(route.kind === 'session' && sessions.isSuccess && !active);
   const activeAgent = useMemo(() => agents.data?.find(agent => agent.id === active?.agentId), [agents.data, active?.agentId]);
   const activeOutputLabel = active?.model ?? activeAgent?.name ?? active?.agentId ?? 'Agent';
@@ -238,9 +238,9 @@ export default function App() {
     restart, resolvePermission, resolveActivePermission, pickComposerFile, activeModels, refreshModels,
     switchModel, switchReasoningEffort, modelReadiness
   } = useSessionActions(activeSessionId, { active, tasks, selectSession, setActionError, setSendFailure });
-  const skillCatalog = useQuery({ queryKey: ['skills', active?.cwd, active?.sourceId], queryFn: () => fetchSkillCatalog(active?.cwd, active?.source === 'lark' || active?.source === 'plugin_trigger' ? active.sourceId?.split(':')[0] : undefined, active?.sourceId?.split(':')[1], active?.workspaceSourceCwd), enabled: Boolean(active && !active.archivedAt), staleTime: 60_000 });
+  const skillCatalog = useQuery({ ...skillsQuery(active), enabled: Boolean(active && !active.archivedAt) });
   const skills = { ...skillCatalog, data: skillCatalog.data?.skills };
-  const pluginCommands = useQuery({ queryKey: ['plugin-commands', active?.cwd], queryFn: () => api.pluginCommands(active?.cwd), enabled: Boolean(active && !active.archivedAt), staleTime: 60_000 });
+  const pluginCommands = useQuery({ ...pluginCommandsQuery(active?.cwd), enabled: Boolean(active && !active.archivedAt) });
   const eventList = events.data?.events ?? [];
   const taskContext = useMemo(() => currentContextStats(eventList, sessionUsage.data?.snapshot?.context), [eventList, sessionUsage.data?.snapshot?.context]);
   const commandCatalog = events.data?.outline?.commandCatalog;
@@ -432,7 +432,7 @@ export default function App() {
       {primaryNav === 'bots' ? <LazyBoundary fallback={<div className="grid min-h-0 flex-1 place-items-center"><Spinner label="正在打开机器人管理…"/></div>}><BotManagement selectedAppId={selectedAppId} field={location.botField} onSelectBot={selectBot} onOpenLarkSetup={openLarkSetup} onSelectGroup={selectGroup} agents={agents.data ?? []} larkListeningDisabled={larkConfig.data?.listeningDisabled ?? false}/></LazyBoundary>
       : primaryNav === 'groups' ? <LazyBoundary fallback={<div className="grid min-h-0 flex-1 place-items-center"><Spinner label="正在打开群聊管理…"/></div>}><GroupManagement selectedChatId={selectedChatId} selectedAppId={selectedAppId} onSelectGroup={selectGroup} onNavigateToBot={selectBot} agents={agents.data ?? []}/></LazyBoundary>
       : primaryNav === 'automation' ? <div className="min-h-0 flex-1 overflow-y-auto"><div className="ui-page py-6 sm:py-8"><h1 className="mb-5 text-display font-semibold">自动化</h1><LazyBoundary fallback={<Spinner label="正在读取任务自动化…"/>}><AutomationOverview agents={agents.data ?? []} capabilities={systemCapabilities.data} onOpenAgentSetup={() => openSettings('agents')} sessions={visibleSessions} summaries={runSummaries} onSelectSession={selectSession}/></LazyBoundary></div></div>
-      : primaryNav === 'inbox' ? <div className="min-h-0 flex-1 overflow-y-auto"><div className="ui-page py-6 sm:py-8"><header className="mb-6"><p className="text-caption text-subtle">人的决定是执行的一部分</p><h1 className="mt-1 text-display font-semibold">待办</h1><p className="mt-1 text-body text-secondary">权限、提问和结果核对集中在这里。高风险授权只在任务卡里完成。</p></header><InboxPanel items={inbox.data?.items ?? []} loading={inbox.isLoading} failed={inbox.isError} onRetry={() => void inbox.refetch()} call={api.inboxAction} onSettled={() => { void qc.invalidateQueries({ queryKey: ['inbox'] }); void qc.invalidateQueries({ queryKey: queryKeys.sessions() }); void qc.invalidateQueries({ queryKey: ['run-summaries'] }); }} onOpen={handleSelectAttention}/></div></div>
+      : primaryNav === 'inbox' ? <div className="min-h-0 flex-1 overflow-y-auto"><div className="ui-page py-6 sm:py-8"><header className="mb-6"><p className="text-caption text-subtle">人的决定是执行的一部分</p><h1 className="mt-1 text-display font-semibold">待办</h1><p className="mt-1 text-body text-secondary">权限、提问和结果核对集中在这里。高风险授权只在任务卡里完成。</p></header><InboxPanel items={inbox.data?.items ?? []} loading={inbox.isLoading} failed={inbox.isError} onRetry={() => void inbox.refetch()} call={api.inboxAction} onSettled={() => { void qc.invalidateQueries({ queryKey: queryKeys.inbox() }); void qc.invalidateQueries({ queryKey: queryKeys.sessions() }); void qc.invalidateQueries({ queryKey: queryKeys.runSummaries() }); }} onOpen={handleSelectAttention}/></div></div>
       : primaryNav === 'more' ? <div className="min-h-0 flex-1 overflow-y-auto"><div className="ui-page py-6 sm:py-8"><header className="mb-6"><p className="text-caption text-subtle">管理与偏好</p><h1 className="mt-1 text-display font-semibold">更多</h1></header>
           <div className="overflow-hidden rounded-xl border border-default bg-surface shadow-card divide-y divide-subtle">
             <button type="button" onClick={() => setPrimaryNav('automation')} className="flex min-h-12 w-full items-center justify-between px-4 py-3 text-left transition-colors hover:bg-hover">
@@ -493,7 +493,7 @@ export default function App() {
             ? <aside aria-label="原始日志" className="ui-side-panel flex w-[420px] shrink-0 flex-col border-l border-code-border bg-code-surface text-code-header-text"><div className="flex h-11 items-center border-b border-code-border px-3 text-caption font-medium"><Terminal size={13} className="mr-2"/>原始日志<span className="ml-auto"><IconButton label="关闭原始日志" onClick={toggleRawPanel}><PanelRightClose size={14}/></IconButton></span></div><RawHistoryContent sessionId={active.id} text={raw} events={completeRawEvents} readComplete={events.loadAll} loading={events.loadingRaw} error={events.rawError} retry={() => void events.loadAll()}/></aside>
             : <Dialog open onClose={toggleRawPanel} label="原始日志" size="lg"><Dialog.Header><Terminal size={16}/><h2 className="text-title font-semibold">原始日志</h2><span className="ml-auto"><IconButton label="关闭原始日志" onClick={toggleRawPanel}><PanelRightClose size={16}/></IconButton></span></Dialog.Header><Dialog.Body className="bg-code-surface"><RawHistoryContent sessionId={active.id} text={raw} events={completeRawEvents} readComplete={events.loadAll} loading={events.loadingRaw} error={events.rawError} retry={() => void events.loadAll()}/></Dialog.Body></Dialog>)}
         </div>
-      : <WorkspaceOverview homeComposer={<HomeTaskComposer creation={taskCreation} onOpenSettings={openCreateTask}/>} mode={primaryNav === 'tasks' ? 'tasks' : 'home'} filters={primaryNav === 'home' ? { query: '', project: '' } : { query: taskFilters.query, project: taskFilters.project }} onFiltersChange={filters => updateTaskFilters(filters)} inbox={{ items: inbox.data?.items ?? [], loading: inbox.isLoading, failed: inbox.isError, onRetry: () => void inbox.refetch(), call: api.inboxAction, onSettled: () => { void qc.invalidateQueries({ queryKey: ['inbox'] }); void qc.invalidateQueries({ queryKey: queryKeys.sessions() }); void qc.invalidateQueries({ queryKey: ['run-summaries'] }); } }} onSelectAttention={handleSelectAttention} onOpenChanges={(id: string) => { selectSession(id); setTaskViews(current => ({ ...current, [id]: { ...current[id], tab: 'changes', changesVisited: true, inspector: false, inspectorChosen: true } })); }} sessions={visibleSessions} summaries={runSummaries} agents={agents.data ?? []} loading={sessions.isLoading} agentsLoading={agents.isLoading} larkBots={larkConfig.data?.bots ?? []} larkBotsLoading={larkConfig.isLoading} larkListeningDisabled={larkConfig.data?.listeningDisabled ?? false} larkBotsFailed={larkConfig.isError} larkBotsRetrying={larkConfig.isFetching} onRetryLarkBots={() => void larkConfig.refetch()} view={primaryNav === 'home' ? 'all' : workbenchView} onViewChange={view => { setWorkbenchView(view); setPrimaryNav('tasks'); }} onSelect={selectSession} onBulkArchive={ids => { captureDialogOpener(); bulkArchive.reset(); setBulkArchiveIds(ids); }} onCreate={openCreateTask} onOpenAgentSetup={() => openSettings('agents')} onOpenLarkSetup={() => openLarkSetup('new')} onManageBots={() => setPrimaryNav('bots')}/>}
+      : <WorkspaceOverview homeComposer={<HomeTaskComposer creation={taskCreation} onOpenSettings={openCreateTask}/>} mode={primaryNav === 'tasks' ? 'tasks' : 'home'} filters={primaryNav === 'home' ? { query: '', project: '' } : { query: taskFilters.query, project: taskFilters.project }} onFiltersChange={filters => updateTaskFilters(filters)} inbox={{ items: inbox.data?.items ?? [], loading: inbox.isLoading, failed: inbox.isError, onRetry: () => void inbox.refetch(), call: api.inboxAction, onSettled: () => { void qc.invalidateQueries({ queryKey: queryKeys.inbox() }); void qc.invalidateQueries({ queryKey: queryKeys.sessions() }); void qc.invalidateQueries({ queryKey: queryKeys.runSummaries() }); } }} onSelectAttention={handleSelectAttention} onOpenChanges={(id: string) => { selectSession(id); setTaskViews(current => ({ ...current, [id]: { ...current[id], tab: 'changes', changesVisited: true, inspector: false, inspectorChosen: true } })); }} sessions={visibleSessions} summaries={runSummaries} agents={agents.data ?? []} loading={sessions.isLoading} agentsLoading={agents.isLoading} larkBots={larkConfig.data?.bots ?? []} larkBotsLoading={larkConfig.isLoading} larkListeningDisabled={larkConfig.data?.listeningDisabled ?? false} larkBotsFailed={larkConfig.isError} larkBotsRetrying={larkConfig.isFetching} onRetryLarkBots={() => void larkConfig.refetch()} view={primaryNav === 'home' ? 'all' : workbenchView} onViewChange={view => { setWorkbenchView(view); setPrimaryNav('tasks'); }} onSelect={selectSession} onBulkArchive={ids => { captureDialogOpener(); bulkArchive.reset(); setBulkArchiveIds(ids); }} onCreate={openCreateTask} onOpenAgentSetup={() => openSettings('agents')} onOpenLarkSetup={() => openLarkSetup('new')} onManageBots={() => setPrimaryNav('bots')}/>}
     </main>
     </div>
     {showTabBar && <MobileTabBar current={primaryNav} onNavigate={setPrimaryNav} inboxCount={inbox.data?.items.length ?? 0}/>}

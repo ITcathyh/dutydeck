@@ -1,3 +1,4 @@
+import { artifactPreviewQuery, artifactSnapshotsQuery, queryKeys } from '../queries';
 import { useState } from 'react';
 import type { ArtifactSnapshot, EventArtifactReference } from '@dutydeck/shared';
 import { useMutation, useQueries, useQuery, useQueryClient } from '@tanstack/react-query';
@@ -8,7 +9,7 @@ import { Banner, Button, Spinner } from './primitives';
 
 function SnapshotCard({ snapshot }: { snapshot: ArtifactSnapshot }) {
   const [open, setOpen] = useState(false);
-  const preview = useQuery({ queryKey: ['artifact-preview', snapshot.sessionId, snapshot.id], queryFn: () => artifactSnapshotsApi.preview(snapshot.sessionId, snapshot.id), enabled: open });
+  const preview = useQuery({ ...artifactPreviewQuery(snapshot.sessionId, snapshot.id), enabled: open });
   const download = useMutation({ mutationFn: async () => {
     const blob = await artifactSnapshotsApi.download(snapshot.sessionId, snapshot.id);
     const url = URL.createObjectURL(blob);
@@ -34,8 +35,8 @@ function SourceButton({ reference }: { reference: Pick<EventArtifactReference, '
 export function SessionArtifacts({ sessionId }: { sessionId: string }) {
   const client = useQueryClient();
   const shared = hasShareToken();
-  const snapshots = useQuery({ queryKey: ['artifact-snapshots', sessionId], queryFn: () => artifactSnapshotsApi.list(sessionId), enabled: !shared });
-  const capture = useMutation({ mutationFn: (ref: EventArtifactReference) => artifactSnapshotsApi.capture(sessionId, { taskId: ref.taskId, attemptId: ref.attemptId, eventId: ref.eventId, sequence: ref.sequence, partIndex: ref.partIndex, revision: ref.revision }), onSuccess: () => client.invalidateQueries({ queryKey: ['artifact-snapshots', sessionId] }) });
+  const snapshots = useQuery({ ...artifactSnapshotsQuery(sessionId), enabled: !shared });
+  const capture = useMutation({ mutationFn: (ref: EventArtifactReference) => artifactSnapshotsApi.capture(sessionId, { taskId: ref.taskId, attemptId: ref.attemptId, eventId: ref.eventId, sequence: ref.sequence, partIndex: ref.partIndex, revision: ref.revision }), onSuccess: () => client.invalidateQueries({ queryKey: queryKeys.artifactSnapshots(sessionId) }) });
   const history = useQuery({ ...historyOutlineQuery(sessionId, HISTORY_TURN_PAGE_SIZE), refetchInterval: 10_000 });
   // The outline summarizes only the newest page of turns. Earlier turns load a page per request,
   // aligned like the timeline's pages so both share the cached reads; once requested, a page stays loaded.

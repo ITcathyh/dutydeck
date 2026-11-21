@@ -1,4 +1,4 @@
-import { larkConfigQuery, managementGroupsQuery, queryKeys, systemCapabilitiesQuery } from '../queries';
+import { larkConfigQuery, larkMemoryStatusQuery, leaderSkillsQuery, managementGroupsQuery, queryKeys, systemCapabilitiesQuery } from '../queries';
 import { draftFromBot, saveBodyFromDraft } from '../bot-settings-form';
 import { ReplyPolishSettings } from './ReplyPolishSettings';
 import { ReactionTriggerSetting } from './ReactionTriggerSetting';
@@ -246,13 +246,7 @@ export function BotManagement({
   });
 
   // 机器人的群共享会话记忆状态
-  const memoryStatusQuery = useQuery({
-    queryKey: ['lark-memory-status', activeAppId],
-    queryFn: () => api.larkMemoryStatus(activeAppId!),
-    enabled: Boolean(activeAppId && currentDraft?.memoryEnabled),
-    staleTime: 30_000,
-    refetchInterval: query => query.state.data?.groups?.running ? 10_000 : false
-  });
+  const memoryStatusQuery = useQuery({ ...larkMemoryStatusQuery(activeAppId), enabled: Boolean(activeAppId && currentDraft?.memoryEnabled) });
 
   /*
     保存。
@@ -345,12 +339,7 @@ export function BotManagement({
   /** 只有「正在保存的就是当前这个对象」时才显示忙碌态，否则切过去的 B 会跟着转圈。 */
   const savingThisBot = saveMutation.isPending && saveMutation.variables?.appId === activeAppId;
 
-  const leaderSkills = useQuery({
-    queryKey: ['bot-leader-skills', activeAppId, activeBot?.workspace],
-    queryFn: () => api.skills(activeBot?.workspace || undefined, activeAppId!),
-    enabled: Boolean(activeAppId && leaderEnabled),
-    staleTime: 60_000
-  });
+  const leaderSkills = useQuery({ ...leaderSkillsQuery(activeAppId, activeBot?.workspace), enabled: Boolean(activeAppId && leaderEnabled) });
   const leaderSkillOptions = (leaderSkills.data ?? []).map(skill => ({ value: skill.ref ?? skill.path, name: skill.name }));
 
   const hookDraft: LarkHookDraft = { workspace: currentDraft?.workspace, defaultAgentId: currentDraft?.defaultAgentId, fallbackAgentId: currentDraft?.fallbackAgentId, defaultAgentWeights: activeBot?.defaultAgentWeights ?? [] };
