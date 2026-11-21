@@ -1,3 +1,4 @@
+import { defaultHighRiskPattern } from '../policy/high-risk.js';
 import { parseCardLinks, readCardLinks } from './card-links.js';
 import { preparePromptVersions, type PromptSaveOrigin } from './prompt-versions.js';
 import { parseLarkEventHandlers, validateLarkEventConfiguration, type LarkEventHandler } from './event-pipeline.js';
@@ -46,7 +47,7 @@ export const defaultLarkTraceLimit = 50;
 export const defaultLarkIdleCompactHours = 24;
 /** Leader 指引设置的长度上限：技能名、`插件名/技能名` 或 SKILL.md 绝对路径都放得下。 */
 export const maxLeaderSkillLength = 300;
-export const defaultHighRiskPattern = String.raw`(?:^|[\s;&|])(?:sudo|rm|shred|dd|mkfs|diskutil|launchctl|kill|pkill|lark-?cli|larkcli|bits-?cli|bitscli|bytedcli|ssh|scp|rsync|osascript)\b|\bgit\s+(?:push|reset|clean|checkout)\b|\b(?:npm|pnpm|yarn)\s+(?:publish|unpublish)\b|\bcurl\b[^\n]*(?:-X|--request)\s*(?:POST|PUT|PATCH|DELETE)\b`;
+export { defaultHighRiskPattern };
 
 const normalizeEmails = (value: unknown) => [...new Set((Array.isArray(value) ? value : [])
   .map(item => String(item).trim().toLowerCase()).filter(Boolean))];

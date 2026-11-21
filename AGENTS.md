@@ -35,6 +35,7 @@ pnpm exec tsx apps/server/src/cli.ts --local-only --port 14310 --no-lark-listen
 
 ## 改动时保持的契约
 
+- **依赖方向**：`apps/server/src/architecture-boundaries.test.ts` 拦截核心模块对 `lark/` 的新值导入，以及 `daemon/`、`doctor/` 对上层模块的新值导入。被拦时改依赖方向，不往基线里加；修掉一条旧依赖时，同时从基线删除。
 - **设置同步**：Dashboard 可保存的服务端设置须有对应 CLI。修改设置项、范围或保存接口时，同步 `apps/server/src/settings-cli.ts` 的命令、键表及 `settings-cli.test.ts`；新增机器人设置还要更新 `scripts/e2e-bot-settings.mts` 的显式矩阵。`satisfies` 检查键覆盖，不能替代枚举、清空语义和新面板的核对；浏览器本地偏好不属于服务端设置。
 - **ACPX 持久化**：`session_options` 递归要求小写 `snake_case`；群工具用 `dutydeck_group_tools_url`、`dutydeck_group_tools_token`。供应商的大写环境变量经 `prepareAcpxAgentLaunch` 的 launcher 传递，不直接塞进持久化 `env`。修改此链路须用真实 `AcpxAdapter` 和持久化 session key 回归，参照 `packages/acp-client/src/acpx.test.ts`。
 - **子进程环境**：复用 `packages/shared/runtime/child-environment.mjs` 清洗继承环境，再合并显式 Agent 配置与当前会话凭证；不要修改 daemon 的全局 `process.env` 来切账号或会话。改动同时检查 ACP、PTY 和恢复路径的 `child-environment.test.ts`。

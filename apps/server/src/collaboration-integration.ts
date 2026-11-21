@@ -1,3 +1,4 @@
+import { allowedHighRiskActor } from './policy/high-risk.js';
 import type { ReplyPolish } from './lark/reply-polish.js';
 import { CollaborationDelivery } from './collaboration-delivery.js';
 import { createHash } from 'node:crypto';
@@ -197,11 +198,7 @@ export function createCollaborationIntegration(options: CollaborationIntegration
       if (!context) throw new Error('后台任务身份缺失。');
       const scope = { appId, chatId }, { config } = await live(scope);
       if (config.riskControlMode !== 'enforced') return { policy: undefined };
-      const owner = context.actorId === installationOwnerTaskActor;
-      const emails = !owner && config.highRiskAllowedEmails.length ? await client(config).getUserEmails(context.actorId) : [];
-      const allowedByBot = owner || !config.highRiskAllowedUsers.length && !config.highRiskAllowedEmails.length
-        || config.highRiskAllowedUsers.some(user => user.openId === context.actorId)
-        || emails.some(email => config.highRiskAllowedEmails.includes(email));
+      const allowedByBot = await allowedHighRiskActor(config, context.actorId, id => client(config).getUserEmails(id), options.log);
       return { policy: { enabled: true, authorized: allowedByBot && await policy(scope, context.actorId, 'high_risk.execute'), pattern: config.highRiskPattern, reason: '委托发起人没有此高风险操作授权。' } };
     } catch {
       return { policy: { enabled: true, authorized: false, pattern: '.*', reason: '后台委托已变更或失去授权。' } };

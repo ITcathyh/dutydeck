@@ -17,7 +17,8 @@ import { LarkGroupManager } from './lark/group-management.js';
 import { readLarkConfig, saveLarkConfig } from './lark/config.js';
 import { LarkAgentToolCapabilityRegistry, LarkAgentToolsService, type AgentGroupToolError } from './lark/agent-tools.js';
 import { LarkMessageCoordinator } from './lark/coordinator.js';
-import type { LarkChatMessage } from './lark/service.js';
+import { workItemRiskPolicy } from './work-item-policy.js';
+import { LarkCardService, type LarkChatMessage } from './lark/service.js';
 import type { LarkMessageEvent } from './lark/listener.js';
 
 const cleanups: Array<() => Promise<void>> = [];
@@ -46,7 +47,7 @@ async function fixture(options: { realAcp?: boolean; scenarios?: ScenarioRegistr
     checkApplicationIdentity: async () => ({ verified: true, reportedAppId: scope.appId, tenantKey: 'synthetic' }),
     listChats: vi.fn(async () => ({ items: [{ chatId: scope.chatId, name: '文档协作', external: false }], hasMore: false })),
     listChatMembers: async () => ({ items: members.map(openId => ({ memberId: openId, openId, name: openId, memberType: 'user' })), hasMore: false, securityLimited: false }),
-    getUserEmails: async () => [],
+    getUserEmails: async (_openId: string): Promise<string[]> => [],
     getChatPreflightInfo: async () => ({ name: '文档协作', description: '讨论资料进度' }),
     listMessages: vi.fn(async () => ({ items: [], hasMore: false })),
     listChatMessages: vi.fn(async () => ({ items: [] as LarkChatMessage[], hasMore: false })),
@@ -442,6 +443,53 @@ it('passes partial history coverage and omitted-context markers through the real
   const action = (await f.repos.collaboration.listActions(scope)).find(item => item.kind === 'agent_execution')!;
   expect((action.payload.request as { prompt: string }).prompt).toBe(call.prompt);
   call.finish('Only the supplied window was reviewed; earlier history is missing.');
+});
+
+describe.each(['group', 'collaboration', 'work item'] as const)('%s high-risk actor', caller => {
+  const email = 'member@example.com';
+  const actor = 'ou_alice', other = 'ou_other';
+  it.each([
+    { name: 'installation owner', actorId: installationOwnerTaskActor, users: [other], emails: [email], lookup: false, allowed: true },
+    { name: 'empty lists', actorId: actor, users: [], emails: [], lookup: false, allowed: true },
+    { name: 'listed user', actorId: actor, users: [actor], emails: [email], lookup: false, allowed: true },
+    { name: 'listed email alongside another user', actorId: actor, users: [other], emails: [email], lookup: true, allowed: true },
+    { name: 'neither list matches', actorId: actor, users: [other], emails: ['other@example.com'], lookup: true, allowed: false },
+    { name: 'directory unavailable', actorId: actor, users: [other], emails: [email], lookup: true, allowed: false }
+  ])('$name', async ({ name, actorId, users, emails, lookup, allowed }) => {
+    const f = await fixture();
+    await saveLarkConfig(f.repos.config, f.repos.agents, { originalAppId: scope.appId,
+      highRiskAllowedUsers: users.map(openId => ({ openId, name: openId })), highRiskAllowedEmails: emails });
+    const sourceId = `${scope.appId}:${scope.chatId}:group` + (caller === 'collaboration' ? ':collaboration:test' : '');
+    const session = await f.runtime.start({ agentId: 'agent', source: 'lark', sourceId });
+    // Keep the group-level grant fixed to exercise the bot-level decision in each caller.
+    vi.spyOn(f.groups, 'authorize').mockImplementation(async (_app, _chat, _actor, action) =>
+      ({ allowed: true, action, code: 'allowed_owner', reason: 'fixture', source: 'owner' }));
+    const lookupEmails = vi.fn(async (_id: string) => {
+      if (name === 'directory unavailable') throw new Error('directory unavailable');
+      return ['alias@example.com', email];
+    });
+    vi.spyOn(f.client, 'getUserEmails').mockImplementation(lookupEmails);
+    const directory = vi.spyOn(LarkCardService.prototype, 'getUserEmails').mockImplementation(lookupEmails);
+    const warning = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      let policy;
+      if (caller === 'group') {
+        const config = await f.groups.resolved((await readLarkConfig(f.repos.config, scope.appId))!, scope.chatId);
+        await f.groups.recordRun(session, config, { chatId: scope.chatId, chatType: 'group', senderOpenId: actorId }, 'group');
+        await f.groups.beginTurn(session.id, actorId);
+        policy = await f.groups.riskPolicy(session.id);
+      } else if (caller === 'collaboration') {
+        vi.spyOn(f.collaboration.background, 'authorizeTool').mockResolvedValue({ actorId });
+        policy = (await f.collaboration.riskPolicy(session.id))?.policy;
+      } else {
+        policy = await workItemRiskPolicy(f.repos, f.groups, session.id, actorId);
+      }
+      expect(policy).toMatchObject({ enabled: true, authorized: allowed, pattern: 'rm\\s' });
+      expect(lookupEmails).toHaveBeenCalledTimes(lookup ? 1 : 0);
+      if (lookup) expect(lookupEmails).toHaveBeenCalledWith(actorId);
+      expect(warning).toHaveBeenCalledTimes(name === 'directory unavailable' ? 1 : 0);
+    } finally { directory.mockRestore(); warning.mockRestore(); }
+  });
 });
 
 it('uses real saved group bindings, runs one frozen background task and delivers its result once', async () => {
