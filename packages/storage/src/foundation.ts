@@ -106,7 +106,7 @@ export interface FoundationRepositories {
   foundation: FoundationRepository;
 }
 
-export function createFoundationRepositories(sqlite: Database.Database): FoundationRepositories {
+export function createFoundationRepositories(sqlite: Database.Database): FoundationRepositories & { withFoundation<T>(work: (tx: FoundationTransactionContext) => T): T } {
   const selectSecretRef = cachedStatement(sqlite, 'SELECT * FROM secret_refs WHERE id = ?');
   const selectChannelBot = cachedStatement(sqlite, 'SELECT * FROM channel_bots WHERE id = ?');
   const insertVersion = cachedStatement(sqlite, `
@@ -316,10 +316,10 @@ export function createFoundationRepositories(sqlite: Database.Database): Foundat
 
   const transactionContext: FoundationTransactionContext = {
     secretRefs: { get: getSecretRef, create: createSecretRef, update: updateSecretRef, remove: removeSecretRef },
-    channelBots: { get: getChannelBot, create: createChannelBot, update: updateChannelBot }
+    channelBots: { get: getChannelBot, getByAppId: id => findChannelBotByNaturalKey('lark', id), create: createChannelBot, update: updateChannelBot }
   };
 
-  const transact = async <T>(work: (repositories: FoundationTransactionContext) => T): Promise<T> => {
+  const withFoundation = <T>(work: (repositories: FoundationTransactionContext) => T): T => {
     let value!: T;
     sqlite.transaction(() => {
       const candidate = work(transactionContext);
@@ -330,6 +330,8 @@ export function createFoundationRepositories(sqlite: Database.Database): Foundat
     })();
     return value;
   };
+
+  const transact: FoundationRepository['transact'] = async work => withFoundation(work);
 
   const rollbackLast = async (
     entityKind: FoundationEntityKind,
@@ -394,6 +396,7 @@ export function createFoundationRepositories(sqlite: Database.Database): Foundat
   };
 
   return {
+    withFoundation,
     secretRefs: {
       async list() { return (cachedStatement(sqlite, 'SELECT * FROM secret_refs ORDER BY created_at, id').all() as SecretRefRow[]).map(decodeSecretRef); },
       async get(id) { return getSecretRef(id); },

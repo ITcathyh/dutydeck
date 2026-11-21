@@ -150,7 +150,7 @@ export interface Wp1aRepositories {
   groupPolicy: GroupPolicyRepository;
 }
 
-export function createWp1aRepositories(sqlite: Database.Database, transaction = createConfigTransaction(sqlite)): Wp1aRepositories {
+export function createWp1aRepositories(sqlite: Database.Database, transaction = createConfigTransaction(sqlite)): Wp1aRepositories & { withGroupPolicy<T>(work: (tx: GroupPolicyTransactionContext) => T): T } {
   const selectPolicy = cachedStatement(sqlite, 'SELECT * FROM channel_bot_policies WHERE id = ?');
   const selectBinding = cachedStatement(sqlite, 'SELECT * FROM group_bindings WHERE id = ?');
   const selectFact = cachedStatement(sqlite, 'SELECT * FROM remote_chat_facts WHERE id = ?');
@@ -404,10 +404,13 @@ export function createWp1aRepositories(sqlite: Database.Database, transaction = 
     remoteIdentityFacts: { get: getIdentityFact, getByChannelBot: getIdentityFactByBot, getCurrentByChannelBot: getCurrentIdentityFactByBot, upsert: upsertIdentityFact, invalidate: invalidateIdentityFact },
     roleAssignments: { get: getRole, create: createRole, update: updateRole },
   };
-  const transact = async <T>(work: (repositories: GroupPolicyTransactionContext) => T): Promise<T> =>
+  const withGroupPolicy = <T>(work: (repositories: GroupPolicyTransactionContext) => T): T =>
     transaction(() => work(transactionContext));
 
+  const transact: GroupPolicyRepository['transact'] = async work => withGroupPolicy(work);
+
   return {
+    withGroupPolicy,
     channelBotPolicies: {
       async list(limit) { return (cachedStatement(sqlite, 'SELECT * FROM channel_bot_policies ORDER BY created_at, id LIMIT ?').all(boundedLimit(limit)) as ChannelBotPolicyRow[]).map(decodeChannelBotPolicy); },
       async get(id) { return getPolicy(id); }, async getByChannelBot(id) { return getPolicyByBot(id); },

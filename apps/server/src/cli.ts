@@ -40,6 +40,7 @@ import { LocalFileSecretProvider, SecretProviderError, secretDirectoryForDatabas
 import { setPluginBindingSecret } from './plugins/binding-secret-cli.js';
 import { pluginsInStack, quarantineCrashedPlugins } from './plugins/crash-attribution.js';
 import { releaseProviderLoadingMarkers } from './plugins/quarantine.js';
+import { migrateLarkSecrets } from './migrate-lark-secrets.js';
 import { SecretCliError, readSecretValue, runSecretList, runSecretRemove, runSecretRotate, runSecretSet, type SecretCliContext } from './secret-cli.js';
 import { SettingsCliError, runSettingsCli } from './settings-cli.js';
 import { ScheduleCliError, runScheduleCli, runScheduleRequest } from './schedule-cli.js';
@@ -491,6 +492,7 @@ async function main() {
     legacyPlan: runLegacyPlan,
     legacyArchive: runLegacyArchive,
     pluginBindingSecretSet: async (plugin, reference, options) => { output(await withSecretContext(options.database, context => setPluginBindingSecret(plugin, reference, options, context.provider))); },
+    secretMigrateLark: options => { output(migrateLarkSecrets(resolveCliDatabase(options.database), options)); },
     secretList: async options => { output(await withSecretContext(options.database, runSecretList)); },
     secretSet: async (id, options) => { output(await withSecretContext(options.database, context => runSecretSet(id, options, context))); },
     secretRotate: async (id, options) => { output(await withSecretContext(options.database, context => runSecretRotate(id, options, context))); },

@@ -42,6 +42,20 @@ async function fixture(memory = true) {
   return { database, output, cliFile: process.execPath, peers: [] };
 }
 
+it('blocks splitting a live bot whose credential file would stay in the source directory', async () => {
+  const f = await fixture();
+  const repos = createRepositories(f.database);
+  try {
+    const bots = JSON.parse((await repos.config.get('lark.bots'))!);
+    delete bots[0].appSecret;
+    bots[0].appSecretRef = 'a'.repeat(32);
+    await repos.config.set('lark.bots', JSON.stringify(bots));
+  } finally { repos.close(); }
+  expect(split(f).blockers).toContain('SECRET_PROVIDER_UNSUPPORTED:live-lark:cli_aaa');
+  expect(() => split({ ...f, apply: true })).toThrow('MIGRATION_BLOCKED');
+  expect(existsSync(f.output)).toBe(false);
+});
+
 async function independentSchedules(f: Awaited<ReturnType<typeof fixture>>) {
   const repos=createRepositories(f.database),claim=repos.control.attachRuntime('partition-schedules'),x=repos.execution.bind(claim);
   const records: Array<{origin:string;executionId:string;scheduleId:string;taskId:string;owner:string;keys:string[]}>=[];

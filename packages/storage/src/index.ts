@@ -18,7 +18,7 @@ import { and, asc, desc, eq, gt, lt, sql } from 'drizzle-orm';
 import { drizzle } from 'drizzle-orm/better-sqlite3';
 import { chmodSync, closeSync, constants, existsSync, mkdirSync, openSync } from 'node:fs';
 import { basename, dirname } from 'node:path';
-import type { AgentConfig, AgentEvent, RepositoryBundle, RepositoryOpenOptions, Session, TaskConversationEvent, TaskRecord } from '@dutydeck/shared';
+import type { AgentConfig, AgentEvent, BotProjectionTransaction, RepositoryBundle, RepositoryOpenOptions, Session, TaskConversationEvent, TaskRecord } from '@dutydeck/shared';
 import { agentConfigs, channelMappings, errors, events, machines, permissionRequests, projects, sessions, tasks, toolCalls } from './schema.js';
 import { deferredConfirmationId, RuntimeError, watchFindingSchema } from '@dutydeck/shared';
 import { createTaskExecutionRepository } from './task-execution.js';
@@ -194,7 +194,7 @@ export function createRepositories(filename: string, options: RepositoryOpenOpti
   const db = drizzle(sqlite);
   const execution = createTaskExecutionRepository(sqlite, control);
   function compareAndSetConfigs(checks: Array<{ key: string; expected: string | undefined }>, writes: Array<{ key: string; value: string }>,
-    mapping?: { id: string; expected: string; extra: string }) {
+    mapping?: { id: string; expected: string; extra: string }, project?: (tx: BotProjectionTransaction) => void) {
     return sqlite.transaction(() => {
       for (const { key, value } of writes) assertRepositoryConfigWrite(sqlite, key, value);
       const read = cachedStatement(sqlite, 'SELECT value FROM configs WHERE key=?');
@@ -204,6 +204,7 @@ export function createRepositories(filename: string, options: RepositoryOpenOpti
       const put = cachedStatement(sqlite, 'INSERT INTO configs (key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value');
       for (const { key, value } of writes) put.run(key, value);
       for (const { key, value } of writes) assertConfigWrite(sqlite, key, value);
+      if (project) withFoundation(foundation => withGroupPolicy(({ config, channelBotPolicies }) => project({ ...foundation, config, channelBotPolicies })));
       return true;
     }).immediate();
   }
@@ -211,10 +212,10 @@ export function createRepositories(filename: string, options: RepositoryOpenOpti
     if (execution.authority() !== 'legacy') throw new RuntimeError('EXECUTION_LEDGER_REQUIRED', 'Execution writes require a bound ledger command', 409);
     return work();
   }).immediate();
-  const foundationRepositories = createFoundationRepositories(sqlite);
+  const { withFoundation, ...foundationRepositories } = createFoundationRepositories(sqlite);
   const configReader = createConfigReader(sqlite);
   const transaction = createConfigTransaction(sqlite);
-  const wp1aRepositories = createWp1aRepositories(sqlite, transaction);
+  const { withGroupPolicy, ...wp1aRepositories } = createWp1aRepositories(sqlite, transaction);
   const scheduleRepositories = createScheduleFoundationRepositories(sqlite);
   const collaboration = createCollaborationRepository(sqlite);
   const ciWebhook = createCiWebhookRepository(sqlite, transaction);
@@ -486,7 +487,8 @@ export function createRepositories(filename: string, options: RepositoryOpenOpti
       }
     },
     config: {
-      async compareAndSetBatch(checks, writes) { return compareAndSetConfigs(checks, writes); },
+      databasePath: filename,
+      async compareAndSetBatch(checks, writes, project) { return compareAndSetConfigs(checks, writes, undefined, project); },
       async compareAndSetMappingAndConfig(mapping, checks, writes) { return compareAndSetConfigs(checks, writes, mapping); },
       getSync: configReader.get,
       async listByJsonField(prefix, filter) { return listConfigByJsonField(sqlite, prefix, filter); },

@@ -1,3 +1,5 @@
+import { refreshBotProjection } from './bot-projection.js';
+import { readLiveLarkSecret } from '@dutydeck/secret-provider';
 import { defaultHighRiskPattern } from '../policy/high-risk.js';
 import { parseCardLinks, readCardLinks } from './card-links.js';
 import { preparePromptVersions, type PromptSaveOrigin } from './prompt-versions.js';
@@ -195,12 +197,21 @@ export const larkConfigBlockingError = (config: StoredLarkConfig): string | unde
 // 不让一条坏配置在下一次保存时连同其他机器人一起丢掉。同 appId 的机器人重新保存后即替换它。
 const invalidLarkEntries = new WeakMap<StoredLarkConfig[], unknown[]>();
 
+type DiskCredentials = { appId: string; appSecret?: string; appSecretRef?: string };
+const diskCredentials = new WeakMap<StoredLarkConfig, Pick<DiskCredentials, 'appSecret' | 'appSecretRef'>>();
+
+export function resolveBotSecret(bot: DiskCredentials, database?: string) {
+  return (bot.appSecretRef && database && database !== ':memory:'
+    ? readLiveLarkSecret(database, bot.appId.trim(), bot.appSecretRef) : undefined) ?? bot.appSecret;
+}
+
 const serializeLarkConfigs = (configs: StoredLarkConfig[], preserved: unknown[] = invalidLarkEntries.get(configs) ?? []) => JSON.stringify([...configs.map(stored => {
   const invalid = invalidLarkFields.get(stored);
-  if (!invalid) return stored;
-  const config: Record<string, unknown> = { ...stored };
+  const credentials = diskCredentials.get(stored);
+  if (!invalid && !credentials) return stored;
+  const config: Record<string, unknown> = { ...stored, ...credentials };
   // error 只是运行时视图，原始坏值还原回同名字段后一起写回。
-  for (const [field, { raw }] of invalid) {
+  for (const [field, { raw }] of invalid ?? []) {
     delete config[`${field}Error`];
     config[field] = raw;
   }
@@ -357,8 +368,11 @@ export async function readLarkConfigs(repository?: ConfigRepository, options: { 
     const preserved: unknown[] = [];
     for (const item of parsed) {
       try {
-        const config = normalizeStoredConfig(item);
-        if (config) configs.push(config);
+        const config = normalizeStoredConfig(item?.appSecretRef ? { ...item, appSecret: resolveBotSecret(item, repository?.databasePath) } : item);
+        if (config) {
+          if (item.appSecretRef) diskCredentials.set(config, { appSecretRef: item.appSecretRef, appSecret: item.appSecret });
+          configs.push(config);
+        } else if (item?.appSecretRef) preserved.push(item);
       } catch { preserved.push(item); }
     }
     if (preserved.length) invalidLarkEntries.set(configs, preserved);
@@ -811,18 +825,20 @@ async function mutateLarkConfigs(repository: ConfigRepository | undefined, work:
       const legacyBefore = await repository.get(larkCredentialsConfigKey);
       let value = before;
       const snapshot: ConfigRepository = {
+        databasePath: repository.databasePath,
         get: async key => key === larkBotsConfigKey ? value : key === larkCredentialsConfigKey ? legacyBefore : repository.get(key),
         set: async (key, updated) => { if (key !== larkBotsConfigKey) throw new Error('Unexpected Bot config key'); value = updated; }
       };
       const result = await work(snapshot);
       if (value === undefined && origin.source !== 'backfill') return result;
-      const prior = await readLarkConfigs({ get: async key => key === larkBotsConfigKey ? before : key === larkCredentialsConfigKey ? legacyBefore : repository.get(key), set: async () => {} }, { readOnly: true });
+      const prior = await readLarkConfigs({ databasePath: repository.databasePath, get: async key => key === larkBotsConfigKey ? before : key === larkCredentialsConfigKey ? legacyBefore : repository.get(key), set: async () => {} }, { readOnly: true });
       const versions = await preparePromptVersions(repository, prior, result, origin);
       if (origin.source === 'backfill' && !versions.length) return result;
       const writes = origin.source === 'backfill' ? versions : [{ key: larkBotsConfigKey, value: value! }, ...versions];
       if (repository.compareAndSetBatch) {
+        const saved = result.find(bot => bot.appId === origin.appId);
         if (!await repository.compareAndSetBatch([{ key: larkBotsConfigKey, expected: before }, { key: larkCredentialsConfigKey, expected: legacyBefore }, ...versions.map(item => ({ key: item.key, expected: undefined }))],
-          writes)) continue;
+          writes, saved ? tx => refreshBotProjection(tx, saved) : undefined)) continue;
       } else if (repository.compareAndSet) {
         if (versions.length) throw new LarkServiceError('PROMPT_VERSION_STORAGE_UNAVAILABLE', '提示词保存需要支持原子写入的存储。', 503);
         if (!await repository.compareAndSet(larkBotsConfigKey, before, value!)) continue;

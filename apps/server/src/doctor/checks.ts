@@ -464,7 +464,7 @@ export interface LarkCheckResult {
  * lark.bots，还会把 legacy 的 lark.credentials 迁移过去。体检读一下就改用户
  * 配置是不可接受的。这里自己 parse 原始值，再用纯函数 publicLarkConfigs 投影。
  *
- * appSecret 是明文存储的，全流程只判断「有没有」，绝不写进任何输出字段。
+ * 探针只检查密钥文件是否可用，配置检查只判断凭据是否存在。
  */
 export function checkLark(observation: LarkObservation, listenerDisabled: boolean): LarkCheckResult {
   if (observation.unavailable) {

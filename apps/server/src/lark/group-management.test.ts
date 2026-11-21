@@ -6,10 +6,12 @@ import Database from 'better-sqlite3';
 import { agentConfigSchema, type RepositoryBundle, type Session } from '@dutydeck/shared';
 import { createRepositories } from '@dutydeck/storage';
 import { RelayAskBroker, RelayCapabilityRegistry } from '@dutydeck/relay';
+import { migrateLarkSecrets } from '../migrate-lark-secrets.js';
 import { buildApp } from '../app.js';
 import { LarkGroupManager, type ManagedGroupBot } from './group-management.js';
 import { LarkAgentToolCapabilityRegistry, LarkAgentToolsService } from './agent-tools.js';
-import { deleteLarkConfig, readLarkConfig, saveLarkConfig } from './config.js';
+import { LarkLongConnectionListenerPool } from './listener.js';
+import { deleteLarkConfig, readLarkConfigs, readLarkConfig, saveLarkConfig } from './config.js';
 import { resolveLarkSession } from './session-resolver.js';
 import type { LarkMessageEvent } from './listener.js';
 
@@ -461,6 +463,60 @@ describe('live group configuration', () => {
     await save('cli_one', 'oc_two');
     expect(await manager.resolved((await readLarkConfig(repos.config, 'cli_one'))!, 'oc_two'))
       .toMatchObject({ groupCardMention: true, traceLimit: 50, completionReactionOnly: false, silentProgress: false });
+  });
+
+  it('keeps the verified identity and group activation through live credential migration', async () => {
+    const binding = await save();
+    const owner = await manager.owner('cli_one');
+    expect(migrateLarkSecrets(join(dir, 'state.sqlite'), {}).appIds).toContain('cli_one');
+    await manager.sync('cli_one');
+    expect(await manager.owner('cli_one')).toEqual(owner);
+    expect(await manager.explain('cli_one', 'oc_one')).toMatchObject({ binding: { id: binding.binding!.id }, validity: 'valid', applied: true });
+  });
+
+  it('projects a saved bot ceiling before the next send in an existing session', async () => {
+    await save();
+    const config = await manager.resolved((await readLarkConfig(repos.config, 'cli_one'))!, 'oc_one');
+    const session: Session = { id: 'existing', agentId: 'agent_one', cwd: dir, state: 'idle', runId: 'run', createdAt: time.toISOString(), updatedAt: time.toISOString() };
+    await manager.recordRun(session, config, event, 'thread:om_root');
+    await manager.beginTurn(session.id, 'ou_alice');
+    expect((await manager.authorizeSession(session.id, 'group_tools.send'))?.allowed).toBe(true);
+    const id = (await manager.owner('cli_one'))!.channelBotId;
+    await saveLarkConfig(repos.config, repos.agents, { originalAppId: 'cli_one', groupToolsAllowSend: false, name: 'Renamed' });
+    expect((await manager.authorizeSession(session.id, 'group_tools.send'))?.allowed).toBe(false);
+    expect(await repos.channelBots.get(id)).toMatchObject({ displayName: 'Renamed' });
+    expect(await repos.channelBotPolicies.getByChannelBot(id)).toMatchObject({ groupToolsPolicy: { sendCeiling: false } });
+  });
+
+  it('rolls back a bot save when the managed projection cannot be updated', async () => {
+    const before = await repos.config.get('lark.bots');
+    const db = new Database(join(dir, 'state.sqlite'));
+    try { db.exec("CREATE TRIGGER reject_projection BEFORE UPDATE ON channel_bots BEGIN SELECT RAISE(ABORT,'rejected'); END"); }
+    finally { db.close(); }
+    await expect(saveLarkConfig(repos.config, repos.agents, { originalAppId: 'cli_one', name: 'Renamed' }).then(() => undefined)).rejects.toThrow('rejected');
+    expect(await repos.config.get('lark.bots')).toBe(before);
+  });
+
+  it('guards the refreshed ChannelBot at the foundation management entry point', async () => {
+    const id = (await manager.owner('cli_one'))!.channelBotId;
+    await saveLarkConfig(repos.config, repos.agents, { originalAppId: 'cli_one', name: 'Live' });
+    const app = await buildApp({ listAgents: async () => [] } as any, { foundation: { repositories: repos, authorize: async () => true, isLiveManagedBot: botId => manager.isLiveManagedBot(botId) } });
+    try {
+      const response = await app.inject({ method: 'PATCH', url: '/api/foundation/channel-bots/' + id, payload: { expectedRevision: 1, displayName: 'Draft' } });
+      expect(response.statusCode).toBe(409);
+      expect(response.json().error.code).toBe('LARK_LIVE_MANAGEMENT_REQUIRED');
+      expect((await repos.channelBots.get(id))?.displayName).toBe('Live');
+    } finally { await app.close(); }
+  });
+
+  it('keeps a standalone staged record outside listener synchronization', async () => {
+    await repos.channelBots.create({ id: 'standalone', externalAppId: 'cli_staged', displayName: 'Draft', brand: 'feishu', channel: 'lark', state: 'staged' });
+    const pool = new LarkLongConnectionListenerPool({ info: vi.fn(), warn: vi.fn(), error: vi.fn() }, { workflowStore: repos.config });
+    try {
+      await pool.sync(await readLarkConfigs(repos.config));
+      expect(pool.activeAppIds).toEqual([]);
+      expect(await manager.owner('cli_staged')).toBeUndefined();
+    } finally { pool.stop(); }
   });
 
   it('applies current tool ceilings and group disablement to an already recorded session', async () => {

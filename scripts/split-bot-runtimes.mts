@@ -46,6 +46,7 @@ export function inspect(db: DatabaseSync, database: string) {
   const structured = rows(db, 'channel_bots');
   const legacy = parse(config.get('lark.bots') ?? '[]');
   if (!Array.isArray(legacy)) fail('INVALID_LEGACY_BOTS');
+  for (const bot of legacy) if (bot?.appSecretRef) block(`SECRET_PROVIDER_UNSUPPORTED:live-lark:${bot.appId}`);
   const authority = tables.includes('configuration_authority') ? rows(db, 'configuration_authority')[0]?.authority : 'legacy';
   const apps: string[] = authority === 'legacy' ? legacy.map(b => b.appId) : structured.map(b => b.external_app_id);
   if (!apps.length || new Set(apps).size !== apps.length || apps.some(a => typeof a !== 'string' || !/^cli_[a-z0-9]+$/.test(a))) fail('INVALID_BOT_APP_IDS');
