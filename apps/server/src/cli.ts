@@ -12,7 +12,7 @@ import { runCollaboration } from './collaboration-cli.js';
 import { existsSync, readFileSync, realpathSync } from 'node:fs';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { createCliProgram, environmentFromCli, type CliOptions } from './cli-program.js';
+import { createCliProgram, type CliOptions } from './cli-program.js';
 import { runLarkSend, runLarkUpdate } from './lark/cli.js';
 import { runLarkCreate } from './lark/create-cli.js';
 import { PTY_AGENT_CONTRIBUTIONS } from '@dutydeck/pty-driver/support';
@@ -52,7 +52,7 @@ import { PromptAbortedError, PromptUnavailableError } from './setup/prompts.js';
 import { InvalidWorkingDirectoryError } from './setup/detect.js';
 import { AutostartError, autostartDisable, autostartEnable, autostartStatus } from './autostart/autostart.js';
 import { createCliUi } from './cli-ui.js';
-import { prepareCliEnvironment } from './cli-environment.js';
+import { environmentFromCli, prepareCliEnvironment } from './cli-environment.js';
 import { runPluginCli } from './plugins/cli.js';
 
 let openCliInvocation = false;

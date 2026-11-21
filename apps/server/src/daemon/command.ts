@@ -1,7 +1,6 @@
-import { createConfigReader } from '@dutydeck/storage/helpers';
+import { readAccessToken } from '../access-token.js';
 import type { SqliteDriverCheck, SqliteDriverCheckOptions } from '@dutydeck/storage';
 import { assertBotProcessStartup, checkSqliteDriver, currentProcessIdentity, describeSqliteDriverFailure } from '@dutydeck/storage/helpers';
-import Database from 'better-sqlite3';
 import { networkInterfaces } from 'node:os';
 import { isIP } from 'node:net';
 import {
@@ -33,7 +32,8 @@ import {
   type DaemonProcessStatus,
   type DaemonState
 } from './daemon.js';
-import { environmentFromCli, type CliOptions } from '../cli-program.js';
+import { environmentFromCli } from '../cli-environment.js';
+import type { CliOptions } from '../cli-program.js';
 import { appConfigSchema, resolveDatabaseUrl } from '@dutydeck/config';
 import { AUTOSTART_LINUX_UNIT, AUTOSTART_MACOS_LABEL, defaultRunCommand, firstLine, readLaunchdProgram, type AutostartCommandOutput, type AutostartRunCommand } from '../autostart/autostart.js';
 import { sleep } from './time.js';
@@ -113,12 +113,7 @@ const defaultInfo = (message: string) => {
 
 function defaultReadToken(databasePath: string): string | undefined {
   try {
-    const db = new Database(databasePath, { readonly: true, fileMustExist: true });
-    try {
-      return createConfigReader(db).get('auth.accessToken')?.trim();
-    } finally {
-      db.close();
-    }
+    return readAccessToken(databasePath);
   } catch {
     return undefined;
   }

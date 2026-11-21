@@ -1,3 +1,4 @@
+import { accessMode, listenOptions, unauthenticatedListenRefusal } from './access-policy.js';
 import { LarkReplyPolisher, type ReplyPolish } from './lark/reply-polish.js';
 import { createRelayContinuationChecker, createRelayAskLifecycleWatcher } from './relay-routes.js';
 import { inheritedListenOptions, inheritedSocketMismatch, takeInheritedListenSocket } from './socket-activation.js';
@@ -27,7 +28,7 @@ import { HerdrBackend } from '@dutydeck/session-backends';
 import { TerminalSettings, primaryHerdrBinary } from './terminal-settings.js';
 import { createRequire } from 'node:module';
 import { HerdrSessions } from './herdr.js';
-import { rememberSecretValues } from './lark/secret-redaction.js';
+import { rememberSecretValues } from './platform/secret-redaction.js';
 import { dutydeckGroupToolsCommand } from './lark/agent-tools.js';
 import { resolveExplicitFinalContext } from './lark/explicit-final.js';
 import { larkResultDeliveryIssues } from './lark/reconciler.js';
@@ -46,7 +47,7 @@ import { loadConfigWithDiagnosticsAsync, resolveDatabaseUrl, type AppConfig } fr
 import { logDroppedAgents } from './agent-config-log.js';
 import { assertBotProcessStartup, childProcessIdentity, createRepositories, observeProcess } from '@dutydeck/storage';
 import { createPtyRetirementControl } from './pty-recovery.js';
-import { COLLABORATION_LIST_LIMIT, installationOwnerTaskActor, makeId, parseLarkSourceId, RuntimeError, timeLoop, workPlanConfirmationRequired, type DriverFactory, type PolicyAction, type PolicyDecision, type Session } from '@dutydeck/shared';
+import { backgroundKindFor, COLLABORATION_LIST_LIMIT, installationOwnerTaskActor, makeId, parseLarkSourceId, RuntimeError, timeLoop, workPlanConfirmationRequired, type DriverFactory, type PolicyAction, type PolicyDecision, type Session } from '@dutydeck/shared';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { larkResourceRoot, pruneLarkResourceDirectories, readLarkResourceReferences } from './resource-retention.js';
@@ -132,39 +133,12 @@ export interface LocalServer {
   shutdownPhases: ShutdownPhases;
 }
 
-export function listenOptions(config: Pick<AppConfig, 'host' | 'port'>) {
-  if (config.host === '0.0.0.0') {
-    return { host: '::', port: config.port, ipv6Only: false } as const;
-  }
-  return { host: config.host, port: config.port };
-}
+export { accessMode, listenOptions, unauthenticatedListenRefusal, UNSAFE_NO_AUTH_ENV } from './access-policy.js';
 
-export function accessMode(config: Pick<AppConfig, 'host' | 'authEnabled'>): 'local' | 'token' | 'open' {
-  // Loopback keeps its stricter Host/Origin rebinding protection even when the
-  // redundant --no-auth flag is present.
-  if (config.host === '127.0.0.1' || config.host === '::1') return 'local';
-  return config.authEnabled ? 'token' : 'open';
-}
-
-/** 显式确认在非回环地址上免认证运行：--unsafe-no-auth 或这个环境变量 */
-export const UNSAFE_NO_AUTH_ENV = 'DUTYDECK_UNSAFE_NO_AUTH';
 /** 停服步骤，按执行顺序；强制退出时据此列出还没开始的步骤。 */
 const SHUTDOWN_PHASES = ['insight', 'historyRetention', 'watch', 'pluginResults', 'workbench', 'workbenchHttp', 'workItems', 'delegations', 'leaderMode', 'automation', 'ciWebhook', 'pullRequests',
   'relayClose', 'collaboration', 'relayFlush', 'http', 'runtime', 'capabilities', 'database', 'pluginDispose'] as const;
 type ShutdownPhase = typeof SHUTDOWN_PHASES[number];
-
-/**
- * 监听地址不是回环、认证又关着（open 模式）时返回拒绝启动的说明，显式确认 unsafe 时放行。
- * 第一行带 refused 且不含 password/token 字样：`dutydeck start` 只从守护日志回放这样的行。
- */
-export function unauthenticatedListenRefusal(config: Pick<AppConfig, 'host' | 'authEnabled'>, env: NodeJS.ProcessEnv): string | undefined {
-  if (accessMode(config) !== 'open' || env[UNSAFE_NO_AUTH_ENV] === 'true') return undefined;
-  return [
-    `Dutydeck refused to start: 监听地址 ${config.host} 不是本机回环地址，访问认证却已关闭，同网络任何人都能查看任务、驱动 Agent、打开终端。`,
-    '先设置访问密码：dutydeck auth password set，再去掉 --no-auth（或 .env 里的 DUTYDECK_AUTH=false）重新启动；浏览器用这个密码登录，CLI 和本机调用照旧用 access token。',
-    `确需在这个地址免认证运行，改用 --unsafe-no-auth 或设置 ${UNSAFE_NO_AUTH_ENV}=true。`
-  ].join('\n');
-}
 
 function localApiBaseUrl(config: Pick<AppConfig, 'host' | 'port'>) {
   return localLoopbackUrl(config.host, config.port);
@@ -298,7 +272,7 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
   try {
   // Recheck under the runtime claim in case an offline split completed between inspection and open.
   assertBotProcessStartup(config.databaseUrl, (options.env ?? process.env).DUTYDECK_BOT_APP_ID);
-  // 发往飞书的文本按原值抹掉服务环境和各 Agent 配置里的凭据（见 lark/secret-redaction）。
+  // 发往飞书的文本按原值抹掉服务环境和各 Agent 配置里的凭据（见 platform/secret-redaction）。
   rememberSecretValues(options.env ?? process.env);
   for (const agent of [...config.agents, ...await repos.agents.list()]) rememberSecretValues(agent.env ?? {});
   let localSecretProvider: LocalFileSecretProvider | undefined;
@@ -531,7 +505,7 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
     driverIdleTimeoutMs: config.driverIdleTimeoutMs,
     driverIdleCpuAction: config.driverIdleCpuAction,
     cleanupIntervalMs: config.cleanupIntervalMs,
-    sessionEnvironment: session => session.source === 'lark-reply-polish' ? {} : ({ ...capabilities.environmentFor(session), ...relayCapabilities.environmentFor(session.id), ...herdr.environmentFor(session.id),
+    sessionEnvironment: session => backgroundKindFor(session.source)?.injectHost === false ? {} : ({ ...capabilities.environmentFor(session), ...relayCapabilities.environmentFor(session.id), ...herdr.environmentFor(session.id),
       ...(session.protocol === 'pty-cli' && isFrozenCollaborationSession(session) ? { dutydeck_frozen_materials: 'true' } : {}) }),
     selectPromptPolicy: async session => {
       const parent = await workItems.parentForSession(session.id) ?? await delegations.parentForSession(session.id);
@@ -543,7 +517,7 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
       return { version: promptTemplateVersion(policy.mode), ...(policy.diagnosticReason ? { diagnosticReason: policy.diagnosticReason } : {}) };
     },
     prepareTaskPrompt: async (session, prompt, skills, context) => {
-      if (session.source === 'lark-reply-polish') {
+      if (backgroundKindFor(session.source)?.injectHost === false) {
         const prepared: PrepareSkillPromptResult = { agentPrompt: prompt, skillDeliveries: [], ...(context?.promptParts ? { promptParts: context.promptParts } : {}) };
         return pluginWiring ? pluginWiring.hooks.beforeRun(session, prepared, context?.promptPolicyVersion) : prepared;
       }
@@ -552,7 +526,7 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
     },
     sessionPrompt: async (session, prompt, context) => {
       const version = context?.promptPolicyVersion ?? 'legacy-v1';
-      if (session.source === 'lark-reply-polish' || isFrozenCollaborationSession(session)) {
+      if (backgroundKindFor(session.source)?.injectHost === false || isFrozenCollaborationSession(session)) {
         const result = assemblePrompt(context?.promptParts ?? [{ kind: 'user_request', trustScope: 'user_request', content: prompt }], prompt, version);
         if (context?.promptDiagnostics?.fallbackReason && !result.diagnostics.fallbackReason) result.diagnostics.fallbackReason = context.promptDiagnostics.fallbackReason;
         return result;

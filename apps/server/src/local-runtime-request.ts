@@ -1,5 +1,4 @@
-import { createConfigReader } from '@dutydeck/storage/helpers';
-import Database from 'better-sqlite3';
+import { readAccessToken } from './access-token.js';
 import { networkInterfaces } from 'node:os';
 import { isIP } from 'node:net';
 import { readDaemonStatus, inspectDaemonState, resolveDaemonDir, type DaemonState } from './daemon/daemon.js';
@@ -59,14 +58,7 @@ export async function executeLocalRuntimeRequest(
     throw createError(errorSpec.databaseRequired, 'The runtime database identity is required');
   }
 
-  const token = (dependencies.readToken ?? (path => {
-    const db = new Database(path, { readonly: true, fileMustExist: true });
-    try {
-      return createConfigReader(db).get('auth.accessToken')?.trim();
-    } finally {
-      db.close();
-    }
-  }))(database);
+  const token = (dependencies.readToken ?? readAccessToken)(database);
 
   const headers: Record<string, string> = {
     ...(body !== undefined ? { 'content-type': 'application/json' } : {}),

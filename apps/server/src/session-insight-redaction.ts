@@ -5,7 +5,7 @@ import {
   SESSION_INSIGHT_LIMITS,
   type TraceEvent
 } from '@dutydeck/shared';
-import { redactTraceText } from './lark/secret-redaction.js';
+import { redactTraceText } from './platform/secret-redaction.js';
 
 export const SESSION_INSIGHT_REDACTION_VERSION = 'redaction-v2';
 

@@ -22,7 +22,7 @@ import { readLarkConfig, saveLarkConfig } from './lark/config.js';
 import { LarkAgentToolCapabilityRegistry, LarkAgentToolsService, type AgentGroupToolError } from './lark/agent-tools.js';
 import { LarkMessageCoordinator } from './lark/coordinator.js';
 import { workItemRiskPolicy } from './work-item-policy.js';
-import { LarkCardService, type LarkChatMessage } from './lark/service.js';
+import { LarkCardService, LarkServiceError, type LarkChatMessage } from './lark/service.js';
 import type { LarkMessageEvent } from './lark/listener.js';
 
 const cleanups: Array<() => Promise<void>> = [];
@@ -1335,6 +1335,18 @@ it('retains an unsent thread delivery intent when its target message reader fail
   await f.collaboration.scheduler.tick();
   expect(f.client.reply).toHaveBeenCalledOnce();
   expect(await f.repos.collaboration.getAction(scope, action.id)).toMatchObject({ status: 'succeeded', receipt: 'om_card_reply' });
+});
+
+it('settles a scheduled thread delivery when the Lark circuit rejects target lookup before dispatch', async () => {
+  const f = await fixture();
+  await f.collaboration.service.createMandate(scope, 'ou_alice', { id: 'open-circuit', goal: 'Notify', mode: 'notify', prompt: 'Frozen notification',
+    delivery: { mode: 'thread', chatRef: scope.chatId, rootMessageRef: 'om_root', continuation: 'same_thread' },
+    trigger: { kind: 'interval', everySeconds: 600, anchorAt: f.collaboration.scheduler.options.now!().toISOString() }, timezone: 'UTC' });
+  f.client.getMessage.mockRejectedValueOnce(new LarkServiceError('LARK_CIRCUIT_OPEN', 'Request not sent', 503));
+  f.advance(600_000); await f.collaboration.scheduler.tick();
+  expect((await f.repos.collaboration.listActions(scope)).find(item => item.kind === 'schedule_delivery'))
+    .toMatchObject({ status: 'failed', error: 'Request not sent' });
+  expect(f.client.reply).not.toHaveBeenCalled();
 });
 
 it('suppresses an unsent thread delivery only after its message is proven to belong to another chat', async () => {

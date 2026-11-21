@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
-import { createCliProgram, environmentFromCli } from './cli-program.js';
+import { environmentFromCli } from './cli-environment.js';
+import { createCliProgram } from './cli-program.js';
 
 describe('Dutydeck CLI', () => {
   it('passes bot process identity to both server and daemon commands', async () => {

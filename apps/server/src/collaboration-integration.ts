@@ -6,6 +6,7 @@ import { canonicalExecutionJson, installationOwnerTaskActor, parseLarkSourceId, 
 import type { DutydeckRuntime } from '@dutydeck/runtime';
 import { digest } from '@dutydeck/runtime/digest';
 import { CollaborationService, type CollaborationAuthorization } from './collaboration-service.js';
+import { DeliveryCircuitOpenError } from './delivery-error.js';
 import { ScheduleExecutor, type ScheduleExecutionInput } from './schedule-executor.js';
 import { readConfirmedLarkBoundMessage } from './lark/result-delivery.js';
 import { CollaborationBackground } from './collaboration-background.js';
@@ -19,7 +20,7 @@ import { participationUsage } from './usage-ledger.js';
 import { LarkTeamContextReader } from './lark/team-context.js';
 import { larkExecutionConfirmed, readLarkConfig, type StoredLarkConfig } from './lark/config.js';
 import type { LarkGroupManager } from './lark/group-management.js';
-import { createLarkCardService, type LarkCardService } from './lark/service.js';
+import { createLarkCardService, LarkServiceError, type LarkCardService } from './lark/service.js';
 import { MandateCards } from './collaboration-mandate-cards.js';
 import type { ScenarioRegistry } from './plugins/scenario-registry.js';
 
@@ -232,17 +233,24 @@ export function createCollaborationIntegration(options: CollaborationIntegration
   const scheduler = new ScheduleExecutor({ repositories: repos, service, authorize: scheduleAuthorize,
     executeAgent: input => background.execute(input), cancelAgent: input => background.cancel(input),
     deliver: async input => {
-      const { config } = await live(input.scope, false, true);
-      const delivery = input.schedule.delivery;
-      const receipt = deliveryReceipt(input);
-      if (!receipt) throw new RuntimeError('COLLABORATION_DESTINATION_CONFLICT', '结果投递身份与原定时轮次不符。', 403);
-      if (!await validateDelivery(input.scope, delivery, true)) throw new RuntimeError('COLLABORATION_DESTINATION_CONFLICT', '当前结果投递位置不属于授权群。', 403);
-      return deliveries.run(input.scope, input.actionId, async () => {
-      await input.claimDispatch();
-      // 产出是带暂停/停止按钮的卡片，用户在消息上就能管这个委托。
-      const messageId = await mandateCards.deliver({ client: client(config), scope: input.scope, delivery, mandate: input.mandate, text: input.text, idempotencyKey: receipt.idempotencyKey, receiptIdentity: receipt.identity });
-      return { receipt: messageId };
-      });
+      try {
+        const { config } = await live(input.scope, false, true);
+        const delivery = input.schedule.delivery;
+        const receipt = deliveryReceipt(input);
+        if (!receipt) throw new RuntimeError('COLLABORATION_DESTINATION_CONFLICT', '结果投递身份与原定时轮次不符。', 403);
+        if (!await validateDelivery(input.scope, delivery, true)) throw new RuntimeError('COLLABORATION_DESTINATION_CONFLICT', '当前结果投递位置不属于授权群。', 403);
+        return await deliveries.run(input.scope, input.actionId, async () => {
+          await input.claimDispatch();
+          // 产出是带暂停/停止按钮的卡片，用户在消息上就能管这个委托。
+          const messageId = await mandateCards.deliver({ client: client(config), scope: input.scope, delivery, mandate: input.mandate, text: input.text, idempotencyKey: receipt.idempotencyKey, receiptIdentity: receipt.identity });
+          return { receipt: messageId };
+        });
+      } catch (error) {
+        if (error instanceof LarkServiceError && error.code === 'LARK_CIRCUIT_OPEN') {
+          throw new DeliveryCircuitOpenError(error.message, { cause: error });
+        }
+        throw error;
+      }
     },
     reconcile: async input => {
       const receipt = deliveryReceipt(input);

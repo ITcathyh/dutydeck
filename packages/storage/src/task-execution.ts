@@ -2,6 +2,7 @@ import { assertConfigWrite } from './config-write.js';
 import type Database from 'better-sqlite3';
 import { createHash, randomUUID } from 'node:crypto';
 import {
+  backgroundSource,
   runtimeStateKeys, executionActorSchema, acceptedTaskInputSchema, isTerminalTaskStatus, acceptedTaskInputV2Schema, canonicalExecutionJson, taskExecutionSchemas, taskRequestV1Schema, steeringRecoveryDecisionSchema, steerableTaskNamespace, parseLarkSourceId, RuntimeError, now as timestamp,
   type AcceptedTask, type AcceptedTaskInput, type AgentEvent, type AttemptFence, type BoundExecutionRepository,
   type CommitResult, type DriverResource, type ExecutionBlocker, type ExecutionController, type ExecutionRepository,
@@ -231,7 +232,7 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
     const result: ExecutionBlocker[] = [];
     // 飞书记忆作业只写自己的记忆目录：不参与仓库互斥，只和在同一目录里执行的会话（包括其他记忆作业）互斥。
     const selfSource = preparation ? 'work_item' : (cached('SELECT source FROM sessions WHERE id=?').get(sessionId) as {source:string|null}|undefined)?.source;
-    const orchestrated = (source: string | null | undefined) => source === 'work_item' || source === 'lark-leader';
+    const orchestrated = (source: string | null | undefined) => source === 'work_item' || source === backgroundSource.leader;
     // LIKE is ASCII case-insensitive and treats '_' as a wildcard. Preserve its candidates whenever
     // stop/verification evidence could make a LIKE-only orphan produce a blocker.
     const requiresLikeCandidates = cached(`SELECT 1 FROM configs WHERE key GLOB '${runtimeStateKeys.verification.prefix}*' LIMIT 1`).get()
@@ -307,7 +308,7 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
       for (const otherId of chunk) {
         if (otherId === sessionId) continue;
         const otherSource = sources.get(otherId);
-        const directoryOnly = selfSource === 'lark-memory' || otherSource === 'lark-memory';
+        const directoryOnly = selfSource === backgroundSource.memory || otherSource === backgroundSource.memory;
         const unresolved = unresolvedBySession.get(otherId);
         const queued = preparation ? queuedBySession.get(otherId) : undefined;
         const unknown = unknownBySession.get(otherId);
