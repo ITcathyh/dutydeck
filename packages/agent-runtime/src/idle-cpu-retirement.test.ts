@@ -1,3 +1,4 @@
+import { runtimeComponents } from '../test-support/components.js';
 import { captureBoundExecution } from '../../../tests/support/bound-execution.js';
 import { afterEach, expect, it, vi } from 'vitest';
 import { createRepositories } from '@dutydeck/storage';
@@ -67,7 +68,7 @@ it.each(['background', 'ask', 'notIdle', 'unprepared', 'unknownDriver', 'queue',
   }
   if (block === 'unknown') vi.spyOn(h.repos.execution, 'getUnresolvedTasks').mockReturnValue([{ id: 'unknown', status: 'reconcile_required' }]);
   if (block === 'unresolvedAttempt') vi.spyOn(h.repos.execution, 'getUnresolvedTasks').mockReturnValue([{ id: 'terminal', status: 'cancelled' }]);
-  if (block === 'permission') vi.spyOn(h.runtime as any, 'permissionsForSession').mockReturnValue([{}]);
+  if (block === 'permission') vi.spyOn(runtimeComponents(h.runtime).humanWaits, 'pendingPermissionCount').mockReturnValue(1);
   if (block === 'sessionQueue') {
     const read = h.repos.sessions.get.bind(h.repos.sessions);
     let enqueued = false;

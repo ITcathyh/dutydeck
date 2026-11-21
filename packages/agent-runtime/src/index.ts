@@ -2,9 +2,9 @@ import { backgroundSource, runtimeStateKeys, clearTaskReportSafely, isTerminalTa
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { createHash, randomUUID } from 'node:crypto';
 import type { AgentCapabilities, AgentConfig, AttemptActivity, AgentDriver, AgentEvent, DriverFactory, DriverTranscriptSourceObservation, EventType, EventWindowOptions, HistoryOutlineQuery, NormalizedDriverEvent, PermissionMode, PermissionRequestData, PromptAssemblyData, PromptPart, PromptSourceDiagnostics, PublicTaskRecord, RepositoryBundle, RuntimeControlClaim, Session, SkillDeliveryMetadata, StartSessionInput, TaskExecutionContext, TaskRecord, ToolCallData, ToolRiskPolicy, TranscriptSourceObservation, VerificationCommandInput, VerificationResponse, WorkspaceCleanupBlocker, WorkspaceCleanupPreview, WorkspaceCleanupResult, WorkspaceResponse } from '@dutydeck/shared';
-import { isBackgroundFollowup, eventHasContent, normalizeEventContent, deferredConfirmationId, agentCommandApprovalReason, isAgentCommandAutoApproval, canonicalExecutionJson, ptyRetirementRecoverySchema, steeringRecoveryDecisionSchema, executionRecoveryDecisionSchema, unknownTaskResolutionSchema, executionActorSchema, taskRequestV1Schema, steerableTaskNamespace, makeId, now, errorMessage, withTimeout, RuntimeError, permissionDisplayText, freeTextInputMaxBytes, workspaceModes, sessionNameConfigKey, normalizeSessionName, parseLarkSourceId, supportsRemoteApproval, supportsNativeFork, redactCredentialText, PROMPT_NOT_WRITTEN } from '@dutydeck/shared';
+import { isBackgroundFollowup, eventHasContent, normalizeEventContent, deferredConfirmationId, canonicalExecutionJson, ptyRetirementRecoverySchema, steeringRecoveryDecisionSchema, executionRecoveryDecisionSchema, unknownTaskResolutionSchema, executionActorSchema, taskRequestV1Schema, steerableTaskNamespace, makeId, now, errorMessage, withTimeout, RuntimeError, workspaceModes, sessionNameConfigKey, normalizeSessionName, parseLarkSourceId, supportsRemoteApproval, supportsNativeFork, redactCredentialText, PROMPT_NOT_WRITTEN } from '@dutydeck/shared';
 import { warnCaught, type DiagnosticLog } from '@dutydeck/shared';
-import { listAcpxBuiltinAgents, AcpxAdapter, testRegexWithTimeout, ProcessTreeCpu, readNativeCreationRecord } from '@dutydeck/acp-client';
+import { listAcpxBuiltinAgents, AcpxAdapter, ProcessTreeCpu, readNativeCreationRecord } from '@dutydeck/acp-client';
 import { commandExists, JsonlTransport, PipeTransport, probeAgent, PtyTransport } from '@dutydeck/transports';
 import { mkdir, realpath, rename, unlink, writeFile } from 'node:fs/promises';
 import { join, sep } from 'node:path';
@@ -14,6 +14,8 @@ import { PersistentEventPublisher, type SubscribeOptions, type EventListener } f
 import { digest, eventJson, DriverConfigurationLedger, LocalDriverLedger, type ExecutionOptions } from './ledger.js';
 import { localOnlyDriverContext } from './driver-context.js';
 import { agentAuthFailure, agentLoginProblem, defaultAgentStatusCheck, type AgentStatusCheck, type AgentUnavailable } from './agent-availability.js';
+import { isAttemptRef } from './runtime/attempt-ref.js';
+import { HumanWaits, type PendingPermission } from './runtime/human-waits.js';
 import { Notices } from './runtime/notices.js';
 import { SessionGate } from './session-gate.js';
 import { Maintenance, STOP_RECHECK_MS } from './runtime/maintenance.js';
@@ -67,10 +69,6 @@ interface InsightSourceSubscription {
 
 const isTaskFenceRevocation = (error: unknown): error is RuntimeError => error instanceof RuntimeError
   && (error.code === 'SESSION_AUTOMATION_TASK_REVOKED' || error.code === 'SESSION_AUTOMATION_TASK_STALE_HEAD' || error.code === 'WORK_ITEM_TASK_REVOKED');
-
-function isAttemptRef(ref: SessionFence | AttemptRef): ref is SessionFence & AttemptRef {
-  return 'attemptId' in ref && 'taskId' in ref && typeof ref.attemptId === 'string' && typeof ref.taskId === 'string';
-}
 
 const settledToolStatus = (status?: ToolCallData['status']) => status === 'completed' || status === 'failed';
 
@@ -209,9 +207,6 @@ const QUEUE_HANDOFF_MS = 15 * 60_000;
 /** 自更新的 CLI 原地替换可执行文件期间命令短暂不存在；找不到命令时等这么久再看一次。 */
 const COMMAND_SWAP_WAIT_MS = 3_000;
 const recoveryOwner: ExecutionActor = { kind: 'installation_owner', id: 'installation_owner' };
-/** 轮次结束时执行端已自行拒掉、却没发终态事件的审批，补记的拒绝说明。 */
-const TURN_ENDED_PERMISSION_REASON = '本轮任务已结束，这次操作没有执行。';
-type PendingPermission = { request: PermissionRequestData; nativeId: string; fence: AttemptRef & SessionFence; generation: number; owner?: Owner };
 
 
 /** 已确认投递的任务完成；明确未投递才回队列，failed 保留未知状态等待恢复。 */
@@ -243,7 +238,7 @@ const switchRejection = (error: unknown) =>
 const warnedTaskRejections = new Set<string>();
 
 export class DutydeckRuntime {
-  private readonly mutations = new RuntimeSessionMutations(() => this.assertBinding(), {
+  private readonly mutations = new RuntimeSessionMutations(() => this.assertBinding(), () => this.assertReady(), {
     lifecycle: id => this.lifecycle(id), ownerOf: id => this.ownerOf(id),
     transition: (id, reason) => this.transition(id, reason),
     renew: (id, parent) => { this.lifecycles.set(id, owner(id, parent)); },
@@ -292,7 +287,7 @@ export class DutydeckRuntime {
   private readonly localResources: LocalDriverLedger;
   private readonly configurations: DriverConfigurationLedger;
   private readonly publisher: PersistentEventPublisher;
-  private readonly oscPermissionWaits = new Set<string>();
+
   private readonly completedTurns = new Set<string>();
   private readonly attemptTools = new Map<string, AttemptTools>();
   private readonly sendWaiters = new Set<() => void>();
@@ -308,11 +303,6 @@ export class DutydeckRuntime {
   private readonly activeTasks = new Map<string, TaskRecord>();
   private readonly queues = new Map<string, TaskRecord[]>();
   private readonly queueRuns = new Map<string, Promise<void>>();
-  private readonly permissions = new Map<string, PendingPermission>();
-  private readonly permissionResolutions = new Map<string, string>();
-  private readonly permissionHandledBy = new Map<string, string>();
-  /** 正在提交的拒绝说明（已脱敏）；驱动在裁决时同步发出的终态事件据此补上 reason。 */
-  private readonly permissionRejectReasons = new Map<string, string>();
   private readonly sessionGenerations = new Map<string, number>();
   private readonly exitedDriverGenerations = new Map<string, number>();
   private readonly driverEventChains = new Map<string, Promise<void>>();
@@ -377,13 +367,14 @@ export class DutydeckRuntime {
     turn_active: id => this.activeTurns.has(id),
     driver_replaced: (id, driver) => this.drivers.get(id) !== driver,
     recovery_in_flight: id => this.recoveryInFlight(id),
-    permission_pending: id => this.permissionsForSession(id).length > 0,
-    answer_pending: id => !!this.options.awaitingAnswer?.(id),
+    permission_pending: id => this.humanWaits.pendingPermissionCount(id) > 0,
+    answer_pending: id => this.humanWaits.awaitingAnswer(id),
     unresolved_tasks: id => this.repos.execution.getUnresolvedTasks(id).length > 0,
     queued_or_running: id => this.repos.execution.hasQueuedOrRunningTasks(id)
   }, id => this.drivers.has(id), id => this.repos.execution.getTaskExecution(id)?.task.status);
 
   private readonly maintenance: Maintenance;
+  private readonly humanWaits: HumanWaits;
   private readonly notices: Notices;
 
   constructor(private readonly repos: RepositoryBundle, private readonly options: RuntimeOptions = {}) {
@@ -393,6 +384,16 @@ export class DutydeckRuntime {
     }
     this.notices = new Notices(repos.config, options, this.mutations, this.gate,
       (id, data, eventId) => this.emit(id, 'status', data, undefined, eventId));
+    this.humanWaits = new HumanWaits(this.mutations, {
+      repos, options, drivers: this.drivers, activeTasks: this.activeTasks, sessionGenerations: this.sessionGenerations,
+      eventScope: this.eventScope, shuttingDown: () => this.shuttingDown,
+      driverEventData: (scope, event) => this.driverEventData(scope, event),
+      savePermission: (id, data) => this.artifact('savePermission', id, data),
+      emit: (...args) => this.emit(...args), saveState: (...args) => this.saveState(...args),
+      consume: (...args) => this.consume(...args), warnCaught: (...args) => this.warnCaught(...args),
+      active: id => this.active(id),
+      driverOperation: (driver, operation) => this.driverOperation(driver, operation), touch: id => this.touch(id),
+    });
     this.configurations = new DriverConfigurationLedger(repos.config);
     this.localResources = new LocalDriverLedger(() => this.bound(), repos.execution);
     this.publisher = new PersistentEventPublisher({ highWaterMark: id => repos.events.highWaterMark(id), listWindow: (id, options) => repos.events.listWindow(id, options) }, undefined, options.log);
@@ -403,7 +404,7 @@ export class DutydeckRuntime {
     this.verifications = new VerificationManager(repos.config, (id, commit) => this.mutations.run(undefined, () => this.mutations.write(id, commit)));
     const ptyDriverFactory = options.ptyDriverFactory;
     this.factory = options.driverFactory ?? ((agent, protocol, onEvent, onExit, sessionId, context) => {
-      if (protocol === 'acp') return new AcpxAdapter({ ...agent, env: { ...agent.env, dutydeck_session_id: sessionId } }, { sessionKey: sessionId, context, onEvent, log: this.options.log, ...(this.options.resolveRiskPolicy ? { resolveRiskPolicy: (fallback?: ToolRiskPolicy) => this.options.resolveRiskPolicy!(sessionId, fallback) } : {}), ...(this.options.awaitingAnswer ? { awaitingAnswer: () => this.options.awaitingAnswer!(sessionId) } : {}) });
+      if (protocol === 'acp') return new AcpxAdapter({ ...agent, env: { ...agent.env, dutydeck_session_id: sessionId } }, { sessionKey: sessionId, context, onEvent, log: this.options.log, ...(this.options.resolveRiskPolicy ? { resolveRiskPolicy: (fallback?: ToolRiskPolicy) => this.options.resolveRiskPolicy!(sessionId, fallback) } : {}), ...(this.options.awaitingAnswer ? { awaitingAnswer: () => this.humanWaits.awaitingAnswer(sessionId) } : {}) });
       if (protocol === 'pty-cli') {
         if (!ptyDriverFactory) throw new RuntimeError('DRIVER_UNAVAILABLE', 'protocol 为 pty-cli 的 agent 需要注入 ptyDriverFactory（@dutydeck/pty-driver）', 503);
         // 高风险拦截钩子按 dutydeck_session_id 找会话策略，和 ACP 一样由宿主注入。
@@ -505,9 +506,8 @@ export class DutydeckRuntime {
     const token = owner(id); this.transitions.set(id, token); return token;
   }
   private ownerOf(id: string) { return owner(id, this.transitions.get(id) ?? this.transition(id)); }
-  private async scoped<T>(id: string, operation: () => Promise<T>) {
-    this.assertReady();
-    return this.mutations.run(this.lifecycle(id), operation);
+  private scoped<T>(id: string, operation: () => Promise<T>) {
+    return this.mutations.scoped(id, operation);
   }
   private warnTaskRejection(sessionId: string, error: unknown) {
     const log = this.options.log;
@@ -622,7 +622,6 @@ export class DutydeckRuntime {
       );
     }
   }
-  private permissionKey(sessionId: string, permissionId: string) { return `${sessionId}:${permissionId}`; }
   private enqueueDriverEvent(session: Session, event: NormalizedDriverEvent, generation: number, token: Owner) {
     const ref = this.attemptRefs.get(token) ?? this.fence(session);
     const eventId = event.sourceId ? this.driverEventId(ref, event.sourceId) : makeId('evt');
@@ -630,7 +629,7 @@ export class DutydeckRuntime {
     const next = previous.then(() => this.mutations.run(token, async () => {
       if (this.sessionGenerations.get(session.id) !== generation || !this.mutations.valid(token)) return;
       // 插件审批钩子可能一直等到超时，不能占着会话写锁；同一会话之后的驱动事件仍按顺序排在它后面。
-      const hostDecision = await this.reviewHostPermission(session, ref, event);
+      const hostDecision = await this.humanWaits.reviewHostPermission(session, ref, event);
       if (this.sessionGenerations.get(session.id) !== generation) return;
       await this.eventScope.run(ref, () => this.mutations.write(session.id, () => this.consume(session, event, eventId, hostDecision)));
       if (isAttemptRef(ref)) await this.recordUsage(session, ref, event);
@@ -939,7 +938,7 @@ export class DutydeckRuntime {
         if (!current || current.revision !== resource.revision || current.identity?.identityId !== receipt.identityId) throw new RuntimeError('RESOURCE_IDENTITY_CONFLICT', 'Original idle terminal resource changed', 409);
         const observation = { observationId: makeId('observation'), identityId: current.identity?.identityId,
           state: 'live' as const, observedAt: now(), evidenceRef: `idle-terminal:${digest(receipt)}` };
-        if (session.terminalBackend === 'tmux' && (driver!.isIdle?.() !== true || driver!.hasBackgroundWork?.() !== false || this.permissionsForSession(session.id).length)) {
+        if (session.terminalBackend === 'tmux' && (driver!.isIdle?.() !== true || driver!.hasBackgroundWork?.() !== false || this.humanWaits.pendingPermissionCount(session.id))) {
           throw new RuntimeError('IDLE_TERMINAL_ADOPTION_UNSAFE', 'Original tmux terminal is no longer idle', 409);
         }
         const observed = session.terminalBackend === 'tmux'
@@ -1059,7 +1058,7 @@ export class DutydeckRuntime {
         this.flushInsightSources(driver);
         await this.flushDriverEvents(session.id);
         if (!this.completedTurns.has(attempt.attemptId)) throw new RuntimeError('DRIVER_RESULT_INCOMPLETE', 'Recovered turn has no completed result', 409);
-        await this.closeTurnPermissions(ref);
+        await this.humanWaits.closeTurnPermissions(ref);
         const result = this.turnOutput(ref);
         await this.mutations.write(session.id, async () => this.wake(this.bound().settleAttempt(this.attemptFence(ref), `settlement:${submission.submissionId}`, {
           kind: 'driver_result', submissionId: submission.submissionId, outcome: result.status,
@@ -1449,9 +1448,9 @@ export class DutydeckRuntime {
   async getAttemptActivity(id: string, attemptId: string): Promise<AttemptActivity> { return this.repos.execution.getAttemptActivity(id, attemptId); }
   /** Tool call and result events of one execution attempt of this Session, read through the attempt index. */
   async getAttemptToolEvents(id: string, attemptId: string): Promise<AgentEvent[]> { return this.repos.execution.getAttemptToolEvents(id, attemptId); }
-  getDeferredConfirmationId(id: string, taskId: string) { return this.repos.events.getDeferredConfirmationId(id, taskId); }
-  hasPermissionRequest(id: string, nativeId: string) { return this.repos.events.hasPermissionRequest(id, nativeId); }
-  getLatestPermissionRequest(id: string, taskId: string, nativeId: string) { return this.repos.events.getLatestPermissionRequest(id, taskId, nativeId); }
+  getDeferredConfirmationId(id: string, taskId: string) { return this.humanWaits.getDeferredConfirmationId(id, taskId); }
+  hasPermissionRequest(id: string, nativeId: string) { return this.humanWaits.hasPermissionRequest(id, nativeId); }
+  getLatestPermissionRequest(id: string, taskId: string, nativeId: string) { return this.humanWaits.getLatestPermissionRequest(id, taskId, nativeId); }
   getRecentEvents(id: string, limit: number) { return this.repos.events.listRecent(id, limit); }
   getHistoryOutline(id: string, query?: HistoryOutlineQuery) {
     if (!this.repos.events.listHistoryOutline) throw new RuntimeError('HISTORY_OUTLINE_UNSUPPORTED', 'History summaries are unavailable', 501);
@@ -1524,8 +1523,6 @@ export class DutydeckRuntime {
       ...(projection.currentAttempt?.state === 'settled' && projection.currentAttempt.outcome === 'completed' && projection.currentAttempt.settlement?.kind === 'manual' && projection.currentAttempt.settlement.verifiedOutput ? { verifiedOutput: projection.currentAttempt.settlement.verifiedOutput } : {}),
       ...(active ? { activeTaskId: active.id } : {}) };
   }
-
-
 
   private async noteAgentFailure(agentId: string, failure: { code?: unknown; detailCode?: unknown; message?: unknown }) {
     const kind = agentAuthFailure(failure);
@@ -2059,12 +2056,6 @@ export class DutydeckRuntime {
     if (event.type !== 'permission_request' && event.type !== 'tool_call' && event.type !== 'tool_result') return data;
     return { ...data, id: this.scopedId(scope, String(data.id)), ...(data.toolCallId ? { toolCallId: this.scopedId(scope, String(data.toolCallId)) } : {}) };
   }
-  private async reviewHostPermission(session: Session, scope: SessionFence, event: NormalizedDriverEvent) {
-    if (!this.options.reviewPermission || event.type !== 'permission_request' || (event.data?.status ?? 'pending') !== 'pending' || !isAttemptRef(scope)) return undefined;
-    const request = this.driverEventData(scope, event) as PermissionRequestData;
-    const decision = await this.mutations.wait(() => this.options.reviewPermission!(session, request).catch(() => undefined));
-    return decision === 'allow' || decision === 'deny' ? decision : undefined;
-  }
   private async consume(session: Session, event: NormalizedDriverEvent, eventId: string, hostDecision?: 'allow' | 'deny') {
     const scope = this.currentRef(session.id);
     if (event.type === 'status' && event.data?.state === 'prompt_assembly') {
@@ -2075,19 +2066,14 @@ export class DutydeckRuntime {
     this.touch(session.id);
     if (event.type === 'completed') {
       if (scope && isAttemptRef(scope)) {
-        this.oscPermissionWaits.delete(scope.attemptId);
+        this.humanWaits.clearOscWait(scope.attemptId);
         this.completedTurns.add(scope.attemptId);
         if (typeof event.data?.stopReason === 'string') this.driverStopReasons.set(scope.attemptId, event.data.stopReason);
       }
       return;
     }
     let data = this.driverEventData(scope, event);
-    if (event.type === 'permission_request' && ['approved', 'rejected'].includes(data.status)) {
-      const handledBy = this.permissionHandledBy.get(this.permissionKey(session.id, data.id));
-      if (handledBy) data = { ...data, handledBy };
-    }
-    const rejectReason = event.type === 'permission_request' && data.status === 'rejected' && !data.reason ? this.permissionRejectReasons.get(this.permissionKey(session.id, data.id)) : undefined;
-    if (rejectReason) data = { ...data, reason: rejectReason };
+    if (event.type === 'permission_request') data = this.humanWaits.annotate(session.id, data);
     let tools: AttemptTools | undefined;
     if ((event.type === 'tool_call' || event.type === 'tool_result') && scope && isAttemptRef(scope)) {
       tools = this.attemptTools.get(scope.attemptId);
@@ -2110,18 +2096,7 @@ export class DutydeckRuntime {
       return true;
     };
     if (hostDecision && event.type === 'permission_request' && scope && isAttemptRef(scope)) {
-      // 不发待审批事件（没有人工审批卡片）；登记后走与人工审批相同的 resolvePermission，由它写入最终的审批记录。
-      const key = this.permissionKey(session.id, data.id);
-      const entry = { request: data, nativeId: String(event.data.id), fence: scope, generation: this.sessionGenerations.get(session.id) ?? 0, owner: this.mutations.current() };
-      this.permissions.set(key, entry);
-      setImmediate(() => void this.resolvePermission(session.id, data.id, hostDecision === 'allow').catch(async error => {
-        this.options.log?.warn({ sessionId: session.id, permissionId: data.id, error }, 'Host permission decision could not be applied; asking a person');
-        // 宿主的决定没落地而原生审批还挂着：照常发待审批事件交给人处理，不能悄悄等到超时。
-        await this.mutations.run(entry.owner, () => this.eventScope.run(scope, () => this.mutations.write(session.id, async () => {
-          if (this.permissions.get(key) !== entry || this.permissionResolutions.has(key) || entry.generation !== (this.sessionGenerations.get(session.id) ?? 0)) return;
-          await this.consume(session, event, eventId);
-        })));
-      }).catch(error => { if (!(error instanceof RevokedOperation)) this.options.log?.warn({ sessionId: session.id, permissionId: data.id, error }, 'Host permission fallback could not be recorded'); }));
+      this.humanWaits.applyHostDecision(session, scope, event, data, eventId, hostDecision);
       return;
     }
     let stored: AgentEvent;
@@ -2148,27 +2123,16 @@ export class DutydeckRuntime {
     }
     if (event.type === 'tool_call' || event.type === 'tool_result') {
       if (!rememberTool(stored)) return;
-      if (scope && isAttemptRef(scope)) await this.saveState(session, (this.oscPermissionWaits.has(scope.attemptId) || this.permissionsForSession(session.id).length) ? 'waiting_for_permission' : event.type === 'tool_result' ? 'thinking' : 'running_tool');
+      if (scope && isAttemptRef(scope)) await this.saveState(session, (this.humanWaits.oscWaiting(scope.attemptId) || this.humanWaits.pendingPermissionCount(session.id)) ? 'waiting_for_permission' : event.type === 'tool_result' ? 'thinking' : 'running_tool');
       // best-effort: the canonical driver event has already been persisted.
       await this.artifact('saveToolCall', session.id, data).catch(() => {});
       if (tools) tools.calls.get(data.id)!.projected = true;
-    } else if (event.type === 'thinking' && scope && isAttemptRef(scope)) await this.saveState(session, (this.oscPermissionWaits.has(scope.attemptId) || this.permissionsForSession(session.id).length) ? 'waiting_for_permission' : 'thinking');
+    } else if (event.type === 'thinking' && scope && isAttemptRef(scope)) await this.saveState(session, (this.humanWaits.oscWaiting(scope.attemptId) || this.humanWaits.pendingPermissionCount(session.id)) ? 'waiting_for_permission' : 'thinking');
     else if (event.type === 'permission_request' && scope && isAttemptRef(scope)) {
-      const key = this.permissionKey(session.id, data.id);
-      if ((data.status ?? 'pending') === 'pending') {
-        this.permissions.set(key, { request: data, nativeId: String(event.data.id), fence: scope, generation: this.sessionGenerations.get(session.id) ?? 0, owner: this.mutations.current() });
-        await this.saveState(session, 'waiting_for_permission');
-      } else { this.permissions.delete(key); this.permissionResolutions.delete(key); }
-      await this.artifact('savePermission', session.id, data).catch(error => this.warnCaught('consume.savePermission', session.id, error));
+      await this.humanWaits.recordPermission(session, scope, String(event.data.id), data);
     } else if (event.type === 'status' && scope && isAttemptRef(scope)
       && ((data.state === 'program_status' || data.state === 'program_status_fallback') && data.source === 'osc7501' || data.state === 'turn_timeout')) {
-      if (data.state === 'program_status' && data.programState === 'blocked' && data.kind === 'permission') {
-        this.oscPermissionWaits.add(scope.attemptId);
-        await this.saveState(session, 'waiting_for_permission');
-      } else {
-        const wasWaiting = this.oscPermissionWaits.delete(scope.attemptId);
-        if ((wasWaiting || data.programState === 'working') && !this.permissionsForSession(session.id).length) await this.saveState(session, 'thinking');
-      }
+      await this.humanWaits.recordProgramStatus(session, scope, data);
     } else if (event.type === 'error') {
       if (scope && isAttemptRef(scope)) this.turnErrors.set(scope.attemptId, data.message);
       await this.noteAgentFailure(session.agentId, data);
@@ -2264,7 +2228,7 @@ export class DutydeckRuntime {
   async getTurnStall(id: string): Promise<TurnStall | undefined> {
     const task = this.activeTasks.get(id);
     const silentMs = Date.now() - (this.turnProgressAt.get(id) ?? Date.now());
-    const queued = task && silentMs >= TURN_STALL_SILENCE_MS && !this.permissionsForSession(id).length && !this.options.awaitingAnswer?.(id)
+    const queued = task && silentMs >= TURN_STALL_SILENCE_MS && !this.humanWaits.pendingPermissionCount(id) && !this.humanWaits.awaitingAnswer(id)
       ? (await this.queuedTasks(id)).length : 0;
     if (!task || !queued || this.activeTasks.get(id) !== task) { this.turnCpu.delete(id); return undefined; }
     let sampler = this.turnCpu.get(id);
@@ -2302,8 +2266,8 @@ export class DutydeckRuntime {
         if (!resource) continue;
         const unchanged = () => this.queueHeld && !this.shuttingDown && this.activeTasks.get(id) === task && task.status === 'running'
           && this.drivers.get(id) === driver && !this.gate.stops.block(id) && !this.verifyingSessions.has(id)
-          && !this.steeringSessions.has(id) && !this.permissionsForSession(id).length
-          && !this.oscPermissionWaits.has(attempt.attemptId)
+          && !this.steeringSessions.has(id) && !this.humanWaits.pendingPermissionCount(id)
+          && !this.humanWaits.oscWaiting(attempt.attemptId)
           && this.repos.execution.getTaskExecution(task.id)?.currentAttempt?.revision === attempt.revision
           && this.repos.execution.getResources(id).find(row => row.resourceId === resource.resourceId)?.revision === resource.revision
           && !this.bound().getPendingQueueActions(this.fence(session)).some(action => action.target?.attemptId === attempt.attemptId);
@@ -3051,7 +3015,7 @@ export class DutydeckRuntime {
     const operation = await this.mutations.write(session.id, async () => {
       await this.configurations.assertClear(session.id); this.mutations.check();
       if (this.drivers.get(session.id) !== driver || this.attempts.has(session.id) && this.attempts.get(session.id) !== token) throw new RuntimeError('TURN_IN_PROGRESS', 'Another Attempt owns this driver', 409);
-      if (this.driverOperations.get(driver)?.size || this.permissionsForSession(session.id).length) throw new RuntimeError('DRIVER_CONFIGURATION_BUSY', 'A previous driver operation has not finished', 409);
+      if (this.driverOperations.get(driver)?.size || this.humanWaits.pendingPermissionCount(session.id)) throw new RuntimeError('DRIVER_CONFIGURATION_BUSY', 'A previous driver operation has not finished', 409);
       const target = targetOptions(owned.options);
       if (canonicalExecutionJson(owned.options) === canonicalExecutionJson(target)&&!forceNativeProof) {
         if (defaults) Object.assign(session, await this.patchSession(session.id, defaults));
@@ -3118,45 +3082,6 @@ export class DutydeckRuntime {
     await this.changeDriverConfiguration(session, existing, () => options);
     return existing;
   }
-  private permissionsForSession(id: string) { return [...this.permissions.values()].filter(permission => permission.fence.sessionId === id && this.mutations.valid(permission.owner)); }
-  /**
-   * 轮次退出（失败、停止、握手失败）时仍登记着的审批：移出内存并补记终态，否则时间线和 permission_requests 会一直停在 pending。
-   * 关机时只删内存：保留的 tmux 任务重启后可能重新识别同一审批。
-   */
-  private async dropAttemptPermissions(attemptId: string) {
-    const leftover: PendingPermission[] = [];
-    for (const [key, permission] of this.permissions) if (permission.fence.attemptId === attemptId) {
-      this.permissions.delete(key); this.permissionResolutions.delete(key); leftover.push(permission);
-    }
-    if (!this.shuttingDown) await this.closeLeftoverPermissions(leftover);
-  }
-  /** 把轮次结束后仍登记着的审批补记为拒绝：事件按 `scope` 的 fence 写入，再落到 permission_requests。 */
-  private async recordTurnEndedRejection(permission: PendingPermission, scope: AttemptRef & SessionFence | SessionFence, logMessage: string) {
-    const { sessionId } = scope;
-    const request = { ...permission.request, status: 'rejected' as const, reason: TURN_ENDED_PERMISSION_REASON };
-    await this.eventScope.run(scope, () => this.emit(sessionId, 'permission_request', request)).catch(error =>
-      this.options.log?.warn({ sessionId, permissionId: request.id, error }, logMessage));
-    await this.artifact('savePermission', sessionId, request).catch(error => this.warnCaught('recordTurnEndedRejection.savePermission', sessionId, error));
-  }
-  /** 轮次已经结算或被撤销，审批事件按会话级 fence 写入；不持有已撤销的轮次令牌，也不能在会话写锁内调用。 */
-  private async closeLeftoverPermissions(leftover: PendingPermission[]) {
-    for (const permission of leftover) {
-      const { sessionId, runId } = permission.fence;
-      await this.mutations.run(undefined, () =>
-        this.recordTurnEndedRejection(permission, { sessionId, runId }, 'Permission left by the ended turn could not be recorded'));
-    }
-  }
-  /**
-   * 驱动报告本轮结束后仍登记着的审批已不可能再被采纳（ACP 在中断、停止和轮次收尾时自行 reject_once，不发终态事件）。
-   * 补记拒绝，审批卡和时间线才会收起；正在提交的人工决议由 resolvePermission 自己收尾。
-   */
-  private async closeTurnPermissions(ref: AttemptRef & SessionFence) {
-    for (const [key, permission] of [...this.permissions]) {
-      if (permission.fence.attemptId !== ref.attemptId || this.permissionResolutions.has(key)) continue;
-      this.permissions.delete(key);
-      await this.recordTurnEndedRejection(permission, permission.fence, 'Permission closed by the ended turn could not be recorded');
-    }
-  }
   private async recordPrompt(sessionId: string, prompt: string, stage: 'accepted_input' | 'session_context', mode: 'send' | 'steer', inputTaskId: string, operationId?: string, sources?: PromptSourceDiagnostics) {
     const data: PromptAssemblyData = {
       state: 'prompt_assembly', version: 1, stage,
@@ -3171,7 +3096,7 @@ export class DutydeckRuntime {
   private async executeTask(id: string, task: TaskRecord) {
     const token = this.mutations.current()!;
     const ref = this.attemptRefs.get(token)!;
-    this.activeTurns.add(id); this.completedTurns.delete(ref.attemptId); this.oscPermissionWaits.delete(ref.attemptId);
+    this.activeTurns.add(id); this.completedTurns.delete(ref.attemptId); this.humanWaits.clearOscWait(ref.attemptId);
     let agentId: string | undefined;
     let settledSession: Session | undefined;
     let observed: Session | undefined;
@@ -3266,7 +3191,7 @@ export class DutydeckRuntime {
       // 结束快照在结算之前：结算事件一到，飞书结果卡就要读这一轮的改动摘要。
       await this.mutations.wait(observeEnd);
       if (!this.completedTurns.has(ref.attemptId)) throw new RuntimeError('DRIVER_RESULT_INCOMPLETE', 'Driver returned without a completed result', 409);
-      await this.closeTurnPermissions(ref);
+      await this.humanWaits.closeTurnPermissions(ref);
       const result = this.turnOutput(ref);
       await this.mutations.write(id, async () => {
         const evidence = { kind: 'driver_result' as const, submissionId, outcome: result.status, outputDigest: result.outputDigest, stopReason: result.stopReason, complete: true as const };
@@ -3322,8 +3247,8 @@ export class DutydeckRuntime {
   /** Drop every per-attempt record once its turn has ended, normally or after recovery; leftover approvals are recorded as rejected. */
   private async forgetAttempt(attemptId: string) {
     this.completedTurns.delete(attemptId); this.driverStopReasons.delete(attemptId); this.turnErrors.delete(attemptId); this.eventFlushedAttempts.delete(attemptId);
-    this.attemptTools.delete(attemptId); this.oscPermissionWaits.delete(attemptId);
-    try { await this.dropAttemptPermissions(attemptId); } finally { this.wakeResourceQueues(); }
+    this.attemptTools.delete(attemptId); this.humanWaits.clearOscWait(attemptId);
+    try { await this.humanWaits.dropAttemptPermissions(attemptId); } finally { this.wakeResourceQueues(); }
   }
   private notifyTaskSettled(session: Session, settled: PublicTaskRecord) {
     if (this.options.onTaskSettled && isTerminalTaskStatus(settled.status)) {
@@ -3502,7 +3427,7 @@ export class DutydeckRuntime {
     const checks: ResourceCheckRef[] = [];
     for (const [id, driver] of this.drivers) {
       if (this.sessionHeld(id) || this.driverOperations.get(driver)?.size
-        || this.permissionsForSession(id).length || driver.isDetachedForShutdown?.() || driver.hasBackgroundWork?.() !== false) continue;
+        || this.humanWaits.pendingPermissionCount(id) || driver.isDetachedForShutdown?.() || driver.hasBackgroundWork?.() !== false) continue;
       if (driver.isIdle?.() !== true) {
         const original = this.localResources.get(driver);
         // A new control channel may not have a screen snapshot yet. Preserve its native
@@ -3528,7 +3453,7 @@ export class DutydeckRuntime {
       if (otherId === id || this.repos.execution.getUnresolvedTasks(otherId).length || this.sessionHeld(otherId)
         || blockers.some(value => value.sessionId === otherId && value.code !== 'WORKSPACE_PHYSICAL_RESOURCE_UNSAFE')) continue;
       const driver = this.drivers.get(otherId);
-      if (!driver || driver.hasBackgroundWork?.() === true || this.driverOperations.get(driver)?.size || this.permissionsForSession(otherId).length) continue;
+      if (!driver || driver.hasBackgroundWork?.() === true || this.driverOperations.get(driver)?.size || this.humanWaits.pendingPermissionCount(otherId)) continue;
       const proof = fresh ??= this.idleResourceChecks();
       const resources = this.repos.execution.getResources(otherId);
       const disputed = blockers.filter(value => value.sessionId === otherId && value.code === 'WORKSPACE_PHYSICAL_RESOURCE_UNSAFE');
@@ -3944,7 +3869,7 @@ export class DutydeckRuntime {
       void stopping.catch(() => {});
       let factError: unknown;
       let actorRequired = false;
-      const stoppedPermissions: PendingPermission[] = [];
+      let stoppedPermissions: PendingPermission[] = [];
       try {
       await this.verifications.stopSession(id);
       await this.mutations.write(id, async () => {
@@ -3962,16 +3887,14 @@ export class DutydeckRuntime {
           }
         }
         if (intent.cancelQueue) actorRequired = !await this.cancelSessionQueue(id, intent.actor);
-        for (const [key, permission] of this.permissions) if (permission.fence.sessionId === id) {
-          this.permissions.delete(key); this.permissionResolutions.delete(key); stoppedPermissions.push(permission);
-        }
+        stoppedPermissions = this.humanWaits.takeSessionPermissions(id);
       });
       } catch (error) { factError = error; }
       let stopError: unknown;
       try { await stopping; } catch (error) { stopError = error; }
       while (this.driverEventChains.has(id)) await this.driverEventChains.get(id);
       if (!factError && intent.cancelQueue) actorRequired = !await this.mutations.write(id, () => this.cancelSessionQueue(id, intent.actor));
-      if (!shutdown && !discardSession) await this.closeLeftoverPermissions(stoppedPermissions);
+      if (!shutdown && !discardSession) await this.humanWaits.closeLeftoverPermissions(stoppedPermissions);
       await this.mutations.barrier(id);
       if (!shutdown && !stopError && !factError) {
         const session = await this.repos.sessions.get(id);
@@ -4082,93 +4005,17 @@ export class DutydeckRuntime {
     return this.withSessionMetadata(session);
     });
   }
-  async autoApproveAgentCommand(sessionId: string, kind: string, command: string): Promise<boolean> {
-    const owner = this.attempts.get(sessionId);
-    const task = this.activeTasks.get(sessionId);
-    if (this.shuttingDown || !owner || !task || !this.mutations.valid(owner)) return false;
-    const session = await this.repos.sessions.get(sessionId);
-    if (!session) return false;
-    const accepted = this.repos.execution.getAcceptedTask(task.id);
-    if (accepted?.input?.version !== 2) return false;
-    const permissionMode = accepted.input.executionOptions.permissionMode;
-    if (!isAgentCommandAutoApproval({ permissionMode, kind, command, env: this.options.sessionEnvironment?.(session) })) return false;
-    // PreToolUse already guards terminal commands. Recheck the live policy here as well,
-    // so auto-approval cannot turn a matching high-risk command into an allow.
-    try {
-      const policy = this.options.resolveRiskPolicy
-        ? await this.options.resolveRiskPolicy(sessionId, task.executionContext?.riskPolicy) : task.executionContext?.riskPolicy;
-      if (policy?.enabled && !policy.authorized && await testRegexWithTimeout(policy.pattern, command)) return false;
-    } catch { return false; }
-    if (this.attempts.get(sessionId) !== owner || !this.mutations.valid(owner)) return false;
-    this.options.log?.info?.({ sessionId, taskId: task.id }, agentCommandApprovalReason);
-    return true;
+  autoApproveAgentCommand(sessionId: string, kind: string, command: string): Promise<boolean> {
+    return this.humanWaits.autoApproveAgentCommand(sessionId, kind, command);
   }
-
-  /**
-   * 终端模式 CLI 的权限 hook 交来的请求：本会话有进行中的轮次、驱动也能接时，登记成与 ACP 相同的待审批项，
-   * 返回驱动给出的裁决；否则返回 undefined，调用方保留 CLI 的原生确认。
-   */
   requestDriverPermission(sessionId: string, request: Omit<PermissionRequestData, 'id' | 'status'>) {
-    if (this.shuttingDown || !this.attempts.has(sessionId) || !this.mutations.valid(this.lifecycle(sessionId))) return undefined;
-    return this.drivers.get(sessionId)?.requestPermission?.(request);
+    return this.humanWaits.requestDriverPermission(sessionId, request);
   }
-
   getPendingPermissions(sessionId: string): PermissionRequestData[] {
-    if (!this.mutations.valid(this.lifecycle(sessionId)) || !this.drivers.get(sessionId)?.resolvePermission) return [];
-    return [...this.permissions.entries()].filter(([key, pending]) => key.startsWith(sessionId + ':') && this.mutations.valid(pending.owner) && !this.permissionResolutions.has(key)).map(([, value]) => ({ ...value.request }));
+    return this.humanWaits.getPendingPermissions(sessionId);
   }
-
-  /** annotation.workspaceRule：按工作区规则代为批准时命中的规则，写进最终的审批记录。 */
-  async resolvePermission(sessionId: string, permissionId: string, approved: boolean, reason?: string, annotation?: Pick<PermissionRequestData, 'workspaceRule' | 'handledBy'>) {
-    return this.scoped(sessionId, async () => {
-    const { driver } = await this.active(sessionId);
-    const key = this.permissionKey(sessionId, permissionId);
-    const pending = this.permissions.get(key);
-    if (!pending) throw new RuntimeError('PERMISSION_NOT_FOUND', 'Permission request is no longer active', 404);
-    if (this.permissionResolutions.has(key)) throw new RuntimeError('PERMISSION_RESOLVING', 'Permission decision is already being submitted', 409);
-    if (!driver?.resolvePermission) throw new RuntimeError('PERMISSION_EXPIRED', 'The original approval driver is unavailable', 409);
-    const claim = makeId('permission_claim'); this.permissionResolutions.set(key, claim);
-    try {
-      if (!this.mutations.valid(pending.owner) || pending.generation !== (this.sessionGenerations.get(sessionId) ?? 0) || this.permissions.get(key) !== pending) {
-        if (this.permissions.get(key) === pending) this.permissions.delete(key);
-        throw new RuntimeError('PERMISSION_EXPIRED', 'Permission request is no longer active', 409);
-      }
-      // 记录里的说明脱敏后保存；交给执行端的仍是用户原文。
-      const shownReason = !approved && reason ? permissionDisplayText(reason, [], freeTextInputMaxBytes) : '';
-      if (annotation?.handledBy) this.permissionHandledBy.set(key, annotation.handledBy);
-      const request = { ...pending.request, ...(annotation?.handledBy ? { handledBy: annotation.handledBy } : {}), status: approved ? 'approved' as const : 'rejected' as const, ...(shownReason ? { reason: shownReason } : {}),
-        ...(approved && annotation?.workspaceRule ? { workspaceRule: annotation.workspaceRule } : {}) };
-      if (shownReason) this.permissionRejectReasons.set(key, shownReason);
-      // Keep the stored request pending while recording the requested decision.
-      // A failed driver call must not be represented as an accepted decision.
-      const intent = { ...pending.request, resolutionIntent: request.status };
-      await this.artifact('savePermission', sessionId, intent);
-      if (!this.mutations.valid(pending.owner) || this.permissionResolutions.get(key) !== claim || this.permissions.get(key) !== pending || this.drivers.get(sessionId) !== driver || pending.generation !== (this.sessionGenerations.get(sessionId) ?? 0)) {
-        throw new RuntimeError('PERMISSION_EXPIRED', 'Permission request is no longer active', 409);
-      }
-      const resolved = await this.driverOperation(driver, () => !approved && reason ? driver.resolvePermission!(pending.nativeId, false, reason) : driver.resolvePermission!(pending.nativeId, approved));
-      if (!resolved || !this.mutations.valid(pending.owner) || this.drivers.get(sessionId) !== driver || pending.generation !== (this.sessionGenerations.get(sessionId) ?? 0)) {
-        if (this.permissions.get(key) === pending) this.permissions.delete(key);
-        throw new RuntimeError('PERMISSION_EXPIRED', 'Permission request is no longer active', 409);
-      }
-      // ACPX may synchronously emit its terminal permission update before its
-      // resolve promise settles. That event is the canonical audit record.
-      if (this.permissions.get(key) !== pending) return request;
-      try {
-        await this.mutations.write(sessionId, async () => {
-          if (this.permissions.get(key) !== pending) return;
-          this.mutations.check(pending.owner);
-          this.permissions.delete(key); this.touch(sessionId);
-          await this.eventScope.run(pending.fence, () => this.emit(sessionId, 'permission_request', request));
-          await this.artifact('savePermission', sessionId, request).catch(error => this.warnCaught('resolvePermission.savePermission', sessionId, error));
-        });
-      } catch (error) {
-        throw new RuntimeError('PERMISSION_ACCEPTED_AUDIT_FAILED', `Permission accepted but audit delivery failed: ${errorMessage(error)}`, 503);
-      }
-      // Subsequent driver events own the session state; an approval must not overwrite a completed turn.
-      return request;
-    } finally { this.permissionHandledBy.delete(key); this.permissionRejectReasons.delete(key); if (this.permissionResolutions.get(key) === claim) this.permissionResolutions.delete(key); }
-    });
+  resolvePermission(sessionId: string, permissionId: string, approved: boolean, reason?: string, annotation?: Pick<PermissionRequestData, 'workspaceRule' | 'handledBy'>) {
+    return this.humanWaits.resolvePermission(sessionId, permissionId, approved, reason, annotation);
   }
 
   async cleanupIdleDrivers(at = Date.now()) {

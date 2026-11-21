@@ -49,7 +49,12 @@ const cases: Case[] = [
   ['steering_reply', false, false, true, ({ r }) => { r.steeringReplies.set('reply', { sessionId: id }); }],
   ['factory_cleanup', false, false, true, ({ r }) => { r.factoryCleanups.set(id, Promise.resolve()); }],
   ['driver_operation', false, false, true, ({ r, driver }) => { r.driverOperations.set(driver, new Set([Promise.resolve()])); }],
-  ['permission_pending', false, false, true, ({ r }) => { r.permissions.set('request', { fence: { sessionId: id }, owner: owner(id) }); }],
+  ['permission_pending', false, false, true, ({ r }) => {
+    const token = owner(id);
+    r.mutations.run(token, () => runtimeComponents(r).humanWaits.register(
+      { sessionId: id, runId: 'run', taskId: 'task', attemptId: 'attempt' },
+      { id: 'request', title: 'Permission', status: 'pending' }, 'native'));
+  }],
   ['answer_pending', false, false, true, ({ r }) => { r.options.awaitingAnswer = () => true; }],
   ['background_work', false, false, true, ({ driver }) => { driver.hasBackgroundWork.mockReturnValue(true); }],
   ['driver_detached', false, false, true, ({ driver }) => { driver.isDetachedForShutdown.mockReturnValue(true); }],

@@ -1,3 +1,4 @@
+import { runtimeComponents } from '../../../../packages/agent-runtime/test-support/components.js';
 import { MattersService } from '../matters.js';
 // 聊天内指挥命令的协调器级回归：/agents、/queue、/steer、/grant、/revoke，
 // 以及 /status 的执行身份说明与 /tasks 行内 Agent。
@@ -1060,7 +1061,7 @@ describe('/model 与 /effort 切换当前会话', () => {
   it('有待审批请求时切换被拒，回执是“上一次配置变更还没完成”而不是通用失败', async () => {
     const h = await harness({ answer: true, switching: { model: true, effort: true }, configPatch: { defaultModel: 'model-a' } });
     const id = await idleSession(h);
-    vi.spyOn(h.runtime as unknown as { permissionsForSession(id: string): unknown[] }, 'permissionsForSession').mockReturnValue([{}]);
+    vi.spyOn(runtimeComponents(h.runtime).humanWaits, 'pendingPermissionCount').mockReturnValue(1);
     await h.coordinator.handle(event('om_busy_m', '/model model-b'), h.config);
     expect(h.markdownOf(h.receiptNamed('/model 未执行'))).toContain('上一次配置变更还没完成');
     await h.coordinator.handle(event('om_busy_e', '/effort high'), h.config);

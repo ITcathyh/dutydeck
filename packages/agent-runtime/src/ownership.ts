@@ -100,7 +100,19 @@ export class SessionMutations {
 
 /** Resolve the runtime's shared session owners at the point an operation starts. */
 export class RuntimeSessionMutations extends SessionMutations {
-  constructor(assertControl: () => void, readonly owners: {
+  async scoped<T>(id: string, operation: () => Promise<T>) {
+    this.assertReady();
+    return this.run(this.owners.lifecycle(id), operation);
+  }
+
+  // Deferred human decisions must check the same owner that registered the request.
+  private readonly captured = new WeakMap<object, Owner | undefined>();
+  capture(entry: object) { this.captured.set(entry, this.current()); }
+  validCaptured(entry: object) { return this.valid(this.captured.get(entry)); }
+  checkCaptured(entry: object) { this.check(this.captured.get(entry)); }
+  runCaptured<T>(entry: object, operation: () => T) { return this.run(this.captured.get(entry), operation); }
+
+  constructor(assertControl: () => void, private readonly assertReady: () => void, readonly owners: {
     lifecycle(id: string): Owner;
     ownerOf(id: string): Owner;
     transition(id: string, reason: RevocationReason): Owner;

@@ -1,3 +1,4 @@
+import { runtimeComponents } from '../test-support/components.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createHash } from 'node:crypto';
 import { spawn, type ChildProcess } from 'node:child_process';
@@ -359,7 +360,7 @@ describe('Runtime uses the execution ledger', () => {
   it('keeps the busy code when a pending permission blocks a model or effort switch', async () => {
     const h = await fixture(); h.driver().setReasoningEffort = vi.fn(async () => {});
     // 待审批请求只在一轮执行中出现；这里直接让运行时看到一条，覆盖切换前的检查。
-    vi.spyOn(h.runtime as unknown as { permissionsForSession(id: string): unknown[] }, 'permissionsForSession').mockReturnValue([{}]);
+    vi.spyOn(runtimeComponents(h.runtime).humanWaits, 'pendingPermissionCount').mockReturnValue(1);
     await expect(h.runtime.setModel(h.session.id, 'B')).rejects.toMatchObject({ code: 'DRIVER_CONFIGURATION_BUSY' });
     await expect(h.runtime.setReasoningEffort(h.session.id, 'high')).rejects.toMatchObject({ code: 'DRIVER_CONFIGURATION_BUSY' });
     expect(h.models).toEqual([]); expect(h.driver().setReasoningEffort).not.toHaveBeenCalled();
