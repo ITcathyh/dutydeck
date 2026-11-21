@@ -43,6 +43,7 @@ export * from './usage-ledger.js';
 export * from './execution-inspection.js';
 export { createSessionInsightRepository } from './session-insight.js';
 export { createSessionInsightSchema } from './session-insight-migration.js';
+export { latestSchemaVersion } from './migrations.js';
 
 export const EVENT_WINDOW_DEFAULT_LIMIT = 200;
 export const EVENT_WINDOW_MAX_LIMIT = 1_000;

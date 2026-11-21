@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { sha256HexSchema } from './bot-configuration.js';
+import { sha256HexSchema } from './configuration-primitives.js';
 
 // ============================================================================
 // 1. 统一 Limits 常量 (第 5.3 节)

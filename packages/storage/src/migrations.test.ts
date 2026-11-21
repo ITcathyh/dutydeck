@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import type { AgentConfig, MemoryJob } from '@dutydeck/shared'
-import { createRepositories, PRE_V10_BACKUP_SUFFIX } from './index.js'
+import { createRepositories, latestSchemaVersion, PRE_V10_BACKUP_SUFFIX } from './index.js'
 import { allowEagerParticipation, migrations, runMigrations, withMigrationTransaction } from './migrations.js'
 import { createCiWebhookRepository } from './ci-webhook.js'
 import { createUsageLedgerRepository } from './usage-ledger.js'
@@ -69,7 +69,7 @@ const BUSINESS_TABLES = [
 ]
 
 const SESSION_PATCH_COLUMNS = ['reasoning_effort', 'system_prompt', 'permission_mode', 'source', 'source_id', 'archived_at']
-const ALL_VERSIONS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51]
+const ALL_VERSIONS = Array.from({ length: latestSchemaVersion }, (_, index) => index + 1)
 const temporaryDirectories: string[] = []
 const linuxIt = process.platform === 'linux' ? it : it.skip
 

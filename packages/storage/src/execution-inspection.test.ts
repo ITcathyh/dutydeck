@@ -3,7 +3,7 @@ import { chmodSync, existsSync, mkdtempSync, rmSync, statSync, writeFileSync } f
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { createRepositories } from './index.js';
+import { createRepositories, latestSchemaVersion } from './index.js';
 import { inspectExecutionDatabase } from './execution-inspection.js';
 import { openDatabaseControl } from './database-control.js';
 
@@ -108,7 +108,7 @@ describe('inspectExecutionDatabase', () => {
     const result = inspectExecutionDatabase(dbPath);
     expect(result.status).toBe('legacy');
     expect(result.authority).toBe('legacy');
-    expect(result.schemaVersion).toBe(51);
+    expect(result.schemaVersion).toBe(latestSchemaVersion);
     expect(result.counts?.tasks).toBe(1);
     expect(result.counts?.attempts).toBe(0);
     expect(result.counts?.resources).toBe(0);
@@ -168,7 +168,7 @@ describe('inspectExecutionDatabase', () => {
     const result = inspectExecutionDatabase(dbPath);
     expect(result.status).toBe('ledger_v1');
     expect(result.authority).toBe('ledger_v1');
-    expect(result.schemaVersion).toBe(51);
+    expect(result.schemaVersion).toBe(latestSchemaVersion);
     expect(result.counts?.tasks).toBe(1);
     expect(result.counts?.attempts).toBe(1);
     expect(result.counts?.resources).toBe(1);
@@ -181,7 +181,7 @@ describe('inspectExecutionDatabase', () => {
 
     const result = inspectExecutionDatabase(dbPath);
     expect(result.status).toBe('legacy');
-    expect(result.schemaVersion).toBe(51);
+    expect(result.schemaVersion).toBe(latestSchemaVersion);
 
     const db = new Database(dbPath, { readonly: true });
     try {

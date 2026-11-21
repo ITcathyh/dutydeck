@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { expect, it, vi } from 'vitest'
-import { createRepositories } from './index.js'
+import { createRepositories, latestSchemaVersion } from './index.js'
 import { migrations, runMigrations, withMigrationTransaction } from './migrations.js'
 import { PRUNE_IGNORED_SQL, SLIM_IGNORED_SQL } from './lark-inbox.js'
 
@@ -43,7 +43,7 @@ it('v48 only adds indexes: existing receipts stay byte-for-byte, and only receip
     const read = (key: string) => (db.prepare('SELECT value FROM configs WHERE key=?').get(key) as { value: string }).value
     for (const [key, value] of rows) expect(read(key)).toBe(value)
     expect(db.pragma('foreign_key_check')).toEqual([])
-    expect((db.prepare('SELECT MAX(version) AS v FROM schema_migrations').get() as { v: number }).v).toBe(51)
+    expect((db.prepare('SELECT MAX(version) AS v FROM schema_migrations').get() as { v: number }).v).toBe(latestSchemaVersion)
     const snapshot = db.prepare('SELECT key,value FROM configs ORDER BY key').all()
     runMigrations(db)
     db.close()

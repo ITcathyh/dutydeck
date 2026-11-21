@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { createRepositories } from './index.js';
+import { createRepositories, latestSchemaVersion } from './index.js';
 import { migrations, runMigrations, withMigrationTransaction } from './migrations.js';
 
 const cleanups: Array<() => void> = [];
@@ -147,7 +147,7 @@ describe('CI durable admission storage', () => {
     db = new Database(path);
     try {
       runMigrations(db); db.pragma('foreign_keys = ON');
-      expect(db.prepare('SELECT MAX(version) AS version FROM schema_migrations').get()).toEqual({ version: 51 });
+      expect(db.prepare('SELECT MAX(version) AS version FROM schema_migrations').get()).toEqual({ version: latestSchemaVersion });
       expect(db.prepare("SELECT provider_id, payload_json, received_at FROM ci_webhook_events WHERE event_key = 'legacy'").get()).toEqual({ provider_id: null, payload_json: null, received_at: null });
       expect(db.pragma('foreign_key_check')).toEqual([]);
       expect(() => db.prepare("INSERT INTO ci_webhook_event_targets VALUES ('missing', 'target', 'pending')").run()).toThrow(/FOREIGN KEY/);
