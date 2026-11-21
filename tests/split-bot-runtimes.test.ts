@@ -495,3 +495,24 @@ describe('offline bot partitions', () => {
     expect(() => split({ ...f, apply: true })).toThrow('MIGRATION_BLOCKED'); expect(existsSync(f.output)).toBe(false);
   });
 });
+
+it('partitions registered global, bot and session keys by their declared scope', async () => {
+  const f = await fixture();
+  const repos = createRepositories(f.database);
+  try {
+    await repos.config.set('token_efficiency', '{}');
+    await repos.config.set('session_name:b', 'B');
+    await repos.config.set('lark.pin.cli_aaa.om_1', '{"pinned":true}');
+  } finally { repos.close(); }
+
+  expect(split(f).blockers).toEqual([]);
+  split({ ...f, apply: true });
+  for (const shard of ['web', 'cli_aaa', 'cli_bbb']) {
+    use(join(f.output, shard, 'dutydeck.db'), db => {
+      const get = (key: string) => db.prepare('SELECT value FROM configs WHERE key=?').get(key)?.value;
+      expect(get('token_efficiency')).toBe('{}');
+      expect(get('session_name:b')).toBe(shard === 'cli_bbb' ? 'B' : undefined);
+      expect(get('lark.pin.cli_aaa.om_1')).toBe(shard === 'cli_aaa' ? '{"pinned":true}' : undefined);
+    });
+  }
+});

@@ -8,6 +8,9 @@ import { parseArgs, parseEnv } from 'node:util';
 import { createHash, randomUUID } from 'node:crypto';
 import { observeProcess } from '../packages/storage/src/process-identity.ts';
 
+import { configKeyDefinition } from '../packages/storage/src/config-keys.ts';
+import { assertConfigWrite } from '../packages/storage/src/config-write.ts';
+
 type Row = Record<string, any>;
 type Peer = { id: string; name: string; url: string };
 export type Options = { database: string; output: string; apply?: boolean; cliFile?: string; cwd?: string; basePort?: number; webHost?: string; webPort?: number; peers?: Peer[] };
@@ -17,7 +20,6 @@ const sessionTables = new Set(['sessions', 'tasks', 'events', 'tool_calls', 'per
 const botTables = new Set(['channel_bot_policies', 'group_bindings', 'remote_chat_facts', 'remote_identity_facts', 'role_assignments', 'full_trust_confirmations', 'configuration_changes', 'configuration_versions']);
 const appTables = new Set(['collaboration_scopes', 'collaboration_settings', 'collaboration_observations', 'collaboration_bootstraps', 'collaboration_decisions', 'collaboration_feedbacks', 'usage_ledger', 'usage_background_admissions']);
 const entityTables: Record<string, string> = { channel_bot: 'channel_bots', secret_ref: 'secret_refs', channel_bot_policy: 'channel_bot_policies', group_binding: 'group_bindings', remote_chat_fact: 'remote_chat_facts', remote_identity_fact: 'remote_identity_facts', role_assignment: 'role_assignments' };
-const sharedConfigs = new Set(['auth.accessToken', 'auth.passwordHash', 'auth.shareLinkSecret', 'lark.group_tools.signing_secret', 'relay.signing_secret']);
 const q = (name: string) => '"' + name.replaceAll('"', '""') + '"';
 const parse = (value: string): any => { try { return JSON.parse(value); } catch { return undefined; } };
 const rows = (db: DatabaseSync, table: string): Row[] => db.prepare(`SELECT * FROM ${q(table)}`).all();
@@ -111,7 +113,10 @@ export function inspect(db: DatabaseSync, database: string) {
   }
   const resolveConfig = (r: Row): string[] => {
     const k = r.key as string, value = parse(r.value);
-    if (sharedConfigs.has(k)) return shards;
+    const definition = configKeyDefinition(k);
+    if (!definition) { block(`CONFIG_OWNERSHIP_UNKNOWN:${k}`); return ['unknown']; }
+    if (definition.scope === 'global' || definition.shareOnSplit) return shards;
+    // This array is rewritten to contain only the shard's own bot at copy time.
     if (k === 'lark.bots') return shards;
     const idleTerminal = k.match(/^runtime_idle_terminal:([^:/]+)$/);
     if (idleTerminal && value && typeof value.runId === 'string' && typeof value.resourceId === 'string' && typeof value.identityId === 'string'
@@ -139,12 +144,17 @@ export function inspect(db: DatabaseSync, database: string) {
       // The notice has no session ID; reuse the occurrence's full ownership checks.
       if (config.has(key)) return resolveConfig({ key, value: config.get(key) });
     }
-    const sessionMatch = k.match(/^(?:runtime_(?:workspace|execution_workspace|native_context|driver_stop_block|driver_configuration|pty_retirement|verification):|legacy_retirement:|lark\.(?:run-context|memory\.turns)\.)([^:.]+)/);
-    if (sessionMatch) {
-      const owner = ownerForSession(sessionMatch[1]!);
-      if (value?.sessionId && value.sessionId !== sessionMatch[1] || value?.appId && appOwner(value.appId) !== owner) block(`CONFIG_CROSS_SHARD_REFERENCE:${k}`);
-      return [owner];
+    if (definition.ownerInKey) {
+      const suffix = k.slice(definition.prefix.length);
+      const id = definition.scope === 'session' ? suffix.split(/[.:]/, 1)[0] : suffix.split(definition.prefix.slice(-1), 1)[0];
+      if (id && (definition.scope === 'session' || /^cli_[a-z0-9]+$/.test(id))) {
+        const owner = definition.scope === 'session' ? ownerForSession(id) : appOwner(id);
+        const wrongSession = value?.sessionId && (definition.scope === 'session' ? value.sessionId !== id : ownerForSession(value.sessionId) !== owner);
+        if (wrongSession || value?.appId && appOwner(value.appId) !== owner) block(`CONFIG_CROSS_SHARD_REFERENCE:${k}`);
+        return [owner];
+      }
     }
+    // Automation rows may reference sessions, tasks and attempts owned by different shards.
     const automation = k.match(/^session_automation\/(schedule|occurrence|ci|task|stop_request)\/(.+)$/);
     if (automation && value && typeof value.sessionId === 'string') {
       const [, kind, id] = automation;
@@ -190,12 +200,6 @@ export function inspect(db: DatabaseSync, database: string) {
       // A released claim follows the receipt or bot namespace it guarded.
       const guarded = `lark.${claim[1]}.${claim[2]}`;
       return resolveConfig({ key: guarded, value: config.get(guarded) ?? '' });
-    }
-    const appMatch = k.match(/^lark\.(?:inbox|context|interaction|reaction|live-owner|memory(?:\.state)?|verification_suggestion|welcomed)\.(cli_[a-z0-9]+)(?:\.|$)/);
-    if (appMatch) {
-      const owner = appOwner(appMatch[1]!);
-      if (value?.sessionId && ownerForSession(value.sessionId) !== owner) block(`CONFIG_CROSS_SHARD_REFERENCE:${k}`);
-      return [owner];
     }
     if (k.startsWith('relay.ask.') && value?.sessionId) return [ownerForSession(value.sessionId)];
     if (k.startsWith('lark.principal.') && value?.appId) return [appOwner(value.appId)];
@@ -352,6 +356,7 @@ export function split(options: Options) {
               const url = b.webBaseUrl?.replace(/\/+$/, '');
               return url ? { ...b, webBaseUrl: url.endsWith(prefix) ? url : url + prefix } : b;
             }));
+            if (table === 'configs') assertConfigWrite(target, r.key, r.value);
             insert.run(...columns.map(c => r[c]));
           }
         }
@@ -361,9 +366,13 @@ export function split(options: Options) {
         }
         for (const s of plan.schema.filter(s => s.type !== 'table')) target.exec(s.sql);
         target.prepare('INSERT INTO dutydeck_control VALUES (1,0,1,\'idle\',NULL,NULL,NULL,0,?)').run(entity(file));
-        target.prepare('INSERT OR REPLACE INTO configs VALUES (?,?)').run('dutydeck.bot_process', JSON.stringify({ version: 1, appId: shard === 'web' ? null : shard }));
-        if (shard === 'web') target.prepare('INSERT INTO configs VALUES (?,?)').run('dutydeck.bot_session_routes', JSON.stringify({ version: 1, routes: Object.fromEntries(rows(db, 'sessions').filter(s => plan.destinations('sessions', s)[0] !== 'web').map(s => [s.id, `bot-${plan.destinations('sessions', s)[0]!.replaceAll('_', '-')}`])) }));
-        target.prepare('INSERT INTO configs VALUES (?,?)').run(MARKER, marker); // staging cannot be started before source retirement
+        const insertConfig = (key: string, value: string) => {
+          assertConfigWrite(target, key, value);
+          target.prepare('INSERT INTO configs VALUES (?,?)').run(key, value);
+        };
+        insertConfig('dutydeck.bot_process', JSON.stringify({ version: 1, appId: shard === 'web' ? null : shard }));
+        if (shard === 'web') insertConfig('dutydeck.bot_session_routes', JSON.stringify({ version: 1, routes: Object.fromEntries(rows(db, 'sessions').filter(s => plan.destinations('sessions', s)[0] !== 'web').map(s => [s.id, `bot-${plan.destinations('sessions', s)[0]!.replaceAll('_', '-')}`])) }));
+        insertConfig(MARKER, marker); // staging cannot be started before source retirement
         if (target.prepare('PRAGMA foreign_key_check').all().length) fail(`TARGET_FOREIGN_KEY_FAILURE:${shard}`);
         if (target.prepare('PRAGMA integrity_check').get()?.integrity_check !== 'ok') fail(`TARGET_INTEGRITY_FAILURE:${shard}`);
         target.exec('COMMIT');
@@ -374,8 +383,9 @@ export function split(options: Options) {
     writeFileSync(join(staging, 'peers.json'), JSON.stringify(peers, null, 2) + '\n', { mode: 0o600 });
     writeFileSync(join(staging, 'manifest.json'), JSON.stringify({ ...report, sourceEntity: entity(database), migratedAt: JSON.parse(marker).migratedAt, retainedSourceOnly: 'Counts marked retained_source are inactive legacy bot metadata; source database is retained in full.' }, null, 2) + '\n', { mode: 0o600 });
     // The write lock spans offline proof, partitioning, validation and source retirement.
+    assertConfigWrite(db, MARKER, marker);
     db.prepare('INSERT INTO configs VALUES (?,?)').run(MARKER, marker); db.exec('COMMIT'); retired = true;
-    for (const shard of plan.shards) { const target = new DatabaseSync(join(staging, shard, 'dutydeck.db')); try { target.prepare('DELETE FROM configs WHERE key=?').run(MARKER); } finally { target.close(); } }
+    for (const shard of plan.shards) { const target = new DatabaseSync(join(staging, shard, 'dutydeck.db')); try { assertConfigWrite(target, MARKER, marker); target.prepare('DELETE FROM configs WHERE key=?').run(MARKER); } finally { target.close(); } }
     renameSync(staging, output); staging = undefined;
     return report;
   } finally {

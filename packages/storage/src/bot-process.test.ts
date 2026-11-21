@@ -1,4 +1,4 @@
-import { afterEach, expect, it } from 'vitest';
+import { afterEach, expect, it, vi } from 'vitest';
 import { createRepositories } from './index.js';
 const opened: ReturnType<typeof createRepositories>[] = [];
 afterEach(() => { for (const repo of opened.splice(0)) repo.close(); });
@@ -28,4 +28,43 @@ it('guards structured bot creation and app binding edits', async () => {
   await expect(repos.channelBots.create({ id: 'b', channel: 'lark', externalAppId: 'cli_b', displayName: 'B', brand: 'feishu', state: 'staged' })).rejects.toThrow('BOT_PROCESS_SCOPE');
   const bot = await repos.channelBots.create({ id: 'a', channel: 'lark', externalAppId: 'cli_a', displayName: 'A', brand: 'feishu', state: 'staged' });
   await expect(repos.channelBots.update(bot.id, { expectedRevision: bot.revision, externalAppId: 'cli_b' })).rejects.toThrow('BOT_PROCESS_SCOPE');
+});
+it('guards bot configuration in group policy transactions', async () => {
+  const repos = await bound('cli_a');
+  await expect(repos.groupPolicy.transact(tx => tx.config.set('lark.bots', '[]'))).rejects.toThrow('BOT_PROCESS_SCOPE');
+  expect(await repos.config.get('lark.bots')).toBe('[{"appId":"cli_a"}]');
+});
+
+it('rolls back CI target admission when the config write violates the bot binding', async () => {
+  const repos = await bound('cli_a');
+  repos.ciWebhook.acceptEvent({ eventKey: 'event', providerId: 'provider', payloadJson: '{}', targets: ['one'], now: 1, expiresAt: 100 });
+  expect(() => repos.ciWebhook.commitTarget({ eventKey: 'event', subscriptionId: 'one', state: 'admitted',
+    configKey: 'lark.bots', expectedConfig: '[{"appId":"cli_a"}]', nextConfig: '[]' })).toThrow('BOT_PROCESS_SCOPE');
+  expect(repos.ciWebhook.listPendingEvents()[0]?.targets).toEqual(['one']);
+});
+
+it('rejects unregistered config writes in tests and rolls back synchronous transactions', async () => {
+  const repos = await bound('cli_a');
+  await expect(repos.config.set('unregistered.other', 'x')).rejects.toThrow('Unregistered config');
+  await expect(repos.config.compareAndSet!('unregistered.cas', undefined, 'x')).rejects.toThrow('Unregistered config');
+  await expect(repos.config.compareAndSetBatch!([], [{ key: 'unregistered.batch', value: 'x' }])).rejects.toThrow('Unregistered config');
+  await expect(repos.config.remove!('unregistered.delete', 'x')).rejects.toThrow('Unregistered config');
+  expect(() => repos.transaction(tx => {
+    tx.config.set('lark.listener.status', 'changed');
+    tx.config.set('unregistered.other', 'x');
+  })).toThrow('Unregistered config');
+  expect(repos.configReader.get('lark.listener.status')).toBeUndefined();
+});
+
+it('warns once per unknown namespace outside Vitest and keeps the values readable', async () => {
+  const repos = await bound(null);
+  const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+  vi.stubEnv('VITEST', undefined);
+  try {
+    await repos.config.set('external.one', 'a');
+    await repos.config.compareAndSet!('external.two', undefined, 'b');
+    await repos.config.set('another.one', 'c');
+    expect(warn.mock.calls).toEqual([['Unregistered config prefix: external'], ['Unregistered config prefix: another']]);
+    expect(repos.configReader.list('external.')).toEqual([{ key: 'external.one', value: 'a' }, { key: 'external.two', value: 'b' }]);
+  } finally { warn.mockRestore(); vi.unstubAllEnvs(); }
 });

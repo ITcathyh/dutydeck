@@ -5,6 +5,7 @@ import { canonicalExecutionJson, taskExecutionSchemas, taskRequestV1Schema, type
 // and every repository (about half a second per process, paid once per test file).
 export { childProcessIdentity, currentProcessIdentity, observeProcess, type ProcessIdentity } from './process-identity.js';
 export { checkSqliteDriver, describeSqliteDriverFailure, type SqliteDriverCheck, type SqliteDriverCheckOptions } from './sqlite-preflight.js';
+export { createConfigReader } from './config-reader.js';
 export { assertBotProcessStartup } from './bot-process.js';
 
 export const LEGACY_RETIREMENT_NOTICE = '升级已结束旧会话，历史记录保留；原上下文未自动恢复，请用 /new 新建。';

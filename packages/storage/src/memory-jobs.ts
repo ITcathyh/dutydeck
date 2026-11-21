@@ -1,7 +1,8 @@
+import { createConfigTransaction } from './config-transaction.js';
 import type Database from 'better-sqlite3';
 import { cachedStatement } from './statement-cache.js';
 import { RuntimeError, type JsonValue, type MemoryJob, type MemoryJobRepository, type MemoryJobScope, type MemoryJobVersion } from '@dutydeck/shared';
-import { assertBotProcessApp, assertBotProcessConfigWrite } from './bot-process.js';
+import { assertBotProcessApp } from './bot-process.js';
 import { memoryJobVersionDigest } from './helpers.js';
 
 export { memoryJobVersionDigest };
@@ -36,7 +37,7 @@ export function createMemoryConsumedTaskSchema(db: Database.Database): void {
     WHERE consumed.type='text'
     ON CONFLICT(app_id,pool,task_id) DO NOTHING;`);
 }
-export function createMemoryJobRepository(db: Database.Database): MemoryJobRepository {
+export function createMemoryJobRepository(db: Database.Database, transaction = createConfigTransaction(db)): MemoryJobRepository {
   const read = (key: string) => (cachedStatement(db, 'SELECT value FROM configs WHERE key=?').get(key) as { value: string } | undefined)?.value;
   const scopeCheck = (scope: MemoryJobScope) => {
     if (!/^[A-Za-z0-9_-]+$/.test(scope.appId) || !/^[A-Za-z0-9_-]+$/.test(scope.pool)) throw new RuntimeError('MEMORY_SCOPE_INVALID', 'Invalid memory job scope', 400);
@@ -50,15 +51,14 @@ export function createMemoryJobRepository(db: Database.Database): MemoryJobRepos
   };
   return {
     async enqueuePendingTurn(input) {
-      return db.transaction(() => {
+      return transaction(({ config }) => {
         scopeCheck(input.scope);
         const key = `lark.memory.state.${input.scope.appId}.${input.scope.pool}`;
-        assertBotProcessConfigWrite(db, key, input.state);
         if (consumed(input.scope, input.taskId)) return 'consumed' as const;
-        if (read(key) !== input.expectedState) return 'conflict' as const;
-        cachedStatement(db, 'INSERT INTO configs(key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value').run(key, input.state);
+        if (config.get(key) !== input.expectedState) return 'conflict' as const;
+        config.set(key, input.state);
         return 'enqueued' as const;
-      }).immediate();
+      });
     },
     async hasClaim(scope, token) { scopeCheck(scope); return Boolean(cachedStatement(db, "SELECT 1 FROM memory_jobs WHERE app_id=? AND pool=? AND (state NOT IN ('settled','failed') OR json_extract(json, '$.claimToken') = ?) LIMIT 1").get(scope.appId, scope.pool, token ?? null)); },
     async isConsumed(scope, taskId) { scopeCheck(scope); return consumed(scope, taskId); },
@@ -117,7 +117,7 @@ export function createMemoryJobRepository(db: Database.Database): MemoryJobRepos
       }).immediate();
     },
     async apply(input) {
-      return db.transaction(() => {
+      return transaction(({ config }) => {
         const job = get(input.job.scope, input.job.id);
         if (!job) throw new RuntimeError('MEMORY_JOB_CONFLICT', 'Missing memory job', 409);
         if (job.receipt) return job;
@@ -130,22 +130,21 @@ export function createMemoryJobRepository(db: Database.Database): MemoryJobRepos
         const checkKeys = new Set([...allowed, `lark.memory.ignore.${scope.appId}.${scope.pool}`, 'lark.bots', 'lark.credentials']);
         for (const version of input.versions) {
           if (!checkKeys.has(version.key)) throw new RuntimeError('MEMORY_SCOPE_INVALID', 'Memory transaction check outside scope', 403);
-          if (!versionMatches(version, read(version.key))) throw new RuntimeError('MEMORY_CONCURRENT_CHANGE', 'Memory input or authorization changed', 409);
+          if (!versionMatches(version, config.get(version.key))) throw new RuntimeError('MEMORY_CONCURRENT_CHANGE', 'Memory input or authorization changed', 409);
         }
         for (const write of input.writes) {
           if (!allowed.has(write.key)) throw new RuntimeError('MEMORY_SCOPE_INVALID', 'Memory transaction write outside scope', 403);
-          assertBotProcessConfigWrite(db, write.key, write.value);
         }
         const stateKey = `lark.memory.state.${scope.appId}.${scope.pool}`;
-        const state = JSON.parse(read(stateKey) ?? '{}');
+        const state = JSON.parse(config.get(stateKey) ?? '{}');
         if (state.running?.token !== input.claimToken) throw new RuntimeError('MEMORY_CLAIM_LOST', 'Memory pool claim changed', 409);
-        for (const write of input.writes) cachedStatement(db, 'INSERT INTO configs(key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value').run(write.key, write.value);
+        for (const write of input.writes) config.set(write.key, write.value);
         const recordConsumed = cachedStatement(db, 'INSERT INTO memory_consumed_tasks(app_id,pool,task_id) VALUES (?,?,?) ON CONFLICT(app_id,pool,task_id) DO NOTHING');
         for (const taskId of input.consumedTaskIds) recordConsumed.run(scope.appId, scope.pool, taskId);
         const next: MemoryJob = { ...job, revision: job.revision + 1, state: 'applied', receipt: { appliedJobId: job.id, consumedTaskIds: input.consumedTaskIds, result: input.result, appliedAt: input.appliedAt } };
         cachedStatement(db, 'UPDATE memory_jobs SET state=?,revision=?,json=? WHERE id=?').run(next.state, next.revision, JSON.stringify(next), next.id);
         return next;
-      }).immediate();
+      });
     }
   };
 }

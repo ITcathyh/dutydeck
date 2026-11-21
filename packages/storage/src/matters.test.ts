@@ -11,11 +11,11 @@ describe('matter storage and schema 44', () => {
     const file = join(dir, 'state.db');
     try {
       let repos = createRepositories(file);
-      await repos.config.set('kept', 'old data'); repos.close();
+      await repos.config.set('session_name:kept', 'old data'); repos.close();
       const old = new Database(file);
       old.exec('DROP TABLE matter_links; DROP TABLE matters; DELETE FROM schema_migrations WHERE version=44'); old.close();
       repos = createRepositories(file);
-      expect(await repos.config.get('kept')).toBe('old data');
+      expect(await repos.config.get('session_name:kept')).toBe('old data');
       const first = repos.matters!.ensureSession({ sessionId: 'source', title: '😀'.repeat(65) });
       expect(Array.from(first.title)).toHaveLength(60);
       const inherited = repos.matters!.ensureSession({ sessionId: 'fork', sourceSessionId: 'source', title: 'other', relation: 'fork' });

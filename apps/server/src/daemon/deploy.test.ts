@@ -1,4 +1,4 @@
-import { backupSqlite, createRepositories, type SqliteDriverCheck, type SqliteDriverCheckOptions } from '@dutydeck/storage';
+import { backupSqlite, createRepositories, latestSchemaVersion, type SqliteDriverCheck, type SqliteDriverCheckOptions } from '@dutydeck/storage';
 import { DutydeckRuntime } from '@dutydeck/runtime';
 import type { AgentConfig } from '@dutydeck/shared';
 import Database from 'better-sqlite3';
@@ -1104,6 +1104,7 @@ describe('dutydeck deploy', () => {
   }, 60_000);
 
   it.each([
+    'reader-compatible', 'reader-too-new', 'reader-no-marker', 'reader-bad-backup',
     'same-schema', 'ddl-during-stop', 'migration-set-changed', 'current-unreadable', 'current-missing',
     'backup-missing', 'backup-unreadable', 'backup-schema-changed', 'initial-schema-unknown', 'initial-database-missing',
     'preservation-failed', 'stop-failed', 'stop-still-running', 'stop-threw', 'stop-check-threw',
@@ -1119,6 +1120,10 @@ describe('dutydeck deploy', () => {
     let clock = Date.now(), pid: number | undefined, backup: string | undefined, stopping = false;
     const ran: string[] = [], copies: Array<[string, string]> = [];
     const put = (sql: string) => { const db = new Database(database); try { db.exec(sql); } finally { db.close(); } };
+    if (scenario.startsWith('reader-')) {
+      put(`CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY, compatible_reader_version INTEGER); INSERT INTO schema_migrations VALUES (${latestSchemaVersion}, ${latestSchemaVersion})`);
+      if (scenario !== 'reader-no-marker') writeFileSync(join(first.release!, 'dist/schema-reader.json'), JSON.stringify({ protocol: 1, schemaVersion: latestSchemaVersion }));
+    }
     if (scenario === 'migration-set-changed') put('CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY); INSERT INTO schema_migrations VALUES (1), (2)');
     const stopFailure = scenario.startsWith('stop-');
     const controlled = {
@@ -1135,7 +1140,8 @@ describe('dutydeck deploy', () => {
           if (scenario === 'current-missing') rmSync(database);
           if (scenario === 'backup-missing') rmSync(backup!);
           if (scenario === 'backup-unreadable') writeFileSync(backup!, 'unreadable backup');
-          if (scenario === 'backup-schema-changed') {
+          if (scenario.startsWith('reader-')) put(`CREATE TABLE added(id); INSERT INTO schema_migrations VALUES (${latestSchemaVersion + 1}, ${latestSchemaVersion + Number(scenario === 'reader-too-new')})`);
+          if (scenario === 'backup-schema-changed' || scenario === 'reader-bad-backup') {
             const changed = new Database(backup!); changed.exec('CREATE TABLE changed_backup(id)'); changed.close();
           }
           if (scenario === 'preservation-failed') put('CREATE TABLE new_schema(id)');
@@ -1167,7 +1173,7 @@ describe('dutydeck deploy', () => {
         if (copies.length === 1 && scenario === 'initial-schema-unknown') writeFileSync(to, 'unreadable initial backup');
       }
     }));
-    const compatible = scenario === 'same-schema';
+    const compatible = scenario === 'same-schema' || scenario === 'reader-compatible';
     expect(result.status, result.error).toBe(compatible ? 'rolled_back' : 'rollback_failed');
     expect(ran).toEqual(compatible ? [result.release, first.release] : [result.release]);
     expect(realpathSync(join(releases, 'current'))).toBe(compatible ? first.release : result.release);
@@ -1181,6 +1187,9 @@ describe('dutydeck deploy', () => {
       expect(result.error).not.toContain('已切回');
       expect(result.error).not.toContain('重发');
       expect(manifest.rollback_blocked_reason).toEqual(expect.any(String));
+      if (scenario === 'reader-too-new') expect(manifest.rollback_blocked_reason).toContain('超过部署前的 schema 版本');
+      if (scenario === 'reader-no-marker') expect(manifest.rollback_blocked_reason).toContain('无法核实上一版');
+      if (scenario === 'reader-bad-backup') expect(manifest.rollback_blocked_reason).toContain('备份');
       expect(manifest.rollback_service_stopped).toBe(!stopFailure);
       if (!stopFailure) expect(await controlled.mainPid()).toBeUndefined();
     }
@@ -1251,7 +1260,7 @@ describe('dutydeck deploy', () => {
           expect(completedAttempt).not.toMatchObject({ submissionState: 'not_submitted' });
           upgraded.runtime.setQueueHeld(true);
           addedId = (await upgraded.runtime.dispatch(session.id, 'accepted after backup')).id;
-          await upgraded.repos.config.set('after-backup', 'retained');
+          await upgraded.repos.config.set('session_name:after-backup', 'retained');
           const migration = new Database(database);
           migration.exec('CREATE TABLE deployment_new_schema (id INTEGER PRIMARY KEY)');
           migration.close();
@@ -1274,7 +1283,7 @@ describe('dutydeck deploy', () => {
       expect(execution.task.status).toBe('completed');
       expect(execution.attempts).toHaveLength(1);
       expect(execution.currentAttempt).toEqual(completedAttempt);
-      expect(await recovered.repos.config.get('after-backup')).toBe('retained');
+      expect(await recovered.repos.config.get('session_name:after-backup')).toBe('retained');
       expect((await recovered.repos.tasks.get(addedId!))?.status).toBe('queued');
       recovered.runtime.setQueueHeld(false);
       await vi.waitFor(() => expect(recovered.repos.execution.getTaskExecution(addedId!)?.task.status).toBe('completed'));

@@ -11,6 +11,7 @@
   "files": [
     "dist/cli.js",
     "dist/internal-agent-cli.js",
+    "dist/schema-reader.json",
     "dist/chunk-*.js",
     "dist/lark-sdk.mjs",
     "dist/program-status-relay.js",

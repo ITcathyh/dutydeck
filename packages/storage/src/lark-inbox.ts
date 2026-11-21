@@ -1,3 +1,4 @@
+import { assertConfigWrite } from './config-write.js';
 import type Database from 'better-sqlite3';
 import { assertJsonPaths, decodeJsonFields, expression as field } from './config-query.js';
 import { cachedStatement } from './statement-cache.js';
@@ -28,6 +29,8 @@ export const SLIM_IGNORED_SQL = `UPDATE configs INDEXED BY config_lark_inbox_bod
 export function pruneIgnoredLarkInbox(db: Database.Database, appId: string, options: { receivedBefore: string; keep: number; now: string }) {
   const prefix = `lark.inbox.${appId}.`;
   return db.transaction(() => {
+    // Both indexed writes are confined to this inbox namespace.
+    assertConfigWrite(db, prefix, '');
     const prune = cachedStatement(db, PRUNE_IGNORED_SQL);
     let removed = 0;
     for (const bot of [0, 1]) removed += prune.run({ prefix, app: appId, bot, before: options.receivedBefore, keep: options.keep }).changes;

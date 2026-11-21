@@ -8,7 +8,9 @@ import { listConfigByJsonField, listConfigJsonFields } from './config-query.js';
 import { createPluginResultRepository } from './plugin-results.js';
 import { createMemoryJobRepository } from './memory-jobs.js';
 import { createWorkItemIndexRepository } from './work-item-index.js';
-import { assertBotProcessConfigWrite } from './bot-process.js';
+import { assertConfigWrite, assertRepositoryConfigWrite } from './config-write.js';
+import { createConfigReader } from './config-reader.js';
+import { createConfigTransaction } from './config-transaction.js';
 export { assertBotProcessStartup, botProcessKey, botProcessMigrationKey, type BotProcessBinding } from './bot-process.js';
 export { memoryJobVersionDigest } from './memory-jobs.js';
 import Database from 'better-sqlite3';
@@ -17,7 +19,7 @@ import { drizzle } from 'drizzle-orm/better-sqlite3';
 import { chmodSync, closeSync, constants, existsSync, mkdirSync, openSync } from 'node:fs';
 import { basename, dirname } from 'node:path';
 import type { AgentConfig, AgentEvent, RepositoryBundle, RepositoryOpenOptions, Session, TaskConversationEvent, TaskRecord } from '@dutydeck/shared';
-import { agentConfigs, channelMappings, configs, errors, events, machines, permissionRequests, projects, sessions, tasks, toolCalls } from './schema.js';
+import { agentConfigs, channelMappings, errors, events, machines, permissionRequests, projects, sessions, tasks, toolCalls } from './schema.js';
 import { deferredConfirmationId, RuntimeError, watchFindingSchema } from '@dutydeck/shared';
 import { createTaskExecutionRepository } from './task-execution.js';
 import { needsMigration, runMigrations, withMigrationTransaction } from './migrations.js';
@@ -43,7 +45,9 @@ export * from './usage-ledger.js';
 export * from './execution-inspection.js';
 export { createSessionInsightRepository } from './session-insight.js';
 export { createSessionInsightSchema } from './session-insight-migration.js';
-export { latestSchemaVersion } from './migrations.js';
+export { createConfigReader } from './config-reader.js';
+export { configKeyDefinition } from './config-keys.js';
+export { latestSchemaVersion, readerVersions } from './migrations.js';
 
 export const EVENT_WINDOW_DEFAULT_LIMIT = 200;
 export const EVENT_WINDOW_MAX_LIMIT = 1_000;
@@ -194,21 +198,21 @@ export function createRepositories(filename: string, options: RepositoryOpenOpti
     return work();
   }).immediate();
   const foundationRepositories = createFoundationRepositories(sqlite);
-  const wp1aRepositories = createWp1aRepositories(sqlite);
+  const configReader = createConfigReader(sqlite);
+  const transaction = createConfigTransaction(sqlite);
+  const wp1aRepositories = createWp1aRepositories(sqlite, transaction);
   const scheduleRepositories = createScheduleFoundationRepositories(sqlite);
   const collaboration = createCollaborationRepository(sqlite);
-  const ciWebhook = createCiWebhookRepository(sqlite);
+  const ciWebhook = createCiWebhookRepository(sqlite, transaction);
   const usage = createUsageLedgerRepository(sqlite);
   const insight = createSessionInsightRepository(sqlite, control);
   // Per-event reads: build and prepare each query once, on first use, instead of on every call.
   const once = <T>(build: () => T) => { let prepared: T | undefined; return () => (prepared ??= build()); };
   const sessionById = once(() => db.select().from(sessions).where(eq(sessions.id, sql.placeholder('id'))).prepare());
-  const configByKey = once(() => db.select().from(configs).where(eq(configs.key, sql.placeholder('key'))).prepare());
   const agentById = once(() => db.select().from(agentConfigs).where(eq(agentConfigs.id, sql.placeholder('id'))).prepare());
   const taskById = once(() => db.select().from(tasks).where(eq(tasks.id, sql.placeholder('id'))).prepare());
   const tasksBySession = once(() => db.select().from(tasks).where(eq(tasks.sessionId, sql.placeholder('sessionId'))).orderBy(asc(tasks.createdAt)).prepare());
   const upsertToolCall = () => cachedStatement(sqlite, 'INSERT INTO tool_calls (id,session_id,data,created_at,updated_at) VALUES (?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET data=excluded.data,updated_at=excluded.updated_at');
-  const configValue = () => cachedStatement(sqlite, 'SELECT value FROM configs WHERE key=?');
   const sessionHighWaterMark = () => cachedStatement(sqlite, 'SELECT COALESCE(MAX(sequence),0) AS sequence FROM events WHERE session_id=?');
   const insertEvent = once(() => db.insert(events).values({ id: sql.placeholder('id'), sessionId: sql.placeholder('sessionId'), sequence: sql.placeholder('sequence'), type: sql.placeholder('type'),
     timestamp: sql.placeholder('timestamp'), data: sql.placeholder('data'), raw: sql.placeholder('raw'), taskId: sql.placeholder('taskId'), attemptId: sql.placeholder('attemptId'), settlementId: sql.placeholder('settlementId') }).prepare());
@@ -231,7 +235,7 @@ export function createRepositories(filename: string, options: RepositoryOpenOpti
     return db.select().from(events).where(and(...filters)).orderBy(backward ? desc(events.sequence) : asc(events.sequence)).limit(sql.placeholder('limit')).prepare();
   };
   return {
-    control,
+    control, configReader, transaction,
     matters: createMatterRepository(sqlite),
     workspaceApprovalRules: createWorkspaceApprovalRuleRepository(sqlite),
     execution,
@@ -471,33 +475,32 @@ export function createRepositories(filename: string, options: RepositoryOpenOpti
       async compareAndSetBatch(checks, writes) {
         return sqlite.transaction(() => {
           for (const { key, value } of writes) {
-            assertBotProcessConfigWrite(sqlite, key, value);
-            if (key.startsWith('runtime_native_context:')) throw new RuntimeError('EXECUTION_WRITE_REQUIRES_LEDGER', 'Native context selection requires a bound ledger command', 409);
+            assertRepositoryConfigWrite(sqlite, key, value);
           }
           const read = cachedStatement(sqlite, 'SELECT value FROM configs WHERE key=?');
           if (checks.some(({ key, expected }) => (read.get(key) as { value: string } | undefined)?.value !== expected)) return false;
           const put = cachedStatement(sqlite, 'INSERT INTO configs (key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value');
           for (const { key, value } of writes) put.run(key, value);
-          for (const { key, value } of writes) assertBotProcessConfigWrite(sqlite, key, value);
+          for (const { key, value } of writes) assertConfigWrite(sqlite, key, value);
           return true;
         }).immediate();
       },
-      getSync(key) { return (configValue().get(key) as { value: string } | undefined)?.value; },
+      getSync: configReader.get,
       async listByJsonField(prefix, filter) { return listConfigByJsonField(sqlite, prefix, filter); },
       async listJsonFields(prefix, paths, filter) { return listConfigJsonFields(sqlite, prefix, paths, filter); },
       async pruneIgnoredLarkInbox(appId, options) { return pruneIgnoredLarkInbox(sqlite, appId, options); },
       async listRecentIgnoredLarkInbox(input) { return listRecentIgnoredLarkInbox(sqlite, input); },
       async remove(key, expected) {
-        const promptPending = key.startsWith('bot_prompt_version/pending/');
+        const deletion = assertConfigWrite(sqlite, key, expected)?.deletion;
         let recovered: ReturnType<typeof watchFindingSchema.parse> | undefined;
-        if (key.startsWith('watch_findings/')) {
+        if (deletion === 'recovered-finding') {
           try {
             const parsed = watchFindingSchema.safeParse(JSON.parse(expected));
             if (parsed.success && parsed.data.recoveredAt && !key.endsWith('/notification')
               && key === `watch_findings/${parsed.data.appId}/${parsed.data.fingerprint}`) recovered = parsed.data;
           } catch { /* Invalid records cannot authorize deletion. */ }
         }
-        if (!promptPending && !recovered && (!key.startsWith('lark.inbox.') || JSON.parse(expected)?.state !== 'ignored')) throw new RuntimeError('CONFIG_DELETE_NOT_SUPPORTED', 'Only recovered watch findings, ignored Lark inbox receipts and prompt usage preparations can be removed', 409);
+        if (deletion !== 'pending-prompt' && !recovered && (deletion !== 'ignored-inbox' || JSON.parse(expected)?.state !== 'ignored')) throw new RuntimeError('CONFIG_DELETE_NOT_SUPPORTED', 'Only recovered watch findings, ignored Lark inbox receipts and prompt usage preparations can be removed', 409);
         return sqlite.transaction(() => {
           if (recovered) {
             const row = cachedStatement(sqlite, 'SELECT value FROM configs WHERE key=?').get(`watch_findings/${recovered.appId}/notification`) as { value: string } | undefined;
@@ -512,32 +515,16 @@ export function createRepositories(filename: string, options: RepositoryOpenOpti
           return cachedStatement(sqlite, 'DELETE FROM configs WHERE key = ? AND value = ?').run(key, expected).changes === 1;
         }).immediate();
       },
-      async get(key) { return configByKey().get({ key })?.value; },
-      async set(key, value) { assertBotProcessConfigWrite(sqlite, key, value); if (key.startsWith('runtime_native_context:')) throw new RuntimeError('EXECUTION_WRITE_REQUIRES_LEDGER', 'Native context selection requires a bound ledger command', 409); db.insert(configs).values({ key, value }).onConflictDoUpdate({ target: configs.key, set: { value } }).run(); },
-      async list(prefix) {
-        const characters = Array.from(prefix);
-        // SQLite length/substr stop at NUL; keep their existing edge-case semantics.
-        if (!prefix || prefix.includes('\0') || characters.some(character => /^[\ud800-\udfff]$/.test(character))) {
-          return cachedStatement(sqlite, 'SELECT key, value FROM configs WHERE substr(key, 1, length(?)) = ? ORDER BY key').all(prefix, prefix) as Array<{ key: string; value: string }>;
-        }
-        let upper: string | undefined;
-        for (let index = characters.length - 1; index >= 0; index--) {
-          const code = characters[index]!.codePointAt(0)!;
-          if (code === 0x10ffff) continue;
-          // UTF-8 BINARY order follows scalar values; skip the surrogate range.
-          upper = characters.slice(0, index).join('') + String.fromCodePoint(code === 0xd7ff ? 0xe000 : code + 1);
-          break;
-        }
-        return (upper === undefined
-          ? cachedStatement(sqlite, 'SELECT key, value FROM configs WHERE key >= ? COLLATE BINARY AND substr(key, 1, length(?)) = ? ORDER BY key').all(prefix, prefix, prefix)
-          : cachedStatement(sqlite, 'SELECT key, value FROM configs WHERE key >= ? COLLATE BINARY AND key < ? COLLATE BINARY AND substr(key, 1, length(?)) = ? ORDER BY key').all(prefix, upper, prefix, prefix)) as Array<{ key: string; value: string }>;
-      },
+      async get(key) { return configReader.get(key); },
+      async set(key, value) { transaction(tx => tx.config.set(key, value)); },
+      async list(prefix) { return configReader.list(prefix); },
       async compareAndSet(key, expected, value) {
-        assertBotProcessConfigWrite(sqlite, key, value);
-        if (key.startsWith('runtime_native_context:')) throw new RuntimeError('EXECUTION_WRITE_REQUIRES_LEDGER', 'Native context selection requires a bound ledger command', 409);
-        return expected === undefined
-          ? cachedStatement(sqlite, 'INSERT INTO configs (key, value) VALUES (?, ?) ON CONFLICT(key) DO NOTHING').run(key, value).changes === 1
-          : cachedStatement(sqlite, 'UPDATE configs SET value = ? WHERE key = ? AND value = ?').run(value, key, expected).changes === 1;
+        return transaction(() => {
+          assertRepositoryConfigWrite(sqlite, key, value);
+          return expected === undefined
+            ? cachedStatement(sqlite, 'INSERT INTO configs (key, value) VALUES (?, ?) ON CONFLICT(key) DO NOTHING').run(key, value).changes === 1
+            : cachedStatement(sqlite, 'UPDATE configs SET value = ? WHERE key = ? AND value = ?').run(value, key, expected).changes === 1;
+        });
       }
     },
     channelMappings: {
@@ -558,7 +545,7 @@ export function createRepositories(filename: string, options: RepositoryOpenOpti
     ...wp1aRepositories,
     ...scheduleRepositories,
     pluginResults: createPluginResultRepository(sqlite),
-    memoryJobs: createMemoryJobRepository(sqlite),
+    memoryJobs: createMemoryJobRepository(sqlite, transaction),
     workItems: createWorkItemIndexRepository(sqlite),
     collaboration,
     ciWebhook,

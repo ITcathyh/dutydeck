@@ -1,3 +1,4 @@
+import Database from 'better-sqlite3';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -12,7 +13,9 @@ describe('persistent relay questions', () => {
     const filename = join(directory, 'state.db');
     let repos = createRepositories(filename);
     try {
-      await repos.config.set('relayXask.unrelated', 'not a question');
+      const legacy = new Database(filename);
+      try { legacy.prepare('INSERT INTO configs VALUES (?,?)').run('relayXask.unrelated', 'not a question'); }
+      finally { legacy.close(); }
       const firstStore = createRelayAskStore(repos.config);
       const pending: RelayAskRecord = { id: 'ask_one', sessionId: 'ses_one', question: '采用哪个方案？', status: 'pending', createdAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 60_000).toISOString() };
       expect(await firstStore.compareAndSet(undefined, pending)).toBe(true);

@@ -1,3 +1,4 @@
+import { createConfigReader } from '@dutydeck/storage/helpers';
 /**
  * doctor 的默认外部探针。
  *
@@ -12,9 +13,6 @@ import { existsSync } from 'node:fs';
 
 const UNPRICED_USAGE_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
 
-/** configs 表的形状：{ key TEXT PRIMARY KEY, value TEXT NOT NULL }。 */
-interface ConfigRow { value: string }
-interface KeyedConfigRow { key: string; value: string }
 interface VersionRow { version: number | null }
 
 /**
@@ -44,34 +42,14 @@ export const defaultDatabaseProbe: DatabaseProbe = (path, keys, prefixes = []) =
     }
     if (keys.length > 0 || prefixes.length > 0) {
       const values: Record<string, string | undefined> = {};
-      // prepare 本身会在 configs 表不存在时抛错（半初始化的库就是这样）。
-      // 那不代表整个库读不了，所以单独兜住：键值一律 undefined，库仍算可读。
-      let statement: Database.Statement | undefined;
-      try {
-        statement = db.prepare('SELECT value FROM configs WHERE key = ?');
-      } catch {
-        statement = undefined;
-      }
+      const reader = createConfigReader(db);
       for (const key of keys) {
-        try {
-          values[key] = statement ? (statement.get(key) as ConfigRow | undefined)?.value : undefined;
-        } catch {
-          values[key] = undefined;
-        }
-      }
-      // 前缀查询同样单独兜住：configs 表缺失时这些键一律不出现，库仍算可读。
-      let prefixed: Database.Statement | undefined;
-      try {
-        prefixed = prefixes.length > 0 ? db.prepare('SELECT key, value FROM configs WHERE substr(key, 1, length(?)) = ?') : undefined;
-      } catch {
-        prefixed = undefined;
+        try { values[key] = reader.get(key); }
+        catch { values[key] = undefined; } // A partially initialized database can lack configs.
       }
       for (const prefix of prefixes) {
-        try {
-          for (const row of (prefixed?.all(prefix, prefix) ?? []) as KeyedConfigRow[]) values[row.key] = row.value;
-        } catch {
-          // 读不出来就当没有这些键。
-        }
+        try { for (const row of reader.list(prefix)) values[row.key] = row.value; }
+        catch { /* Keep the remaining probe results when configs is unreadable. */ }
       }
       result.values = values;
     }

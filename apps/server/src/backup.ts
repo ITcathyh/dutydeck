@@ -1,3 +1,4 @@
+import { createConfigReader } from '@dutydeck/storage/helpers';
 import Database from 'better-sqlite3';
 import { createHash } from 'node:crypto';
 import { chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
@@ -93,7 +94,7 @@ const snapshotSchema = z.object({ version: z.literal(1), id: z.string().regex(/^
 function referencedSnapshots(database: string): Array<{ path: string; size: number; sha256: string }> {
   const db = new Database(readFileSync(database), { readonly: true });
   try {
-    return (db.prepare("SELECT key,value FROM configs WHERE key LIKE 'artifact.snapshot.%'").all() as Array<{ key: string; value: string }>).map(row => {
+    return createConfigReader(db).list('artifact.snapshot.', { ignoreAsciiCase: true }).map(row => {
       let value: z.infer<typeof snapshotSchema>;
       try { value = snapshotSchema.parse(JSON.parse(row.value)); } catch { throw new Error('Invalid artifact snapshot metadata'); }
       if (row.key !== `artifact.snapshot.${value.id}`) throw new Error('Artifact snapshot identity mismatch');

@@ -1,7 +1,8 @@
+import { createConfigTransaction } from './config-transaction.js';
 import type Database from 'better-sqlite3';
 import { cachedStatement } from './statement-cache.js';
 import { createHash } from 'node:crypto';
-import { isThenable, naturalKeyConflict as conflict, notFound, revisionConflict } from './foundation-errors.js';
+import { naturalKeyConflict as conflict, notFound, revisionConflict } from './foundation-errors.js';
 import {
   RuntimeError,
   channelBotGroupPolicySchema,
@@ -149,7 +150,7 @@ export interface Wp1aRepositories {
   groupPolicy: GroupPolicyRepository;
 }
 
-export function createWp1aRepositories(sqlite: Database.Database): Wp1aRepositories {
+export function createWp1aRepositories(sqlite: Database.Database, transaction = createConfigTransaction(sqlite)): Wp1aRepositories {
   const selectPolicy = cachedStatement(sqlite, 'SELECT * FROM channel_bot_policies WHERE id = ?');
   const selectBinding = cachedStatement(sqlite, 'SELECT * FROM group_bindings WHERE id = ?');
   const selectFact = cachedStatement(sqlite, 'SELECT * FROM remote_chat_facts WHERE id = ?');
@@ -392,25 +393,19 @@ export function createWp1aRepositories(sqlite: Database.Database): Wp1aRepositor
   };
 
   const transactionContext: GroupPolicyTransactionContext = {
+    // Legacy callers can retain this handle. Each call still takes the same guarded transaction.
+    config: {
+      get: key => transaction(tx => tx.config.get(key)),
+      set: (key, value) => transaction(tx => tx.config.set(key, value))
+    },
     groupBindings: { get: getBinding, getByNaturalKey: getBindingByNaturalKey, create: createBinding, update: updateBinding },
     channelBotPolicies: { get: getPolicy, getByChannelBot: getPolicyByBot, create: createPolicy, update: updatePolicy },
     remoteChatFacts: { get: getFact, getByNaturalKey: getFactByNaturalKey, getCurrentByNaturalKey: getCurrentFactByNaturalKey, create: createFact, update: updateFact, upsert: upsertFact, invalidate: invalidateFact },
     remoteIdentityFacts: { get: getIdentityFact, getByChannelBot: getIdentityFactByBot, getCurrentByChannelBot: getCurrentIdentityFactByBot, upsert: upsertIdentityFact, invalidate: invalidateIdentityFact },
     roleAssignments: { get: getRole, create: createRole, update: updateRole },
-    config: {
-      get: key => (cachedStatement(sqlite, 'SELECT value FROM configs WHERE key = ?').get(key) as { value: string } | undefined)?.value,
-      set: (key, value) => { if (key.startsWith('runtime_native_context:')) throw new RuntimeError('EXECUTION_WRITE_REQUIRES_LEDGER', 'Native context selection requires a bound ledger command', 409); cachedStatement(sqlite, 'INSERT INTO configs (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value').run(key, value); }
-    }
   };
-  const transact = async <T>(work: (repositories: GroupPolicyTransactionContext) => T): Promise<T> => {
-    let result!: T;
-    sqlite.transaction(() => {
-      const candidate = work(transactionContext);
-      if (isThenable(candidate)) throw new RuntimeError('FOUNDATION_ASYNC_TRANSACTION_UNSUPPORTED', 'Group policy transactions must be synchronous', 400);
-      result = candidate;
-    })();
-    return result;
-  };
+  const transact = async <T>(work: (repositories: GroupPolicyTransactionContext) => T): Promise<T> =>
+    transaction(() => work(transactionContext));
 
   return {
     channelBotPolicies: {

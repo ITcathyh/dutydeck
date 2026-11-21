@@ -5,6 +5,7 @@ import { dirname, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
 import { expect, it } from 'vitest';
+import { latestSchemaVersion } from '@dutydeck/storage';
 import { missingRelativeImports } from '../apps/server/src/daemon/import-closure.mjs';
 
 const execFileAsync = promisify(execFile);
@@ -63,6 +64,7 @@ it('packs every deferred chunk and resource without acpx or drizzle as productio
     expect(metadata.dependencies).not.toHaveProperty('drizzle-orm');
     for (const name of ['acpx', 'drizzle-orm']) expect(await stat(join(pkg, 'node_modules', name)).catch(() => undefined)).toBeUndefined();
 
+    expect(JSON.parse(await readFile(join(pkg, 'dist/schema-reader.json'), 'utf8'))).toEqual({ protocol: 1, schemaVersion: latestSchemaVersion });
     const cli = join(pkg, 'dist/cli.js');
     const internalAgentCli = join(pkg, 'dist/internal-agent-cli.js');
     expect(missingRelativeImports(cli)).toEqual([]);
@@ -163,10 +165,10 @@ assert.deepEqual(turns[0],turns[1]);
 assert.deepEqual(turns[0].slice(1).map(parts=>parts[0].type),['image','resource','resource_link']);
 const database = new URL('./migration.db', import.meta.url).pathname;
 const first = createRepositories(database);
-await first.config.set('startup-probe','persisted');
+await first.config.set('session_name:startup-probe','persisted');
 first.close();
 const reopened = createRepositories(database);
-assert.equal(await reopened.config.get('startup-probe'),'persisted');
+assert.equal(await reopened.config.get('session_name:startup-probe'),'persisted');
 reopened.close();
 console.log('PACKED_STARTUP_PROBE_OK');
 `);

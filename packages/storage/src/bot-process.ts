@@ -9,7 +9,8 @@ export interface BotProcessBinding { version: 1; appId: string | null }
 function reject(message: string): never {
   throw new RuntimeError('BOT_PROCESS_SCOPE', `BOT_PROCESS_SCOPE: ${message}`, 409);
 }
-function read(db: Database.Database, key: string): string | undefined {
+export interface ConfigDatabase { prepare(sql: string): { get(key: string): unknown } }
+function read(db: ConfigDatabase, key: string): string | undefined {
   return (db.prepare('SELECT value FROM configs WHERE key = ?').get(key) as { value: string } | undefined)?.value;
 }
 function binding(raw: string): BotProcessBinding {
@@ -32,7 +33,7 @@ export function assertBotProcessApp(db: Database.Database, appId: string): void 
 }
 
 /** All repository config writes, including offline import, share this boundary. */
-export function assertBotProcessConfigWrite(db: Database.Database, key: string, value: string): void {
+export function assertBotProcessConfigWrite(db: ConfigDatabase, key: string, value: string): void {
   const raw = read(db, botProcessKey);
   if (key === botProcessKey) {
     const scope = binding(value);

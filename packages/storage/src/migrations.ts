@@ -19,6 +19,7 @@ import { migrateLegacyDutyScenarios } from './scenario-legacy.js'
 export interface Migration {
   version: number
   name: string
+  compatibleReaderVersion?: number
   /** 只补建可重建的派生结构（索引），重复执行无副作用；旧库补记迁移名时重跑一次，修复分支间版本号错位留下的缺口。 */
   repeatable?: true
   up(db: Database.Database): void
@@ -666,6 +667,10 @@ export const migrations: Migration[] = [
   // 接话人卸任后仍要保留事件水位；只加可空列，已有分工与修订不变。
   { version: 51, name: 'collaboration_responder_watermark', up(db) {
     if (tableExistsForMigration(db, 'collaboration_duties')) ensureColumn(db, 'collaboration_duties', 'responder_watermark_json', 'responder_watermark_json TEXT CHECK (responder_watermark_json IS NULL OR json_valid(responder_watermark_json))');
+  } },
+  { version: 52, name: 'compatible_reader_version', up(db) {
+    ensureColumn(db, 'schema_migrations', 'compatible_reader_version', 'compatible_reader_version INTEGER')
+    db.exec('UPDATE schema_migrations SET compatible_reader_version = version WHERE compatible_reader_version IS NULL')
   } }
 ]
 
@@ -773,6 +778,7 @@ export function runMigrations(db: Database.Database): void {
 }
 
 function applyMigrations(db: Database.Database): void {
+  if (tableExistsForMigration(db, 'schema_migrations') && !needsMigration(db)) return
   db.exec('CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL, name TEXT)')
   ensureColumn(db, 'schema_migrations', 'name', 'name TEXT')
   const recorded = recordedMigrations(db)
@@ -789,7 +795,13 @@ function applyMigrations(db: Database.Database): void {
     }
     db.transaction(() => {
       migration.up(db)
-      recordApplied.run(migration.version, new Date().toISOString(), migration.name)
+      const columns = db.pragma('table_info(schema_migrations)') as Array<{ name: string }>
+      if (columns.some(column => column.name === 'compatible_reader_version')) {
+        db.prepare('INSERT INTO schema_migrations (version, applied_at, name, compatible_reader_version) VALUES (?, ?, ?, ?)')
+          .run(migration.version, new Date().toISOString(), migration.name, migration.compatibleReaderVersion ?? migration.version)
+      } else {
+        recordApplied.run(migration.version, new Date().toISOString(), migration.name)
+      }
     })()
   }
 }
@@ -841,10 +853,6 @@ function applyFreshSchemaTemplate(db: Database.Database): boolean {
   return true
 }
 
-/**
- * 版本号到迁移名的已记录映射；name 为 null 的行早于迁移名记录，无法核对，只能按版本号认定。
- * 迁移名不一致说明库由另一条分支的迁移序列升级过，同一版本号已执行的是别的迁移，必须拒绝继续。
- */
 function shellArgument(value: string): string {
   return /^[A-Za-z0-9_./:@%+=,-]+$/.test(value) ? value : `'${value.replaceAll("'", "'\\''")}'`
 }
@@ -854,13 +862,25 @@ function schemaTooNewError(db: Database.Database, actualVersion: number): Error 
   return new Error(`DATABASE_SCHEMA_TOO_NEW: database schema version ${actualVersion}; this build supports schema version ${latestSchemaVersion}. Startup refuses the newer database and does not migrate or downgrade it.\nRead-only inspection:\n${command}\nUse a Dutydeck build that supports schema ${actualVersion}, or stop all writers and restore a known-good backup into a separate new directory with dutydeck backup restore --archive <backup-archive> --target <new-restored-directory>. Restoring a backup discards all writes made after that backup; switching to older code is not a database rollback.`)
 }
 
+export function readerVersions(db: Database.Database) {
+  const columns = db.pragma('table_info(schema_migrations)') as Array<{ name: string }>
+  const reader = columns.some(column => column.name === 'compatible_reader_version') ? 'COALESCE(compatible_reader_version, version)' : 'version'
+  return db.prepare(`SELECT COALESCE(MAX(version),0) AS version, COALESCE(MAX(${reader}),0) AS required,
+    COUNT(*) FILTER (WHERE version < 1 OR typeof(${reader}) != 'integer' OR ${reader} < 1 OR ${reader} > version) AS invalid FROM schema_migrations`).get() as { version: number; required: number; invalid: number }
+}
+
+/**
+ * 版本号到迁移名的已记录映射；name 为 null 的行早于迁移名记录，无法核对，只能按版本号认定。
+ * 迁移名不一致说明库由另一条分支的迁移序列升级过，同一版本号已执行的是别的迁移，必须拒绝继续。
+ */
 function recordedMigrations(db: Database.Database): Map<number, string | null> {
   const named = (db.pragma('table_info(schema_migrations)') as Array<{ name: string }>).some(column => column.name === 'name')
   const rows = db.prepare(`SELECT version, ${named ? 'name' : 'NULL'} AS name FROM schema_migrations`).all() as Array<{ version: number; name: string | null }>
-  const actualVersion = Math.max(0, ...rows.map(row => row.version))
+  const schema = readerVersions(db)
+  if (schema.required > latestSchemaVersion || schema.invalid) throw schemaTooNewError(db, schema.version)
   for (const row of rows) {
     const expected = migrations.find(migration => migration.version === row.version)
-    if (!expected) throw schemaTooNewError(db, actualVersion)
+    if (!expected) continue
     if (row.name !== null && row.name !== expected.name) {
       throw new Error(`DATABASE_SCHEMA_LINEAGE_MISMATCH: migration ${row.version} was recorded as "${row.name}" but this build expects "${expected.name}"`)
     }
@@ -871,5 +891,6 @@ function recordedMigrations(db: Database.Database): Map<number, string | null> {
 export function needsMigration(db: Database.Database): boolean {
   if (!db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'schema_migrations'").get()) return true;
   const recorded = recordedMigrations(db);
+  for (const version of recorded.keys()) if (version > latestSchemaVersion) return false;
   return migrations.some(migration => (recorded.get(migration.version) ?? null) === null);
 }
