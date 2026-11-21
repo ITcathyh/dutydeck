@@ -1,7 +1,8 @@
+import { insightEventsQuery } from '../queries';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { traceKinds, type TraceEvent } from '@dutydeck/shared';
-import { insightApi, insightQueryKeys, type InsightEventFilters } from '../api';
+import { type InsightEventFilters } from '../api';
 import { currentInstance } from '../instance';
 import { Banner, Button, Select, Spinner } from './primitives';
 import { formatTime, metricTitle, traceKindLabels, traceResultLabels } from './SessionInsightShared';
@@ -82,12 +83,7 @@ export function SessionInsightEvents({ sessionId, snapshotId, locateEventId, onL
     setHighlightedEventId(null);
   }, [snapshotId, sessionId, instance]);
 
-  const query: InsightEventFilters & { snapshotId: string } = { snapshotId, ...filters, cursor: cursors[page], limit: EVENT_PAGE_LIMIT };
-  const events = useQuery({
-    queryKey: insightQueryKeys.events(instance, sessionId, snapshotId, { ...filters, cursor: cursors[page], limit: EVENT_PAGE_LIMIT }),
-    queryFn: ({ signal }) => insightApi.events(sessionId, query, signal),
-    enabled: Boolean(snapshotId)
-  });
+  const events = useQuery({ ...insightEventsQuery(instance, sessionId, snapshotId, { ...filters, cursor: cursors[page], limit: EVENT_PAGE_LIMIT }), enabled: Boolean(snapshotId) });
 
   // 外部传入新的证据定位请求：回到第一页并清除筛选，开启一次顺序向后搜索。
   useEffect(() => {

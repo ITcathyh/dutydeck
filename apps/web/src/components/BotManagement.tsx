@@ -1,4 +1,4 @@
-import { larkConfigQuery, larkMemoryStatusQuery, leaderSkillsQuery, managementGroupsQuery, queryKeys, systemCapabilitiesQuery } from '../queries';
+import { agentModelsQuery, hookRoutingQuery, larkConfigQuery, larkMemoryStatusQuery, leaderSkillsQuery, managementGroupsQuery, queryKeys, systemCapabilitiesQuery } from '../queries';
 import { draftFromBot, saveBodyFromDraft } from '../bot-settings-form';
 import { ReplyPolishSettings } from './ReplyPolishSettings';
 import { ReactionTriggerSetting } from './ReactionTriggerSetting';
@@ -36,7 +36,6 @@ import { AgentSelect, CompactSelect } from './CompactSelect';
 import { DirectoryPicker } from './DirectoryPicker';
 import { ConfirmDialog } from './ConfirmDialog';
 import { toastStore } from '../useToasts';
-import { agentModelsQueryKey, loadAgentModels } from '../model-cache';
 import { supportsModelServiceSettings } from '../agent-model-support';
 
 export type BotManagementProps = {
@@ -238,12 +237,7 @@ export function BotManagement({
   const isDirty = activeBot && currentDraft ? hasDraftChanges(activeBot, currentDraft) : false;
 
   // 模型选项
-  const agentOptions = useQuery({
-    queryKey: agentModelsQueryKey(currentDraft?.defaultAgentId, currentDraft?.defaultModel, activeAppId),
-    queryFn: () => loadAgentModels(currentDraft!.defaultAgentId, currentDraft?.defaultModel || undefined, false, activeAppId),
-    enabled: Boolean(currentDraft?.defaultAgentId),
-    staleTime: 5 * 60_000
-  });
+  const agentOptions = useQuery({ ...agentModelsQuery(currentDraft?.defaultAgentId, currentDraft?.defaultModel || undefined, activeAppId), enabled: Boolean(currentDraft?.defaultAgentId) });
 
   // 机器人的群共享会话记忆状态
   const memoryStatusQuery = useQuery({ ...larkMemoryStatusQuery(activeAppId), enabled: Boolean(activeAppId && currentDraft?.memoryEnabled) });
@@ -344,12 +338,9 @@ export function BotManagement({
 
   const hookDraft: LarkHookDraft = { workspace: currentDraft?.workspace, defaultAgentId: currentDraft?.defaultAgentId, fallbackAgentId: currentDraft?.fallbackAgentId, defaultAgentWeights: activeBot?.defaultAgentWeights ?? [] };
   const routingAgentIds = [...new Set([currentDraft?.defaultAgentId, currentDraft?.fallbackAgentId, ...(activeBot?.defaultAgentWeights ?? []).map(row => row.agentId)].filter((id): id is string => Boolean(id)))];
-  const hookQueryKey = ['lark-hook-status', activeAppId, 'routing', currentDraft?.workspace, ...routingAgentIds];
-  const hookStatus = useQuery({
-    queryKey: hookQueryKey,
-    queryFn: () => Promise.all(routingAgentIds.map(id => api.larkHookStatus(activeAppId!, id, currentDraft!.workspace))),
-    enabled: Boolean(activeAppId && currentDraft?.riskControlMode === 'enforced' && routingAgentIds.length)
-  });
+  const hookOptions = hookRoutingQuery(activeAppId, currentDraft?.workspace, routingAgentIds);
+  const hookQueryKey = hookOptions.queryKey;
+  const hookStatus = useQuery({ ...hookOptions, enabled: Boolean(activeAppId && currentDraft?.riskControlMode === 'enforced' && routingAgentIds.length) });
   const missingHook = hookStatus.data?.find(status => !status.supported || !status.installed || !status.writable || status.nativeReady === false);
   const installHook = useMutation({
     mutationFn: ({ appId, draft, targets }: { appId: string; draft: BotDraft; targets: LarkHookDraft; queryKey: typeof hookQueryKey }) => api.installLarkHook(appId, draft.highRiskPattern, draft.baseRevision, targets),

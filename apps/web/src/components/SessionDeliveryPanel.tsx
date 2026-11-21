@@ -28,10 +28,10 @@ export function SessionDeliveryPanel({ session, tasks, summary, onClose, present
 
   const capabilities = useQuery(sessionCapabilitiesQuery(session.id));
   const workspace = useQuery(workspaceQuery(session.id));
-  const verify = useMutation({ mutationFn: () => api.verify(session.id, { command: command.trim() }), onSettled: () => { void qc.invalidateQueries({ queryKey: ['verifications', session.id] }); } });
+  const verify = useMutation({ mutationFn: () => api.verify(session.id, { command: command.trim() }), onSettled: () => { void qc.invalidateQueries({ queryKey: queryKeys.verifications(session.id) }); } });
   // 本页发起的验证在服务端记下「运行中」之前，也按运行中的节奏读，进度尽快出现。
   const evidence = useVerifications(session.id, { active: verify.isPending });
-  const usage = useQuery(sessionUsageQuery(session.id, queryKeys.deliveryUsage(session.id)));
+  const usage = useQuery(sessionUsageQuery(session.id, 'delivery'));
   const turnDiffs = useQuery(turnDiffsQuery(session.id));
 
   const checkCleanup = useMutation({

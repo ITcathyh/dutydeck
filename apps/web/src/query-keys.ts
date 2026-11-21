@@ -1,12 +1,13 @@
-import type { UsageReportQuery } from './api';
+import type { SessionInsightCompareRequest } from '@dutydeck/shared';
+import type { InsightEventFilters, InsightSummaryFilters, UsageReportQuery } from './api';
 import { currentInstance } from './instance';
 
 export const queryKeys = {
   sessions: () => ['sessions'] as const,
-  instanceSessions: (instance: string | null) => ['sessions', instance] as const,
-  tasks: (sessionId: string | undefined) => ['tasks', sessionId] as const,
+  instanceSessions: (instance: string | null) => [...queryKeys.sessions(), instance] as const,
+  tasks: (sessionId: string | undefined) => [...queryKeys.allTasks(), sessionId] as const,
   allTasks: () => ['tasks'] as const,
-  instanceTasks: (instance: string | null, sessionId: string | undefined) => ['tasks', instance, sessionId] as const,
+  instanceTasks: (instance: string | null, sessionId: string | undefined) => [...queryKeys.allTasks(), instance, sessionId] as const,
   larkConfig: () => ['lark-config'] as const,
   systemCapabilities: () => ['system-capabilities'] as const,
   managementGroups: () => ['lark-management-groups'] as const,
@@ -36,7 +37,7 @@ export const queryKeys = {
   inboxDispositions: (appId: string, since: string) => ['inbox-dispositions', appId, since] as const,
   openPlatformJob: (jobId: string) => ['lark-open-platform-job', jobId] as const,
   projectMemoryBinding: (sessionId: string) => ['projectMemoryBinding', sessionId] as const,
-  plan: (sessionId: string, taskId?: string, status?: string) => ['plan', sessionId, taskId, status] as const,
+  plan: (sessionId: string, taskId?: string, status?: string) => [...queryKeys.sessionPlan(sessionId), taskId, status] as const,
   archivedIntegrations: (channelBotId: string) => ['schedule-archived-integrations', channelBotId] as const,
   artifactPreview: (sessionId: string, snapshotId: string) => ['artifact-preview', sessionId, snapshotId] as const,
   artifactSnapshots: (sessionId: string) => ['artifact-snapshots', sessionId] as const,
@@ -49,18 +50,18 @@ export const queryKeys = {
   turnDiffs: (sessionId: string) => ['turnDiffs', sessionId] as const,
   sessionCapabilities: (sessionId: string) => ['sessionCapabilities', sessionId] as const,
   sessionUsage: (sessionId: string | undefined) => ['session-usage', sessionId] as const,
-  deliveryUsage: (sessionId: string) => ['sessionUsage', sessionId] as const,
+  deliveryUsage: (sessionId: string | undefined) => ['sessionUsage', sessionId] as const,
   agentModelSettings: (agentId: string, botAppId?: string) => ['agent-model-settings', currentInstance(), agentId, botAppId ?? ''] as const,
-  automationHistory: (sessionId: string, scheduleId: string, offset: number) => ['automation-history', currentInstance() ?? null, sessionId, scheduleId, offset] as const,
-  automationRun: (sessionId: string, scheduleId: string, occurrenceId: string) => ['automation-run', currentInstance() ?? null, sessionId, scheduleId, occurrenceId] as const,
+  automationHistory: (sessionId: string, scheduleId: string, offset: number) => [...queryKeys.allAutomationHistory(), currentInstance() ?? null, sessionId, scheduleId, offset] as const,
+  automationRun: (sessionId: string, scheduleId: string, occurrenceId: string) => [...queryKeys.allAutomationRuns(), currentInstance() ?? null, sessionId, scheduleId, occurrenceId] as const,
   codexProfile: (agentId: string) => ['codex-profile', currentInstance(), agentId] as const,
   profileModels: (agentId: string) => ['agent-models', currentInstance(), agentId] as const,
   terminalSettings: () => ['terminal-settings', currentInstance()] as const,
   pullRequests: (sessionId: string) => ['pullRequests', sessionId] as const,
-  automation: (sessionId: string) => ['automation', currentInstance() ?? null, sessionId] as const,
+  automation: (sessionId: string) => [...queryKeys.allAutomation(), currentInstance() ?? null, sessionId] as const,
   ciProviders: (sessionId: string) => ['ci-providers', currentInstance() ?? null, sessionId] as const,
   workTemplates: (sessionId: string) => ['work-templates', currentInstance() ?? null, sessionId] as const,
-  unknownTasks: (sessionId: string, pending: string) => ['unknown-tasks', currentInstance() ?? null, sessionId, pending] as const,
+  unknownTasks: (sessionId: string, pending: string) => [...queryKeys.allUnknownTasks(), currentInstance() ?? null, sessionId, pending] as const,
   approvalRules: () => ['workspace-approval-rules', currentInstance()] as const,
   allUnknownTasks: () => ['unknown-tasks'] as const,
   allAutomation: () => ['automation'] as const,
@@ -68,10 +69,42 @@ export const queryKeys = {
   allAutomationHistory: () => ['automation-history'] as const,
   allAutomationSchedules: () => ['automation-schedules'] as const,
   allManagedMemory: () => ['managedMemory'] as const,
-  managedMemory: (sessionId: string, projectId: string, query: string) => ['managedMemory', sessionId, projectId, query] as const,
+  managedMemory: (sessionId: string, projectId: string, query: string) => [...queryKeys.allManagedMemory(), sessionId, projectId, query] as const,
   skills: (cwd?: string, sourceId?: string) => ['skills', cwd, sourceId] as const,
   session: (instance: string | null | undefined, sessionId?: string) => ['session', instance, sessionId] as const,
-  automationSchedules: (sourceId: string | null, search: URLSearchParams) => ['automation-schedules', sourceId, search.toString()] as const,
+  automationSchedules: (sourceId: string | null, search: URLSearchParams) => [...queryKeys.allAutomationSchedules(), sourceId, search.toString()] as const,
   usageTasks: (query: UsageReportQuery, offset: number) => ['usage-tasks', query, offset] as const,
   sessionPlan: (sessionId: string) => ['plan', sessionId] as const,
+  modelVariants: (agentId: string) => ['agent-models', agentId] as const,
+  botModelVariants: (appId: string, agentId: string) => ['bot-agent-models', appId, agentId] as const,
+  hookRouting: (appId: string | undefined, workspace: string | undefined, agentIds: string[]) => [...queryKeys.botHooks(appId), 'routing', workspace, ...agentIds] as const,
+  hookSummary: (appId: string | undefined, workspace: string, agentId: string, fallback: string, weights: string[]) => [...queryKeys.botHooks(appId), 'summary', workspace, agentId, fallback, ...weights] as const,
+  botHooks: (appId: string | undefined) => ['lark-hook-status', appId] as const,
+  events: (sessionId: string | undefined) => ['events', sessionId] as const,
+  historyOutline: (sessionId: string | undefined, tail?: number) => tail
+    ? ['history-outline', sessionId, { tail }] as const : ['history-outline', sessionId] as const,
+  historyPage: (sessionId: string, from: number, through: number) => ['history-page', sessionId, from, through] as const,
+  historyDetail: (sessionId: string, first?: number, last?: number) => [...queryKeys.allHistoryDetails(), sessionId, first, last] as const,
+  closedHistoryDetail: () => ['history-detail-closed'] as const,
+  allHistoryDetails: () => ['history-detail'] as const,
+  appCreation: (requestId: string | undefined) => ['lark-app-creation', requestId] as const,
+  verifications: (sessionId: string) => ['verifications', sessionId] as const,
+  workItems: (sessionId: string) => ['work-items', sessionId] as const,
+  workItemRequests: (sessionId: string, itemId: string | undefined) => [...queryKeys.sessionWorkRequests(sessionId), itemId] as const,
+  sessionWorkRequests: (sessionId: string) => ['work-item-requests', sessionId] as const,
+};
+
+export const agentModelsQueryKey = (agentId?: string, model?: string, appId?: string) => appId ? [...queryKeys.botModelVariants(appId, agentId ?? ''), model ?? ''] as const : [...queryKeys.modelVariants(agentId ?? ''), model ?? ''] as const;
+
+/** React Query key 统一工厂：实例、session、snapshot、筛选项全部进 key，实例切换不串缓存。 */
+export const insightQueryKeys = {
+  details: (instance: string | undefined, sessionId: string, snapshotId?: string | null) =>
+    ['insight', instance ?? null, 'details', sessionId, snapshotId ?? null] as const,
+  events: (instance: string | undefined, sessionId: string, snapshotId: string, filters: InsightEventFilters) =>
+    ['insight', instance ?? null, 'events', sessionId, snapshotId, filters] as const,
+  summaries: (instance: string | undefined) => ['insight', instance ?? null, 'summary'] as const,
+  summary: (instance: string | undefined, filters: InsightSummaryFilters) =>
+    [...insightQueryKeys.summaries(instance), filters] as const,
+  compare: (instance: string | undefined, request: SessionInsightCompareRequest | null) =>
+    ['insight', instance ?? null, 'compare', request] as const
 };

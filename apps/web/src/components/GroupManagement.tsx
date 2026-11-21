@@ -1,4 +1,4 @@
-import { collaborationQuery, groupMembersQuery, larkConfigQuery, managementGroupsQuery, queryKeys, systemCapabilitiesQuery } from '../queries';
+import { agentModelsQuery, collaborationQuery, groupMembersQuery, larkConfigQuery, managementGroupsQuery, queryKeys, systemCapabilitiesQuery } from '../queries';
 import { useState, useMemo, useEffect, useRef } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
@@ -17,7 +17,6 @@ import {
   ApiError,
   collaborationApi,
   type Agent,
-  type CollaborationOverview,
   type CollaborationSettings,
   type LarkBotConfig,
   type ManagedGroupBot,
@@ -36,7 +35,6 @@ import { DirectoryPicker } from './DirectoryPicker';
 import { CollaborationPanel } from './CollaborationPanel';
 import { useDraftStore, type GroupAccessMode, type GroupBotDraft, type PresentationToggle } from '../draft-store';
 import { toastStore } from '../useToasts';
-import { agentModelsQueryKey, loadAgentModels, readCachedAgentModels } from '../model-cache';
 
 export type GroupManagementProps = {
   selectedChatId?: string;
@@ -420,13 +418,7 @@ export function GroupManagement({
     ? currentDraft.agentValue
     : (editingAppId ? botsMap.get(editingAppId)?.defaultAgentId : '');
 
-  const agentOptions = useQuery({
-    queryKey: agentModelsQueryKey(effectiveAgentId, currentDraft?.modelMode === 'set' ? currentDraft.modelValue : undefined),
-    queryFn: () => loadAgentModels(effectiveAgentId!, currentDraft?.modelMode === 'set' ? currentDraft.modelValue : undefined),
-    enabled: Boolean(effectiveAgentId),
-    initialData: () => effectiveAgentId ? readCachedAgentModels(effectiveAgentId, currentDraft?.modelMode === 'set' ? currentDraft.modelValue : undefined) : undefined,
-    staleTime: 5 * 60_000
-  });
+  const agentOptions = useQuery({ ...agentModelsQuery(effectiveAgentId, currentDraft?.modelMode === 'set' ? currentDraft.modelValue : undefined), enabled: Boolean(effectiveAgentId) });
 
   /*
     保存群内某个 Bot 的设置。

@@ -2,7 +2,7 @@ import { usageReportQuery, usageTasksQuery } from '../queries';
 import { useRef, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { usageUnknownModel, type UsageTaskRow } from '@dutydeck/shared';
-import { api, type UsageGroupResponse as UsageGroup, type UsageReportQuery, type UsageTotalsResponse as UsageTotals } from '../api';
+import { type UsageGroupResponse as UsageGroup, type UsageReportQuery, type UsageTotalsResponse as UsageTotals } from '../api';
 import { Badge, Banner, Button, Card, EmptyState, Field, Input, Select, Spinner } from './primitives';
 import { count, usageText, usd } from './usageFormat';
 

@@ -3,7 +3,6 @@ import { useEffect, useRef, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { previewSessionSchedule, resolveScheduleDeadline, SCHEDULE_PRECONDITION_DEFAULT_TIMEOUT_SECONDS, SCHEDULE_PRECONDITION_MAX_TIMEOUT_SECONDS, type AutomationDeliveryTarget, type PublicSchedulePrecondition, type CreateSessionScheduleInput, type UpdateSessionScheduleInput, type PublicSessionSchedule as SessionSchedule } from '@dutydeck/shared';
 import { api, ApiError, type Session } from '../api';
-import { currentInstance } from '../instance';
 import { requestId } from '../request-id';
 import { PlanHistory, automationTime } from './AutomationHistory';
 import { ConfirmDialog } from './ConfirmDialog';

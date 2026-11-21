@@ -1,4 +1,4 @@
-import { instanceSessionsQuery } from '../queries';
+import { insightQueryKeys, insightDetailsQuery, instanceSessionsQuery, isRefreshInFlight } from '../queries';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { X } from 'lucide-react';
@@ -11,7 +11,7 @@ import type {
   SessionInsightSourceSummary,
   SessionInsightSummary
 } from '@dutydeck/shared';
-import { api, insightApi, insightQueryKeys, ApiError } from '../api';
+import { insightApi, ApiError } from '../api';
 import { currentInstance } from '../instance';
 import { Badge, Banner, Button, Dialog, EmptyState, Spinner } from './primitives';
 import { SessionInsightPulseChart } from './SessionInsightPulseChart';
@@ -23,7 +23,6 @@ import {
   formatMetricByKey,
   formatTime,
   freshnessLabels,
-  isRefreshInFlight,
   metricMeta,
   metricTitle,
   metricValueText,
@@ -32,7 +31,6 @@ import {
   type MetricKey
 } from './SessionInsightShared';
 
-const POLL_INTERVAL_MS = 2000;
 
 /** 触发浏览器 attachment 下载；报告内容已由服务端脱敏并固定到快照。 */
 function downloadAttachment(blob: Blob, filename: string) {
@@ -234,14 +232,7 @@ export function SessionInsightPanel({ sessionId, compareSessionId, onCompareSess
   const [exportError, setExportError] = useState<string | null>(null);
 
   // GET 详情：不触发分析；只在面板可见且作业 queued/running 时轮询，完成即停。
-  const details = useQuery({
-    queryKey: insightQueryKeys.details(instance, sessionId, null),
-    queryFn: ({ signal }) => insightApi.details(sessionId, null, signal),
-    refetchInterval: query => {
-      const state = query.state.data?.status.refreshState;
-      return state && isRefreshInFlight(state) ? POLL_INTERVAL_MS : false;
-    }
-  });
+  const details = useQuery(insightDetailsQuery(instance, sessionId));
 
   // 作业从进行中转为终态：失效跨会话汇总（覆盖分母可能变化）。
   // 详情不在这里再失效：轮询的最后一次响应已是终态，刷新/取消 mutation 的 onSuccess
@@ -251,7 +242,7 @@ export function SessionInsightPanel({ sessionId, compareSessionId, onCompareSess
   useEffect(() => {
     const inFlight = refreshState ? isRefreshInFlight(refreshState) : false;
     if (wasInFlight.current && !inFlight) {
-      void qc.invalidateQueries({ queryKey: ['insight', instance ?? null, 'summary'] });
+      void qc.invalidateQueries({ queryKey: insightQueryKeys.summaries(instance) });
     }
     wasInFlight.current = inFlight;
   }, [refreshState, instance, qc]);
@@ -298,11 +289,7 @@ export function SessionInsightPanel({ sessionId, compareSessionId, onCompareSess
   const failedWithOldSnapshot = refreshState === 'failed' && Boolean(summary);
 
   // 右侧对比会话：深链只给 sessionId，固定版本取该会话当前快照。
-  const rightDetails = useQuery({
-    queryKey: insightQueryKeys.details(instance, compareSessionId ?? '', null),
-    queryFn: ({ signal }) => insightApi.details(compareSessionId!, null, signal),
-    enabled: Boolean(compareSessionId)
-  });
+  const rightDetails = useQuery({ ...insightDetailsQuery(instance, compareSessionId ?? ''), enabled: Boolean(compareSessionId) });
   const sessionsForCompare = useQuery(instanceSessionsQuery(instance ?? null));
 
   const currentContextKey = compareSessionId ? `${instance ?? ''}:${sessionId}:${compareSessionId}` : null;

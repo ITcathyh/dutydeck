@@ -6,7 +6,6 @@ import { AgentModelSettings } from './AgentModelSettings';
 import { CodexProfileSettings } from './CodexProfileSettings';
 import { WorkspaceApprovalRules } from './WorkspaceApprovalRules';
 import { supportsModelServiceSettings } from '../agent-model-support';
-import { currentInstance } from '../instance';
 import type { LarkSetupTarget } from '../app-route';
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';

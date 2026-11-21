@@ -1,7 +1,7 @@
 import { sessionCapabilitiesQuery } from '../queries';
 import { useQuery } from '@tanstack/react-query';
 import { ShieldCheck } from 'lucide-react';
-import { api, type Session } from '../api';
+import { type Session } from '../api';
 import { Button } from './primitives';
 import { verificationLabel } from './verification-presentation';
 import { useVerifications } from './useVerifications';

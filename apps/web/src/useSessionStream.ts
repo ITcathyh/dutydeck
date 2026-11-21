@@ -24,7 +24,7 @@ export function useSessionStream(sessionId: string | undefined, runId: string | 
     const controller = new AbortController();
     let frame: number | undefined;
     let pending: import('./api').DockEvent[] = [];
-    let received = newestSequence(qc.getQueryData<EventWindow>(['events', sessionId]));
+    let received = newestSequence(qc.getQueryData<EventWindow>(queryKeys.events(sessionId)));
     let refreshingTasks: Promise<void> | undefined;
     let tasksRefreshPending = false;
     let tasksInvalidated = false;
@@ -55,7 +55,7 @@ export function useSessionStream(sessionId: string | undefined, runId: string | 
     };
     const applyEvents = (batch: import('./api').DockEvent[]) => {
       if (!batch.length) return;
-      const cached = qc.getQueryData<EventWindow>(['events', sessionId]);
+      const cached = qc.getQueryData<EventWindow>(queryKeys.events(sessionId));
       let statuses = batch.filter(event => event.type === 'status');
       if (statuses.length) {
         const firstStatus = Math.min(...statuses.map(event => event.sequence));
@@ -69,7 +69,7 @@ export function useSessionStream(sessionId: string | undefined, runId: string | 
         statuses = [...statuses, ...later.reverse()].sort((a, b) => a.sequence - b.sequence);
       }
       const newTask = batch.some(event => event.type === 'task' && !cached?.events.some(item => item.sequence === event.sequence));
-      qc.setQueryData<EventWindow>(['events', sessionId], current => mergeReconciledEvents(current, batch));
+      qc.setQueryData<EventWindow>(queryKeys.events(sessionId), current => mergeReconciledEvents(current, batch));
       if (statuses.length) qc.setQueryData<Session[]>(queryKeys.sessions(), current => current?.map(session => {
         if (session.id !== sessionId) return session;
         const updated = statuses.reduce(applyStatusEvent, session);
@@ -118,7 +118,7 @@ export function useSessionStream(sessionId: string | undefined, runId: string | 
       setStatus(current => ({ ...current, content: 'catching_up' }));
       // The cursor describes a contiguous required suffix. Collapsed historical
       // ranges precede it and are intentionally absent from the canonical cache.
-      let cursor = recoveryCursors.current.get(sessionId) ?? newestSequence(qc.getQueryData<EventWindow>(['events', sessionId]));
+      let cursor = recoveryCursors.current.get(sessionId) ?? newestSequence(qc.getQueryData<EventWindow>(queryKeys.events(sessionId)));
       recoveryCursors.current.set(sessionId, cursor);
       void (async () => {
         while (alive(generation)) {
@@ -185,9 +185,9 @@ export function useSessionStream(sessionId: string | undefined, runId: string | 
     const stream = new SessionStream({
       onReconnect: () => { backoff.reset(); calibrate(); },
       sessionId,
-      getAfter: () => recoveryCursors.current.get(sessionId) ?? newestSequence(qc.getQueryData<EventWindow>(['events', sessionId])),
+      getAfter: () => recoveryCursors.current.get(sessionId) ?? newestSequence(qc.getQueryData<EventWindow>(queryKeys.events(sessionId))),
       onEvent: event => {
-        const current = qc.getQueryData<EventWindow>(['events', sessionId]);
+        const current = qc.getQueryData<EventWindow>(queryKeys.events(sessionId));
         const newest = Math.max(received, newestSequence(current));
         received = Math.max(received, event.sequence);
         if (event.sequence > newest + 1) reconcileEvents(newest, event.sequence);

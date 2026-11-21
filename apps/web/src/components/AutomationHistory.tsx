@@ -1,8 +1,6 @@
 import { automationHistoryQuery } from '../queries';
 import { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
-import { currentInstance } from '../instance';
-import { api } from '../api';
 import { automationRunPath } from '../app-route';
 import { Button, Spinner, Banner } from './primitives';
 import { automationTime, occurrenceRunLabel } from './automation-display';

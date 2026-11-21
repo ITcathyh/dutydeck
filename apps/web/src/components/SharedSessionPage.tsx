@@ -1,8 +1,8 @@
-import { queryKeys, sharedSessionsQuery, tasksQuery } from '../queries';
+import { sharedSessionsQuery, tasksQuery } from '../queries';
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { ArrowUpRight, Link2Off, MessageSquareText, UserRound, Users } from 'lucide-react';
-import { api, ApiError, type DockEvent, type Session } from '../api';
+import { ApiError, type DockEvent, type Session } from '../api';
 import { createTimelineProjector, hasAnswerSince, type TimelineSection } from '../timeline';
 import { useEventHistory } from '../useEventHistory';
 import { sessionDisplayName } from '../run-summary';

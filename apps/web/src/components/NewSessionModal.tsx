@@ -1,8 +1,8 @@
+import { agentModelsQuery } from '../queries';
 import { useEffect, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { X } from 'lucide-react';
 import type { Agent, PermissionMode, Session, Task } from '../api';
-import { agentModelsQueryKey, loadAgentModels, readCachedAgentModels } from '../model-cache';
 import { permissionLabels } from './ui';
 import { Banner, Button, Dialog, IconButton, Spinner, Textarea, Field } from './primitives';
 import { AgentSelect, CompactSelect } from './CompactSelect';
@@ -64,7 +64,7 @@ export function NewSessionDialog({ open, onClose, onOpenAgentSetup, agents, capa
   const [confirmedAgentId, setConfirmedAgentId] = useState<string>();
   const confirmed = confirmedAgentId === agentId;
   const focusConfirmation = creation.needsConfirmation && Boolean(goal.trim());
-  const agentModels = useQuery({ queryKey: agentModelsQueryKey(agentId, model), queryFn: () => loadAgentModels(agentId, model || undefined), enabled: open && Boolean(selectedAgent) && !legacyPtyUnsupported, initialData: () => readCachedAgentModels(agentId, model || undefined), initialDataUpdatedAt: 0, refetchOnMount: 'always', staleTime: 5 * 60_000 });
+  const agentModels = useQuery({ ...agentModelsQuery(agentId, model || undefined), enabled: open && Boolean(selectedAgent) && !legacyPtyUnsupported });
   const validReasoningEffort = agentModels.data?.reasoningEfforts.some(option => option.id === reasoningEffort);
   useEffect(() => {
     if (!pending && !createdSession && !agentModels.isFetching && reasoningEffort && validReasoningEffort === false) update({ reasoningEffort: '' });

@@ -3,7 +3,6 @@ import { useEffect, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { unknownTaskActionLabels, unknownTaskRetryWarning, unknownTaskStoppedOriginalNotice, type UnknownTaskAction } from '@dutydeck/shared';
 import { api, ApiError, type Session, type Task, type UnknownTask } from '../api';
-import { currentInstance } from '../instance';
 import { toastStore } from '../useToasts';
 import { Button } from './primitives';
 import { ConfirmDialog } from './ConfirmDialog';

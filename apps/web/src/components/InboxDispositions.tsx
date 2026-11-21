@@ -1,7 +1,6 @@
 import { inboxDispositionsQuery } from '../queries';
 import { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
-import { api } from '../api';
 import { Card } from './primitives';
 export function InboxDispositions({ appId }: { appId: string }) {
   const [since, setSince] = useState('24h');

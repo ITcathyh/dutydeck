@@ -1,7 +1,6 @@
 import { approvalRulesQuery, queryKeys } from '../queries';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { ApiError, workspaceApprovalRulesApi } from '../api';
-import { currentInstance } from '../instance';
 import { Banner, Button, Card, Spinner } from './primitives';
 import { formatTime } from './SessionInsightShared';
 

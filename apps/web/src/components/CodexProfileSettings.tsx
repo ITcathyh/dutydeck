@@ -2,8 +2,7 @@ import { codexProfileQuery, profileModelsQuery, queryKeys } from '../queries';
 import { useEffect, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { supportsCodexProfiles } from '@dutydeck/shared';
-import { agentConfigApi, api, type Agent } from '../api';
-import { currentInstance } from '../instance';
+import { agentConfigApi, type Agent } from '../api';
 import { Banner, Button, Field, Select, Spinner } from './primitives';
 
 export function CodexProfileSettings({ agent, onDirtyChange }: { agent: Agent; onDirtyChange?: (dirty: boolean, saving?: boolean) => void }) {

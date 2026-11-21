@@ -1,4 +1,4 @@
-import { larkConfigQuery, openPlatformJobQuery, queryKeys, systemCapabilitiesQuery } from '../queries';
+import { agentModelsQuery, hookSummaryQuery, larkConfigQuery, openPlatformJobQuery, queryKeys, systemCapabilitiesQuery } from '../queries';
 import { draftFromBot, saveBodyFromDraft, msFromSeconds, secondsFromMs, type SharedBotDraft } from '../bot-settings-form';
 import { ReplyPolishSettings } from './ReplyPolishSettings';
 import { ReactionTriggerSetting } from './ReactionTriggerSetting';
@@ -13,7 +13,6 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { AlertTriangle, Bot, Check, ExternalLink, Eye, EyeOff, FolderOpen, Plus, Trash2, Wrench, X } from 'lucide-react';
 import { botSettingDescriptors as fields, agentWeightsSchema, type AgentWeight, describeWebBaseUrlReachability, validateHighRiskPattern } from '@dutydeck/shared';
 import { api, ApiError, type Agent, type LarkAppCreationJob, type LarkBotConfig, type RiskControlMode } from '../api';
-import { agentModelsQueryKey, loadAgentModels, readCachedAgentModels } from '../model-cache';
 import { supportsModelServiceSettings } from '../agent-model-support';
 import { Badge, Banner, Button, Dialog, Field, IconButton, Input, Select, Skeleton, Spinner, Textarea } from './primitives';
 import { ConfirmDialog } from './ConfirmDialog';
@@ -205,13 +204,10 @@ export function LarkConfigModal({ agents, target, field, onLeaveGuardChange, onC
   const [modelSettingsSaving, setModelSettingsSaving] = useState(false);
   const handleModelDirtyChange = useCallback((dirty: boolean, saving = false) => { setModelSettingsPending(dirty); setModelSettingsSaving(saving); }, []);
   const routingAgentIds = [...new Set([defaultAgentId, ...(fallbackAgentId ? [fallbackAgentId] : []), ...defaultAgentWeights.map(row => row.agentId)])];
-  const hookQueryKey = ['lark-hook-status', current?.appId, 'summary', workspace, defaultAgentId, fallbackAgentId, ...defaultAgentWeights.map(row => row.agentId)];
-  const hookStatus = useQuery({ queryKey: hookQueryKey, queryFn: async () => {
-    const statuses = await Promise.all(routingAgentIds.map(id => api.larkHookStatus(current!.appId, id, workspace)));
-    const failed = statuses.find(status => !status.supported || !status.installed || !status.writable || status.nativeReady === false);
-    return failed && routingAgentIds.length > 1 ? { ...failed, reason: `${failed.agentId}: ${failed.reason ?? '尚未配置可写 Hook'}` } : failed ?? statuses[0]!;
-  }, enabled: Boolean(current && defaultAgentId && riskControlMode === 'enforced') });
-  const agentOptions = useQuery({ queryKey: agentModelsQueryKey(defaultAgentId, defaultModel, current?.appId), queryFn: () => loadAgentModels(defaultAgentId, defaultModel || undefined, false, current?.appId), enabled: Boolean(defaultAgentId), initialData: () => current ? undefined : readCachedAgentModels(defaultAgentId, defaultModel || undefined), initialDataUpdatedAt: 0, refetchOnMount: 'always', staleTime: 5 * 60_000 });
+  const hookOptions = hookSummaryQuery(current?.appId, workspace, defaultAgentId, fallbackAgentId, defaultAgentWeights.map(row => row.agentId), routingAgentIds);
+  const hookQueryKey = hookOptions.queryKey;
+  const hookStatus = useQuery({ ...hookOptions, enabled: Boolean(current && defaultAgentId && riskControlMode === 'enforced') });
+  const agentOptions = useQuery({ ...agentModelsQuery(defaultAgentId, defaultModel || undefined, current?.appId), enabled: Boolean(defaultAgentId) });
   const openPlatformJob = useQuery({ ...openPlatformJobQuery(openPlatformJobId), enabled: Boolean(openPlatformJobId) });
   useEffect(() => {
     const job = openPlatformJob.data;
@@ -269,7 +265,7 @@ export function LarkConfigModal({ agents, target, field, onLeaveGuardChange, onC
       draftRevision.current = data.bots.find(bot => bot.appId === savedId)?.revision ?? 1;
       qc.setQueryData(queryKeys.larkConfig(), data); setSelectedAppId(savedId);
       if (submitted.step === 1) setField('appSecret', '');
-      void qc.invalidateQueries({ queryKey: ['lark-hook-status', savedId] });
+      void qc.invalidateQueries({ queryKey: queryKeys.botHooks(savedId) });
       if (submitted.step === 1) setStep(2);
       else if (latestDraftSignature.current === submitted.signature) setCloseAfterSave(true);
     }

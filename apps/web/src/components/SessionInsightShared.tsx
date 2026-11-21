@@ -49,8 +49,6 @@ export const freshnessLabels: Record<InsightFreshness, string> = {
   unknown: '新鲜度未知'
 };
 
-/** 作业是否仍在进行中：只有 queued / running 需要轮询。 */
-export const isRefreshInFlight = (state: RefreshState) => state === 'queued' || state === 'running';
 
 /** null 与 0 严格不同：null 渲染为「未知」，0 照常显示 0。 */
 export const metricValueText = (metric: Metric): string => {

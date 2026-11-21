@@ -2,7 +2,7 @@ import { turnDiffsQuery } from '../queries';
 import { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { FileDiff } from 'lucide-react';
-import { api, type Session } from '../api';
+import { type Session } from '../api';
 import { Banner, Button, EmptyState, Spinner } from './primitives';
 import { TurnDiffContent } from './TurnDiffPage';
 import { isSessionActionDisabled } from './ui';

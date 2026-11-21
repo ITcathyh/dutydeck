@@ -2,7 +2,6 @@ import { configurationQuery } from '../queries';
 import { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import type { ConfigurationExplanation, ConfigurationField } from '@dutydeck/shared';
-import { configurationApi } from '../api';
 import { Button } from './primitives';
 
 const sourceLabels: Record<string, string> = { bot_default: '继承机器人默认', group_override: '群显式覆盖', group_clear: '群显式清空', unconfigured: '未配置', bot_ceiling: '机器人能力上限' };

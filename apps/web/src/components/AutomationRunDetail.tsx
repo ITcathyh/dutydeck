@@ -2,7 +2,7 @@ import { automationRunQuery, sessionQuery, tasksQuery } from '../queries';
 import { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { currentInstance } from '../instance';
-import { api, ApiError } from '../api';
+import { ApiError } from '../api';
 import { sessionPath } from '../app-route';
 import { MarkdownContent } from '../MarkdownContent';
 import { copyToClipboard } from '../clipboard';

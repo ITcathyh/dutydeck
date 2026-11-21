@@ -1,4 +1,4 @@
-import { queryKeys } from './queries';
+import { agentModelsQuery, agentModelsQueryKey, queryKeys } from './queries';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useIsMutating, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api, ApiError, type Session, type SteeringResult, type Task } from './api';
@@ -8,7 +8,7 @@ import { buildPrompt, getModelReadiness, splitPromptFileReferences } from './com
 import { acknowledgeComposerDraft, readComposerDraft, updateComposerDraft, useComposerDraft } from './composer-draft';
 import type { EventWindow } from './event-history';
 import { currentInstance } from './instance';
-import { agentModelsQueryKey, loadAgentModels, readCachedAgentModels } from './model-cache';
+import { loadAgentModels } from './model-cache';
 import { requestId } from './request-id';
 import { SendOperationStore } from './send-operations';
 import { useDockStore } from './store';
@@ -56,7 +56,7 @@ export function useSessionActions(activeSessionId: string | undefined, {
   // queue/interrupt 的未确认操作只在同一标签页内跨刷新保留，另一标签页视为新请求。
   const sendOperations = useRef<SendOperationStore | null>(null);
   const sendOperationStore = sendOperations.current ??= new SendOperationStore();
-  const activeModels = useQuery({ queryKey: agentModelsQueryKey(active?.agentId, active?.model), queryFn: () => loadAgentModels(active!.agentId, active!.model), enabled: Boolean(active && !active.archivedAt), initialData: () => active ? readCachedAgentModels(active.agentId, active.model) : undefined, initialDataUpdatedAt: 0, refetchOnMount: 'always', staleTime: 60_000 });
+  const activeModels = useQuery({ ...agentModelsQuery(active?.agentId, active?.model), enabled: Boolean(active && !active.archivedAt) });
 
   useEffect(() => {
     if (!queueCancelOperations.size) return;
@@ -176,8 +176,8 @@ export function useSessionActions(activeSessionId: string | undefined, {
       });
     }
   });
-  const restart = useMutation({ mutationFn: api.restart, onSuccess: result => { setActionError(undefined); qc.setQueryData<Session[]>(queryKeys.sessions(), current => current?.map(session => session.id === result.id ? result : session)); void qc.invalidateQueries({ queryKey: queryKeys.sessions() }); void qc.invalidateQueries({ queryKey: ['events', activeSessionId] }); void qc.invalidateQueries({ queryKey: queryKeys.tasks(activeSessionId) }); toastStore.push({ kind: 'success', key: 'restart', title: '任务已重新启动', description: '这是一个全新的 Agent 进程，会从空白上下文开始；之前的对话不会带过来。' }); }, onError: error => { setActionError(error.message); toastStore.push({ kind: 'error', key: 'restart', title: '重新启动失败', description: error.message }); } });
-  const resolvePermission = useMutation({ mutationFn: ({ sessionId, permissionId, approved, reason }: { sessionId: string; permissionId: string; approved: boolean; reason?: string }) => reason ? api.permission(sessionId, permissionId, approved, reason) : api.permission(sessionId, permissionId, approved), onSuccess: (_result, variables) => { qc.setQueryData<EventWindow>(['events', variables.sessionId], current => { if (!current) return current; const next = current.events.map(event => event.type === 'permission_request' && (event.data.id === variables.permissionId || event.id === variables.permissionId) ? { ...event, data: { ...event.data, status: variables.approved ? 'approved' : 'rejected', ...(variables.reason ? { reason: variables.reason } : {}) } } : event); return { ...current, events: next, previousEvents: undefined, changes: undefined }; }); }, onError: (error, variables) => { setActionError(error.message); void qc.invalidateQueries({ queryKey: ['events', variables.sessionId] }); void qc.invalidateQueries({ queryKey: queryKeys.sessions() }); } });
+  const restart = useMutation({ mutationFn: api.restart, onSuccess: result => { setActionError(undefined); qc.setQueryData<Session[]>(queryKeys.sessions(), current => current?.map(session => session.id === result.id ? result : session)); void qc.invalidateQueries({ queryKey: queryKeys.sessions() }); void qc.invalidateQueries({ queryKey: queryKeys.events(activeSessionId) }); void qc.invalidateQueries({ queryKey: queryKeys.tasks(activeSessionId) }); toastStore.push({ kind: 'success', key: 'restart', title: '任务已重新启动', description: '这是一个全新的 Agent 进程，会从空白上下文开始；之前的对话不会带过来。' }); }, onError: error => { setActionError(error.message); toastStore.push({ kind: 'error', key: 'restart', title: '重新启动失败', description: error.message }); } });
+  const resolvePermission = useMutation({ mutationFn: ({ sessionId, permissionId, approved, reason }: { sessionId: string; permissionId: string; approved: boolean; reason?: string }) => reason ? api.permission(sessionId, permissionId, approved, reason) : api.permission(sessionId, permissionId, approved), onSuccess: (_result, variables) => { qc.setQueryData<EventWindow>(queryKeys.events(variables.sessionId), current => { if (!current) return current; const next = current.events.map(event => event.type === 'permission_request' && (event.data.id === variables.permissionId || event.id === variables.permissionId) ? { ...event, data: { ...event.data, status: variables.approved ? 'approved' : 'rejected', ...(variables.reason ? { reason: variables.reason } : {}) } } : event); return { ...current, events: next, previousEvents: undefined, changes: undefined }; }); }, onError: (error, variables) => { setActionError(error.message); void qc.invalidateQueries({ queryKey: queryKeys.events(variables.sessionId) }); void qc.invalidateQueries({ queryKey: queryKeys.sessions() }); } });
   const resolveActivePermission = useCallback((permissionId: string, approved: boolean, reason?: string) => resolvePermission.mutateAsync({ sessionId: active!.id, permissionId, approved, reason }), [active?.id, resolvePermission.mutateAsync]);
   const pickComposerFile = useMutation({ mutationFn: api.selectFile, onError: error => setActionError(error.message) });
   const refreshModels = useMutation({ mutationFn: ({ agentId: targetAgentId, currentModel }: { agentId: string; currentModel?: string }) => loadAgentModels(targetAgentId, currentModel, true), onSuccess: (result, variables) => { setActionError(undefined); qc.setQueryData(agentModelsQueryKey(variables.agentId, variables.currentModel), result); }, onError: error => setActionError(error.message) });

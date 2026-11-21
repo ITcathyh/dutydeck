@@ -3,7 +3,7 @@ import { useEffect, useId, useState, type ReactNode } from 'react';
 import { useQueries } from '@tanstack/react-query';
 import type { WorkAttempt, WorkItem } from '@dutydeck/shared';
 import { ChevronDown, ChevronRight } from 'lucide-react';
-import { api, type Agent, type Session, type Task } from '../api';
+import { type Agent, type Session, type Task } from '../api';
 import { sessionPath } from '../app-route';
 import { elapsedMilliseconds, formatElapsed } from '../tool-presentation';
 import { Badge, Banner, Button, Spinner } from './primitives';

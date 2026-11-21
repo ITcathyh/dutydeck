@@ -20,7 +20,6 @@ import {
 import {
   collaborationApi,
   ApiError,
-  type CollaborationOverview,
   type CollaborationSettings,
   type CollaborationDecision,
   type CollaborationReplayResponse,

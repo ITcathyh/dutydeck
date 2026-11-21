@@ -1,4 +1,4 @@
-import { tasksQuery } from '../queries';
+import { historyPageQuery, tasksQuery } from '../queries';
 import { ArrowDown, MessageSquare } from 'lucide-react';
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState, useContext, type ReactNode } from 'react';
 import { flushSync } from 'react-dom';
@@ -10,13 +10,12 @@ import { TimelineDisclosureContext } from '../timeline-disclosure';
 import { getTimelineReadingState, saveTimelineReadingState, type TimelineReadingAnchor } from '../timeline-reading-state';
 import { TimelineItem, TimelineTimestamp } from './TimelineItem';
 import { useQuery } from '@tanstack/react-query';
-import { api, type DockEvent, type HistoryTurnPlace, type HistoryTurnSummary } from '../api';
+import { type DockEvent, type HistoryTurnPlace, type HistoryTurnSummary } from '../api';
 import { HISTORY_TURN_PAGE_SIZE } from '../event-history';
 import { useHistoryDetail } from '../useHistoryDetail';
 import { buildTimelineSections, createTimelineProjector } from '../timeline';
 import { useTimelineDisclosure } from '../timeline-disclosure';
 import { MarkdownContent } from '../MarkdownContent';
-import { historyPageQuery } from '../useEventHistory';
 import { ShareTurn, type EarlierPlace } from './ShareTurn';
 import { liveTurnFacts, turnMomentWidth } from '../share-view';
 

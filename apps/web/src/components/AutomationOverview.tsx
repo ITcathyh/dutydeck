@@ -1,8 +1,8 @@
 import { automationSchedulesQuery, instancesQuery, sessionQuery } from '../queries';
 import { useEffect, useState } from 'react';
-import { useQueries, useQuery, type Query } from '@tanstack/react-query';
+import { useQueries, useQuery } from '@tanstack/react-query';
 import type { AutomationScheduleSummary } from '@dutydeck/shared';
-import { api, ApiError, type Agent, type RunSummary, type Session } from '../api';
+import { ApiError, type Agent, type RunSummary, type Session } from '../api';
 import { currentInstance, instanceHomePath, instancePagePath } from '../instance';
 import { useExperimental } from '../experimental';
 import { Banner, Button, Card, EmptyState, Spinner, Input, Field, Select } from './primitives';
@@ -15,7 +15,6 @@ import { runStateLabels } from './automation-display';
 
 const healthLabels = { blocked: '等待人工核对', queued: '等待执行资源', running: '正在执行', delivery: '等待结果投递', disabled: '已停用', ready: '等待到期', error: '需要处理错误' };
 const pageSize = 20;
-const poll = (query: Query) => query.state.error ? false : 10_000;
 const coverage = (error: Error) => error instanceof ApiError && error.status === 403 ? '无权限（forbidden）' : error instanceof ApiError && [404, 405].includes(error.status) ? '版本不支持（unsupported）' : '未连通（unavailable）';
 
 function PlanState({ item, instanceId }: { item: AutomationScheduleSummary; instanceId: string }) {

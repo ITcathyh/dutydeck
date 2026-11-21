@@ -1,6 +1,6 @@
 import { taskAuthorizationsQuery } from '../queries';
 import { useQuery } from '@tanstack/react-query';
-import { api, type Task, type TaskAuthorization } from '../api';
+import { type Task, type TaskAuthorization } from '../api';
 
 export function authorizationLabel(record: TaskAuthorization): string {
   if (record.via === 'participation_confirmed') return `确认人 ${record.actorOpenId ?? '未记录'}${record.decisionId ? `（判断记录 ${record.decisionId}）` : ''}`;
