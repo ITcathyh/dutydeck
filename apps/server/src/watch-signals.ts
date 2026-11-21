@@ -4,7 +4,7 @@ import { dispositionSchema } from './lark/disposition.js';
 import { larkConfirmActionId } from './lark/confirm-cards.js';
 import { larkMessageAnchor } from './lark/message-anchor.js';
 import { listLarkInboxFields } from './lark/inbox-fields.js';
-import { readTaskReportSafely, taskReportAttentionText, botAppIdOfSession, readStoredSessionSchedule, sessionScheduleOccurrenceSchema, type ConfigRepository, type RepositoryBundle, type SessionScheduleOccurrence, type Session } from '@dutydeck/shared';
+import { runtimeStateKeys, readTaskReportSafely, taskReportAttentionText, botAppIdOfSession, readStoredSessionSchedule, sessionScheduleOccurrenceSchema, type ConfigRepository, type RepositoryBundle, type SessionScheduleOccurrence, type Session } from '@dutydeck/shared';
 import { larkResultDeliveryIssues } from './lark/reconciler.js';
 import { larkListenerStatusKey, type LarkListenerStatus } from './lark/listener-status.js';
 import { larkMemoryEnabled, type StoredLarkConfig } from './lark/config.js';
@@ -19,7 +19,6 @@ export const WATCH_SCHEDULE_OVERDUE_MS = 10 * 60_000;
 export const WATCH_REPORT_MS = 24 * 60 * 60_000;
 export const WATCH_INBOX_MS = 60 * 60_000;
 export const WATCH_SCHEDULE_DISABLED_MS = 24 * 60 * 60_000;
-const STOP_BLOCK_PREFIX = 'runtime_driver_stop_block:';
 const RETRY_OCCURRENCE_PREFIX = 'occ_retry_';
 // Validate the read projection and strict disposition; leave all other execution fields untouched.
 const inboxProjection = z.object({
@@ -175,7 +174,7 @@ export async function collectWatchScopes(repos: RepositoryBundle, bots: StoredLa
     }
   }
   // 与运行时同一判据：非空即受阻，清除时写回空串。
-  const stopBlocked = new Set((await repos.config.list?.(STOP_BLOCK_PREFIX) ?? []).flatMap(row => row.value ? [row.key.slice(STOP_BLOCK_PREFIX.length)] : []));
+  const stopBlocked = new Set((await repos.config.list?.(runtimeStateKeys.driverStopBlock.prefix) ?? []).flatMap(row => row.value ? runtimeStateKeys.driverStopBlock.parse(row.key) ?? [] : []));
   for (const session of sessions) {
     const scope = scopeOf(session);
     if (!scope) continue;

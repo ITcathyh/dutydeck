@@ -68,7 +68,7 @@ describe('真实 AcpxAdapter + patched acpx + 持久 sessionKey 的 Runtime 生�
     // 真实 stop：底层 AcpxAdapter 关闭句柄并经 isStopped 物理核验。
     await runtime.stop(session.id);
     expect((await runtime.getSession(session.id))?.state).toBe('stopped');
-    const stoppedDriver = (runtime as any).blockedDrivers?.get(session.id);
+    const stoppedDriver = (runtime as any).gate.stops.driver(session.id);
     expect(stoppedDriver).toBeUndefined();
     expect(runtime.getDriverStopBlock(session.id)).toBeUndefined();
 

@@ -6,6 +6,7 @@ import { dirname, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { parseArgs, parseEnv } from 'node:util';
 import { createHash, randomUUID } from 'node:crypto';
+import { runtimeStateKeys } from '../packages/shared/src/runtime-state-keys.ts';
 import { observeProcess } from '../packages/storage/src/process-identity.ts';
 
 type Row = Record<string, any>;
@@ -17,6 +18,11 @@ const sessionTables = new Set(['sessions', 'tasks', 'events', 'tool_calls', 'per
 const botTables = new Set(['channel_bot_policies', 'group_bindings', 'remote_chat_facts', 'remote_identity_facts', 'role_assignments', 'full_trust_confirmations', 'configuration_changes', 'configuration_versions']);
 const appTables = new Set(['collaboration_scopes', 'collaboration_settings', 'collaboration_observations', 'collaboration_bootstraps', 'collaboration_decisions', 'collaboration_feedbacks', 'usage_ledger', 'usage_background_admissions']);
 const entityTables: Record<string, string> = { channel_bot: 'channel_bots', secret_ref: 'secret_refs', channel_bot_policy: 'channel_bot_policies', group_binding: 'group_bindings', remote_chat_fact: 'remote_chat_facts', remote_identity_fact: 'remote_identity_facts', role_assignment: 'role_assignments' };
+const sessionConfigPrefixes = [
+  runtimeStateKeys.workspace.prefix, runtimeStateKeys.executionWorkspace.prefix, runtimeStateKeys.nativeContext.prefix,
+  runtimeStateKeys.driverStopBlock.prefix, runtimeStateKeys.driverConfiguration.prefix, runtimeStateKeys.ptyRetirement.prefix,
+  runtimeStateKeys.verification.prefix, runtimeStateKeys.legacyRetirement.prefix, 'lark.run-context.', 'lark.memory.turns.'
+];
 const sharedConfigs = new Set(['auth.accessToken', 'auth.passwordHash', 'auth.shareLinkSecret', 'lark.group_tools.signing_secret', 'relay.signing_secret']);
 const q = (name: string) => '"' + name.replaceAll('"', '""') + '"';
 const parse = (value: string): any => { try { return JSON.parse(value); } catch { return undefined; } };
@@ -113,23 +119,25 @@ export function inspect(db: DatabaseSync, database: string) {
     const k = r.key as string, value = parse(r.value);
     if (sharedConfigs.has(k)) return shards;
     if (k === 'lark.bots') return shards;
-    const idleTerminal = k.match(/^runtime_idle_terminal:([^:/]+)$/);
-    if (idleTerminal && value && typeof value.runId === 'string' && typeof value.resourceId === 'string' && typeof value.identityId === 'string'
+    const idleTerminal = runtimeStateKeys.idleTerminal.parse(k);
+    if (idleTerminal && !/[:/]/.test(idleTerminal) && value && typeof value.runId === 'string' && typeof value.resourceId === 'string' && typeof value.identityId === 'string'
         && value.options && typeof value.options === 'object' && !Array.isArray(value.options) && value.identity && typeof value.identity === 'object' && !Array.isArray(value.identity)) {
-      const owner = ownerForSession(idleTerminal[1]!);
-      if (references.get('driver_resources')?.get(value.resourceId) !== idleTerminal[1]) block(`CONFIG_CROSS_SHARD_REFERENCE:${k}`);
+      const owner = ownerForSession(idleTerminal);
+      if (references.get('driver_resources')?.get(value.resourceId) !== idleTerminal) block(`CONFIG_CROSS_SHARD_REFERENCE:${k}`);
       return [owner];
     }
-    const workspaceNotice = k.match(/^runtime_notice:workspace_blocked:([^:/]+)$/);
-    if (workspaceNotice) {
-      const owner = ownerForSession(workspaceNotice[1]!);
-      if (references.get('tasks')?.get(r.value) !== workspaceNotice[1]) block(`CONFIG_CROSS_SHARD_REFERENCE:${k}`);
-      return [owner];
-    }
-    const attemptNotice = k.match(/^runtime_notice:unknown_task_(?:overdue|abandoned):([^:/]+)$/);
-    if (attemptNotice && r.value === 'sent') {
-      const sessionId = references.get('task_attempts')?.get(attemptNotice[1]!);
-      if (sessionId) return [ownerForSession(sessionId)];
+    const notice = runtimeStateKeys.notice.parse(k);
+    if (notice && !/[:/]/.test(notice[1])) {
+      const [kind, id] = notice;
+      if (kind === 'workspace_blocked') {
+        const owner = ownerForSession(id);
+        if (references.get('tasks')?.get(r.value) !== id) block(`CONFIG_CROSS_SHARD_REFERENCE:${k}`);
+        return [owner];
+      }
+      if ((kind === 'unknown_task_overdue' || kind === 'unknown_task_abandoned') && r.value === 'sent') {
+        const sessionId = references.get('task_attempts')?.get(id);
+        if (sessionId) return [ownerForSession(sessionId)];
+      }
     }
     const overdue = k.match(/^session_automation\/overdue\/([^/]+)$/);
     if (overdue && value?.version === 1 && ['sending', 'sent', 'error'].includes(value.status) && Number.isInteger(value.attempts) && value.attempts > 0
@@ -139,10 +147,11 @@ export function inspect(db: DatabaseSync, database: string) {
       // The notice has no session ID; reuse the occurrence's full ownership checks.
       if (config.has(key)) return resolveConfig({ key, value: config.get(key) });
     }
-    const sessionMatch = k.match(/^(?:runtime_(?:workspace|execution_workspace|native_context|driver_stop_block|driver_configuration|pty_retirement|verification):|legacy_retirement:|lark\.(?:run-context|memory\.turns)\.)([^:.]+)/);
-    if (sessionMatch) {
-      const owner = ownerForSession(sessionMatch[1]!);
-      if (value?.sessionId && value.sessionId !== sessionMatch[1] || value?.appId && appOwner(value.appId) !== owner) block(`CONFIG_CROSS_SHARD_REFERENCE:${k}`);
+    const prefix = sessionConfigPrefixes.find(prefix => k.startsWith(prefix));
+    const sessionId = prefix && k.slice(prefix.length).match(/^[^:.]+/)?.[0];
+    if (sessionId) {
+      const owner = ownerForSession(sessionId);
+      if (value?.sessionId && value.sessionId !== sessionId || value?.appId && appOwner(value.appId) !== owner) block(`CONFIG_CROSS_SHARD_REFERENCE:${k}`);
       return [owner];
     }
     const automation = k.match(/^session_automation\/(schedule|occurrence|ci|task|stop_request)\/(.+)$/);
@@ -268,7 +277,7 @@ export function inspect(db: DatabaseSync, database: string) {
         const native = resource.purpose === 'acp_native_context' && (resource.nativeReplacement || resource.stage === 'created' && resource.identity);
         const gone = last?.state === 'gone' || resource.stage === 'not_created';
         if (!closed && !native && !gone) {
-          const stopBlock = parse(config.get(`runtime_driver_stop_block:${r.session_id}`) ?? '');
+          const stopBlock = parse(config.get(runtimeStateKeys.driverStopBlock.key(r.session_id)) ?? '');
           if (resource.kind === 'legacy' || resource.kind === 'local_only' && stopBlock?.sessionId === r.session_id && stopBlock?.runId === s?.run_id) warnings.push(`RESOURCE_REMAINS_BLOCKED:${r.id}`);
           else block(`RESOURCE_NOT_CLOSED:${r.id}`);
         }

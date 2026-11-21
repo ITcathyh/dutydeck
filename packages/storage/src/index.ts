@@ -18,7 +18,7 @@ import { chmodSync, closeSync, constants, existsSync, mkdirSync, openSync } from
 import { basename, dirname } from 'node:path';
 import type { AgentConfig, AgentEvent, RepositoryBundle, RepositoryOpenOptions, Session, TaskConversationEvent, TaskRecord } from '@dutydeck/shared';
 import { agentConfigs, channelMappings, configs, errors, events, machines, permissionRequests, projects, sessions, tasks, toolCalls } from './schema.js';
-import { deferredConfirmationId, RuntimeError, watchFindingSchema } from '@dutydeck/shared';
+import { runtimeStateKeys, deferredConfirmationId, RuntimeError, watchFindingSchema } from '@dutydeck/shared';
 import { createTaskExecutionRepository } from './task-execution.js';
 import { needsMigration, runMigrations, withMigrationTransaction } from './migrations.js';
 import { listRecentIgnoredLarkInbox, pruneIgnoredLarkInbox } from './lark-inbox.js';
@@ -472,7 +472,7 @@ export function createRepositories(filename: string, options: RepositoryOpenOpti
         return sqlite.transaction(() => {
           for (const { key, value } of writes) {
             assertBotProcessConfigWrite(sqlite, key, value);
-            if (key.startsWith('runtime_native_context:')) throw new RuntimeError('EXECUTION_WRITE_REQUIRES_LEDGER', 'Native context selection requires a bound ledger command', 409);
+            if (key.startsWith(runtimeStateKeys.nativeContext.prefix)) throw new RuntimeError('EXECUTION_WRITE_REQUIRES_LEDGER', 'Native context selection requires a bound ledger command', 409);
           }
           const read = cachedStatement(sqlite, 'SELECT value FROM configs WHERE key=?');
           if (checks.some(({ key, expected }) => (read.get(key) as { value: string } | undefined)?.value !== expected)) return false;
@@ -513,7 +513,7 @@ export function createRepositories(filename: string, options: RepositoryOpenOpti
         }).immediate();
       },
       async get(key) { return configByKey().get({ key })?.value; },
-      async set(key, value) { assertBotProcessConfigWrite(sqlite, key, value); if (key.startsWith('runtime_native_context:')) throw new RuntimeError('EXECUTION_WRITE_REQUIRES_LEDGER', 'Native context selection requires a bound ledger command', 409); db.insert(configs).values({ key, value }).onConflictDoUpdate({ target: configs.key, set: { value } }).run(); },
+      async set(key, value) { assertBotProcessConfigWrite(sqlite, key, value); if (key.startsWith(runtimeStateKeys.nativeContext.prefix)) throw new RuntimeError('EXECUTION_WRITE_REQUIRES_LEDGER', 'Native context selection requires a bound ledger command', 409); db.insert(configs).values({ key, value }).onConflictDoUpdate({ target: configs.key, set: { value } }).run(); },
       async list(prefix) {
         const characters = Array.from(prefix);
         // SQLite length/substr stop at NUL; keep their existing edge-case semantics.
@@ -534,7 +534,7 @@ export function createRepositories(filename: string, options: RepositoryOpenOpti
       },
       async compareAndSet(key, expected, value) {
         assertBotProcessConfigWrite(sqlite, key, value);
-        if (key.startsWith('runtime_native_context:')) throw new RuntimeError('EXECUTION_WRITE_REQUIRES_LEDGER', 'Native context selection requires a bound ledger command', 409);
+        if (key.startsWith(runtimeStateKeys.nativeContext.prefix)) throw new RuntimeError('EXECUTION_WRITE_REQUIRES_LEDGER', 'Native context selection requires a bound ledger command', 409);
         return expected === undefined
           ? cachedStatement(sqlite, 'INSERT INTO configs (key, value) VALUES (?, ?) ON CONFLICT(key) DO NOTHING').run(key, value).changes === 1
           : cachedStatement(sqlite, 'UPDATE configs SET value = ? WHERE key = ? AND value = ?').run(value, key, expected).changes === 1;

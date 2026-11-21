@@ -62,7 +62,7 @@ function compareCandidatePaths(h:ReturnType<typeof fixture>,target:ReturnType<ty
       try {
         const value=h.x.claimNext(target);
         outcome={taskId:value?.task.id,status:value?.task.status,attemptTaskId:value?.attempt?.taskId,attemptState:value?.attempt?.state};
-      } catch(error) { outcome={code:(error as any).code,message:(error as Error).message}; }
+      } catch(error) { outcome={code:(error as any).code,message:(error as Error).message,details:(error as any).details}; }
       const configs=db.prepare('SELECT key,value FROM configs ORDER BY key').all();
       return {claim:outcome,configs};
     } finally {db.exec('ROLLBACK TO candidate_path_comparison;RELEASE candidate_path_comparison');}
@@ -86,7 +86,7 @@ function expectAdmissionResult(result:ReturnType<typeof compareCandidatePaths>,t
   expect(result.blockers).toEqual(expected);
   if(expected.length) {
     expect(result.claim).toMatchObject({code:'WORKSPACE_RESOURCE_BLOCKED'});
-    expect(JSON.parse((result.claim as {message:string}).message)).toEqual(expected);
+    expect((result.claim as {details:unknown}).details).toEqual(expected);
     expect(result.preparation).toBe(false);
   } else {
     expect(result.claim).toMatchObject({taskId,status:'running',attemptTaskId:taskId,attemptState:'preparing'});
@@ -476,8 +476,8 @@ it('preserves multi-row blocker ownership and order across candidate chunks', ()
     expect(h.repos.execution.getSessionExecutions(target.sessionId)[0]?.blockers).toEqual(expected);
     phase='claim';
     let claimError:any;try{h.x.claimNext(target);}catch(error){claimError=error;}
-    expect(claimError).toMatchObject({code:'WORKSPACE_RESOURCE_BLOCKED'});
-    expect(JSON.parse(claimError.message)).toEqual(expected);
+    expect(claimError).toMatchObject({code:'WORKSPACE_RESOURCE_BLOCKED',message:'Workspace is held by another session',statusCode:409});
+    expect(claimError.details).toEqual(expected);
     phase='prepare';
     expect(h.x.canPrepareWorkspace(h.root)).toBe(false);
     expect(batches.length).toBeGreaterThan(0);

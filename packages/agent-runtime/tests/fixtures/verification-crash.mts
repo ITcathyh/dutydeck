@@ -1,3 +1,4 @@
+import { runtimeStateKeys } from '@dutydeck/shared';
 import { createRepositories } from '@dutydeck/storage';
 import type { AgentConfig, AgentDriver } from '@dutydeck/shared';
 import { DutydeckRuntime } from '../../src/index.js';
@@ -16,7 +17,7 @@ await runtime.initialize([agent]);
 const session = await runtime.start({ agentId: agent.id, cwd });
 void runtime.runVerification(session.id, { command: `${process.execPath} ${JSON.stringify(writer)} ${JSON.stringify(markerFile)}` });
 while (true) {
-  const records = await repos.config.list!(`runtime_verification:${session.id}:`);
+  const records = await repos.config.list!(runtimeStateKeys.verification.sessionPrefix(session.id));
   if (records.some(item => JSON.parse(item.value).processStage === 'command_started')) break;
   await new Promise(resolve => setTimeout(resolve, 10));
 }

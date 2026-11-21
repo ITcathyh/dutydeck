@@ -5,12 +5,11 @@ import { createHash } from 'node:crypto';
 import { mkdir, realpath, stat } from 'node:fs/promises';
 import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import type { ConfigRepository, SessionWorkspaceProof, SessionWorkspace, WorkspaceCleanupBlocker, WorkspaceMode } from '@dutydeck/shared';
-import { now, RuntimeError } from '@dutydeck/shared';
+import { runtimeStateKeys, now, RuntimeError } from '@dutydeck/shared';
 import { SAFE_GIT_CONFIG, safeGitConfigFor } from '@dutydeck/shared/safe-git';
 import { minimalToolEnvironment } from './process-environment.js';
 
 const runFile = promisify(execFile);
-const WORKSPACE_KEY_PREFIX = 'runtime_workspace:';
 
 async function git(cwd: string, args: string[], timeoutMs = 15_000): Promise<string> {
   return (await gitRaw(cwd, args, timeoutMs)).trim();
@@ -124,8 +123,6 @@ function parseGitStatusZ(raw: string): {
   return { trackedFiles, untrackedFiles, ignoredFiles, entries };
 }
 
-function workspaceKey(sessionId: string) { return WORKSPACE_KEY_PREFIX + sessionId; }
-
 export class WorkspaceManager {
   readonly root: string;
 
@@ -134,14 +131,14 @@ export class WorkspaceManager {
   }
 
   async get(sessionId: string, recoverCleaning = true): Promise<SessionWorkspace | undefined> {
-    return this.decode(sessionId, await this.config.get(workspaceKey(sessionId)), recoverCleaning);
+    return this.decode(sessionId, await this.config.get(runtimeStateKeys.workspace.key(sessionId)), recoverCleaning);
   }
 
   /** 一次读出全部工作区记录，返回按会话取用的读取函数（与 get 结果相同）；配置仓库不支持前缀列举时返回 undefined。 */
   async snapshot(): Promise<((sessionId: string) => Promise<SessionWorkspace | undefined>) | undefined> {
     if (!this.config.list) return undefined;
-    const rows = new Map((await this.config.list(WORKSPACE_KEY_PREFIX)).map(row => [row.key, row.value]));
-    return sessionId => this.decode(sessionId, rows.get(workspaceKey(sessionId)), true);
+    const rows = new Map((await this.config.list(runtimeStateKeys.workspace.prefix)).map(row => [row.key, row.value]));
+    return sessionId => this.decode(sessionId, rows.get(runtimeStateKeys.workspace.key(sessionId)), true);
   }
 
   private async decode(sessionId: string, raw: string | undefined, recoverCleaning: boolean): Promise<SessionWorkspace | undefined> {
@@ -157,12 +154,12 @@ export class WorkspaceManager {
   }
 
   async proof(sessionId: string, expectedCwd: string): Promise<SessionWorkspaceProof> {
-    const raw = await this.config.get(workspaceKey(sessionId));
+    const raw = await this.config.get(runtimeStateKeys.workspace.key(sessionId));
     if (!raw) throw new RuntimeError('WORKSPACE_NOT_FOUND', 'Workspace proof is missing', 409);
     const record: SessionWorkspace = JSON.parse(raw);
     if (record.sessionId !== sessionId || record.state !== 'ready') throw new RuntimeError('WORKSPACE_NOT_READY', 'Workspace proof is not ready', 409);
     await this.validate(record);
-    if (await this.config.get(workspaceKey(sessionId)) !== raw) throw new RuntimeError('WORKSPACE_CONFLICT', 'Workspace changed during verification', 409);
+    if (await this.config.get(runtimeStateKeys.workspace.key(sessionId)) !== raw) throw new RuntimeError('WORKSPACE_CONFLICT', 'Workspace changed during verification', 409);
     return { expectedCwd, workspaceRevision: record.revision, workspaceDigest: createHash('sha256').update(raw).digest('hex') };
   }
 
@@ -171,7 +168,7 @@ export class WorkspaceManager {
     return this.commit ? this.commit(record.sessionId, write) : write();
   }
   private async replaceRecord(record: SessionWorkspace, expected: SessionWorkspace | undefined): Promise<void> {
-    const key = workspaceKey(record.sessionId);
+    const key = runtimeStateKeys.workspace.key(record.sessionId);
     const expectedRaw = expected ? JSON.stringify(expected) : undefined;
     if (this.config.compareAndSet) {
       if (!await this.config.compareAndSet(key, expectedRaw, JSON.stringify(record))) {
