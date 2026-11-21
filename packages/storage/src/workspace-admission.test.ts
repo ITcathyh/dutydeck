@@ -24,10 +24,10 @@ function fixture() {
   const x = repos.execution.bind(claim);
   const git = (cwd:string,...args:string[]) => execFileSync('git',['-C',cwd,...args],{stdio:'pipe'});
   const repo = (name:string) => { const cwd=join(root,name);mkdirSync(cwd);git(cwd,'init','-q');git(cwd,'-c','user.name=Fixture','-c','user.email=fixture@example.invalid','commit','--allow-empty','-qm','baseline');return cwd; };
-  const session = (id:string,cwd:string) => { const f={sessionId:id,runId:'run-'+id};x.createSession({id,cwd,runId:f.runId,agentId:'fixture',state:'idle',createdAt:new Date().toISOString(),updatedAt:new Date().toISOString()});return f; };
-  const accept = (f:ReturnType<typeof session>,key='task') => {
-    const request:TaskRequestV1={version:1,namespace:'runtime',sessionId:f.sessionId,key,prompt:key,mode:'queue',actor:{kind:'unspecified'},skills:[],options:{},sources:[],sourcePayload:null};
-    const content={version:2 as const,prompt:key,executionOptions:{permissionMode:'ask' as const},executionContext:{agentPrompt:key},contentSources:[]};
+  const session = (id:string,cwd:string,source?:string) => { const f={sessionId:id,runId:'run-'+id};x.createSession({id,cwd,...(source ? {source} : {}),runId:f.runId,agentId:'fixture',state:'idle',createdAt:new Date().toISOString(),updatedAt:new Date().toISOString()});return f; };
+  const accept = (f:ReturnType<typeof session>,key='task',requestActor:TaskRequestV1['actor']={kind:'unspecified'}) => {
+    const request:TaskRequestV1={version:1,namespace:'runtime',sessionId:f.sessionId,key,prompt:key,mode:'queue',actor:requestActor,skills:[],options:{},sources:[],sourcePayload:null};
+    const content={version:2 as const,prompt:key,executionOptions:{permissionMode:'ask' as const},executionContext:{agentPrompt:key,...(requestActor.kind === 'unspecified' ? {} : {actorId:requestActor.id})},contentSources:[]};
     return x.acceptTask(f,request,{...content,digest:digest(content)} as AcceptedTaskInputV2,'back').task!;
   };
   return {root,path,repos,claim,x,git,repo,session,accept};
@@ -175,6 +175,27 @@ it.each(['gone', 'one live', 'missing', 'preparing', 'active', 'steering unknown
     }
   }
 );
+it.each([
+  { blocker: 'work_item', claimant: 'web' },
+  { blocker: 'web', claimant: 'lark-leader' },
+])('keeps a $claimant claim behind a $blocker unknown result after verified exit', ({ blocker, claimant }) => {
+  const h = fixture(), origin = h.session('origin', h.root, blocker), target = h.session('target', h.root, claimant);
+  h.accept(origin, 'original', actor);
+  let attempt = h.x.claimNext(origin)!.attempt!;
+  let resource = h.x.beforeCreate(origin, { resourceId: 'driver', kind: 'local_only' });
+  resource = h.x.spawned(origin, resource.resourceId, resource.revision, { identityId: 'driver', kind: 'local_only', locator: { driver: 'fixture' } });
+  resource = h.x.creationFinished(origin, resource.resourceId, resource.revision, 'created');
+  resource = h.x.observed(origin, resource.resourceId, resource.revision, { observationId: 'ready', identityId: 'driver', state: 'live', observedAt: new Date().toISOString(), evidenceRef: 'fixture' });
+  attempt = h.x.markSubmissionPending(af(attempt), { submissionId: 'send', inputDigest: digest('input'), resourceRefs: [{ resourceId: resource.resourceId, identityId: 'driver' }], authorizationRefs: [] }).attempt!;
+  h.x.markReconcileRequired(af(attempt), { reasonId: 'lost', code: 'DISCONNECTED', evidenceRefs: [] });
+  h.x.observed(origin, resource.resourceId, resource.revision, { observationId: 'exit', identityId: 'driver', state: 'gone', observedAt: new Date().toISOString(), evidenceRef: 'fixture' });
+
+  const task = h.accept(target);
+  expect(h.repos.execution.getTaskExecution(task.id)?.blockers).toEqual([
+    { code: 'WORKSPACE_EXECUTION_BUSY', sessionId: origin.sessionId, taskId: attempt.taskId, attemptId: attempt.attemptId }
+  ]);
+  expect(() => h.x.claimNext(target)).toThrow(expect.objectContaining({ code: 'WORKSPACE_RESOURCE_BLOCKED' }));
+});
 it('only computes workspace admission for queued tasks while validating every read claim', () => {
   const h=fixture(),cwd=h.repo('repo'),target=h.session('target',cwd),foreign=h.session('foreign',cwd);
   const task=h.accept(target),a=h.x.claimNext(target)!.attempt!;

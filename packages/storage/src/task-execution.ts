@@ -222,8 +222,8 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
     catch { return [{ code: 'WORKSPACE_RESOURCE_UNVERIFIABLE', sessionId }]; }
     const result: ExecutionBlocker[] = [];
     // 飞书记忆作业只写自己的记忆目录：不参与仓库互斥，只和在同一目录里执行的会话（包括其他记忆作业）互斥。
-    const memory = (id: string) => (cached('SELECT source FROM sessions WHERE id=?').get(id) as {source:string|null}|undefined)?.source === 'lark-memory';
-    const selfMemory = memory(sessionId);
+    const selfSource = (cached('SELECT source FROM sessions WHERE id=?').get(sessionId) as {source:string|null}|undefined)?.source;
+    const orchestrated = (source: string | null | undefined) => source === 'work_item' || source === 'lark-leader';
     // LIKE is ASCII case-insensitive and treats '_' as a wildcard. Preserve its candidates whenever
     // stop/verification evidence could make a LIKE-only orphan produce a blocker.
     const requiresLikeCandidates = cached("SELECT 1 FROM configs WHERE key GLOB 'runtime_verification:*' LIMIT 1").get()
@@ -298,7 +298,8 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
       }
       for (const otherId of chunk) {
         if (otherId === sessionId) continue;
-        const directoryOnly = selfMemory || sources.get(otherId) === 'lark-memory';
+        const otherSource = sources.get(otherId);
+        const directoryOnly = selfSource === 'lark-memory' || otherSource === 'lark-memory';
         const unresolved = unresolvedBySession.get(otherId);
         const queued = preparation ? queuedBySession.get(otherId) : undefined;
         const unknown = unknownBySession.get(otherId);
@@ -323,7 +324,8 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
         if (directoryOnly ? other.cwd.path !== identity.cwd.path : other.key !== identity.key) continue;
         // ORDER BY state selects active, legacy_unresolved and preparing before reconcile_required.
         const onlyUnknown = unresolved ? unresolved.state === 'reconcile_required' : Boolean(unknown);
-        if (onlyUnknown && recorded.length && !notExited.length && !external.length && !steering.length && !queued) continue;
+        if (onlyUnknown && !orchestrated(selfSource) && !orchestrated(otherSource)
+          && recorded.length && !notExited.length && !external.length && !steering.length && !queued) continue;
         if (unresolved || queued || unknown || steering.length) result.push({code:'WORKSPACE_EXECUTION_BUSY',sessionId:otherId,...(unresolved ? {taskId:unresolved.taskId,attemptId:unresolved.attemptId} : unknown ? {taskId:unknown.id} : queued ? {taskId:queued.id} : {taskId:steering[0]!.taskId})});
         result.push(...unsafe.map(r => ({code:'WORKSPACE_PHYSICAL_RESOURCE_UNSAFE',sessionId:otherId,resourceId:r.resourceId})),...external);
       }
