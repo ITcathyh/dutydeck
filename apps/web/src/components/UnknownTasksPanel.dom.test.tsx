@@ -59,11 +59,11 @@ describe('result-unknown tasks in the task detail', () => {
 
   it('marks completed or failed in one click without the duplicate-effects acknowledgement', async () => {
     const { list } = mount([task('reconcile_required')]);
-    const resolve = vi.spyOn(api, 'resolveUnknownTask').mockResolvedValue({ replayed: false, status: 'failed', decisionId: 'manual:attempt_1:failed:web:installation_owner' });
+    const resolve = vi.spyOn(api, 'resolveUnknownTask').mockResolvedValue({ replayed: false, status: 'failed', stoppedOriginal: true, decisionId: 'manual:attempt_1:failed:web:installation_owner' });
     await userEvent.setup({ delay: null }).click(await screen.findByRole('button', { name: '标为失败' }));
     expect(resolve).toHaveBeenCalledExactlyOnceWith('s1', 'task_1', { target: 'attempt_1', action: 'failed' });
     await waitFor(() => expect(list).toHaveBeenCalledTimes(2));
-    expect(toastStore.getSnapshot().find(toast => toast.key === 'unknown-task-task_1')).toMatchObject({ kind: 'success', title: '已标为失败' });
+    expect(toastStore.getSnapshot().find(toast => toast.key === 'unknown-task-task_1')).toMatchObject({ kind: 'success', title: '已标为失败', description: '这一轮按人工确认结算为失败，不会重发。Agent 当时没有确认停下，已先停掉它的进程再处理。' });
   });
 
   it('says who already handled it when someone else got there first', async () => {

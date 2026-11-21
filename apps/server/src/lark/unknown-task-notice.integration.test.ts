@@ -223,6 +223,15 @@ describe('结果未知提醒卡（真实 Runtime + SQLite）', () => {
     expect(await h.status()).toBe('reconcile_required');
   });
 
+  it('在停掉原进程后把原因追加到成功提示', async () => {
+    const h = await unknownTopic();
+    const runtime = h.current().runtime;
+    const resolve = runtime.resolveUnknownTask.bind(runtime);
+    vi.spyOn(runtime, 'resolveUnknownTask').mockImplementation(async (...args) => ({ ...await resolve(...args), stoppedOriginal: true }));
+    expect(await h.current().coordinator.handleAction(valueOf(h.notice, 'resolve_failed'), 'ou_alice', h.context))
+      .toMatchObject({ type: 'success', content: '已标为失败，这一轮不会再重发。Agent 当时没有确认停下，已先停掉它的进程再处理。' });
+  });
+
   it('标为失败：并发重复点击只结算一次，记下操作人与时间，提醒卡收尾，之后的点击写明谁已处理', async () => {
     const h = await unknownTopic();
     const { saved } = await h.mapping();

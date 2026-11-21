@@ -58,7 +58,8 @@ describe.skipIf(process.platform !== 'linux')('legacy Claude workspace admission
         const path = join(cwd, 'projects', cwd.replace(/[^A-Za-z0-9-]/g, '-'), pinnedSessionUuid(first.id) + '.jsonl');
         appendFileSync(path, JSON.stringify({ sessionId: pinnedSessionUuid(first.id), cwd, type: 'system', subtype: 'turn_duration', pendingBackgroundAgentCount: 1 }) + '\n');
         await vi.waitFor(() => expect(driver.hasBackgroundWork?.()).toBe(true));
-        expect(driver.isIdle?.()).toBe(true);
+        expect(driver.quiescence?.()).toEqual({ state: 'busy', evidence: 'background_work' });
+        expect(driver.isIdle?.()).toBe(false);
       }
       const second = await runtime.start({ agentId: 'ccflash', cwd });
       const task = await runtime.dispatch(second.id, 'second');

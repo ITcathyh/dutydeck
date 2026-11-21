@@ -3,7 +3,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createRepositories } from '@dutydeck/storage';
-import type { AgentConfig, BoundExecutionRepository, DriverFactory, UnknownTaskResolution } from '@dutydeck/shared';
+import type { AgentConfig, AgentDriver, BoundExecutionRepository, DriverFactory, UnknownTaskResolution } from '@dutydeck/shared';
 import { readFileSync } from 'node:fs';
 import { createCliAdapter } from '@dutydeck/cli-adapters';
 import { TerminalSnapshot } from '@dutydeck/terminal-renderer';
@@ -15,15 +15,16 @@ const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => { for (const close of cleanups.splice(0).reverse()) await close(); });
 
 /** 第一轮驱动报错后停在结果未知，第二条排在后面；idle 控制驱动是否声明自己空闲。 */
-async function fixture(options: { idle?: boolean | (() => boolean); deferFailure?: boolean } = {}) {
+async function fixture(options: { idle?: boolean | (() => boolean); deferFailure?: boolean; driver?: Partial<AgentDriver>; onSend?: (prompt: string) => void } = {}) {
   const cwd = await mkdtemp(join(tmpdir(), 'dutydeck-unknown-task-'));
   const repos = createRepositories(':memory:', { newDatabaseAuthority: 'ledger_v1' });
   const prompts: string[] = [];
+  const emitters: Parameters<DriverFactory>[2][] = [];
   let fail = true, releaseFailure!: () => void;
   const failureGate = new Promise<void>(done => { releaseFailure = done; });
-  const factory: DriverFactory = (_agent, _protocol, emit) => ({ start: async () => {}, resume: async () => {}, stop: async () => {}, isStopped: async () => true,
-    interrupt: async () => {}, ...(options.idle === undefined ? {} : { isIdle: () => typeof options.idle === 'function' ? options.idle() : options.idle! }), send: async input => {
-      const prompt = typeof input === 'string' ? input : input.prompt; prompts.push(prompt);
+  const factory: DriverFactory = (_agent, _protocol, emit) => ({ start: async () => { emitters.push(emit); }, resume: async () => {}, stop: async () => {}, isStopped: async () => true,
+    interrupt: async () => {}, ...options.driver, ...(options.idle === undefined ? {} : { isIdle: () => typeof options.idle === 'function' ? options.idle() : options.idle! }), send: async input => {
+      const prompt = typeof input === 'string' ? input : input.prompt; prompts.push(prompt); options.onSend?.(prompt);
       if (fail && prompt === 'original') {
         if (options.deferFailure) await failureGate;
         throw Object.assign(new Error('original result unavailable'), { code: 'AGENT_IDLE_TIMEOUT' });
@@ -45,7 +46,7 @@ async function fixture(options: { idle?: boolean | (() => boolean); deferFailure
       ...(action === 'completed' ? { verifiedOutputText: '已人工标为已完成' } : {}), ...(action === 'retry' ? { allowDuplicateEffects: true as const } : {}) };
   };
   const status = async (taskId: string) => (await runtime.getTasks(session.id)).find(task => task.id === taskId)?.status;
-  return { repos, session, first, second, prompts, resolution, status, releaseFailure, succeed: () => { fail = false; }, get runtime() { return runtime; },
+  return { repos, session, first, second, prompts, emitters, resolution, status, releaseFailure, succeed: () => { fail = false; }, get runtime() { return runtime; },
     reopen: async () => { await runtime.shutdown(); fail = false; runtime = new DutydeckRuntime(repos, { driverFactory: factory, cleanupIntervalMs: 0 }); await runtime.initialize([agent]); } };
 }
 
@@ -166,4 +167,78 @@ it.each((['failed', 'completed', 'retry', 'settle'] as const).flatMap(action =>
   if (action === 'retry') await vi.waitFor(async () => expect(await h.status(h.first.id)).toBe('completed'));
   else expect(await h.status(h.first.id)).toBe(action === 'settle' ? 'failed' : action);
   expect(h.prompts).toEqual(action === 'retry' ? ['original', 'queued', 'original'] : ['original', 'queued']);
+});
+
+it.each([
+  { id: 'claude-code', screen: '──────────\n❯ \ncustom model\ncustom usage\n──────────', evidence: 'composer_not_recognized' },
+  { id: 'codex', screen: 'Ready for input', evidence: 'no_idle_screen_matcher' },
+  { id: 'claude-code', screen: '✻ Working… (esc to interrupt)', evidence: 'status_activity' },
+])('handles manual resolution with $id reporting $evidence', async ({ id, screen, evidence }) => {
+  const snapshot = new TerminalSnapshot(120, 30);
+  cleanups.push(async () => snapshot.dispose());
+  await snapshot.writeAndFlush(screen.replaceAll('\n', '\r\n'));
+  const pty: PtyCliDriver = Object.assign(Object.create(PtyCliDriver.prototype), { snapshot, adapter: createCliAdapter(id) });
+  const stop = vi.fn(async () => {});
+  const h = await fixture({ idle: () => pty.isIdle(), driver: { stop, quiescence: () => pty.quiescence() } });
+  const input = await h.resolution('failed');
+  if (evidence === 'status_activity') {
+    await expect(h.runtime.resolveUnknownTask(h.session.id, input, owner)).rejects.toMatchObject({ code: 'RECOVERY_EXECUTION_ACTIVE' });
+    expect(stop).not.toHaveBeenCalled();
+    expect(pty.quiescence()).toEqual({ state: 'busy', evidence });
+    return;
+  }
+  await expect(h.runtime.resolveUnknownTask(h.session.id, input, owner)).resolves.toMatchObject({ stoppedOriginal: true, task: { status: 'failed' } });
+  expect(stop).toHaveBeenCalledTimes(1);
+  expect(pty.quiescence()).toEqual({ state: 'unknown', evidence });
+  expect(h.repos.execution.getTaskExecution(h.first.id)?.currentAttempt?.settlement).toMatchObject({
+    decision: { evidenceRefs: [...input.evidenceRefs, 'stopped_original_driver'], resourceChecks: [expect.objectContaining({ observationId: expect.any(String) })] }
+  });
+  await vi.waitFor(async () => expect(await h.status(h.second.id)).toBe('completed'));
+  expect(h.prompts).toEqual(['original', 'queued']);
+});
+
+it.each(['live', 'probe error'])('keeps the stop block and original decision open after %s', async failure => {
+  let gone = false;
+  const h = await fixture({ driver: { quiescence: () => ({ state: 'unknown', evidence: 'no_snapshot' }), isStopped: async () => {
+    if (!gone && failure === 'probe error') throw new Error('exit probe unavailable');
+    return gone;
+  } } });
+  try {
+    await expect(h.runtime.resolveUnknownTask(h.session.id, await h.resolution('failed'), owner)).rejects.toMatchObject({ code: 'DRIVER_STOP_UNVERIFIED' });
+    expect((await h.runtime.inspectExecutionRecovery(h.session.id, owner)).stopBlock).toBeTruthy();
+    expect(await h.status(h.first.id)).toBe('reconcile_required');
+    expect(await h.status(h.second.id)).toBe('queued');
+  } finally { gone = true; }
+});
+
+it('dispatches messages arriving during exit verification after settlement', async () => {
+  let proveExit!: () => void;
+  const gate = new Promise<void>(resolve => { proveExit = resolve; });
+  const isStopped = vi.fn(async () => { await gate; return true; });
+  let oldEmit: Parameters<DriverFactory>[2];
+  const h = await fixture({ driver: { isStopped, quiescence: () => ({ state: 'unknown', evidence: 'no_snapshot' }) }, onSend(prompt) {
+    if (prompt === 'arrived during stop') {
+      oldEmit({ type: 'text', data: { text: 'late original output' } });
+      oldEmit({ type: 'completed', data: { stopReason: 'end_turn' } });
+    }
+  } });
+  oldEmit = h.emitters[0]!;
+  const decision = h.runtime.resolveUnknownTask(h.session.id, await h.resolution('failed'), owner);
+  void decision.catch(() => {});
+  try {
+    await vi.waitFor(() => expect(isStopped).toHaveBeenCalled());
+    const arriving = h.runtime.dispatch(h.session.id, 'arrived during stop');
+    await new Promise(resolve => setImmediate(resolve));
+    expect(h.prompts).toEqual(['original']);
+    expect(await h.status(h.first.id)).toBe('reconcile_required');
+    proveExit();
+    await expect(decision).resolves.toMatchObject({ stoppedOriginal: true, task: { status: 'failed' } });
+    const next = await arriving;
+    await vi.waitFor(async () => expect(await h.status(next.id)).toBe('completed'));
+    expect(h.prompts).toEqual(['original', 'queued', 'arrived during stop']);
+    const attempt = h.repos.execution.getTaskExecution(next.id)!.currentAttempt!;
+    const events = h.repos.execution.getAttemptEvents(attempt.attemptId);
+    expect(events.filter(event => event.type === 'completed')).toHaveLength(1);
+    expect(events.map(event => event.data)).not.toContainEqual(expect.objectContaining({ text: 'late original output' }));
+  } finally { proveExit(); }
 });

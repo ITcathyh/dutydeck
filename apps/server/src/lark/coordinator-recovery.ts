@@ -10,7 +10,7 @@ import { larkNotice } from './notify-tier.js';
 import { describeUnknownTaskResolution, resolveUnknownTask, type UnknownTaskRuntime } from '../task-resolution.js';
 import type { LarkInboxRecord } from './task-inbox.js';
 import type { LarkLaunchOptions } from './new-session.js';
-import { AGENT_IDLE_TIMEOUT, AGENT_LOGIN_REQUIRED, RuntimeError, unknownTaskActionLabels, unknownTaskRetryWarning, timeLoop, type AgentEvent, type AttemptActivity, type ChannelMapping, type ChannelMappingRepository, type Session, type TaskRecord, type UnknownTaskAction, type UnknownTaskFacts } from '@dutydeck/shared';
+import { AGENT_IDLE_TIMEOUT, AGENT_LOGIN_REQUIRED, RuntimeError, unknownTaskActionLabels, unknownTaskRetryWarning, unknownTaskStoppedOriginalNotice, timeLoop, type AgentEvent, type AttemptActivity, type ChannelMapping, type ChannelMappingRepository, type Session, type TaskRecord, type UnknownTaskAction, type UnknownTaskFacts } from '@dutydeck/shared';
 import { larkPermissionMode, readLarkConfig, type StoredLarkConfig } from './config.js';
 import { larkPendingVerificationKey, parseLarkPendingVerifications } from './auto-verification.js';
 import { LarkServiceError } from './service.js';
@@ -1139,8 +1139,9 @@ export abstract class LarkCoordinatorRecovery extends LarkCoordinatorCards {
       } else if (!this.foreignActionConfirmed(operatorOpenId, saved.sender_open_id, `${taskId}|${turn}|${action}|${target}`)) {
         return { type: 'warning', content: '该任务由他人发起，再次点击同一按钮以确认操作' };
       }
+      let result;
       try {
-        await resolveUnknownTask(runtime as UnknownTaskRuntime, { sessionId: mapping.sessionId, taskId: saved.runtime_task_id, target, action: kind, operator: { channel: 'lark', id: operatorOpenId } });
+        result = await resolveUnknownTask(runtime as UnknownTaskRuntime, { sessionId: mapping.sessionId, taskId: saved.runtime_task_id, target, action: kind, operator: { channel: 'lark', id: operatorOpenId } });
       } catch (error) {
         if (!(error instanceof RuntimeError)) throw error;
         if (error.code === 'UNKNOWN_TASK_ALREADY_RESOLVED') {
@@ -1156,7 +1157,8 @@ export abstract class LarkCoordinatorRecovery extends LarkCoordinatorCards {
       const resolution = (await runtime.inspectUnknownTask(mapping.sessionId, saved.runtime_task_id, target)).resolution;
       if (resolution) void this.closeUnknownTaskNotice(config, context.messageId, card, resolution).catch(error => this.log.warn({ error, taskId }, '结果未知提醒卡未能更新'));
       this.scheduleReconcile();
-      return { type: 'success', content: kind === 'retry' ? '已按原请求重新排队执行，进度见原来的任务卡' : `已${unknownTaskActionLabels[kind]}，这一轮不会再重发` };
+      const content = kind === 'retry' ? '已按原请求重新排队执行，进度见原来的任务卡' : `已${unknownTaskActionLabels[kind]}，这一轮不会再重发`;
+      return { type: 'success', content: result.stoppedOriginal ? content + '。' + unknownTaskStoppedOriginalNotice : content };
     } catch (error) {
       this.log.warn({ error, taskId, action }, '处理结果未知的一轮失败');
       return { type: 'warning', content: error instanceof LarkServiceError ? error.message : '暂时无法处理，请稍后重试' };

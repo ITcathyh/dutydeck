@@ -99,6 +99,7 @@ dutydeck agent --turn "$TURN" group send '可检索摘要' --final --card-file /
 - 发起人和管理员可以操作。「重新执行」需要在 60 秒内再点一次确认。
 - 插话投递结果未知时，回执也会指向这张卡。
 - Web 会话详情页执行记录下方有同样三个操作，重新执行要在确认框里确认。
+- 终端还在执行或等人回答时，需要等它停下。人工处理时，如果终端状态无法识别，Dutydeck 会先停止原进程，核实退出后才结案。排队的消息会由新进程继续执行。
 - 处理后卡片上会显示谁在何时做了什么；处理记录写入执行账本。
 - 超过 24 小时的旧任务不发飞书卡，只能在 Web 上处理。
 - 接口：`GET /api/sessions/:id/unknown-tasks`、`POST /api/sessions/:id/unknown-tasks/:taskId`，body 为 `{target, action, allowDuplicateEffects?}`。

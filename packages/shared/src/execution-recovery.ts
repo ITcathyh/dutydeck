@@ -54,6 +54,7 @@ export type UnknownTaskResolution = z.infer<typeof unknownTaskResolutionSchema>;
 export type UnknownTaskAction = UnknownTaskResolution['action'];
 export const unknownTaskActionLabels: Record<UnknownTaskAction, string> = { retry: '重新执行', completed: '标为已完成', failed: '标为失败' };
 /** 重新执行之前要读者确认的那句话：飞书提醒卡、确认提示与 Web 确认框共用。 */
+export const unknownTaskStoppedOriginalNotice = 'Agent 当时没有确认停下，已先停掉它的进程再处理。';
 export const unknownTaskRetryWarning = '重新执行会按原请求再做一遍。上一轮可能已经做过其中一部分（发消息、改文件、调接口等），这些操作可能被重复执行。';
 
 /** 结果未知任务的已知事实：只读投影，不含进程或控制器标识。 */
