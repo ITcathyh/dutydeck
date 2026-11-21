@@ -1,3 +1,4 @@
+import { resolveCallback } from './handlers/callbacks.js';
 import { turnDecisionKey } from './recovery-decision.js';
 import { fromRecord } from './turn-record.js';
 import { clearTaskReportSafely, errorMessage, isTerminalTaskStatus } from '@dutydeck/shared';
@@ -2283,13 +2284,22 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
     await this.handle(event, config);
   }
 
-  async handleAction(value: unknown, operatorOpenId?: string, context?: { messageId?: string; chatId?: string; actionTag?: string; option?: string }) {
+  private buttonDependencies() {
+    const host = this;
+    return {
+      get reconcileConfig() { return host.reconcileConfig; },
+      participation: this.workflowOptions.participation,
+    };
+  }
+
+  async handleAction(value: unknown, operatorOpenId?: string, context?: { messageId?: string; chatId?: string; actionTag?: string; option?: string }): Promise<{ type: string; content: string }> {
     const workflow = value as Record<string, unknown> | null;
-    // 群级变更确认卡（如参与强度）：改什么、谁发起都以存档的确认单为准，谁能确认由各种类自己校验。
-    if (workflow && typeof workflow === 'object' && 'dutydeck_confirm' in workflow) {
-      const participation = this.workflowOptions.participation;
-      const result = participation && this.reconcileConfig ? await participation.confirmations.handle(this.reconcileConfig.appId, value, operatorOpenId, context) : undefined;
-      return result ?? { type: 'warning', content: '这张确认卡已失效。' };
+    if (workflow && typeof workflow === 'object') {
+      const callback = resolveCallback(workflow);
+      if (callback) {
+        const [key, , handle] = callback;
+        return handle(this.buttonDependencies(), { key, workflow, operatorOpenId, context });
+      }
     }
     if (workflow && workflow.dutydeck_export_trace === 'download') {
       if (!operatorOpenId || !context?.messageId || !context.chatId || !this.reconcileConfig || !this.cardMappings || !this.runtime.getEvents) {
