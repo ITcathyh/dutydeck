@@ -189,6 +189,23 @@ export function createRepositories(filename: string, options: RepositoryOpenOpti
     if (filename !== ':memory:') restrictDatabaseFiles(filename);
   const db = drizzle(sqlite);
   const execution = createTaskExecutionRepository(sqlite, control);
+  function compareAndSetConfigs(checks: Array<{ key: string; expected: string | undefined }>, writes: Array<{ key: string; value: string }>,
+    mapping?: { id: string; expected: string; extra: string }) {
+    return sqlite.transaction(() => {
+      for (const { key, value } of writes) {
+        assertBotProcessConfigWrite(sqlite, key, value);
+        if (key.startsWith('runtime_native_context:')) throw new RuntimeError('EXECUTION_WRITE_REQUIRES_LEDGER', 'Native context selection requires a bound ledger command', 409);
+      }
+      const read = cachedStatement(sqlite, 'SELECT value FROM configs WHERE key=?');
+      if (checks.some(({ key, expected }) => (read.get(key) as { value: string } | undefined)?.value !== expected)) return false;
+      if (mapping && cachedStatement(sqlite, 'UPDATE channel_mappings SET extra=? WHERE id=? AND extra IS ?')
+        .run(mapping.extra, mapping.id, mapping.expected).changes !== 1) return false;
+      const put = cachedStatement(sqlite, 'INSERT INTO configs (key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value');
+      for (const { key, value } of writes) put.run(key, value);
+      for (const { key, value } of writes) assertBotProcessConfigWrite(sqlite, key, value);
+      return true;
+    }).immediate();
+  }
   const legacyWrite = <T>(work: () => T): T => sqlite.transaction(() => {
     if (execution.authority() !== 'legacy') throw new RuntimeError('EXECUTION_LEDGER_REQUIRED', 'Execution writes require a bound ledger command', 409);
     return work();
@@ -468,20 +485,8 @@ export function createRepositories(filename: string, options: RepositoryOpenOpti
       }
     },
     config: {
-      async compareAndSetBatch(checks, writes) {
-        return sqlite.transaction(() => {
-          for (const { key, value } of writes) {
-            assertBotProcessConfigWrite(sqlite, key, value);
-            if (key.startsWith('runtime_native_context:')) throw new RuntimeError('EXECUTION_WRITE_REQUIRES_LEDGER', 'Native context selection requires a bound ledger command', 409);
-          }
-          const read = cachedStatement(sqlite, 'SELECT value FROM configs WHERE key=?');
-          if (checks.some(({ key, expected }) => (read.get(key) as { value: string } | undefined)?.value !== expected)) return false;
-          const put = cachedStatement(sqlite, 'INSERT INTO configs (key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value');
-          for (const { key, value } of writes) put.run(key, value);
-          for (const { key, value } of writes) assertBotProcessConfigWrite(sqlite, key, value);
-          return true;
-        }).immediate();
-      },
+      async compareAndSetBatch(checks, writes) { return compareAndSetConfigs(checks, writes); },
+      async compareAndSetMappingAndConfig(mapping, checks, writes) { return compareAndSetConfigs(checks, writes, mapping); },
       getSync(key) { return (configValue().get(key) as { value: string } | undefined)?.value; },
       async listByJsonField(prefix, filter) { return listConfigByJsonField(sqlite, prefix, filter); },
       async listJsonFields(prefix, paths, filter) { return listConfigJsonFields(sqlite, prefix, paths, filter); },

@@ -7,7 +7,7 @@ import type { LarkMessageResource } from './message-content.js';
 import type { LarkCardElement } from './card-renderer.js';
 import type { LarkRedispatchInfo } from './turn-redispatch.js';
 import type { LarkMessageEvent } from './listener.js';
-import type { LarkScenarioRecall, LarkScenarioRecallLine } from './scenario-recall.js';
+import type { LarkScenarioRecall } from './scenario-recall.js';
 import { LarkCoordinatorInbound } from './coordinator-inbound.js';
 
 // 飞书消息协调器（从 listener.ts 拆分）：按群/话题串行化任务轮次、驱动 Agent 会话、
@@ -130,64 +130,7 @@ export type LarkTask = {
   /** 场景包关联到的上一轮结论：注入给 Agent，过程卡顶部挂一行。 */
   scenarioRecall?: LarkScenarioRecall;
 };
-export type PersistedLarkCardTask = {
-  launcher_recovery_note?: boolean;
-  result_feedback_state?: string;
-  retry_material_prompt?: string;
-  sender_open_id?: string;
-  /** 发送方类型（user / app / bot）。重启后的回执卡靠它决定要不要 @ 回发起人。 */
-  sender_type?: string;
-  thread_id?: string;
-  scope_id?: string;
-  app_id: string;
-  chat_id: string;
-  anchor_message_id?: string;
-  fallback_note?: string;
-  reply_message_id?: string;
-  reply_in_thread?: boolean;
-  /** @deprecated 兼容旧记录；历史版本可能错误地写入 omt_* thread_id。 */
-  root_message_id?: string;
-  /** 静默进展下本轮不发过程卡，这里就没有值；除此之外恒有值。 */
-  card_message_id?: string;
-  runtime_task_id?: string;
-  task_name: string;
-  prompt: string;
-  state: LarkTaskState;
-  started_at: number;
-  last_successful_elements?: LarkCardElement[];
-  /** Daemon recovery already removed stale in-memory card actions. */
-  recovery_read_only?: boolean;
-  recovery_status_key?: string;
-  /** 这一轮正在转到新会话（在新会话中执行/重新执行）：对账跳过它；新一轮落库时整行替换，标记随之消失。 */
-  relaunch_pending?: boolean;
-  chat_type?: LarkMessageEvent['chatType'];
-  final_message_id?: string;
-  final_attachment_message_id?: string;
-  /**
-   * 'reaction' = 只贴了完成表情、没有结果卡消息，对账据此判定「已交付」。
-   * 'failed' = 结果卡被平台明确拒收（不在群里、没有权限、内容被拒等），或瞬时失败自动重试超过 1 小时，对账不再补发。
-   */
-  final_delivery_state?: 'delivered' | 'reaction' | 'failed';
-  /** 结果没送达的原因：failed 时是停止重试的原因，重试中是最近一次失败的原因。送达后清掉。 */
-  final_delivery_error?: string;
-  /** 结果卡连续瞬时失败次数、下次重发时间和首次投递时间（毫秒；旧记录为首次失败时间）。送达或判定失败后清掉。 */
-  final_delivery_attempts?: number;
-  final_delivery_retry_at?: number;
-  final_delivery_first_failed_at?: number;
-  final_elements?: LarkCardElement[];
-  /** 结果卡整卡入参，供重启后的「运行验证」原样重绘同一张收据。 */
-  final_card_input?: Record<string, unknown>;
-  progress_frozen?: boolean;
-  turn?: number;
-  /** 同一会话里之前几轮（重试前）的过程卡与结果卡消息 ID，旧卡上的「查看详情」靠它认回这条任务。转到新会话前那一轮的卡不记在这里。 */
-  earlier_message_ids?: string[];
-  /** 结果卡上自动验证的进展，重绘时验证状态行照它写。 */
-  verification_auto?: LarkAutoVerificationProgress;
-  /** 过程卡顶部场景关联的那一行，对账重绘时照它画。 */
-  scenario_recall?: LarkScenarioRecallLine;
-  /** 升级前的同类字段，只读不写，见 scenario-legacy.ts。 */
-  alert_recall?: unknown;
-};
+export type { PersistedLarkCardTask } from './turn-record.js';
 export { larkTaskTitle } from './coordinator-core.js';
 
 export class LarkMessageCoordinator extends LarkCoordinatorInbound {}

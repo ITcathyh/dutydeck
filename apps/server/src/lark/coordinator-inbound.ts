@@ -1,3 +1,5 @@
+import { turnDecisionKey } from './recovery-decision.js';
+import { fromRecord } from './turn-record.js';
 import { clearTaskReportSafely, errorMessage, isTerminalTaskStatus } from '@dutydeck/shared';
 import { annotateDisposition, type Disposition } from './disposition.js';
 import { larkMessageAnchor } from './message-anchor.js';
@@ -261,14 +263,12 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
     const key = larkGroupKey(event, scopeId, config.appId);
     const group = this.groups.get(key) ?? { tail: Promise.resolve() };
     this.groups.set(key, group);
-    const anchor = saved?.anchor_message_id;
-    const task: LarkTask = { id, event: anchor === undefined ? event : { ...event, replyMessageId: anchor !== id ? anchor : undefined },
-      config: effective, prompt, resources: [], group, inbox: adopted, state: 'queued', events: [], turn: turn - 1,
-      scopeId, epoch: group.epoch ?? 0, retryMaterialPrompt: saved?.retry_material_prompt ?? record.request?.materialPrompt,
-      sessionId, cardMessageId: saved?.card_message_id ?? record.cardId, runtimeTaskId: taskId,
-      startedAt: saved?.started_at ?? Date.parse(runtimeTask.createdAt), lastSuccessfulElements: saved?.last_successful_elements,
-      fallbackNote: saved?.fallback_note ?? record.fallbackNote, launcherRecoveryNote: saved?.launcher_recovery_note,
-      progressFrozen: saved?.progress_frozen, resumeTask: runtimeTask, restoring: true };
+    const restored = saved && fromRecord(saved, { externalId: id, sessionId }, effective);
+    const task: LarkTask = Object.assign(restored ?? { id, config: effective, resources: [], events: [], sessionId, startedAt: Date.parse(runtimeTask.createdAt) }, {
+      event: { ...event, replyMessageId: saved?.anchor_message_id ? restored?.event.replyMessageId : event.replyMessageId },
+      prompt, group, inbox: adopted, state: 'queued' as const, turn: turn - 1, scopeId, epoch: group.epoch ?? 0,
+      retryMaterialPrompt: restored?.retryMaterialPrompt ?? record.request?.materialPrompt, cardMessageId: restored?.cardMessageId ?? record.cardId,
+      runtimeTaskId: taskId, fallbackNote: restored?.fallbackNote ?? record.fallbackNote, resumeTask: runtimeTask, restoring: true });
     this.tasks.set(id, task);
     this.handledMessages.add(id);
     group.tail = group.tail.then(() => this.runTurn(task)).catch(error => {
@@ -2641,7 +2641,7 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
       // 转交旧卡：映射已移到新一轮，按回调里的任务与轮次读转交认领。claim.sessionId 是原会话，
       // 与 markRelaunchedCard 给这张旧卡的页脚会话一致。
       if (!card && target?.turn !== undefined) {
-        const raw = await this.workflowOptions.store.get(`lark.relaunch.${config.appId}.${target.taskId}.${target.turn}`);
+        const raw = await this.decisions.get(turnDecisionKey('relaunch', config.appId, target.taskId, target.turn));
         const claim = raw ? JSON.parse(raw) as LarkRelaunchClaim : undefined;
         if (claim?.phase === 'moved' && claim.cardMessageId === context.messageId && claim.chatId === context.chatId) {
           card = { externalId: claim.taskId, sessionId: claim.sessionId, saved: { app_id: claim.appId, chat_id: claim.chatId, turn: claim.turn,

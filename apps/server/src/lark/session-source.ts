@@ -2,7 +2,7 @@ import { parseLarkSourceId, type Session, type SessionSourceContext } from '@dut
 import { isBotSenderType } from './card-mentions.js';
 import { readLarkConfig } from './config.js';
 import { withLarkContextReadTimeout } from './context-read-timeout.js';
-import { parseOptionalCardTask } from './persisted-card-task.js';
+import { parseCardFields } from './persisted-card-task.js';
 import type { LarkRoutesOptions } from './routes.js';
 import { createLarkCardService, type LarkCardService } from './service.js';
 
@@ -23,11 +23,11 @@ export function createLarkSessionSourceResolver(options: SourceOptions) {
       const chatUrl = new URL(`https://${host}/client/chat/open`);
       chatUrl.searchParams.set('openChatId', chatId);
       const rows = await options.cardMappings?.list(`lark-card:${appId}`).catch(() => []) ?? [];
-      let origin: { mapping: typeof rows[number]; saved: NonNullable<ReturnType<typeof parseOptionalCardTask>> } | undefined;
+      let origin: { mapping: typeof rows[number]; saved: NonNullable<ReturnType<typeof parseCardFields>> } | undefined;
       for (const mapping of rows.filter(row => row.sessionId === session.id && row.channel === `lark-card:${appId}`)
         .sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id))) {
         try {
-          const saved = parseOptionalCardTask(mapping.extra);
+          const saved = parseCardFields(mapping.extra);
           if (saved?.app_id && saved.app_id !== appId || saved?.chat_id && saved.chat_id !== chatId) continue;
           if (saved?.app_id === appId && saved.chat_id === chatId) origin = { mapping, saved };
         } catch { /* A broken earliest origin must not promote a later follow-up to the original request. */ }
