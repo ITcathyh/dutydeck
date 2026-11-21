@@ -126,7 +126,7 @@ async function harness(kind: 'normal' | 'ask' | 'permission' = 'normal', options
       expect(record, 'receipt must follow durable inbox acceptance').toBeTruthy();
       return { reactionId: `reaction_${messageId}` };
     }),
-    deleteReaction: vi.fn(async () => {}), getUserEmails: vi.fn(async () => []),
+    deleteReaction: vi.fn(async () => {}), getUserEmails: vi.fn(async (_openId: string): Promise<string[]> => []),
     listChatMembers: vi.fn(async () => ({ items: [{ memberId: 'ou_alice' }, { memberId: 'ou_bob' }], hasMore: false })),
     listChatMessages: vi.fn(async () => ({ items: [], hasMore: false })),
     getMessage: vi.fn(async (id: string) => ({ messageId: id, chatId: 'oc_group', threadId: 'omt_topic', messageType: 'text', rawContent: JSON.stringify({ text: '已核实的引用材料' }), sender: { type: 'user' }, mentions: [] })),
@@ -1023,6 +1023,31 @@ describe('Feishu workflows through coordinator, Runtime and persistent storage',
     // 这一轮只多了进度卡和结果卡。
     expect(again).toHaveLength(2);
     expect(h.cards.size - cardCount).toBe(2);
+  });
+
+  it.each(['listed email', 'directory unavailable'] as const)('approval card email lookup: %s', async scenario => {
+    const h = await harness('permission');
+    await h.coordinator.handle(event('om_task', '修改实现'), h.config);
+    await vi.waitFor(async () => expect((await h.interactions()).find(item => item.kind === 'permission')?.cardId).toBeTruthy());
+    const request = (await h.interactions()).find(item => item.kind === 'permission')!;
+    const email = 'member@example.com';
+    await h.repos.config.set(larkBotsConfigKey, JSON.stringify([{ ...h.config, highRiskAllowedEmails: [email],
+      highRiskAllowedUsers: scenario === 'listed email' ? [{ openId: 'ou_other', name: 'Other' }] : [] }]));
+    const error = new Error('directory unavailable');
+    if (scenario === 'listed email') h.service.getUserEmails.mockResolvedValue([email]);
+    else h.service.getUserEmails.mockRejectedValue(error);
+
+    const result = await h.coordinator.handleAction({ dutydeck_workflow: 'approve', request_id: request.id, generation: request.boot },
+      'ou_alice', { messageId: request.cardId, chatId: 'oc_group' });
+    if (scenario === 'listed email') {
+      expect(result.type).toBe('success');
+      expect(h.resolvePermission).toHaveBeenCalledExactlyOnceWith('native_permission', true);
+    } else {
+      expect(result).toMatchObject({ type: 'error', content: '当前账号无权操作此任务。' });
+      expect(h.resolvePermission).not.toHaveBeenCalled();
+      expect(h.log.warn).toHaveBeenCalledWith({ error }, 'High-risk actor email lookup failed');
+    }
+    expect(h.service.getUserEmails).toHaveBeenCalledWith('ou_alice');
   });
 
   it('binds an ACP approval to the real card and current authority; simultaneous approvals resolve only once', async () => {

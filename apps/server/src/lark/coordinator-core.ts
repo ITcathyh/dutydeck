@@ -12,6 +12,7 @@ import type { LarkGroupManager } from './group-management.js';
 import { deferredConfirmationId, parseLarkSourceId } from '@dutydeck/shared';
 import type { ChannelMappingRepository, ConfigRepository, PolicyAction, PolicyDecision } from '@dutydeck/shared';
 import { defaultHighRiskPattern, readLarkConfig, type StoredLarkConfig } from './config.js';
+import { allowedHighRiskActor } from '../policy/high-risk.js';
 import { LarkServiceError, type LarkCardService } from './service.js';
 import { isLarkReplyTargetUnavailable } from './api-gate.js';
 import type { LarkHeldCause, LarkRedispatchInfo } from './turn-redispatch.js';
@@ -257,10 +258,7 @@ export abstract class LarkCoordinatorCore {
     if (action === 'task.view_result') return true;
     if (!requester || requester !== actor) return false;
     if (action !== 'high_risk.execute') return true;
-    const users = config.highRiskAllowedUsers ?? [];
-    const emails = config.highRiskAllowedEmails ?? [];
-    if (users.length) return users.some(user => user.openId === actor);
-    return !emails.length || (await this.service.getUserEmails(actor)).some(email => emails.includes(email));
+    return allowedHighRiskActor(config, actor, id => this.service.getUserEmails(id), this.log);
   }
 
   async repairClosedCards(appId: string) { await this.workflows?.repairClosedCards(appId); }
