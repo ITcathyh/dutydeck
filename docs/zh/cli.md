@@ -228,6 +228,8 @@ dutydeck autostart disable  # 关闭自启
 
 Web 控制台里的机器人设置、群聊策略和用量上限，都可以用命令行改，方便脚本化和让 Agent 自己管理配置：
 
+用 `dutydeck --database <数据库路径> secret migrate-lark --dry-run` 列出待迁移机器人的 appId。去掉 `--dry-run` 后，命令逐个把 App Secret 写入数据库旁的 `secrets/` 目录，读回一致才从 `lark.bots` 移除明文。中断后可重跑，已完成的机器人会跳过。新建或重新保存某个机器人时，该机器人的 App Secret 仍写入 JSON，可再次执行迁移。
+
 绑定国际 Lark 应用时，用 `dutydeck settings bot add <app-id> brand=lark --app-secret-fd 0`。未通过 `LARK_OPEN_API_BASE_URL` 覆盖服务地址时，`brand=lark` 向国际 Lark 域校验凭据，省略品牌默认走飞书。`brand`、App Secret 和成员名单走同一校验步骤，与默认 Agent、权限或监听等设置分开提交。开启了飞书任务派发通道（`LARK_TASK_AGENT_ENABLED`）时，每轮拉取任务前，以及任务交给消息处理时，都会检查机器人当前保存的发起人名单（`allowedUsers` / `allowedEmails`）和监听开关。两项名单都清空或关闭监听后不再接单；交接时发现通道已关闭的在途任务退回待派，重新开放后可继续处理且不会重复派发。已经通过交接检查的任务不撤回；补上名单后不用重启即可接单。普通私聊里名单为空仍表示对所有人开放。
 
 `ou_` 身份按应用隔离。更换应用时，管理员和高危审批人名单即使省略也会用目标应用校验；确定无效会拒绝保存，原配置和修订号不变。允许机器人名单须在目标应用重新按姓名解析，或显式清空。Web 和 CLI 的所有保存步骤遵守相同身份边界；临时网络或联系人权限不足仍按“无法判定”处理，不当作确定无效。
@@ -276,6 +278,8 @@ dutydeck settings channel-bot set <id> credentialRef=null
 ```
 
 可改 `externalAppId`、`displayName`、`brand=feishu|lark`、`credentialRef` 和 `state=staged|disabled`。省略的键保持原值，`credentialRef=null` 清除引用；不传 `--expected-revision` 时使用刚读取的版本，版本冲突会拒绝保存。命令只改草稿元数据，监听仍停用；已接入运行时的机器人继续用 `settings bot` 管理。支持同样的 `--instance`、`--url` 和 `--database` 目标选项，不返回凭据值。
+
+现用机器人首次同步群聊时建立关联。之后用 `settings bot` 保存名称、品牌或默认策略时，群管理会在同一事务更新原记录。关闭群工具发送权限后，已有会话的下一次发送也会被拒绝。
 
 实验页「群配置与权限」中的群绑定策略草稿使用 `group-binding` 管理，沿用与 `channel-bot` 相同的草稿寻址、运行保护与版本并发控制（CAS）：
 

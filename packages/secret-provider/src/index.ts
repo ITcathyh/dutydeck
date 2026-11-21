@@ -405,3 +405,22 @@ export class LocalFilePluginSecretResolver {
     finally { value.fill(0); }
   }
 }
+
+/** Live bot credentials have a separate namespace from operator-managed SecretRefs. */
+export function liveLarkSecretKey(appId: string, version: string): string {
+  if (!/^[0-9a-f]{32}$/.test(version)) throw new SecretProviderError('SECRET_REFERENCE_KEY_INVALID', 'Invalid live bot credential reference');
+  return `live-lark.${createHash('sha256').update(appId).digest('hex')}.${version}`;
+}
+
+export function readLiveLarkSecret(database: string, appId: string, version: string): string | undefined {
+  const key = liveLarkSecretKey(appId, version);
+  try {
+    const provider = new LocalFileSecretProvider(secretDirectoryForDatabase(database));
+    const value = runtimeReaders.get(provider)!(key);
+    try { return value.toString('utf8'); }
+    finally { value.fill(0); }
+  } catch (error) {
+    if (isMissing(error) || error instanceof SecretProviderError && error.code === 'SECRET_DIRECTORY_MISSING') return undefined;
+    throw error;
+  }
+}

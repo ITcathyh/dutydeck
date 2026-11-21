@@ -460,7 +460,10 @@ export interface EventRepository {
   /** 有硬上限的游标窗口；无论查询方向如何，结果均按 sequence 升序。 */
   listWindow(sessionId: string, options?: EventWindowOptions): Promise<AgentEvent[]>;
 }
+export type BotProjectionTransaction = FoundationTransactionContext & Pick<import('./group-policy.js').GroupPolicyTransactionContext, 'config' | 'channelBotPolicies'>;
+
 export interface ConfigRepository {
+  readonly databasePath?: string;
   /** Optional synchronous lookup for consumers whose live read contract is synchronous. */
   getSync?(key: string): string | undefined;
   /** Indexed JSON discriminator lookup; source rows remain authoritative. */
@@ -478,7 +481,7 @@ export interface ConfigRepository {
   set(key: string, value: string): Promise<void>;
   compareAndSet?(key: string, expected: string | undefined, value: string): Promise<boolean>;
   /** Atomically check config values and apply all writes, or change nothing. */
-  compareAndSetBatch?(checks: Array<{ key: string; expected: string | undefined }>, writes: Array<{ key: string; value: string }>): Promise<boolean>;
+  compareAndSetBatch?(checks: Array<{ key: string; expected: string | undefined }>, writes: Array<{ key: string; value: string }>, project?: (tx: BotProjectionTransaction) => void): Promise<boolean>;
   /** CAS 删除已恢复巡检记录、state=ignored 飞书 Inbox 记录或 bot_prompt_version/pending/ 准备快照；其他配置键不可删除。 */
   remove?(key: string, expected: string): Promise<boolean>;
   list?(prefix: string): Promise<Array<{ key: string; value: string }>>;
@@ -523,6 +526,7 @@ export interface FoundationTransactionContext {
   };
   channelBots: {
     get(id: string): ChannelBotFoundation | undefined;
+    getByAppId(appId: string): ChannelBotFoundation | undefined;
     create(input: CreateChannelBotInput): ChannelBotFoundation;
     update(id: string, input: UpdateChannelBotInput): ChannelBotFoundation;
   };

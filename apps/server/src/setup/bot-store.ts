@@ -1,10 +1,7 @@
 /**
  * setup 写飞书机器人配置的落点。
  *
- * 默认 Agent 与 App Secret 在 Dutydeck 里都存在机器人配置（configs 表的 lark.bots，字段
- * defaultAgentId / appSecret），与 Dashboard、`dutydeck settings bot` 是同一份数据；
- * 守护进程的飞书监听也只读这份。`.env` 里没有默认 Agent 这个键，`dutydeck secret set`
- * 管的 SecretRef 是另一套（身份预检用），不参与监听——所以向导写的是这里。
+ * 与 Dashboard 和 settings bot 共用现用配置读写。readLarkConfig 同时支持已迁移的文件凭据。
  *
  * 打开数据库的规则与 `dutydeck lark create` 相同：经 createRepositories，机器人配置走 saveLarkConfig，
  * 复用它的校验、revision 与并发写入保护。

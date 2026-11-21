@@ -1,4 +1,5 @@
 import { createConfigReader } from '@dutydeck/storage/helpers';
+import { realpathSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { larkFailureKind } from './api-gate.js';
 import Database from 'better-sqlite3';
@@ -47,7 +48,7 @@ export async function runLarkSend(markdown: string | undefined, options: LarkCli
     const db = new Database(resolveCliDatabase(options.database, env), { readonly: true, fileMustExist: true });
     try {
       const reader = createConfigReader(db);
-      const saved = await readLarkConfig({ get: async (key: string) => reader.get(key) } as any, options.app, { readOnly: true });
+      const saved = await readLarkConfig({ databasePath: realpathSync(db.name), get: async key => reader.get(key), set: async () => { throw new Error('Read-only bot configuration'); } }, options.app, { readOnly: true });
       if (!saved) throw new TaskCliError('not_found', 'Saved bot not found');
       bot = { appId: saved.appId, appSecret: saved.appSecret, baseUrl: options.baseUrl ?? (saved.brand === 'lark' ? 'https://open.larksuite.com' : undefined) };
     } finally { db.close(); }

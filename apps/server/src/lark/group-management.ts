@@ -7,11 +7,12 @@ import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import {
   RuntimeError, canonicalExecutionJson, parseLarkSourceId, createGroupBindingInputSchema, createRoleAssignmentInputSchema, evaluatePolicyAction, installationOwnerTaskActor,
-  groupBindingSchema, remoteChatFactValidity, resolveGroupEffectiveConfig, resolveParticipation, updateRoleAssignmentInputSchema,
+  groupBindingSchema, remoteChatFactValidity, resolveGroupEffectiveConfig, updateRoleAssignmentInputSchema,
   type ChannelBotFoundation, type ChannelBotGroupPolicy, type EffectiveGroupConfig, type GroupBinding, type PolicyAction,
   type PolicyDecision, type PresentationSettings, type RepositoryBundle, type RemoteIdentityFact, type RoleAssignment, type Session, type ToolRiskPolicy
 } from '@dutydeck/shared';
-import { defaultLarkTraceLimit, larkExecutionConfirmed, readLarkConfig, readLarkConfigs, type StoredLarkConfig } from './config.js';
+import { botPolicyFields, ownerKey, principalId, refreshBotProjection, type LiveOwner } from './bot-projection.js';
+import { defaultLarkTraceLimit, larkExecutionConfirmed, readLarkConfig, readLarkConfigs, resolveBotSecret, type StoredLarkConfig } from './config.js';
 import { createLarkCardService, LarkServiceError, type LarkCardService, type LarkChat } from './service.js';
 import type { LarkMessageEvent } from './listener.js';
 import { larkSourceId } from './session-resolver.js';
@@ -23,11 +24,8 @@ export interface ManagedGroupBot {
   validity: string; checkedAt?: string; applied: boolean; error?: string;
 }
 export interface ManagedGroup { key: string; chatId: string; name: string; bots: ManagedGroupBot[] }
-interface LiveOwner { channelBotId: string; credentialRefId: string; fingerprint: string; activeGroups: string[] }
 interface RunContext { activeOpenId?: string; appId: string; chatId: string; bindingId: string; principalId: string; openId: string; sourceId: string; revision: number; agentId: string; cwd: string; model?: string; reasoningEffort?: string }
-const ownerKey = (appId: string) => `lark.live-owner.${appId}`;
 const runKey = (sessionId: string) => `lark.run-context.${sessionId}`;
-const principalId = (appId: string, openId: string) => `principal_${hash(`${appId}\0${openId}`)}`;
 const fingerprint = (config: StoredLarkConfig) => hash(`${config.brand ?? 'feishu'}\0${config.appId}\0${config.appSecret}`);
 const parse = <T>(value: string | undefined): T | undefined => value ? JSON.parse(value) as T : undefined;
 const deny = (action: PolicyAction, reason: string): PolicyDecision => ({ allowed: false, action, code: 'LARK_GROUP_POLICY_DENIED', reason, source: 'explicit_deny' });
@@ -121,22 +119,19 @@ export class LarkGroupManager {
   }
 
   private async ensureOwner(config: StoredLarkConfig) {
-    let owner = await this.owner(config.appId);
-    if (!owner) {
-      const existing = (await this.repos.channelBots.list()).find(bot => bot.externalAppId === config.appId);
-      if (existing) throw new RuntimeError('LARK_IMPORTED_BOT_CONFLICT', '此 App 已有迁移草稿，请先处理草稿冲突；同步不会激活导入配置。', 409);
-      const id = hash(config.appId).slice(0, 24);
-      owner = { channelBotId: `live_lark_${id}`, credentialRefId: `live_lark_secret_${id}`, fingerprint: fingerprint(config), activeGroups: [] };
-      const inserted = await this.repos.config.compareAndSet?.(ownerKey(config.appId), undefined, JSON.stringify(owner));
-      if (inserted === false) owner = (await this.owner(config.appId))!;
-      else if (inserted === undefined) await this.repos.config.set(ownerKey(config.appId), JSON.stringify(owner));
-    }
-    if (!await this.repos.secretRefs.get(owner.credentialRefId)) {
-      await this.repos.secretRefs.create({ id: owner.credentialRefId, kind: 'lark_app_secret', provider: 'live_lark_config', referenceKey: config.appId, status: 'configured' });
-    }
-    if (!await this.repos.channelBots.get(owner.channelBotId)) {
-      await this.repos.channelBots.create({ id: owner.channelBotId, channel: 'lark', externalAppId: config.appId, displayName: config.name ?? config.appId, brand: config.brand ?? 'feishu', credentialRef: owner.credentialRefId, state: 'staged' });
-    }
+    const id = hash(config.appId).slice(0, 24);
+    let owner!: LiveOwner;
+    await this.repos.config.compareAndSetBatch!([], [], tx => {
+      const saved = parse<StoredLarkConfig[]>(tx.config.get('lark.bots'))?.find(bot => bot.appId === config.appId);
+      if (!saved || (saved.revision ?? 1) !== (config.revision ?? 1)) throw new RuntimeError('LARK_CONFIG_REVISION_CONFLICT', '保存期间 Bot 默认设置已变化，请比较后重试。', 409);
+      const mapped = parse<LiveOwner>(tx.config.get(ownerKey(config.appId)));
+      if (!mapped && tx.channelBots.getByAppId(config.appId)) throw new RuntimeError('LARK_IMPORTED_BOT_CONFLICT', '此 App 已有迁移草稿，请先处理草稿冲突；同步不会激活导入配置。', 409);
+      owner = mapped ?? { channelBotId: `live_lark_${id}`, credentialRefId: `live_lark_secret_${id}`, fingerprint: fingerprint(config), activeGroups: [] };
+      if (!mapped) tx.config.set(ownerKey(config.appId), JSON.stringify(owner));
+      if (!tx.secretRefs.get(owner.credentialRefId)) tx.secretRefs.create({ id: owner.credentialRefId, kind: 'lark_app_secret', provider: 'live_lark_config', referenceKey: config.appId, status: 'configured' });
+      if (!tx.channelBots.get(owner.channelBotId)) tx.channelBots.create({ id: owner.channelBotId, channel: 'lark', externalAppId: config.appId, displayName: config.name ?? config.appId, brand: config.brand ?? 'feishu', credentialRef: owner.credentialRefId, state: 'staged' });
+      refreshBotProjection(tx, config);
+    });
     return owner;
   }
 
@@ -144,11 +139,7 @@ export class LarkGroupManager {
     const now = this.now().toISOString();
     return {
       id: `live_policy_${channelBotId}`, schemaVersion: 1, revision: config.revision ?? 1, channelBotId,
-      defaults: { agentDefinitionId: config.defaultAgentId, workspace: config.workspace, model: config.defaultModel, reasoningEffort: config.defaultReasoningEffort },
-      routingDefaults: { groupReplyMode: config.groupReplyMode ?? 'chat-topic', mentionPolicy: resolveParticipation({ mentionPolicy: config.mentionPolicy }).mentionPolicy },
-      accessPolicy: config.allowedUsers.length ? { mode: 'allowlist', principalIds: config.allowedUsers.map(user => principalId(config.appId, user.openId)) }
-        : { mode: config.allowedEmails.length ? 'owner_only' : 'open', principalIds: [] },
-      groupToolsPolicy: { readCeiling: config.groupToolsEnabled, discoverCeiling: config.groupToolsEnabled, sendCeiling: config.groupToolsEnabled && config.groupToolsAllowSend, readDefault: config.groupToolsEnabled, discoverDefault: config.groupToolsEnabled, sendDefault: config.groupToolsEnabled && config.groupToolsAllowSend },
+      ...botPolicyFields(config),
       createdAt: now, updatedAt: now
     };
   }
@@ -233,7 +224,7 @@ export class LarkGroupManager {
     const previousFacts = await this.repos.remoteChatFacts.listMembersByChannelBot(owner.channelBotId);
     await this.repos.groupPolicy.transact(tx => {
       const liveConfig = parse<StoredLarkConfig[]>(tx.config.get('lark.bots'))?.find(bot => bot.appId === appId);
-      if (!liveConfig || fingerprint(liveConfig) !== fingerprint(config)) throw new RuntimeError('LARK_CREDENTIAL_CHANGED', '同步期间凭据已变更，请重试。', 409);
+      if (!liveConfig || fingerprint({ ...liveConfig, appSecret: resolveBotSecret(liveConfig, this.repos.config.databasePath) ?? '' }) !== fingerprint(config)) throw new RuntimeError('LARK_CREDENTIAL_CHANGED', '同步期间凭据已变更，请重试。', 409);
       const live = parse<LiveOwner>(tx.config.get(ownerKey(appId)))!;
       live.fingerprint = fingerprint(config);
       tx.config.set(ownerKey(appId), JSON.stringify(live));

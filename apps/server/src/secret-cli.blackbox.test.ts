@@ -4,6 +4,8 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { bundleCliForTest } from '../../../tests/support/bundle-for-test.js';
+import { liveLarkSecretKey } from '@dutydeck/secret-provider';
+import { readLarkConfigs, saveLarkConfig } from './lark/config.js';
 import { createRepositories } from '@dutydeck/storage';
 
 let bundledCliPath: string;
@@ -47,6 +49,83 @@ afterEach(async () => {
 });
 
 describe('dutydeck secret CLI black box', () => {
+  it('migrates live bots one at a time, resolves them after reopen and restores legacy JSON', async () => {
+    const root = await fixture();
+    const database = join(root, 'dutydeck.db');
+    const seed = createRepositories(database);
+    const bots = [{ appId: 'cli_one', appSecret: INITIAL_SECRET }, { appId: 'cli_two', appSecret: ROTATED_SECRET }];
+    await seed.config.set('lark.bots', JSON.stringify(bots));
+    seed.close();
+    const command = (...flags: string[]) => {
+      const result = invoke(root, ['secret', 'migrate-lark', ...flags]);
+      expectNoValues(result);
+      expect(result.status, result.stderr).toBe(0);
+      return JSON.parse(result.stdout).appIds;
+    };
+    expect(command('--dry-run')).toEqual(['cli_one', 'cli_two']);
+    await expect(lstat(join(root, 'secrets'))).rejects.toMatchObject({ code: 'ENOENT' });
+    expect(command()).toEqual(['cli_one', 'cli_two']);
+    expect(command()).toEqual([]);
+    const report = invoke(root, ['doctor', '--json'], undefined, { DUTYDECK_DATABASE_URL: database });
+    expectNoValues(report);
+    expect(JSON.parse(report.stdout).checks.find((check: { id: string }) => check.id === 'lark.config')).toMatchObject({ level: 'ok' });
+    const repos = createRepositories(database);
+    try {
+      const raw = async () => JSON.parse((await repos.config.get('lark.bots'))!);
+      const migrated = await raw();
+      expect(migrated.every((bot: any) => bot.appSecret === undefined && typeof bot.appSecretRef === 'string')).toBe(true);
+      await repos.config.set('lark.bots', JSON.stringify([{ ...migrated[0], appSecret: ROTATED_SECRET }, migrated[1]]));
+      expect((await readLarkConfigs(repos.config)).map(bot => bot.appSecret)).toEqual([INITIAL_SECRET, ROTATED_SECRET]);
+      const mismatch = invoke(root, ['secret', 'migrate-lark']);
+      expectNoValues(mismatch);
+      expect(mismatch.status).toBe(1);
+      expect(mismatch.stderr).toContain('SECRET_CONDITION_FAILED');
+      expect((await raw())[0].appSecret === ROTATED_SECRET).toBe(true);
+      await saveLarkConfig(repos.config, repos.agents, { originalAppId: 'cli_two', appSecret: INITIAL_SECRET });
+      expect((await raw())[1]).toMatchObject({ appSecret: INITIAL_SECRET });
+      expect((await raw())[1]).not.toHaveProperty('appSecretRef');
+      expect(command('--dry-run', '--revert')).toEqual(['cli_one']);
+      expect(command('--revert')).toEqual(['cli_one']);
+      expect(command('--revert')).toEqual([]);
+      expect((await raw()).map((bot: any) => bot.appSecret)).toEqual([INITIAL_SECRET, INITIAL_SECRET]);
+    } finally { repos.close(); }
+  });
+
+  it('uses inline credentials when a referenced file is missing and preserves other bots on save', async () => {
+    const root = await fixture();
+    const repos = createRepositories(join(root, 'dutydeck.db'));
+    try {
+      await repos.config.set('lark.bots', JSON.stringify([{ appId: 'cli_one', appSecret: INITIAL_SECRET }, { appId: 'cli_two', appSecret: ROTATED_SECRET }]));
+      const result = invoke(root, ['secret', 'migrate-lark']);
+      expect(result.status, result.stderr).toBe(0);
+      const migrated = JSON.parse((await repos.config.get('lark.bots'))!);
+      const missing = migrated[0];
+      await rm(join(root, 'secrets', liveLarkSecretKey(missing.appId, missing.appSecretRef) + '.secret'));
+      await saveLarkConfig(repos.config, repos.agents, { originalAppId: 'cli_two', name: 'Updated' });
+      const saved = JSON.parse((await repos.config.get('lark.bots'))!);
+      expect(saved.find((bot: { appId: string }) => bot.appId === 'cli_one')).toEqual(missing);
+      expect(saved.find((bot: { appId: string }) => bot.appId === 'cli_two').appSecret === ROTATED_SECRET).toBe(true);
+      await repos.config.set('lark.bots', JSON.stringify([{ ...missing, appSecret: INITIAL_SECRET }]));
+      expect((await readLarkConfigs(repos.config))[0]?.appSecret === INITIAL_SECRET).toBe(true);
+    } finally { repos.close(); }
+  });
+
+  it('preserves progress and plaintext on a provider write failure without disclosing values', async () => {
+    const root = await fixture();
+    const repos = createRepositories(join(root, 'dutydeck.db'));
+    try {
+      const oversized = ROTATED_SECRET.repeat(5000);
+      await repos.config.set('lark.bots', JSON.stringify([{ appId: 'cli_one', appSecret: INITIAL_SECRET }, { appId: 'cli_two', appSecret: oversized }]));
+      const result = invoke(root, ['secret', 'migrate-lark']);
+      expectNoValues(result);
+      expect(result.status).toBe(1);
+      const raw = JSON.parse((await repos.config.get('lark.bots'))!);
+      expect(raw[0]).not.toHaveProperty('appSecret');
+      expect(raw[1].appSecret === oversized).toBe(true);
+      expect((await readLarkConfigs(repos.config, { readOnly: true }))[0]?.appSecret === INITIAL_SECRET).toBe(true);
+    } finally { repos.close(); }
+  });
+
   it('sets, lists and rotates using fd input while outputting metadata only', async () => {
     const root = await fixture();
     const created = invoke(root, ['secret', 'set', 'team-bot', '--value-fd', '0'], bundle(INITIAL_SECRET));

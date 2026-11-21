@@ -197,10 +197,10 @@ export function createRepositories(filename: string, options: RepositoryOpenOpti
     if (execution.authority() !== 'legacy') throw new RuntimeError('EXECUTION_LEDGER_REQUIRED', 'Execution writes require a bound ledger command', 409);
     return work();
   }).immediate();
-  const foundationRepositories = createFoundationRepositories(sqlite);
+  const { withFoundation, ...foundationRepositories } = createFoundationRepositories(sqlite);
   const configReader = createConfigReader(sqlite);
   const transaction = createConfigTransaction(sqlite);
-  const wp1aRepositories = createWp1aRepositories(sqlite, transaction);
+  const { withGroupPolicy, ...wp1aRepositories } = createWp1aRepositories(sqlite, transaction);
   const scheduleRepositories = createScheduleFoundationRepositories(sqlite);
   const collaboration = createCollaborationRepository(sqlite);
   const ciWebhook = createCiWebhookRepository(sqlite, transaction);
@@ -472,7 +472,8 @@ export function createRepositories(filename: string, options: RepositoryOpenOpti
       }
     },
     config: {
-      async compareAndSetBatch(checks, writes) {
+      databasePath: filename,
+      async compareAndSetBatch(checks, writes, project) {
         return sqlite.transaction(() => {
           for (const { key, value } of writes) {
             assertRepositoryConfigWrite(sqlite, key, value);
@@ -482,6 +483,7 @@ export function createRepositories(filename: string, options: RepositoryOpenOpti
           const put = cachedStatement(sqlite, 'INSERT INTO configs (key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value');
           for (const { key, value } of writes) put.run(key, value);
           for (const { key, value } of writes) assertConfigWrite(sqlite, key, value);
+          if (project) withFoundation(foundation => withGroupPolicy(({ config, channelBotPolicies }) => project({ ...foundation, config, channelBotPolicies })));
           return true;
         }).immediate();
       },

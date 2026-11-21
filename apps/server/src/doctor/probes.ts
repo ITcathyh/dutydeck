@@ -1,3 +1,4 @@
+import { liveLarkSecretKey, LocalFileSecretProvider, secretDirectoryForDatabase, SecretProviderError } from '@dutydeck/secret-provider';
 import { createConfigReader } from '@dutydeck/storage/helpers';
 /**
  * doctor 的默认外部探针。
@@ -9,11 +10,31 @@ import Database from 'better-sqlite3';
 import { createServer } from 'node:net';
 import { execFile, execFileSync } from 'node:child_process';
 import type { AgentProbe, DatabaseProbe, DatabaseProbeResult, PortProbe, PortProbeOutcome } from './types.js';
-import { existsSync } from 'node:fs';
+import { existsSync, realpathSync } from 'node:fs';
 
 const UNPRICED_USAGE_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
 
 interface VersionRow { version: number | null }
+
+/** Represent file-backed credentials by presence alone for all read-only doctor checks. */
+function inspectBotCredentials(database: string, raw: string): string {
+  let bots: unknown;
+  try { bots = JSON.parse(raw); } catch { return raw; }
+  if (!Array.isArray(bots) || !bots.some(bot => bot?.appSecretRef)) return raw;
+  for (const bot of bots) {
+    if (!bot?.appSecretRef) continue;
+    try {
+      const provider = new LocalFileSecretProvider(secretDirectoryForDatabase(realpathSync(database)));
+      const { availability } = provider.inspect(liveLarkSecretKey(bot.appId.trim(), bot.appSecretRef));
+      if (availability === 'available') bot.appSecret = 'configured';
+      if (availability === 'unreadable') delete bot.appSecret;
+    } catch (error) {
+      if (!(error instanceof SecretProviderError && error.code === 'SECRET_DIRECTORY_MISSING')) delete bot.appSecret;
+    }
+    delete bot.appSecretRef;
+  }
+  return JSON.stringify(bots);
+}
 
 /**
  * 只读打开数据库，一次读完需要的键后立刻关闭。
@@ -51,6 +72,7 @@ export const defaultDatabaseProbe: DatabaseProbe = (path, keys, prefixes = []) =
         try { for (const row of reader.list(prefix)) values[row.key] = row.value; }
         catch { /* Keep the remaining probe results when configs is unreadable. */ }
       }
+      if (values['lark.bots']) values['lark.bots'] = inspectBotCredentials(path, values['lark.bots']);
       result.values = values;
     }
     // 空闲页：只读 pragma，读不到就不报。

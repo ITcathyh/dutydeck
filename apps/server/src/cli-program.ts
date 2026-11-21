@@ -245,6 +245,7 @@ export interface CliHandlers extends SessionRelayCliHandlers {
   legacyDiscover?(options: LegacySourceCliOptions): void | Promise<void>;
   legacyPlan?(options: LegacySourceCliOptions): void | Promise<void>;
   legacyArchive?(options: LegacyArchiveCliOptions): void | Promise<void>;
+  secretMigrateLark?(options: SecretListCliOptions & { dryRun?: boolean; revert?: boolean }): void | Promise<void>;
   secretList?(options: SecretListCliOptions): void | Promise<void>;
   pluginBindingSecretSet?(plugin: string, reference: string, options: SecretValueCliOptions): void | Promise<void>;
   secretSet?(id: string, options: SecretValueCliOptions): void | Promise<void>;
@@ -1041,6 +1042,10 @@ alarm=<JSON> (the old flat alarm subscription) still works for one release and i
   addMigrateCommands(botmux, 'botmux');
 
   const secret = program.command('secret').description('Manage local SecretRef metadata and encrypted-channel credentials without printing values');
+  secret.command('migrate-lark')
+    .option('--dry-run')
+    .option('--revert')
+    .action((options, command) => handlers.secretMigrateLark?.(serverOptionsFrom(options, command)));
   secret.command('list')
     .description('List SecretRef metadata and file availability; never prints secret values')
     .action((options, command) => handlers.secretList?.(serverOptionsFrom(options, command)));
