@@ -9,8 +9,8 @@ export interface ConfigKey {
   /** Conditions for removal through ConfigRepository.remove. */
   deletion: Deletion;
   retention: string;
-  /** The first component after the prefix is its owner ID. Other keys require domain evidence. */
-  ownerInKey?: boolean;
+  /** Session keys use the entire suffix as the ID unless they also encode a second ID. Bot IDs end at the namespace delimiter. */
+  ownerInKey?: true | 'session-and-id';
   /** Split shards share the original instance's login and signing credentials. */
   shareOnSplit?: boolean;
 }
@@ -33,13 +33,13 @@ const entries = [
   ...keys('lark/config', 'bot', ['lark.bots', 'lark.credentials']),
   ...keys('agent-runtime', 'session', [
     runtimeStateKeys.workspace.prefix, runtimeStateKeys.executionWorkspace.prefix, runtimeStateKeys.driverConfiguration.prefix,
-    runtimeStateKeys.driverStopBlock.prefix, runtimeStateKeys.nativeContext.prefix, runtimeStateKeys.ptyRetirement.prefix,
-    runtimeStateKeys.verification.prefix, runtimeStateKeys.legacyRetirement.prefix
+    runtimeStateKeys.driverStopBlock.prefix, runtimeStateKeys.nativeContext.prefix, runtimeStateKeys.legacyRetirement.prefix
   ], { ownerInKey: true }),
+  ...keys('agent-runtime', 'session', [runtimeStateKeys.ptyRetirement.prefix, runtimeStateKeys.verification.prefix], { ownerInKey: 'session-and-id' }),
   ...keys('agent-runtime', 'session', [runtimeStateKeys.idleTerminal.prefix, runtimeStateKeys.notice.prefix]),
   ...keys('session-name', 'session', ['session_name:'], { ownerInKey: true }),
-  ...keys('turn-diff', 'session', ['turn_diff.'], { ownerInKey: true }),
-  ...keys('plan-routes', 'session', ['plan.web.'], { ownerInKey: true }),
+  ...keys('turn-diff', 'session', ['turn_diff.'], { ownerInKey: 'session-and-id' }),
+  ...keys('plan-routes', 'session', ['plan.web.'], { ownerInKey: 'session-and-id' }),
   ...keys('tasks', 'session', ['task_authorization/', 'task_report/', 'client_audit/']),
   ...keys('leader-mode', 'session', ['leader_delegation:', 'leader_mode:']),
   ...keys('collaboration', 'bot', ['collaboration.policy.']),
@@ -58,7 +58,8 @@ const entries = [
     'lark.reaction-trigger.', 'lark.pr_proposal.', 'lark.task_dashboard.', 'lark.taskagent.'], { ownerInKey: true }),
   ...keys('lark', 'bot', ['lark.delivery.', 'lark.delivery_claim.', 'lark.reaction_claim.', 'lark.principal.', 'lark.app_creation.',
     'lark.app_creation_owner.', 'lark.explicit_final.', 'lark.send.', 'lark.reply_polish.', 'lark.unknown_task.', 'lark.recovery.']),
-  ...keys('lark', 'session', ['lark.run-context.', 'lark.artifact_delivery.'], { ownerInKey: true }),
+  ...keys('lark', 'session', ['lark.run-context.'], { ownerInKey: true }),
+  ...keys('lark', 'session', ['lark.artifact_delivery.'], { ownerInKey: 'session-and-id' }),
   ...keys('session-automation', 'session', ['session_automation/schedule/', 'session_automation/occurrence/', 'session_automation/ci/',
     'session_automation/task/', 'session_automation/stop_request/', 'session_automation/overdue/', 'session_automation/streak/',
     'session_automation/precondition/', 'session_automation/precondition_status/', 'session_automation/fresh_retry/']),

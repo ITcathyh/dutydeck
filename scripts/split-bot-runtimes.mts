@@ -6,11 +6,8 @@ import { dirname, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { parseArgs, parseEnv } from 'node:util';
 import { createHash, randomUUID } from 'node:crypto';
-import { runtimeStateKeys } from '../packages/shared/src/runtime-state-keys.ts';
-import { observeProcess } from '../packages/storage/src/process-identity.ts';
-
-import { configKeyDefinition } from '../packages/storage/src/config-keys.ts';
-import { assertConfigWrite } from '../packages/storage/src/config-write.ts';
+import { runtimeStateKeys } from '@dutydeck/shared';
+import { assertConfigWrite, configKeyDefinition, observeProcess } from '@dutydeck/storage/helpers';
 
 type Row = Record<string, any>;
 type Peer = { id: string; name: string; url: string };
@@ -116,6 +113,10 @@ export function inspect(db: DatabaseSync, database: string) {
     const k = r.key as string, value = parse(r.value);
     const definition = configKeyDefinition(k);
     if (!definition) { block(`CONFIG_OWNERSHIP_UNKNOWN:${k}`); return ['unknown']; }
+    if (definition.owner === 'agent-model-settings' && value?.referenceKey) {
+      block(`SECRET_PROVIDER_UNSUPPORTED:local-file-v1:${k}`);
+      return ['unknown'];
+    }
     if (definition.scope === 'global' || definition.shareOnSplit) return shards;
     // This array is rewritten to contain only the shard's own bot at copy time.
     if (k === 'lark.bots') return shards;
@@ -149,7 +150,22 @@ export function inspect(db: DatabaseSync, database: string) {
     }
     if (definition.ownerInKey) {
       const suffix = k.slice(definition.prefix.length);
-      const id = definition.scope === 'session' ? suffix.split(/[.:]/, 1)[0] : suffix.split(definition.prefix.slice(-1), 1)[0];
+      const delimiter = definition.prefix.slice(-1);
+      let id = suffix;
+      if (definition.scope === 'bot') id = suffix.split(delimiter, 1)[0]!;
+      else if (definition.ownerInKey === 'session-and-id') {
+        // Both IDs can contain the delimiter. Only one complete session ID may fit.
+        const candidates: string[] = [];
+        for (let end = suffix.indexOf(delimiter); end >= 0; end = suffix.indexOf(delimiter, end + 1)) {
+          const candidate = suffix.slice(0, end);
+          if (end < suffix.length - 1 && sessionById.has(candidate)) candidates.push(candidate);
+        }
+        if (candidates.length !== 1) { block(`CONFIG_OWNERSHIP_UNKNOWN:${k}`); return ['unknown']; }
+        id = candidates[0]!;
+      } else if (definition.prefix === runtimeStateKeys.nativeContext.prefix && Number.isSafeInteger(value)) {
+        const native = runtimeStateKeys.nativeContext.parse(k);
+        if (native?.revision) id = native.sessionId;
+      }
       if (id && (definition.scope === 'session' || /^cli_[a-z0-9]+$/.test(id))) {
         const owner = definition.scope === 'session' ? ownerForSession(id) : appOwner(id);
         const wrongSession = value?.sessionId && (definition.scope === 'session' ? value.sessionId !== id : ownerForSession(value.sessionId) !== owner);
@@ -401,8 +417,10 @@ export function split(options: Options) {
 
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
   try {
-    const { values } = parseArgs({ options: { database: { type: 'string' }, output: { type: 'string' }, apply: { type: 'boolean' }, 'cli-file': { type: 'string' }, 'web-host': { type: 'string' }, 'web-port': { type: 'string' }, cwd: { type: 'string' }, 'base-port': { type: 'string' }, 'existing-peers': { type: 'string' } }, strict: true });
-    if (!values.database || !values.output) fail('Usage: node --import tsx scripts/split-bot-runtimes.mts --database FILE --output NEW_DIRECTORY [--apply --cli-file /absolute/apps/server/dist/cli.js --web-host HOST --web-port PORT --cwd WORKSPACE --base-port 4400 --existing-peers FILE]');
+    const usage = 'Usage: node scripts/split-bot-runtimes.mts --database FILE --output NEW_DIRECTORY [--apply --cli-file /absolute/apps/server/dist/cli.js --web-host HOST --web-port PORT --cwd WORKSPACE --base-port 4400 --existing-peers FILE]';
+    const { values } = parseArgs({ options: { help: { type: 'boolean' }, database: { type: 'string' }, output: { type: 'string' }, apply: { type: 'boolean' }, 'cli-file': { type: 'string' }, 'web-host': { type: 'string' }, 'web-port': { type: 'string' }, cwd: { type: 'string' }, 'base-port': { type: 'string' }, 'existing-peers': { type: 'string' } }, strict: true });
+    if (values.help) { console.log(usage); process.exit(0); }
+    if (!values.database || !values.output) fail(usage);
     if (values.apply && !values['existing-peers']) fail('APPLY_REQUIRES_EXISTING_PEERS_FILE: use [] only after checking the current DUTYDECK_INSTANCES_JSON');
     const report = split({ database: values.database, output: values.output, apply: values.apply, cliFile: values['cli-file'], webHost: values['web-host'], webPort: values['web-port'] ? Number(values['web-port']) : undefined, cwd: values.cwd, basePort: values['base-port'] ? Number(values['base-port']) : undefined, peers: values['existing-peers'] ? JSON.parse(readFileSync(values['existing-peers'], 'utf8')) : undefined });
     process.stdout.write(JSON.stringify(report, null, 2) + '\n'); if (report.blockers.length) process.exitCode = 2;
