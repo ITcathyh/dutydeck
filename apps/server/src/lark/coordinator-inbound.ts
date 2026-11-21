@@ -2290,12 +2290,14 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
       cardMappings: this.cardMappings,
       currentAccess: this.currentAccess.bind(this),
       executeRepairFlight: this.executeRepairFlight.bind(this),
+      isOperatorAllowed: this.isOperatorAllowed.bind(this),
       isRepairOperatorAllowed: this.isRepairOperatorAllowed.bind(this),
       log: this.log,
       get reconcileConfig() { return host.reconcileConfig; },
       repairInFlight: this.repairInFlight,
       runtime: this.runtime,
       service: this.service,
+      automation: this.workflowOptions.automation,
       participation: this.workflowOptions.participation,
       store: this.workflowOptions.store,
     };
@@ -2308,69 +2310,6 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
       if (callback) {
         const [key, , handle] = callback;
         return handle(this.buttonDependencies(), { key, workflow, operatorOpenId, context });
-      }
-    }
-    // 定时计划的「启用」「停用」按钮：结果卡上的「停用此计划」和 Agent 代建计划的确认卡。权限校验与执行逻辑和 /schedule enable|disable <编号> 完全一致。
-    const scheduleToggle = workflow && typeof workflow === 'object'
-      ? typeof workflow.dutydeck_schedule_enable === 'string' ? { action: 'enable' as const, id: workflow.dutydeck_schedule_enable }
-        : typeof workflow.dutydeck_schedule_disable === 'string' ? { action: 'disable' as const, id: workflow.dutydeck_schedule_disable } : undefined
-      : undefined;
-    if (scheduleToggle) {
-      const verb = scheduleToggle.action === 'enable' ? '启用' : '停用';
-      const scheduleId = scheduleToggle.id.trim();
-      if (!scheduleId || !context?.chatId || !operatorOpenId || !this.reconcileConfig || !this.workflowOptions.store) {
-        return { type: 'error', content: `卡片已失效，无法${verb}计划。` };
-      }
-      const automation = this.workflowOptions.automation;
-      if (!automation) return { type: 'error', content: '当前服务尚未接入定时任务。' };
-      const scheduleRecord = await automation.getSchedule(scheduleId);
-      if (!scheduleRecord) return { type: 'warning', content: '当前话题没有此计划' };
-
-      // 核对回调所在的卡片、聊天是否和计划冻结的投递位置一致，防止跨会话改动他人的计划
-      const rawTarget = await this.workflowOptions.store.get(`automation.delivery-target.${scheduleId}`);
-      type DeliveryTarget = { appId: string; chatId: string; replyMessageId?: string; messageId?: string; replyInThread?: boolean };
-      let target: DeliveryTarget | null = null;
-      try { target = JSON.parse(rawTarget ?? 'null'); } catch {}
-      if (!target || target.appId !== this.reconcileConfig.appId || target.chatId !== context.chatId) {
-        return { type: 'warning', content: `这张卡不属于这个计划，无法${verb}。` };
-      }
-      if (context.messageId && target.messageId && target.messageId !== context.messageId) {
-        return { type: 'warning', content: `这张卡不属于这个计划，无法${verb}。` };
-      }
-
-      const config = await readLarkConfig(this.workflowOptions.store, this.reconcileConfig.appId);
-      if (!config?.listening) return { type: 'warning', content: '机器人已停用，无法执行此操作。' };
-      if (!await this.isOperatorAllowed(config, operatorOpenId, context.chatId, scheduleRecord.sessionId)) {
-        return { type: 'warning', content: '当前账号没有操作此任务的权限。' };
-      }
-      try {
-        const dummyEvent: LarkMessageEvent = {
-          messageId: context.messageId ?? '',
-          chatId: context.chatId,
-          chatType: context.chatId.startsWith('oc_') ? 'group' : 'p2p',
-          senderOpenId: operatorOpenId,
-          messageType: 'text',
-          content: '',
-          mentions: []
-        };
-        const content = await executeScheduleCommand(
-          automation,
-          this.workflowOptions.store,
-          scheduleRecord.sessionId,
-          `${scheduleToggle.action} ${scheduleId}`,
-          dummyEvent,
-          config
-        );
-        // 确认卡原位改成新状态；结果卡上的「停用此计划」不重绘，结果正文保持原样。
-        if (workflow?.card === 'request' && context.messageId) {
-          const messageId = context.messageId, replyInThread = target.replyInThread === true;
-          void automation.listBySession(scheduleRecord.sessionId, operatorOpenId)
-            .then(({ schedules }) => { const schedule = schedules.find(item => item.id === scheduleId); return schedule && this.service.update({ messageId, ...scheduleRequestCard(schedule, replyInThread) }); })
-            .catch(error => this.log.warn({ error, scheduleId }, '定时任务确认卡未能更新'));
-        }
-        return { type: 'success', content };
-      } catch (error) {
-        return { type: 'warning', content: error instanceof Error ? error.message : String(error) };
       }
     }
     // 结果卡「本轮记忆」的删除按钮：与 /forget 同一道命令层白名单门，只接受这一轮列出过的条目。
