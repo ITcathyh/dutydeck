@@ -45,11 +45,29 @@ it('an idle retirement whose exit is unverified reports a stop block, not a revo
   await h.runtime.cleanupIdleDrivers(Date.now() + 100);
   expect(h.drivers[0]!.stop).toHaveBeenCalledOnce();
   await expect(h.runtime.send(h.session.id, 'second')).rejects.toMatchObject({ code: 'DRIVER_STOP_UNVERIFIED' });
-  expect(warned(h.log, 'DRIVER_STOP_UNVERIFIED')).toEqual([[expect.objectContaining({ sessionId: h.session.id, elapsedMs: expect.any(Number) }), expect.any(String)]]);
+  await expect(h.runtime.dispatch(h.session.id, 'third')).rejects.toMatchObject({ code: 'DRIVER_STOP_UNVERIFIED' });
+  const warnings = [
+    [expect.objectContaining({ sessionId: h.session.id, elapsedMs: expect.any(Number) }), expect.any(String)],
+    [expect.objectContaining({ sessionId: h.session.id, reason: h.runtime.getDriverStopBlock(h.session.id) }), expect.any(String)],
+  ];
+  expect(warned(h.log, 'DRIVER_STOP_UNVERIFIED')).toEqual(warnings);
   // The blocked driver is left to its recheck instead of being retried and re-logged every cleanup.
   await h.runtime.cleanupIdleDrivers(Date.now() + 200);
   expect(h.drivers[0]!.stop).toHaveBeenCalledOnce();
-  expect(warned(h.log, 'DRIVER_STOP_UNVERIFIED')).toHaveLength(1);
+  expect(warned(h.log, 'DRIVER_STOP_UNVERIFIED')).toEqual(warnings);
+});
+
+it('logs a failed background stop recheck', async () => {
+  const h = await fixture();
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+  await h.runtime.cleanupIdleDrivers(Date.now() + 100);
+  const failure = new Error('recheck status unavailable');
+  h.drivers[0]!.stopUnverifiable = () => { throw failure; };
+  await vi.advanceTimersByTimeAsync(46_000);
+  expect(h.log.warn).toHaveBeenCalledWith(expect.objectContaining({
+    component: 'DutydeckRuntime', location: 'recheckStop', sessionId: h.session.id, error: failure.message,
+  }), expect.any(String));
+  expect(h.runtime.getDriverStopBlock(h.session.id)).toBeDefined();
 });
 
 it('rechecks a stop block in the background, notices once while it persists, and reopens the session after exit is proven', async () => {

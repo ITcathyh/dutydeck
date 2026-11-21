@@ -129,6 +129,7 @@ SIGKILL 无法执行进程内退出处理，所以下一代先根据上一代缺
 - 普通行、错误行和多行堆栈都会保留。含疑似 token、密码、凭据或 Authorization 的整行会被过滤，所以原始日志里的这些行不会出现在命令输出中，原始日志不变。
 - 如果普通 daemon 日志文件不存在（ENOENT），错误会给出完整路径：前台根命令启动的服务没有这份 daemon 日志，请看启动终端；systemd 托管服务请用 `journalctl --user -u <unit>` 或 `dutydeck logs --unit <unit>` 查看对应 unit 的日志。路径和其他读取错误保持不变。
 - 如果提示找不到 `journalctl`，检查 systemd 是否已安装且命令在 PATH 中；提示 unit 不存在或尚无日志时先核对名称，名称正确则说明该 unit 当前没有匹配日志。普通 daemon 不依赖 `journalctl`，不带 `--unit` 即可读取当前 daemon 日志文件。
+- 派发、发送或插话遇到 `OPERATION_REVOKED` 或 `DRIVER_STOP_UNVERIFIED` 时，按 `sessionId` 在服务日志中查找 `code` 和 `reason`。撤销原因里的 `code` 表示触发事件，`by` 表示触发组件或方法。同一进程对同一会话、错误码和原因只记一次。驱动、终端后端及停止复核的诊断日志还带 `component`、`location` 和 `error`。
 
 ### Q20: `doctor` 的 `terminal.backend` 检查失败？
 - 先看失败阶段：找不到命令时装 tmux 或修正 `PATH`；`tmux -V` 失败时检查二进制是否可执行、是否与本机架构匹配；创建或核验私有会话失败时检查临时目录权限和 tmux server 日志。检查只使用独立临时 socket，所有调用带 `-f /dev/null`，`XDG_CONFIG_HOME` 指向私有目录，测试会话只运行受控命令，不读取系统或用户 tmux 配置，也不会连接或结束你的默认 tmux server、自动安装软件。

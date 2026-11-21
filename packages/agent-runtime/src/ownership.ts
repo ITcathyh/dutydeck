@@ -1,26 +1,40 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { RuntimeError } from '@dutydeck/shared';
 
+export type RevocationReason = { code: string; by: string };
+
 export class RevokedOperation extends RuntimeError {
-  constructor() { super('OPERATION_REVOKED', 'The session operation was revoked', 409); }
+  readonly details?: RevocationReason;
+  constructor(token?: Owner) {
+    const reason = revokedOwner(token)?.revokedBy;
+    super('OPERATION_REVOKED', reason ? `The session operation was revoked (${reason.code} by ${reason.by})` : 'The session operation was revoked', 409);
+    this.details = reason;
+  }
 }
 export interface Owner {
   readonly sessionId: string;
   readonly parent?: Owner;
   revoked: boolean;
+  readonly revokedBy?: RevocationReason;
   onCancel(listener: () => void): () => void;
-  revoke(): void;
+  revoke(reason?: RevocationReason): void;
+}
+function revokedOwner(token?: Owner): Owner | undefined {
+  for (let current = token; current; current = current.parent) if (current.revoked) return current;
 }
 export function owner(sessionId: string, parent?: Owner): Owner {
   const listeners = new Set<() => void>();
+  let revokedBy: RevocationReason | undefined;
   const token: Owner = {
     sessionId, parent, revoked: false,
+    get revokedBy() { return revokedBy; },
     onCancel(listener) {
       if (token.revoked) listener(); else listeners.add(listener);
       return () => { listeners.delete(listener); };
     },
-    revoke() {
+    revoke(reason) {
       if (token.revoked) return;
+      revokedBy = reason && { ...reason };
       token.revoked = true;
       for (const listener of listeners) listener();
       listeners.clear();
@@ -36,8 +50,8 @@ export class SessionMutations {
   private readonly lease = new AsyncLocalStorage<{ sessionId: string; active: boolean; owner?: Owner }>();
   private readonly tails = new Map<string, Promise<void>>();
   current() { return this.scope.getStore(); }
-  valid(token = this.current()): boolean { for (let current = token; current; current = current.parent) if (current.revoked) return false; return true; }
-  check(token = this.current()) { this.assertControl(); if (!this.valid(token)) throw new RevokedOperation(); }
+  valid(token = this.current()): boolean { return !revokedOwner(token); }
+  check(token = this.current()) { this.assertControl(); if (!this.valid(token)) throw new RevokedOperation(token); }
   run<T>(token: Owner | undefined, operation: () => T): T { return this.scope.run(token, operation); }
   async wait<T>(operation: Promise<T> | (() => Promise<T>)): Promise<T> {
     if (typeof operation === 'function') this.check();
@@ -46,9 +60,10 @@ export class SessionMutations {
     void pending.catch(() => {});
     this.check();
     const unsubscribe: Array<() => void> = [];
+    const current = this.current();
     const cancelled = new Promise<never>((_resolve, reject) => {
-      for (let token = this.current(); token; token = token.parent) {
-        unsubscribe.push(token.onCancel(() => reject(new RevokedOperation())));
+      for (let token = current; token; token = token.parent) {
+        unsubscribe.push(token.onCancel(() => reject(new RevokedOperation(current))));
       }
     });
     try {

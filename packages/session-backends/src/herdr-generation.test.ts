@@ -5,6 +5,28 @@ import { join } from 'node:path';
 import { HerdrBackend } from './herdr-backend.js';
 const directories: string[] = [];
 afterEach(() => { for (const directory of directories.splice(0)) rmSync(directory, { recursive: true, force: true }); });
+
+it('logs failed detach evidence once across backend instances and preserves the saved identity', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'dd-herdr-detach-')); directories.push(directory);
+  const name = `dutydeck-${'a'.repeat(32)}`, sessionId = 'ses_herdr_detach';
+  const stateFile = join(directory, 'identity.json');
+  const original = { name, owner: `dutydeck:${sessionId}`, root: { pid: 123 }, identities: [] };
+  writeFileSync(stateFile, JSON.stringify(original));
+  const warn = vi.fn();
+  const backend = new HerdrBackend(name, {
+    binary: 'unused', stateFile, ownerId: original.owner, log: { warn },
+    processProbe: { identify() { throw new Error('unused'); }, observe: () => 'unknown' },
+  });
+  for (const candidate of [backend, backend.fork()]) {
+    vi.spyOn(candidate, 'captureOwnedIdentity').mockRejectedValue(new Error('identity read failed'));
+    await expect(candidate.detach()).resolves.toBeUndefined();
+  }
+  expect(JSON.parse(readFileSync(stateFile, 'utf8'))).toEqual(original);
+  expect(warn).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+    component: 'HerdrBackend', location: 'detach.captureOwnedIdentity', sessionId, error: 'identity read failed',
+  }), expect.any(String));
+});
+
 it.each(['reservation', 'launched'])('fences an old natural-exit observation after the replacement %s is persisted', async stage => {
   const directory = mkdtempSync(join(tmpdir(), 'dd-herdr-generation-')); directories.push(directory);
   const name = `dutydeck-${'c'.repeat(32)}`, stateFile = join(directory, 'identity.json');

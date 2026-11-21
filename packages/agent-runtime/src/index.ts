@@ -3,6 +3,7 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import { createHash, randomUUID } from 'node:crypto';
 import type { AgentCapabilities, AgentConfig, AttemptActivity, AgentDriver, AgentEvent, DriverFactory, DriverTranscriptSourceObservation, EventType, EventWindowOptions, HistoryOutlineQuery, NormalizedDriverEvent, PermissionMode, PermissionRequestData, PromptAssemblyData, PromptPart, PromptSourceDiagnostics, PublicTaskRecord, RepositoryBundle, RuntimeControlClaim, Session, SkillDeliveryMetadata, StartSessionInput, TaskExecutionContext, TaskRecord, ToolCallData, ToolRiskPolicy, TranscriptSourceObservation, VerificationCommandInput, VerificationResponse, WorkspaceCleanupBlocker, WorkspaceCleanupPreview, WorkspaceCleanupResult, WorkspaceResponse } from '@dutydeck/shared';
 import { timeLoop, isBackgroundFollowup, eventHasContent, normalizeEventContent, deferredConfirmationId, agentCommandApprovalReason, isAgentCommandAutoApproval, canonicalExecutionJson, ptyRetirementRecoverySchema, steeringRecoveryDecisionSchema, executionRecoveryDecisionSchema, unknownTaskResolutionSchema, executionActorSchema, taskRequestV1Schema, steerableTaskNamespace, makeId, now, errorMessage, withTimeout, RuntimeError, permissionDisplayText, freeTextInputMaxBytes, workspaceModes, sessionNameConfigKey, normalizeSessionName, parseLarkSourceId, supportsRemoteApproval, supportsNativeFork, redactCredentialText, PROMPT_NOT_WRITTEN, unknownTaskActionLabels } from '@dutydeck/shared';
+import { warnCaught, type DiagnosticLog } from '@dutydeck/shared';
 import { listAcpxBuiltinAgents, AcpxAdapter, testRegexWithTimeout, ProcessTreeCpu, readNativeCreationRecord } from '@dutydeck/acp-client';
 import { commandExists, JsonlTransport, PipeTransport, probeAgent, PtyTransport } from '@dutydeck/transports';
 import { mkdir, realpath, rename, unlink, writeFile } from 'node:fs/promises';
@@ -16,7 +17,7 @@ import { agentAuthFailure, agentLoginProblem, defaultAgentStatusCheck, type Agen
 import { IdleCpuWindow, IDLE_CPU_MIN_IDLE_MS } from './idle-cpu.js';
 import { isNonGitWorkspace, WorkspaceManager } from './workspace.js';
 import { cachedRepositoryFingerprint, VerificationManager } from './verification.js';
-import { owner, RevokedOperation, SessionMutations, type Owner } from './ownership.js';
+import { owner, RevokedOperation, SessionMutations, type Owner, type RevocationReason } from './ownership.js';
 import {
   INSIGHT_INSTANCE_ID_CONFIG_KEY,
   canonicalizeDataRoot,
@@ -170,7 +171,7 @@ export interface RuntimeOptions {
     promptDiagnostics?: PromptSourceDiagnostics;
   }>;
   /** Diagnostics only, e.g. a steering reply that arrives after its timeout. */
-  log?: { warn(data: Record<string, unknown>, message: string): void; info?(data: Record<string, unknown>, message: string): void };
+  log?: DiagnosticLog;
   /** 会话里有 Agent 的提问在等人回答（relay ask）：与待审批一样是人工等待，这期间不判这一轮可能卡住。 */
   awaitingAnswer?: (sessionId: string) => boolean;
   /** 不调模型的登录状态检查，缺省见 agent-availability.ts。只在 checkAgentAvailability 里调用。 */
@@ -253,6 +254,8 @@ export interface TurnStall { taskId: string; silentMs: number; queued: number; c
 /** changeDriverConfiguration 在调用驱动之前的拒绝（轮次占用、上一次配置未完成或有待审批、驱动不能保留上下文）原样抛出，调用方据此给出专用提示。 */
 const switchRejection = (error: unknown) =>
   error instanceof RuntimeError && ['TURN_IN_PROGRESS', 'DRIVER_CONFIGURATION_BUSY', 'TASK_OPTIONS_UNSUPPORTED'].includes(error.code) ? error : undefined;
+
+const warnedTaskRejections = new Set<string>();
 
 export class DutydeckRuntime {
   private readonly mutations = new SessionMutations(() => this.assertBinding());
@@ -387,7 +390,7 @@ export class DutydeckRuntime {
     this.verifications = new VerificationManager(repos.config, (id, commit) => this.mutations.run(undefined, () => this.mutations.write(id, commit)));
     const ptyDriverFactory = options.ptyDriverFactory;
     this.factory = options.driverFactory ?? ((agent, protocol, onEvent, onExit, sessionId, context) => {
-      if (protocol === 'acp') return new AcpxAdapter({ ...agent, env: { ...agent.env, dutydeck_session_id: sessionId } }, { sessionKey: sessionId, context, onEvent, ...(this.options.resolveRiskPolicy ? { resolveRiskPolicy: (fallback?: ToolRiskPolicy) => this.options.resolveRiskPolicy!(sessionId, fallback) } : {}), ...(this.options.awaitingAnswer ? { awaitingAnswer: () => this.options.awaitingAnswer!(sessionId) } : {}) });
+      if (protocol === 'acp') return new AcpxAdapter({ ...agent, env: { ...agent.env, dutydeck_session_id: sessionId } }, { sessionKey: sessionId, context, onEvent, log: this.options.log, ...(this.options.resolveRiskPolicy ? { resolveRiskPolicy: (fallback?: ToolRiskPolicy) => this.options.resolveRiskPolicy!(sessionId, fallback) } : {}), ...(this.options.awaitingAnswer ? { awaitingAnswer: () => this.options.awaitingAnswer!(sessionId) } : {}) });
       if (protocol === 'pty-cli') {
         if (!ptyDriverFactory) throw new RuntimeError('DRIVER_UNAVAILABLE', 'protocol 为 pty-cli 的 agent 需要注入 ptyDriverFactory（@dutydeck/pty-driver）', 503);
         // 高风险拦截钩子按 dutydeck_session_id 找会话策略，和 ACP 一样由宿主注入。
@@ -460,26 +463,45 @@ export class DutydeckRuntime {
     if (!token) { token = owner(id); this.lifecycles.set(id, token); }
     return token;
   }
-  private retireTransition(id: string) {
+  private retireTransition(id: string, reason: RevocationReason) {
     const previous = this.transitions.get(id);
     if (!previous || previous.revoked) return;
     let lifecycleOwnsParent = false;
     for (let token = this.lifecycles.get(id); token; token = token.parent) if (token === previous) { lifecycleOwnsParent = true; break; }
     const driver = this.drivers.get(id) ?? this.blockedDrivers.get(id)?.driver;
     const source = lifecycleOwnsParent ? driver?.drainExitedOutput?.() : undefined;
-    if (!source) { previous.revoke(); return; }
+    if (!source) { previous.revoke(reason); return; }
     // Only the current lifecycle's parent survives, and only until this exact
     // exit drain has persisted or exhausted its budget. Other tokens stay fenced.
-    void this.settleExitedDriver(id, driver, source).then(() => previous.revoke());
+    void this.settleExitedDriver(id, driver, source).then(() => previous.revoke(reason));
   }
-  private transition(id: string) {
-    this.retireTransition(id);
+  private transition(id: string, reason: RevocationReason = { code: 'transition_superseded', by: 'DutydeckRuntime.transition' }) {
+    this.retireTransition(id, reason);
     const token = owner(id); this.transitions.set(id, token); return token;
   }
   private ownerOf(id: string) { return owner(id, this.transitions.get(id) ?? this.transition(id)); }
   private async scoped<T>(id: string, operation: () => Promise<T>) {
     this.assertReady();
     return this.mutations.run(this.lifecycle(id), operation);
+  }
+  private warnTaskRejection(sessionId: string, error: unknown) {
+    const log = this.options.log;
+    if (!log || !(error instanceof RuntimeError) || !['OPERATION_REVOKED', 'DRIVER_STOP_UNVERIFIED'].includes(error.code)) return;
+    const reason = error instanceof RevokedOperation ? error.details
+      : error.code === 'DRIVER_STOP_UNVERIFIED' ? this.getDriverStopBlock(sessionId) ?? error.message : undefined;
+    const key = JSON.stringify([sessionId, error.code, reason]);
+    if (warnedTaskRejections.has(key)) return;
+    warnedTaskRejections.add(key);
+    try {
+      log.warn({ sessionId, code: error.code, reason: typeof reason === 'string' ? redactCredentialText(reason) : reason }, 'Session task operation rejected');
+    } catch { /* best-effort: logging cannot replace the rejection. */ }
+  }
+  private async logTaskRejection<T>(id: string, operation: Promise<T>): Promise<T> {
+    try { return await operation; }
+    catch (error) { this.warnTaskRejection(id, error); throw error; }
+  }
+  private warnCaught(location: string, sessionId: string | undefined, error: unknown) {
+    warnCaught(this.options.log, 'DutydeckRuntime', location, sessionId, error);
   }
   private async readWorkspace<T>(id: string, operation: () => Promise<T>): Promise<T> {
     this.assertReady();
@@ -602,6 +624,7 @@ export class DutydeckRuntime {
   private async recordUsage(session: Session, ref: AttemptRef, event: NormalizedDriverEvent) {
     const usage = event.type === 'status' && event.data?.state === 'turn_usage';
     if (!this.options.recordUsage || !usage && event.type !== 'completed') return;
+    // best-effort: usage accounting is separate from turn settlement.
     await this.options.recordUsage(session, { taskId: ref.taskId, attemptId: ref.attemptId }, usage ? event.data : undefined).catch(() => {});
   }
   private async flushDriverEvents(sessionId: string) {
@@ -746,16 +769,17 @@ export class DutydeckRuntime {
       }));
     }).catch(error => {
       this.initializationFailed = true;
-      this.initializationOwner.revoke();
-      this.workspaceReaders.revoke();
-      for (const transition of this.transitions.values()) transition.revoke();
+      const reason = { code: 'initialization_failed', by: 'DutydeckRuntime.initialize' };
+      this.initializationOwner.revoke(reason);
+      this.workspaceReaders.revoke(reason);
+      for (const transition of this.transitions.values()) transition.revoke(reason);
       // Recovery may already have admitted turns for earlier sessions. Capture
       // their submitted state and revoke them before rejecting initialization.
       const ids = new Set([...this.lifecycles.keys(), ...this.drivers.keys()]);
       // The service marks persistent PTY drivers for detach before shutdown.
       // Fence facts now, but keep physical teardown behind that lifecycle boundary.
       const cleanupReady = this.shuttingDown ? Promise.resolve() : new Promise<void>(resolve => { this.releaseInitializationCleanup = resolve; });
-      this.initializationCleanup = Promise.allSettled([...ids].map(id => this.revokeSession(id, false, 'stopped', true, false, cleanupReady))).then(() => {});
+      this.initializationCleanup = Promise.allSettled([...ids].map(id => this.revokeSession(id, reason, false, 'stopped', true, false, cleanupReady))).then(() => {});
       throw error;
     });
     return this.initializationRun;
@@ -1032,7 +1056,7 @@ export class DutydeckRuntime {
         if (this.attempts.get(session.id) === token) {
           this.attempts.delete(session.id); this.activeTasks.delete(session.id); this.activeTurns.delete(session.id);
         }
-        token.revoke(); await this.forgetAttempt(attempt.attemptId);
+        token.revoke({ code: 'recovery_finished', by: 'DutydeckRuntime.recoverPersistentTurn' }); await this.forgetAttempt(attempt.attemptId);
         if (attached && !this.shuttingDown) await this.scoped(session.id, async () => {
           await this.projectQueue(session.id); this.queueBlocked.delete(session.id); this.scheduleQueue(session.id);
         });
@@ -1041,7 +1065,7 @@ export class DutydeckRuntime {
       if (settledHere) this.notifyTaskSettled(session, this.publicTask(this.repos.execution.getTaskExecution(task.id)?.task ?? task));
     });
     this.taskRuns.add(running);
-    void running.finally(() => this.taskRuns.delete(running)).catch(() => {});
+    void running.finally(() => this.taskRuns.delete(running)).catch(error => this.warnCaught('recoverPersistentTurn', session.id, error));
     await Promise.race([ready, running]);
     return attached;
   }
@@ -1159,8 +1183,8 @@ export class DutydeckRuntime {
           if (otherWorkspace?.repoRoot) {
             otherDir = otherWorkspace.repoRoot;
           }
-        } catch {
-          // ignore error reading other workspace
+        } catch (error) {
+          this.warnCaught('workspaceCleanupPreview.readOtherWorkspace', other.id, error);
         }
         const otherCanonical = await this.mutations.wait(() => realpath(otherDir).catch(() => otherDir));
         if (isSameOrIntersectingPath(targetRoot, otherCanonical)) {
@@ -1312,7 +1336,7 @@ export class DutydeckRuntime {
         cleanedAt: cleaned.cleanedAt!
       };
     })).finally(() => {
-      cleanupOwner.revoke();
+      cleanupOwner.revoke({ code: 'workspace_cleanup_finished', by: 'DutydeckRuntime.cleanWorkspace' });
       if (this.cleaningRuns.get(sessionId) === run && targetRoot && this.cleaningDirs.get(targetRoot) === sessionId) {
         this.cleaningDirs.delete(targetRoot);
       }
@@ -1831,6 +1855,7 @@ export class DutydeckRuntime {
         () => this.mutations.run(token, () => this.authorize(id, actorId)),
         () => this.mutations.run(token, () => this.assertVerificationAdmission(session))
       ));
+      // best-effort: verification is already settled before this notification.
       if (this.options.onVerificationCompleted) void Promise.resolve().then(() => this.options.onVerificationCompleted!(session, result)).catch(() => {});
       return result;
     } catch (error) {
@@ -2090,6 +2115,7 @@ export class DutydeckRuntime {
     if (event.type === 'tool_call' || event.type === 'tool_result') {
       if (!rememberTool(stored)) return;
       if (scope && isAttemptRef(scope)) await this.saveState(session, (this.oscPermissionWaits.has(scope.attemptId) || this.permissionsForSession(session.id).length) ? 'waiting_for_permission' : event.type === 'tool_result' ? 'thinking' : 'running_tool');
+      // best-effort: the canonical driver event has already been persisted.
       await this.artifact('saveToolCall', session.id, data).catch(() => {});
       if (tools) tools.calls.get(data.id)!.projected = true;
     } else if (event.type === 'thinking' && scope && isAttemptRef(scope)) await this.saveState(session, (this.oscPermissionWaits.has(scope.attemptId) || this.permissionsForSession(session.id).length) ? 'waiting_for_permission' : 'thinking');
@@ -2099,7 +2125,7 @@ export class DutydeckRuntime {
         this.permissions.set(key, { request: data, nativeId: String(event.data.id), fence: scope, generation: this.sessionGenerations.get(session.id) ?? 0, owner: this.mutations.current() });
         await this.saveState(session, 'waiting_for_permission');
       } else { this.permissions.delete(key); this.permissionResolutions.delete(key); }
-      await this.artifact('savePermission', session.id, data).catch(() => {});
+      await this.artifact('savePermission', session.id, data).catch(error => this.warnCaught('consume.savePermission', session.id, error));
     } else if (event.type === 'status' && scope && isAttemptRef(scope)
       && ((data.state === 'program_status' || data.state === 'program_status_fallback') && data.source === 'osc7501' || data.state === 'turn_timeout')) {
       if (data.state === 'program_status' && data.programState === 'blocked' && data.kind === 'permission') {
@@ -2112,6 +2138,7 @@ export class DutydeckRuntime {
     } else if (event.type === 'error') {
       if (scope && isAttemptRef(scope)) this.turnErrors.set(scope.attemptId, data.message);
       await this.noteAgentFailure(session.agentId, data);
+      // best-effort: the canonical driver event has already been persisted.
       await this.artifact('saveError', session.id, data.message, data.detail).catch(() => {});
     }
   }
@@ -2250,7 +2277,7 @@ export class DutydeckRuntime {
         const policy = this.options.resolveRiskPolicy ? await this.options.resolveRiskPolicy(id, task.executionContext?.riskPolicy) : task.executionContext?.riskPolicy;
         if (policy?.enabled && !policy.authorized) continue;
         if (await driver.canRecoverTurn(recovery) && unchanged()) recoverable.set(id, unchanged);
-      } catch { /* Missing or changing recovery evidence remains a restart blocker. */ }
+      } catch (error) { this.warnCaught('getRestartActivity.checkRecovery', id, error); }
     }
     const runningTasks = this.getRunningTaskCount(excludeSessionId);
     const recoverableTasks = [...recoverable.values()].filter(unchanged => unchanged()).length;
@@ -2431,7 +2458,7 @@ export class DutydeckRuntime {
       return await this.mutations.wait(preparation);
     } finally {
       const release = () => {
-        preparationOwner.revoke();
+        preparationOwner.revoke({ code: 'workspace_preparation_finished', by: 'DutydeckRuntime.prepareWorkspace' });
         if (preparation) this.workspacePreparations.delete(preparation);
         for (const p of pathsToProtect) {
           const set = this.preparingWorkspaces.get(p);
@@ -2501,7 +2528,7 @@ export class DutydeckRuntime {
       if (error instanceof RevokedOperation) throw error;
       const message = errorMessage(error);
       const driver = this.drivers.get(session.id);
-      try { if (driver) await this.stopDriver(session.id, driver, true); } catch { /* Retain resource block and original failure. */ }
+      try { if (driver) await this.stopDriver(session.id, driver, true); } catch (failure) { this.warnCaught('startSession.stopFailedDriver', session.id, failure); }
       await this.artifact('saveError', session.id, message);
       if (!this.resourceBlockers(session.id).length&&!this.repos.execution.getNativeContext(session.id)) Object.assign(session, await this.patchSession(session.id, { archivedAt: now() }));
       await this.saveState(session, 'failed', message);
@@ -2595,7 +2622,7 @@ export class DutydeckRuntime {
     if(!replacement&&!this.repos.execution.getNativeContext(id))throw new RuntimeError('NATIVE_CONTEXT_PROOF_REQUIRED','The original native context is required',409);
     if(expectedRunId!==undefined&&(await this.repos.sessions.get(id))?.runId!==expectedRunId)throw new RuntimeError('SESSION_RUN_CONFLICT','Session run changed',409);
     // Retain queued requests and unknown submitted Attempts. This operation never prompts.
-    try{await this.revokeSession(id,false,'stopped');}catch(error){
+    try{await this.revokeSession(id,{code:replacement?'native_context_replacement':'configuration_change',by:'DutydeckRuntime.prepareNativeContext'},false,'stopped');}catch(error){
       const blockers=this.repos.execution.getSessionResourceBlockers(id);
       if(!replacement||!(error instanceof RuntimeError&&error.code==='SESSION_RESOURCE_BLOCKED')||!blockers.length||blockers.some(block=>block.resourceId!==replacement.resourceId))throw error;
     }
@@ -2629,8 +2656,8 @@ export class DutydeckRuntime {
         });
         if(!unresolved)Object.assign(session,await this.patchSession(id,{state:'idle',error:undefined}));return session;
       } catch(error) {
-        if(operation)await this.mutations.run(undefined,()=>this.mutations.write(id,()=>this.configurations.finish(operation!,false))).catch(()=>{});
-        if(driver)await this.mutations.run(undefined,()=>this.stopDriver(id,driver!)).catch(()=>{});
+        if(operation)await this.mutations.run(undefined,()=>this.mutations.write(id,()=>this.configurations.finish(operation!,false))).catch(failure=>this.warnCaught('prepareNativeContext.finishConfiguration',id,failure));
+        if(driver)await this.mutations.run(undefined,()=>this.stopDriver(id,driver!)).catch(failure=>this.warnCaught('prepareNativeContext.stopDriver',id,failure));
         const code=(error as {code?:unknown}|null)?.code;
         if(!replacement&&session.protocol==='acp'&&error instanceof Error&&!(error instanceof RuntimeError)
           &&(typeof code==='number'||/^(ACP_NATIVE_CONTEXT_|ACP_LAUNCHER_VERSION_CHANGED:|NATIVE_CONTEXT_PROTOCOL_UNSUPPORTED)/.test(error.message))) {
@@ -2682,13 +2709,13 @@ export class DutydeckRuntime {
       if (session.protocol === 'pty-cli') this.exitedDriverGenerations.set(session.id, generation);
       this.notifyDriverExit(session.id, code);
       // An executing turn owns its result. A lifecycle exit never overwrites it.
-      if (code && !this.attempts.has(session.id)) void this.mutations.run(lifecycle, () => this.saveState(session, 'failed', `Agent exited with code ${code}`)).catch(() => {});
+      if (code && !this.attempts.has(session.id)) void this.mutations.run(lifecycle, () => this.saveState(session, 'failed', `Agent exited with code ${code}`)).catch(error => this.warnCaught('reconnect.saveExitState', session.id, error));
     }, session.id, nativeForkSessionId ? { ...resource.context, nativeForkSessionId } : resource.context);} catch(error) {
       if(resource.controlled){
         const cleanup=resource.controlled.abortFactory();this.factoryCleanups.set(session.id,cleanup);
         const release=()=>{if(this.factoryCleanups.get(session.id)===cleanup)this.factoryCleanups.delete(session.id);};
         void cleanup.then(release,release);
-        try{await cleanup;}catch{/* Keep the failed factory and durable resource evidence. */}
+        try{await cleanup;}catch(failure){this.warnCaught('reconnect.abortFactory',session.id,failure);}
       }
       this.mutations.check();throw error;
     }
@@ -2809,6 +2836,7 @@ export class DutydeckRuntime {
       sub.pending.push(raw);
       return;
     }
+    // best-effort: Insight observations are independent of task execution.
     void this.processInsightSourceObservation(sub, raw).catch(() => {});
   }
 
@@ -2921,7 +2949,7 @@ export class DutydeckRuntime {
     }
   }
   private async stopDriverOnce(id: string, driver: AgentDriver, discardSession = false, shutdown = false) {
-    this.localResources.get(driver)?.controlled?.revoke();
+    this.localResources.get(driver)?.controlled?.revoke({ code: 'driver_stop', by: 'DutydeckRuntime.stopDriverOnce' });
     this.unsubscribeInsightSources(driver);
     let stopError: unknown;
     try { await driver.stop(discardSession ? { discardSession: true } : undefined); } catch (error) { stopError = error; }
@@ -2960,7 +2988,10 @@ export class DutydeckRuntime {
       try {
         await writeFile(temp, JSON.stringify(policy ?? { enabled: false }), { mode: 0o600, flag: 'wx' });
         await rename(temp, target);
-      } catch (error) { await unlink(temp).catch(() => {}); throw error; }
+      } catch (error) {
+        // best-effort: the temporary file may already be gone.
+        await unlink(temp).catch(() => {}); throw error;
+      }
     });
   }
 
@@ -3070,7 +3101,7 @@ export class DutydeckRuntime {
     const request = { ...permission.request, status: 'rejected' as const, reason: TURN_ENDED_PERMISSION_REASON };
     await this.eventScope.run(scope, () => this.emit(sessionId, 'permission_request', request)).catch(error =>
       this.options.log?.warn({ sessionId, permissionId: request.id, error }, logMessage));
-    await this.artifact('savePermission', sessionId, request).catch(() => {});
+    await this.artifact('savePermission', sessionId, request).catch(error => this.warnCaught('recordTurnEndedRejection.savePermission', sessionId, error));
   }
   /** 轮次已经结算或被撤销，审批事件按会话级 fence 写入；不持有已撤销的轮次令牌，也不能在会话写锁内调用。 */
   private async closeLeftoverPermissions(leftover: PendingPermission[]) {
@@ -3099,6 +3130,7 @@ export class DutydeckRuntime {
       sha256: createHash('sha256').update(prompt, 'utf8').digest('hex'), inputTaskId,
       ...(operationId ? { operationId } : {}), ...(sources ? { sources } : {})
     };
+    // best-effort: prompt assembly is diagnostic.
     await this.emit(sessionId, 'status', data).catch(() => {});
   }
   private async executeTask(id: string, task: TaskRecord) {
@@ -3111,6 +3143,7 @@ export class DutydeckRuntime {
     const observeEnd = async () => {
       const session = observed;
       observed = undefined;
+      // best-effort: the host hook must not block turn settlement on failure.
       if (session) await this.options.observeTurn!(session, task.id, 'end').catch(() => {});
     };
     try {
@@ -3166,6 +3199,7 @@ export class DutydeckRuntime {
         throw new RuntimeError('ATTEMPT_NOT_PREPARING', 'The attempt was cancelled or changed while awaiting submission authorization', 409);
       }
       if (this.options.observeTurn) {
+        // best-effort: host observation is independent of submission.
         await this.mutations.wait(() => this.options.observeTurn!(session, task.id, 'start').catch(() => {}));
         observed = session;
       }
@@ -3214,7 +3248,7 @@ export class DutydeckRuntime {
       if (this.mutations.valid(token)) {
         const exitDriver = this.drivers.get(id), exitSource = exitDriver?.drainExitedOutput?.();
         const exitDrain = exitDriver && exitSource ? this.settleExitedDriver(id, exitDriver, exitSource) : undefined;
-        if (!exitDrain) await this.flushDriverEvents(id).catch(() => {});
+        if (!exitDrain) await this.flushDriverEvents(id).catch(failure => this.warnCaught('executeTask.flushDriverEvents', id, failure));
         this.eventFlushedAttempts.add(ref.attemptId);
         await observeEnd();
         await (exitDrain ?? this.settleExitedDriver(id, this.drivers.get(id)));
@@ -3229,7 +3263,7 @@ export class DutydeckRuntime {
         // 驱动确认 prompt 没写入（PROMPT_NOT_WRITTEN）时，记过的提交意图不算提交：同样按未提交、可重试结算。
         const notWritten = failureCode === PROMPT_NOT_WRITTEN;
         if (unsubmitted && unsubmitted.state !== 'settled' && (unsubmitted.submissionState === 'not_submitted' || notWritten && unsubmitted.submissionState === 'intent_recorded') && !isTaskFenceRevocation(error)) {
-          await this.emit(id, 'error', { message: errorMessage(error) }).catch(() => {});
+          await this.emit(id, 'error', { message: errorMessage(error) }).catch(failure => this.warnCaught('executeTask.publishFailure', id, failure));
         }
         await this.mutations.write(id, async () => {
           const attempt = this.repos.execution.getTaskExecution(task.id)?.attempts.find(item => item.attemptId === ref.attemptId);
@@ -3242,7 +3276,7 @@ export class DutydeckRuntime {
     } finally {
       if (this.attempts.get(id) === token) {
         this.attempts.delete(id); this.activeTurns.delete(id); this.activeTasks.delete(id);
-        token.revoke(); this.touch(id);
+        token.revoke({ code: 'attempt_finished', by: 'DutydeckRuntime.executeTask' }); this.touch(id);
       }
       await this.forgetAttempt(ref.attemptId);
     }
@@ -3258,6 +3292,7 @@ export class DutydeckRuntime {
   }
   private notifyTaskSettled(session: Session, settled: PublicTaskRecord) {
     if (this.options.onTaskSettled && isTerminalTaskStatus(settled.status)) {
+      // best-effort: notification follows durable task settlement.
       void Promise.resolve().then(() => this.options.onTaskSettled!(session, settled)).catch(() => {});
     }
   }
@@ -3278,7 +3313,7 @@ export class DutydeckRuntime {
       const finish = (error?: unknown, value?: PublicTaskRecord) => {
         if (finished) return;
         finished = true; unsubscribe(); this.sendWaiters.delete(inspect);
-        if (error) reject(error); else resolve(value!);
+        if (error) { this.warnTaskRejection(id, error); reject(error); } else resolve(value!);
       };
       const inspect = () => {
         try {
@@ -3340,15 +3375,15 @@ export class DutydeckRuntime {
     if (existing) {
       try { await this.options.matterTracking?.accepted(stored, existing.task); } catch { console.warn('MATTER_LINK_FAILED'); }
       if (this.mutations.valid(this.lifecycle(id)) && !stored.archivedAt && stored.state !== 'stopped') {
-        await this.scoped(id, async () => {
+        await this.logTaskRejection(id, this.scoped(id, async () => {
           this.rememberQueued(existing.task); this.queueBlocked.delete(id);
           try { await this.projectQueue(id); await this.applyQueueActions(stored); }
           finally { this.scheduleQueue(id); }
-        });
+        }));
       }
       return { ...this.publicTask(existing.task), replayed: true, queuedAhead: 0 };
     }
-    return this.scoped(id, async () => {
+    return this.logTaskRejection(id, this.scoped(id, async () => {
       const { session } = await this.active(id);
       // 空闲回收或启动失败后没核实进程已退出、正等后台复核：排进队列也要等复核，直接告诉调用方这个会话暂不可用。
       // 其余停止受阻（包括驱动报告退出永远无法核实的）由恢复流程（核对结果未知、终端回收）解除，解除后照常执行排队的消息，所以仍收进队列。
@@ -3385,7 +3420,7 @@ export class DutydeckRuntime {
       try { await this.projectQueue(id); await this.applyQueueActions(session); }
       finally { this.scheduleQueue(id); }
       return { ...this.publicTask(accepted.task), replayed: accepted.replayed, queuedAhead: Math.max(0, (this.queues.get(id)?.length ?? 1) - 1) };
-    });
+    }));
   }
 
   private rememberQueued(task: TaskRecord) {
@@ -3416,7 +3451,7 @@ export class DutydeckRuntime {
     const run = this.mutations.run(token, () => this.drainQueue(id)); this.queueRuns.set(id, run);
     const finish = () => {
       if (this.drains.get(id) !== token) return;
-      this.drains.delete(id); token.revoke();
+      this.drains.delete(id); token.revoke({ code: 'queue_drain_finished', by: 'DutydeckRuntime.scheduleQueue' });
       if (this.queueRuns.get(id) === run) this.queueRuns.delete(id);
       this.mutations.run(undefined, () => this.scheduleQueue(id));
     };
@@ -3473,7 +3508,7 @@ export class DutydeckRuntime {
       // Adapters without a reliable background-empty proof must prove physical stop on contention.
       if (driver.prepareForIdleRetirement && !await driver.prepareForIdleRetirement()) continue;
       try { await this.mutations.run(undefined, () => this.stopDriver(otherId,driver)); closed = true; }
-      catch { /* Stop failure remains a durable blocker; accepted requests stay queued. */ }
+      catch (error) { this.warnCaught('closeUnprovenIdleCompetitors.stopDriver', otherId, error); }
     }
     return closed;
   }
@@ -3484,7 +3519,7 @@ export class DutydeckRuntime {
       if (!session) return;
       let next: TaskRecord | undefined;
       try { next = (await this.queuedTasks(id))[0]; }
-      catch { this.queueBlocked.add(id); return; }
+      catch (error) { this.warnCaught('drainQueue.readQueuedTasks', id, error); this.queueBlocked.add(id); return; }
       if (next && this.repos.execution.getAcceptedTask(next.id)?.input?.version !== 2) { this.queueBlocked.add(id); return; }
       const retry = next && this.repos.execution.getTaskExecution(next.id)?.currentAttempt?.automaticRetry;
       if (next && retry && Date.parse(retry.dueAt) > Date.now()) {
@@ -3647,7 +3682,7 @@ export class DutydeckRuntime {
       const latest = this.repos.execution.getTaskExecution(ref.taskId)?.attempts.find(attempt => attempt.attemptId === ref.attemptId);
       if (!latest || latest.state === 'settled') return;
       if (latest.submissionState !== 'not_submitted') return;
-      token.revoke();
+      token.revoke({ code: 'interrupted_before_submission', by: 'DutydeckRuntime.interruptOwnedAttempt' });
       if (driver) this.blockedDrivers.set(ref.sessionId, { driver, reason: 'Interrupted preparation is still closing its original driver' });
       this.wake(this.bound().settleAttempt(this.attemptFence(ref), `interrupt_preparing:${operationId}`, { kind: 'not_submitted', outcome: 'cancelled', reason: 'interrupted_before_submission' }));
     });
@@ -3693,18 +3728,18 @@ export class DutydeckRuntime {
     });
   }
   async steerQueued(id: string, taskId: string, actorId?: string, expectedRevision?: number, operationId = makeId('promote')) {
-    return this.scoped(id, async () => {
+    return this.logTaskRejection(id, this.scoped(id, async () => {
       const { session } = await this.active(id);
       const task = this.repos.execution.getTaskExecution(taskId)?.task;
       if (!task) throw new RuntimeError('QUEUED_TASK_NOT_FOUND', 'Queued task is missing', 404);
       const committed = await this.mutations.write(id, async () => this.wake(this.bound().promoteQueued(this.fence(session), taskId, expectedRevision ?? task.revision, { operationId, actor: this.actor(session, actorId), interrupt: true })));
       await this.projectQueue(id); await this.applyQueueActions(session); this.queueBlocked.delete(id); this.scheduleQueue(id);
       return this.publicTask(committed.task!);
-    });
+    }));
   }
   /** 插话：先持久记录投递意图；没有明确回执时禁止普通队列重发。 */
   async injectQueued(id: string, taskId: string, actorId?: string, operationId = makeId('steering'), expectedTarget?: { taskId: string; attemptId?: string }): Promise<SteeringResult> {
-    return this.scoped(id, async () => {
+    return this.logTaskRejection(id, this.scoped(id, async () => {
       const {session,driver} = await this.active(id);
       await this.authorize(id,actorId);
       const projection = this.repos.execution.getTaskExecution(taskId);
@@ -3782,6 +3817,7 @@ export class DutydeckRuntime {
           });
           return skipped(outcome);
         } catch (error) {
+          this.warnTaskRejection(id, error);
           await record('unknown');
           return skipped('failed',errorMessage(error));
         } finally { finishObservation?.(); clearTimeout(timer); }
@@ -3792,7 +3828,7 @@ export class DutydeckRuntime {
         if (this.steeringSessions.get(id) === taskId) this.steeringSessions.delete(id);
         this.wakeResourceQueues(); this.scheduleQueue(id);
       }
-    });
+    }));
   }
   private async cancelSessionQueue(id: string, suppliedActor?: ExecutionActor): Promise<boolean> {
     const session = await this.repos.sessions.get(id);
@@ -3907,7 +3943,7 @@ export class DutydeckRuntime {
       return this.withSessionMetadata(session);
     });
   }
-  private revokeSession(id: string, cancelQueue: boolean, state: 'stopped' | 'interrupted', shutdown = false, discardSession = false, beforeResourceCleanup?: Promise<void>, actor?: ExecutionActor): Promise<void> {
+  private revokeSession(id: string, reason: RevocationReason, cancelQueue: boolean, state: 'stopped' | 'interrupted', shutdown = false, discardSession = false, beforeResourceCleanup?: Promise<void>, actor?: ExecutionActor): Promise<void> {
     const delayed = this.capacityTimers.get(id);
     if (delayed) { clearTimeout(delayed.timer); this.capacityTimers.delete(id); }
     const pending = this.stopRuns.get(id);
@@ -3918,10 +3954,11 @@ export class DutydeckRuntime {
     const exitDrain = driver?.drainExitedOutput?.();
     const run = this.mutations.run(undefined, async () => {
       const drainError = exitDrain ? await this.settleExitedDriver(id, driver, exitDrain) : undefined;
-      this.lifecycle(id).revoke(); token?.revoke(); this.drains.get(id)?.revoke();
+      this.lifecycle(id).revoke(reason); token?.revoke(reason); this.drains.get(id)?.revoke(reason);
       this.nextSessionGeneration(id);
       // Start teardown before waiting for a turn which may be waiting on permission.
       const stopping = (async () => { await beforeResourceCleanup; await this.factoryCleanups.get(id); if (driver) await this.stopDriver(id, driver, discardSession, shutdown); })();
+      // best-effort: observe early rejection until teardown awaits the same promise below.
       void stopping.catch(() => {});
       let factError: unknown;
       let actorRequired = false;
@@ -3968,7 +4005,7 @@ export class DutydeckRuntime {
     const finish = () => { if (this.stopRuns.get(id) === run) this.stopRuns.delete(id); this.drains.delete(id); this.wakeResourceQueues(); };
     void run.then(finish, finish); return run;
   }
-  private async stopTransition(id: string, token: Owner, actor?: ExecutionActor) {
+  private async stopTransition(id: string, token: Owner, reason: RevocationReason, actor?: ExecutionActor) {
     const session = await this.repos.sessions.get(id);
     this.mutations.check(token);
     await this.mutations.run(token, () => this.loadStopBlock(id));
@@ -3985,22 +4022,24 @@ export class DutydeckRuntime {
         else await this.options.authorizeExecution?.(id, actor.id);
       }
     }
-    await this.revokeSession(id, true, 'stopped', false, false, undefined, actor);
+    await this.revokeSession(id, reason, true, 'stopped', false, false, undefined, actor);
     await this.clearSessionTaskReports(id);
     this.mutations.check(token);
     if (this.resourceBlockers(id).length) throw new RuntimeError('SESSION_RESOURCE_BLOCKED', '原执行进程尚未确认安全停止；请联系管理员核对，当前会话未安全结束。', 409);
   }
   async stop(id: string, actor?: ExecutionActor) {
     this.assertReady();
-    const token = this.transition(id);
-    return this.stopTransition(id, token, actor);
+    const reason = { code: 'session_stop', by: 'DutydeckRuntime.stop' };
+    const token = this.transition(id, reason);
+    return this.stopTransition(id, token, reason, actor);
   }
   async archive(id: string, actor?: ExecutionActor) {
     this.assertReady();
-    const token = this.transition(id);
+    const reason = { code: 'archive', by: 'DutydeckRuntime.archive' };
+    const token = this.transition(id, reason);
     const running = this.attempts.get(id);
     const ref = running && this.attemptRefs.get(running);
-    await this.stopTransition(id, token, actor);
+    await this.stopTransition(id, token, reason, actor);
     const session = await this.mutations.run(token, async () => {
       const attempt = ref && this.repos.execution.getTaskExecution(ref.taskId)?.currentAttempt;
       // A verified stop ends execution, not proof of its external effects. Record
@@ -4027,10 +4066,11 @@ export class DutydeckRuntime {
   async restart(id: string, actor?: ExecutionActor) {
     this.assertReady();
     this.assertVerificationRecoverySafe(id);
-    const transition = this.transition(id);
-    await this.stopTransition(id, transition, actor);
+    const reason = { code: 'restart', by: 'DutydeckRuntime.restart' };
+    const transition = this.transition(id, reason);
+    await this.stopTransition(id, transition, reason, actor);
     this.mutations.check(transition);
-    this.lifecycles.get(id)?.revoke();
+    this.lifecycles.get(id)?.revoke(reason);
     const token = owner(id, transition); this.lifecycles.set(id, token);
     return this.mutations.run(token, async () => {
       const { session } = await this.active(id);
@@ -4138,7 +4178,7 @@ export class DutydeckRuntime {
           this.mutations.check(pending.owner);
           this.permissions.delete(key); this.touch(sessionId);
           await this.eventScope.run(pending.fence, () => this.emit(sessionId, 'permission_request', request));
-          await this.artifact('savePermission', sessionId, request).catch(() => {});
+          await this.artifact('savePermission', sessionId, request).catch(error => this.warnCaught('resolvePermission.savePermission', sessionId, error));
         });
       } catch (error) {
         throw new RuntimeError('PERMISSION_ACCEPTED_AUDIT_FAILED', `Permission accepted but audit delivery failed: ${errorMessage(error)}`, 503);
@@ -4224,9 +4264,10 @@ export class DutydeckRuntime {
     await this.finishIdleRetirement(sessionId, driver, lifecycle);
   }
   private async finishIdleRetirement(sessionId: string, driver: AgentDriver, lifecycle: Owner) {
-    const transition = this.transition(sessionId), startedAt = Date.now();
+    const reason = { code: 'idle_retirement', by: 'DutydeckRuntime.finishIdleRetirement' };
+    const transition = this.transition(sessionId, reason), startedAt = Date.now();
     try {
-      await this.revokeSession(sessionId, false, 'interrupted');
+      await this.revokeSession(sessionId, reason, false, 'interrupted');
       if (!this.shuttingDown && this.mutations.valid(transition) && this.lifecycle(sessionId) === lifecycle) this.lifecycles.set(sessionId, owner(sessionId, transition));
     }
     catch (error) {
@@ -4239,7 +4280,9 @@ export class DutydeckRuntime {
   }
   private scheduleStopRecheck(id: string, driver: AgentDriver, delay: number, since: string, cause: 'idle' | 'startup' = 'idle') {
     clearTimeout(this.stopRechecks.get(id)?.timer);
-    const timer = setTimeout(() => { void this.recheckStop(id, driver, delay, since, cause).catch(() => {}); }, delay);
+    const timer = setTimeout(() => {
+      void this.recheckStop(id, driver, delay, since, cause).catch(error => this.warnCaught('recheckStop', id, error));
+    }, delay);
     timer.unref?.();
     this.stopRechecks.set(id, { timer, since });
   }
@@ -4268,7 +4311,7 @@ export class DutydeckRuntime {
     let error: unknown;
     try {
       // 探测在停止流程外：挂起时不占用 stopRuns，显式停止或重启不会排在它后面。
-      const proven = await bounded(async () => await driver.isStopped?.() === true).catch(() => false);
+      const proven = await bounded(async () => await driver.isStopped?.() === true).catch(failure => { this.warnCaught('recheckStop.probeExit', id, failure); return false; });
       if (current()) {
         // 再停一次时驱动合并已有的退出证明，不会退回启动时的进程身份。
         await this.mutations.run(token, () => proven ? this.retireStoppedDriver(id, driver) : bounded(() => this.stopDriver(id, driver)));
@@ -4292,7 +4335,7 @@ export class DutydeckRuntime {
         message: unverifiable ? '这个会话的 Agent 进程没法确认是否已经退出，后台不会再自动复核。新消息会先排队，请管理员核对进程后在执行恢复里解除。'
           : cause === 'startup' ? '这个会话启动 Agent 失败后，没能确认启动到一半的进程已经退出，暂时不能接新消息。后台会定时复核，确认退出后自动恢复。'
           : '这个会话闲置关闭时，没能确认它的终端进程已经退出，暂时不能接新消息。后台会定时复核，确认退出后自动恢复。' },
-        { key: `runtime_notice:${kind}:${id}`, value: since })).catch(() => {});
+        { key: `runtime_notice:${kind}:${id}`, value: since })).catch(failure => this.warnCaught('recheckStop.publishNotice', id, failure));
     }
     if (unverifiable) return;
     if (!this.shuttingDown && this.blockedDrivers.get(id)?.driver === driver) this.scheduleStopRecheck(id, driver, Math.min(delay * 2, STOP_RECHECK_MAX_MS), since, cause);
@@ -4379,12 +4422,13 @@ export class DutydeckRuntime {
     this.shuttingDown = true;
     for (const inspect of [...this.sendWaiters]) inspect();
     this.releaseInitializationCleanup?.();
-    this.initializationOwner.revoke();
-    this.workspaceReaders.revoke();
+    const reason = { code: 'shutdown', by: 'DutydeckRuntime.shutdownOnce' };
+    this.initializationOwner.revoke(reason);
+    this.workspaceReaders.revoke(reason);
     if (this.cleanupTimer) clearInterval(this.cleanupTimer);
     for (const recheck of this.stopRechecks.values()) clearTimeout(recheck.timer);
     this.stopRechecks.clear();
-    for (const id of this.transitions.keys()) this.retireTransition(id);
+    for (const id of this.transitions.keys()) this.retireTransition(id, reason);
     const ids = new Set([...this.lifecycles.keys(), ...this.drivers.keys()]);
     try {
       for (const [id, driver] of this.drivers) {
@@ -4401,11 +4445,11 @@ export class DutydeckRuntime {
           }
         }
         catch {
-          try { await driver.prepareForDaemonShutdown(true); } catch { /* Stop still must prove physical exit. */ }
+          try { await driver.prepareForDaemonShutdown(true); } catch (error) { this.warnCaught('shutdownOnce.prepareDriver', id, error); }
           await this.retainStopBlock(id, 'Shutdown preparation failed; physical resource verification is required');
         }
       }
-      await Promise.allSettled([...ids].map(id => this.revokeSession(id, false, 'stopped', true)));
+      await Promise.allSettled([...ids].map(id => this.revokeSession(id, reason, false, 'stopped', true)));
       if (this.binding) await this.verifications.stop();
       await this.cleanupRun;
     } finally {

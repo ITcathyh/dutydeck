@@ -34,6 +34,40 @@ async function fixture(options: ConstructorParameters<typeof DutydeckRuntime>[1]
   return { repos, runtime, session, runs, factory, close };
 }
 
+it('reports the nearest revoked owner on checks and cancelled waits', async () => {
+  const mutations = new SessionMutations();
+  const root = owner('session'), parent = owner('session', root), child = owner('session', parent);
+  const reason = { code: 'session_stop', by: 'DutydeckRuntime.stop' };
+  const checked = {
+    code: 'OPERATION_REVOKED',
+    message: 'The session operation was revoked (session_stop by DutydeckRuntime.stop)',
+    details: reason,
+  };
+  const pending = deferred();
+  const waiting = mutations.run(child, () => mutations.wait(pending.promise));
+  parent.revoke(reason);
+  root.revoke({ code: 'shutdown', by: 'DutydeckRuntime.shutdownOnce' });
+  await expect(waiting).rejects.toMatchObject(checked);
+  expect(() => mutations.check(child)).toThrow(expect.objectContaining(checked));
+  expect(parent.revokedBy).toEqual(reason);
+});
+
+it('warns once across dispatch, send and steering after a session stop', async () => {
+  const warn = vi.fn();
+  const { runtime, session } = await fixture({ log: { warn } });
+  await runtime.stop(session.id);
+  const reason = { code: 'session_stop', by: 'DutydeckRuntime.stop' };
+  const rejected = { code: 'OPERATION_REVOKED', details: reason };
+  await expect(runtime.dispatch(session.id, 'first')).rejects.toMatchObject(rejected);
+  await expect(runtime.dispatch(session.id, 'second')).rejects.toMatchObject(rejected);
+  await expect(runtime.send(session.id, 'third')).rejects.toMatchObject(rejected);
+  await expect(runtime.steerQueued(session.id, 'queued-task')).rejects.toMatchObject(rejected);
+  await expect(runtime.injectQueued(session.id, 'queued-task')).rejects.toMatchObject(rejected);
+  expect(warn.mock.calls.filter(([data]) => data.code === 'OPERATION_REVOKED')).toEqual([
+    [expect.objectContaining({ sessionId: session.id, code: 'OPERATION_REVOKED', reason }), expect.any(String)],
+  ]);
+});
+
 it.each(['resolve', 'reject'] as const)('reaps the old driver and ignores late stale callbacks after an unconfirmed stop (%s)', async completion => {
   const h = await fixture(), run = h.runs[0]!;
   const entered = deferred(), gate = deferred(); let physicallyStopped = false;

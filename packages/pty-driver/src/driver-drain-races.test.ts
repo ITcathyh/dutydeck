@@ -15,7 +15,7 @@ afterEach(async () => {
 });
 const nextTurn = () => new Promise<void>(resolve => setImmediate(resolve));
 
-async function fixture(tmux = false, writeInput: CliAdapter['writeInput'] = () => {}) {
+async function fixture(tmux = false, writeInput: CliAdapter['writeInput'] = () => {}, sessionId = 'ses_drain-race') {
   const directory = mkdtempSync(join(tmpdir(), 'driver-drain-races-'));
   const path = join(directory, 'transcript.jsonl');
   writeFileSync(path, '');
@@ -32,11 +32,12 @@ async function fixture(tmux = false, writeInput: CliAdapter['writeInput'] = () =
     vi.spyOn(backend as TmuxBackend, 'setDutydeckMetadata').mockImplementation(() => {});
     vi.spyOn(backend, 'kill').mockImplementation(() => {});
   }
+  const warn = vi.fn();
   const driver = new PtyCliDriver({
     agent: { id: 'fixture', name: 'fixture', protocol: 'pty-cli', command: 'unused', args: [],
       env: {}, permissionMode: 'full-trust', timeout: 60, capabilities: { resume: true, pause: false }, builtin: false },
     adapter: { id: 'fixture', capabilities: {}, buildArgs: () => [], buildResumeCommand: () => [], writeInput },
-    backend, sessionId: 'ses_drain-race', onEvent(event) { events.push(event); }, onExit() {},
+    backend, sessionId, log: { warn }, onEvent(event) { events.push(event); }, onExit() {},
   });
   // Keep the real driver and real yielding tail; only the external CLI is inert.
   const internals = driver as unknown as { transcript: JsonlTailer; started: boolean; preparedTurnId?: string };
@@ -45,10 +46,26 @@ async function fixture(tmux = false, writeInput: CliAdapter['writeInput'] = () =
   cleanup.push(() => rmSync(directory, { recursive: true, force: true }));
   cleanup.push(async () => { await driver.stop(); tail.stop(); });
   const backlog = () => appendFileSync(path, (JSON.stringify({ text: 'x'.repeat(1024) }) + '\n').repeat(4000));
-  return { driver, tail, writes, events, backlog, internals };
+  return { driver, tail, writes, events, backlog, internals, warn, backend };
 }
 
 describe('driver cancellation across a real transcript drain', () => {
+  it('warns once for a failed stop transcript drain and still kills the backend', async () => {
+    const sessionId = 'ses_stop-drain-warning';
+    const first = await fixture(false, undefined, sessionId);
+    const second = await fixture(false, undefined, sessionId);
+    for (const f of [first, second]) {
+      vi.spyOn(f.tail, 'flush').mockRejectedValue(new Error('transcript read failed'));
+      const kill = vi.spyOn(f.backend, 'kill');
+      await expect(f.driver.stop()).resolves.toBeUndefined();
+      expect(kill).toHaveBeenCalledOnce();
+    }
+    expect(first.warn).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+      component: 'PtyCliDriver', location: 'stop.flushTranscript', sessionId, error: 'transcript read failed',
+    }), expect.any(String));
+    expect(second.warn).not.toHaveBeenCalled();
+  });
+
   it('rejects send and fences delayed Enter before stop finishes draining', async () => {
     let release!: () => void;
     const gate = new Promise<void>(resolve => { release = resolve; });
