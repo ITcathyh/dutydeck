@@ -1,3 +1,4 @@
+import type { ButtonResult, ButtonSource } from './handlers/button-context.js';
 import { answer as answerWorkflow } from './handlers/workflow-commands.js';
 import { storedButtons } from './handlers/stored-buttons.js';
 import { taskButtons } from './handlers/task-buttons.js';
@@ -2327,15 +2328,21 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
     };
   }
 
-  async handleAction(value: unknown, operatorOpenId?: string, context?: { messageId?: string; chatId?: string; actionTag?: string; option?: string }): Promise<{ type: string; content: string }> {
-    const workflow = value as Record<string, unknown> | null;
-    if (workflow && typeof workflow === 'object') {
-      const callback = resolveCallback(workflow);
-      if (callback) {
-        const [key, , handle] = callback;
-        return handle(this.buttonDependencies(), { key, workflow, operatorOpenId, context });
+  handleAction(value: unknown, operatorOpenId?: string, context?: ButtonSource): Promise<ButtonResult> {
+    try {
+      const workflow = value as Record<string, unknown> | null;
+      if (workflow && typeof workflow === 'object') {
+        const callback = resolveCallback(workflow);
+        if (callback) {
+          const [key, , handle] = callback;
+          return handle(this.buttonDependencies(), { key, workflow, operatorOpenId, context });
+        }
       }
-    }
+      return this.handleTaskButton(value, operatorOpenId, context);
+    } catch (error) { return Promise.reject(error); }
+  }
+
+  private async handleTaskButton(value: unknown, operatorOpenId?: string, context?: ButtonSource): Promise<ButtonResult> {
     // 解析交给 card-actions.ts 的共享解析器：渲染端与回调端共用一套形状校验，
     // 不存在「一端认、另一端不认」的权限缝隙。同时兼容线上遗留的 {action, task_id}。
     const parsed = parseLarkCardActionValue(value);
