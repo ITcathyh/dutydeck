@@ -228,7 +228,7 @@ export const larkCommandRegistry: readonly LarkCommandDefinition[] = [
     mutating: true
   },
   {
-    name: 'status',
+    name: 'status', execute: async ctx => (await import('./handlers/status.js')).handleStatus(ctx),
     summary: '查看本会话绑定的 Agent、工作区、运行状态、待执行指令数与本月用量',
     usage: '/status',
     mutating: false,
@@ -268,7 +268,7 @@ export const larkCommandRegistry: readonly LarkCommandDefinition[] = [
   { name: 'effort', execute: async ctx => (await import('./handlers/sessions.js')).handleModel(ctx), summary: '查看本会话当前思考强度与可选项；带档位则在空闲时切换，下一轮起生效', usage: '/effort [档位]', mutating: true, requires: c => c.getSession && c.setReasoningEffort === true, unavailableReason: '当前运行时不支持切换会话思考强度，/effort 已停用。可以用 /new --effort 档位 -- 任务 开新会话时指定。' },
   { name: 'rename', execute: async ctx => (await import('./handlers/sessions.js')).handleRename(ctx), summary: '给本会话改名（Web、/tasks、/resume list 都显示新名称）；--clear 恢复默认标题。需要安装管理员权限', usage: '/rename <名称>；/rename --clear', mutating: true, requires: c => c.getSession && c.setSessionName === true, unavailableReason: '当前运行时不支持会话改名，/rename 已停用。' },
   {
-    name: 'agents',
+    name: 'agents', execute: async ctx => (await import('./handlers/status.js')).handleAgents(ctx),
     summary: '列出本机可用的 Agent、版本与本机器人当前默认使用的那个',
     usage: '/agents',
     mutating: false,

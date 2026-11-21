@@ -1535,6 +1535,7 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
   private commandDependencies() {
     return {
       absorbQueuedTask: this.absorbQueuedTask.bind(this),
+      approvalBlock: this.approvalBlock.bind(this),
       botOpenId: this.botOpenId,
       cancelPreparingTurns: this.cancelPreparingTurns.bind(this),
       cancelUndeliveredRetries: this.cancelUndeliveredRetries.bind(this),
@@ -1542,6 +1543,7 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
       clearAcknowledgementReaction: this.clearAcknowledgementReaction.bind(this),
       closedScopeSessions: this.closedScopeSessions.bind(this),
       currentTurnInterruptDenial: this.currentTurnInterruptDenial.bind(this),
+      describeChatStatus: this.describeChatStatus.bind(this),
       groupManager: this.groupManager,
       groups: this.groups,
       handle: this.handle.bind(this),
@@ -1567,6 +1569,7 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
       restoreRetryPrompt: this.restoreRetryPrompt.bind(this),
       retireScopeSession: this.retireScopeSession.bind(this),
       runtime: this.runtime,
+      saveTaskDashboardOrigin: this.saveTaskDashboardOrigin.bind(this),
       service: this.service,
       sessionFor: this.sessionFor.bind(this),
       steeringPermissionStatus: this.steeringPermissionStatus.bind(this),
@@ -1576,7 +1579,9 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
       validateNewSession: this.validateNewSession.bind(this),
       automation: this.workflowOptions.automation,
       memoryOptions: this.workflowOptions.memory,
+      participation: this.workflowOptions.participation,
       store: this.workflowOptions.store,
+      usage: this.workflowOptions.usage,
       workbench: this.workflowOptions.workbench,
     };
   }
@@ -1618,42 +1623,6 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
 
 
 
-      if (route.command === 'status') {
-        const participation = event.chatType === 'group'
-          ? await this.workflowOptions.participation?.describe({ appId: config.appId, chatId: event.chatId }).catch(() => undefined) : undefined;
-        const usage = await this.workflowOptions.usage?.describe(config.appId, event.chatType === 'group' ? event.chatId : undefined).catch(() => undefined);
-        // 当前一轮停在审批上、后面还有指令排队时给一个拒绝入口：按钮与 /tasks 行内审批同形，
-        // 登记成任务导航卡后由 respond 照常做鉴权和一次性决议。
-        const approval = sessionId ? (await this.approvalBlock(config.appId, sessionId))?.record : undefined;
-        const memoryApi = this.workflowOptions.memory;
-        const memoryLine = memoryApi && larkMemoryEnabled(config)
-          ? await (memoryApi.pipeline ?? memoryApi.store).status(larkMemoryScope(config.appId, event.chatId, event.chatType, config.groupMemoryScope)).then(renderLarkMemoryStatusLine).catch(() => undefined) : undefined;
-        const status = [await this.describeChatStatus(config, sessionId, latestTask, event.chatId), participation, usage, memoryLine].filter(Boolean).join('\n\n');
-        // 卡片带了 elements 就不再渲染 markdown 正文，正文要作为第一个元素放在按钮前面。
-        const card = await replyCard('任务状态', status,
-          approval ? { elements: [{ tag: 'markdown', element_id: 'status_body', content: status, text_align: 'left', text_size: 'normal_v2', margin: '0px' },
-            { tag: 'button', element_id: 'status_reject_approval', type: 'danger', text: { tag: 'plain_text', content: '拒绝这条审批' },
-              behaviors: [{ type: 'callback', value: { dutydeck_workflow: 'reject', request_id: approval.id, generation: approval.boot } }] }] } : {});
-        if (card && approval) {
-          await this.saveTaskDashboardOrigin(config, card, event);
-        }
-        return 'handled';
-      }
-      if (route.command === 'agents') {
-        const agents = await this.runtime.listAgents!();
-        if (!agents.length) {
-          await replyCard('本机可用 Agent', '**这台机器还没有配置任何 Agent。**\n\n请先在 Dutydeck Web 添加 Agent。');
-          return 'handled';
-        }
-        const lines = agents.map(agent => {
-          // 版本只来自 Agent 配置里探测到的值；探测不到就说探测不到，不拿命令名冒充版本。
-          const version = agent.version?.trim() ? `版本 ${larkCommandEcho(agent.version, 40)}` : '版本未探测到';
-          const current = agent.id === config.defaultAgentId ? ' · **本机器人当前默认**' : '';
-          return `**${larkCommandEcho(agent.name, 64)}**（\`${larkCommandEcho(agent.id, 64)}\`）\n${version}${current}`;
-        });
-        await replyCard('本机可用 Agent', lines.join('\n\n'));
-        return 'handled';
-      }
       // 记忆命令的授权就是命令层的白名单门（发言人能在本聊天用命令，就能维护本聊天可见的记忆），
       // 作用域由当前聊天决定：群聊是本机器人的群共享池，私聊是自己的池；不接受参数指定别的聊天。
     } catch (error) {
