@@ -48,7 +48,32 @@ it('resolves colon-bearing session and decision IDs using the known scope', () =
 it('reads persisted values without reordering evidence used in compare-and-set', () => {
   const raw = '{"status":"running","id":"check","sessionId":"session","schemaVersion":1,"revision":1,"command":"true","cwd":"/workspace","startedAt":"2026-01-01T00:00:00Z","outputTruncated":false,"output":""}';
   expect(JSON.stringify(keys.verification.read(raw))).toBe(raw);
-  expect(keys.verification.value.safeParse({ status: 'unexpected' }).success).toBe(false);
+  expect(keys.verification.read('{"status":"unexpected"}')).toEqual({status: 'unexpected'});
   expect(keys.executionWorkspace.read('{"version":1,"unverifiable":true}')).toEqual({ version: 1, unverifiable: true });
   expect(keys.notice.read('sent')).toBe('sent');
+});
+
+it('reads the original stop reason without interpreting the run ID', () => {
+  const block = {sessionId: 'session', reason: 'pending proof', runId: null};
+  expect(keys.driverStopBlock.read(JSON.stringify(block))).toEqual(block);
+  expect(() => keys.driverStopBlock.read('{"sessionId":"session","reason":null}')).toThrow();
+});
+
+it.each([
+  [keys.driverConfiguration, {state: 'pending', operationId: 'op'}],
+  [keys.workspace, {state: 'ready'}],
+  [keys.verification, {status: 'running', sessionId: 'session'}],
+  [keys.ptyRetirement, {snapshot: null}],
+  [keys.executionWorkspace, {key: 'git:/repo', cwd: {path: '/repo'}}]
+] as const)('preserves partial JSON evidence for its reader %#', (entry, record) => {
+  expect(entry.read(JSON.stringify(record))).toEqual(record);
+  expect(() => entry.read('{')).toThrow();
+});
+
+it('passes opaque, truthy idle options and identity to the recovery checks', () => {
+  const receipt = {runId:'run', resourceId:'resource', identityId:'id', options:{model:'', extra:true}, identity:'terminal'};
+  expect(keys.idleTerminal.read(JSON.stringify(receipt))).toEqual(receipt);
+  for (const invalid of [{...receipt, options: null}, {...receipt, identity: false}]) {
+    expect(() => keys.idleTerminal.read(JSON.stringify(invalid))).toThrow();
+  }
 });

@@ -10,13 +10,15 @@ import { createRepositories } from '../packages/storage/src/index.js';
 import { currentProcessIdentity } from '../packages/storage/src/process-identity.js';
 import { DutydeckRuntime } from '../packages/agent-runtime/src/index.js';
 import { deliverLarkStatusReaction, larkResultKey, sendLarkFile } from '../apps/server/src/lark/result-delivery.js';
-import { canonicalExecutionJson } from '@dutydeck/shared';
+import { agentConfigSchema, canonicalExecutionJson } from '@dutydeck/shared';
+import { LocalFileSecretProvider, secretDirectoryForDatabase } from '@dutydeck/secret-provider';
+import { AgentModelSettings } from '../apps/server/src/agent-model-settings.js';
 import { split } from '../scripts/split-bot-runtimes.mts';
 
 const dirs: string[] = [];
 afterEach(() => { for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true }); });
 const use = <T>(file: string, f: (db: DatabaseSync) => T) => { const db = new DatabaseSync(file); try { return f(db); } finally { db.close(); } };
-async function fixture(memory = true) {
+async function fixture(memory = true, extraSessions: ReadonlyArray<readonly [string, string, string]> = []) {
   const dir = mkdtempSync(join(tmpdir(), 'bot-split-')); dirs.push(dir);
   const database = join(dir, 'source.db'), output = join(dir, 'split');
   const repos = createRepositories(database);
@@ -27,7 +29,7 @@ async function fixture(memory = true) {
     await repos.channelBots.create({ id: `bot_${name}`, channel: 'lark', externalAppId: `cli_${name}`, displayName: name, brand: 'feishu', credentialRef: `secret_${name}`, state: 'staged' });
   }
   const time = '2026-01-01T00:00:00.000Z';
-  for (const [id, source, sourceId] of [['a', 'lark', 'cli_aaa:chat:thread'], ['b', memory ? 'lark-memory' : 'lark', 'cli_bbb:chat:memory'], ['w', undefined, undefined]] as const) {
+  for (const [id, source, sourceId] of [['a', 'lark', 'cli_aaa:chat:thread'], ['b', memory ? 'lark-memory' : 'lark', 'cli_bbb:chat:memory'], ['w', undefined, undefined], ...extraSessions] as const) {
     await repos.sessions.save({ id, agentId: 'agent', state: 'idle', cwd: '/tmp', source, sourceId, runId: `run_${id}`, createdAt: time, updatedAt: time });
     await repos.tasks.save({ id: `t_${id}`, sessionId: id, prompt: `history ${id}`, status: id === 'b' ? 'queued' : 'completed', createdAt: time, updatedAt: time });
 
@@ -516,6 +518,7 @@ it('partitions registered global, bot and session keys by their declared scope',
   try {
     await repos.config.set('token_efficiency', '{}');
     await repos.config.set('session_name:b', 'B');
+    await repos.config.set('dutydeck.bot_agent_model.cli_aaa.claude', '{}');
     await repos.config.set('lark.pin.cli_aaa.om_1', '{"pinned":true}');
   } finally { repos.close(); }
 
@@ -525,8 +528,65 @@ it('partitions registered global, bot and session keys by their declared scope',
     use(join(f.output, shard, 'dutydeck.db'), db => {
       const get = (key: string) => db.prepare('SELECT value FROM configs WHERE key=?').get(key)?.value;
       expect(get('token_efficiency')).toBe('{}');
+      expect(get('dutydeck.bot_agent_model.cli_aaa.claude')).toBe(shard === 'cli_aaa' ? '{}' : undefined);
       expect(get('session_name:b')).toBe(shard === 'cli_bbb' ? 'B' : undefined);
       expect(get('lark.pin.cli_aaa.om_1')).toBe(shard === 'cli_aaa' ? '{"pinned":true}' : undefined);
     });
   }
+});
+
+it('prints split usage with plain Node', () => {
+  const result = spawnSync(process.execPath, ['scripts/split-bot-runtimes.mts', '--help'], { encoding: 'utf8' });
+  expect(result.status, result.stderr).toBe(0);
+  expect(result.stdout).toContain('Usage: node scripts/split-bot-runtimes.mts');
+});
+
+it('blocks splitting a model configuration backed by a local secret file', async () => {
+  const f = await fixture();
+  const key = 'dutydeck.bot_agent_model.cli_aaa.claude';
+  const repos = createRepositories(f.database);
+  try {
+    const provider = new LocalFileSecretProvider(secretDirectoryForDatabase(f.database), { createDirectory: true });
+    const agent = agentConfigSchema.parse({ id: 'claude', name: 'Claude', command: process.execPath, cwd: dirname(f.database) });
+    const settings = new AgentModelSettings(repos, [agent], provider);
+    expect(await settings.set('claude', { apiKey: 'fixture-key' }, 'cli_aaa')).toMatchObject({ apiKeyAvailable: true });
+  } finally { repos.close(); }
+  const reason = 'SECRET_PROVIDER_UNSUPPORTED:local-file-v1:' + key;
+  expect(split(f).blockers).toContain(reason);
+  expect(() => split({ ...f, apply: true })).toThrow(reason);
+  expect(existsSync(f.output)).toBe(false);
+  expect(use(f.database, db => db.prepare("SELECT key FROM configs WHERE key='dutydeck.bot_process_migration'").get())).toBeUndefined();
+});
+
+it.each([
+  ['case', 'case.1', true], ['origin', 'origin:tenant', true], ['origin', 'origin:tenant', false]
+] as const)('uses the complete session ID for %s / %s (short ID exists: %s)', async (short, full, hasShort) => {
+  const f = await fixture(true, [
+    [full, 'lark', 'cli_bbb:chat:thread'],
+    ...(hasShort ? [[short, 'lark', 'cli_aaa:chat:thread'] as const] : [])
+  ]);
+  use(f.database, db => {
+    const insert = db.prepare('INSERT INTO configs VALUES (?, ?)');
+    insert.run('session_name:' + full, 'name for ' + full);
+    if (hasShort) insert.run('session_name:' + short, 'name for ' + short);
+  });
+  expect(split(f).blockers).toEqual([]);
+  split({ ...f, apply: true });
+  for (const shard of ['cli_aaa', 'cli_bbb', 'web']) use(join(f.output, shard, 'dutydeck.db'), db => {
+    const name = (id: string) => db.prepare('SELECT value FROM configs WHERE key=?').get('session_name:' + id)?.value;
+    expect(name(full)).toBe(shard === 'cli_bbb' ? 'name for ' + full : undefined);
+    expect(name(short)).toBe(hasShort && shard === 'cli_aaa' ? 'name for ' + short : undefined);
+  });
+});
+
+it('blocks a session key when only the shorter session exists', async () => {
+  const f = await fixture();
+  use(f.database, db => db.prepare('INSERT INTO configs VALUES (?,?)').run('session_name:a.missing', 'unknown'));
+  expect(split(f).blockers).toContain('ORPHAN_SESSION_REFERENCE:a.missing');
+});
+
+it('blocks a composite key when two complete session IDs fit the key', async () => {
+  const f = await fixture(true, [['a.b', 'lark', 'cli_bbb:chat:thread']]);
+  use(f.database, db => db.prepare('INSERT INTO configs VALUES (?,?)').run('plan.web.a.b.task', '{}'));
+  expect(split(f).blockers).toContain('CONFIG_OWNERSHIP_UNKNOWN:plan.web.a.b.task');
 });

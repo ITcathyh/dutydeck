@@ -351,6 +351,14 @@ describe('ADHD durable confirmation — actual Runtime and SQLite', () => {
     await vi.waitFor(() => expect(h.sends).toHaveLength(2));
     expect(h.sends[1]).toContain(h.record.id);
   });
+  it('sends a standalone result after a durable confirmation in a private chat', async () => {
+    const h = await harness({ threaded: false, chatType: 'p2p' });
+    await h.click(); await h.waitConfirmed();
+    const result = expect.objectContaining({ taskId: `confirmation_${h.record.id}`, state: 'completed', cardKind: 'result' });
+    await vi.waitFor(() => expect(h.service.send).toHaveBeenCalledWith(result));
+    expect(h.service.reply).not.toHaveBeenCalledWith(result);
+  });
+
   it.each([true, false])('uses real reply anchors after confirmation for nested ask, permission and results (threaded=%s)', async threaded => {
     for (const continuation of ['ask', 'permission', undefined] as const) {
       const h = await harness({ threaded, continuation });

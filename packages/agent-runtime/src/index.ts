@@ -561,7 +561,7 @@ export class DutydeckRuntime {
     const version = this.gate.stops.version(id);
     const raw = await this.mutations.wait(() => this.repos.config.get(runtimeStateKeys.driverStopBlock.key(id)));
     if (!raw || this.gate.stops.version(id) !== version) return;
-    let block: { sessionId: string; runId?: string; reason: string };
+    let block: ReturnType<typeof runtimeStateKeys.driverStopBlock.read>;
     try {
       block = runtimeStateKeys.driverStopBlock.read(raw);
       if (block.sessionId !== id) throw new Error('invalid stop block');
@@ -910,8 +910,8 @@ export class DutydeckRuntime {
       || this.repos.execution.getUnresolvedTasks(session.id).length) return false;
     const raw = await this.mutations.wait(() => this.repos.config.get(runtimeStateKeys.idleTerminal.key(session.id)));
     if (!raw) return false;
-    let receipt: { runId: string; resourceId: string; identityId: string; options: ExecutionOptions; identity: unknown };
-    try { receipt = runtimeStateKeys.idleTerminal.read(raw); if (!receipt.identity) return false; } catch { return false; }
+    let receipt: ReturnType<typeof runtimeStateKeys.idleTerminal.read>;
+    try { receipt = runtimeStateKeys.idleTerminal.read(raw); } catch { return false; }
     const resource = this.repos.execution.getResources(session.id).find(row => row.resourceId === receipt.resourceId);
     if (receipt.runId !== session.runId || !resource || resource.kind !== 'local_only' || resource.stage !== 'created'
       || resource.runId !== session.runId || resource.identity?.identityId !== receipt.identityId || resource.observations.at(-1)?.state === 'gone'
@@ -938,7 +938,7 @@ export class DutydeckRuntime {
       await this.mutations.write(session.id, async () => {
         const current = this.repos.execution.getResources(session.id).find(row => row.resourceId === resource.resourceId);
         if (!current || current.revision !== resource.revision || current.identity?.identityId !== receipt.identityId) throw new RuntimeError('RESOURCE_IDENTITY_CONFLICT', 'Original idle terminal resource changed', 409);
-        const observation = { observationId: makeId('observation'), identityId: receipt.identityId,
+        const observation = { observationId: makeId('observation'), identityId: current.identity?.identityId,
           state: 'live' as const, observedAt: now(), evidenceRef: `idle-terminal:${digest(receipt)}` };
         if (session.terminalBackend === 'tmux' && (driver!.isIdle?.() !== true || driver!.hasBackgroundWork?.() !== false || this.permissionsForSession(session.id).length)) {
           throw new RuntimeError('IDLE_TERMINAL_ADOPTION_UNSAFE', 'Original tmux terminal is no longer idle', 409);

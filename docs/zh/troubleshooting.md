@@ -19,7 +19,7 @@
 
 ## 常见问题与排障 (FAQ) <a id="faq"></a>
 
-**插话时看到 `Workspace is held by another session`？** 同一工作区的其他会话挡住了这次插话。排队消息仍在队列中，任务执行详情会列出挡住它的会话和原因。
+**插话时看到 `Workspace is held by another session`？** 同一工作区的其他会话挡住了这次插话。排队消息仍在队列中，任务执行详情会列出挡住它的会话和原因。如果提示 `This session's workspace needs recovery`，请检查本会话的工作目录是否已移走或被替换。
 
 ### 启动报 `DATABASE_SCHEMA_TOO_NEW`，或备份提示版本不匹配？
 

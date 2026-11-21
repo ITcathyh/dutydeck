@@ -1,3 +1,4 @@
+import { sleep } from '../daemon/time.js';
 import { planTerminalDelivery } from './terminal-plan.js';
 import { toRecord } from './turn-record.js';
 import { readTaskReportSafely } from '@dutydeck/shared';
@@ -1266,11 +1267,26 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
     const acceptedId = request && larkTurnRuntimeTaskId(session.id, config.appId, event.messageId, currentTurn);
     let accepted: ReturnType<typeof this.readAcceptedTurn> | undefined;
     if (acceptedId && request) {
-      try { accepted = this.readAcceptedTurn(acceptedId, request); }
-      catch (error) {
-        this.log.warn({ error, taskId: acceptedId }, '执行记录暂时无法核验，保留入站记录');
-        if (resumeTask) throw error;
-        return;
+      for (let attempt = 1; ; attempt++) {
+        try { accepted = this.readAcceptedTurn(acceptedId, request); break; }
+        catch (error) {
+          this.log.warn({ error, taskId: acceptedId, attempt }, '执行记录暂时无法核验，保留入站记录');
+          if (resumeTask) throw error; // The accepted-card reconciler already schedules its own retries.
+          if (attempt === 3) {
+            if (!await this.inbox!.release(task.inbox!)) return;
+            if (this.tasks.get(task.id) === task) {
+              this.tasks.delete(task.id);
+              this.handledMessages.delete(task.id);
+            }
+            await clearAcknowledgement();
+            await sendTaskCard(this.service, event, { ...cardContext, state: 'reconcile_required', taskName: taskTitle,
+              readOnly: true, markdown: '请求结果未知', idempotencyKey: `acceptance_read_${event.messageId}_${currentTurn}`.slice(0, 50) }, this.log)
+              .catch(noticeError => this.log.warn({ error: noticeError, taskId: acceptedId }, '入站认领已交还，核对提示未送达'));
+            return;
+          }
+          await sleep(250 * attempt);
+          if (this.stopped || task.turn !== currentTurn || await this.supersededTurn(task, session) || await cancelledBeforeCard()) return;
+        }
       }
     }
     if (accepted?.mismatch) {
@@ -1287,7 +1303,8 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
     // A1：Agent 已知不可用（没登录、凭据失效）时不开新一轮，直接在话题里说清楚怎么修。
     // 每次有新消息（用户重发）都先跑一次不调模型的状态命令复查，修好了就照常执行。
     const reliability = larkReliability(this.runtime);
-    const unavailable = !resumeTask && !task.restoring && reliability.getAgentAvailability?.(session.agentId)
+    const previous = accepted?.task ?? resumeTask;
+    const unavailable = !previous && reliability.getAgentAvailability?.(session.agentId)
       ? await reliability.checkAgentAvailability?.(session.agentId).catch(() => reliability.getAgentAvailability?.(session!.agentId)) : undefined;
     if (unavailable) {
       if (await this.recoverFallbackSession(task, session, unavailable.reason, restoring || Boolean(resumeTask))) return;
@@ -1299,7 +1316,7 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
       await clearAcknowledgement();
       return;
     }
-    if (planTask !== undefined) {
+    if (!previous && planTask !== undefined) {
       // 拦不住写操作的 Agent 明确拒绝，绝不退回直接执行。
       const reason = !this.workflows || !this.inbox || !canDispatch ? '当前服务没有计划卡所需的存储或无法派发任务，不能先出计划。'
         : planUnsupportedReason(session, (await this.runtime.listAgents?.())?.find(item => item.id === session.agentId) as Parameters<typeof planUnsupportedReason>[1]);
@@ -1336,7 +1353,7 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
     let materialPrompt = task.retryMaterialPrompt ?? prompt;
     let materialParts: PromptPart[] | undefined;
     let contextCommit: (() => Promise<void>) | undefined;
-    if (this.workflowOptions.store && !resumeTask) {
+    if (this.workflowOptions.store && !resumeTask && (!previous || task.inbox?.materials)) {
       const contextKey = `lark.context.${config.appId}.${session.id}`;
       let snapshot = task.inbox?.materials;
       if (!snapshot) {
@@ -1611,7 +1628,7 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
           runtimeTask?.currentAttemptId) : undefined;
         const reportElements = taskReportCardElements(task.runtimeTaskId && this.workflowOptions.store ? await readTaskReportSafely(this.workflowOptions.store, task.runtimeTaskId) : undefined);
         const explicit = await hasExplicitFinal(this.workflowOptions.store, finalContext, state);
-        const plan = planTerminalDelivery(record, task.id, config, { state, now: Date.now(), explicit,
+        const plan = planTerminalDelivery(record, task.id, config, { state, agentName: cardContext.agentName, now: Date.now(), explicit,
           quiet: Boolean(confirmation), hasReport: reportElements.length > 0, steered: Boolean(task.steered),
           interruptedByUser: Boolean(task.interruptRequested || runtimeTask?.interruptedByActor) });
         if (this.stopped || task.turn !== currentTurn) return;
@@ -1665,7 +1682,7 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
           ...reportElements,
           ...plan.fallbackElements,
           ...(continueCause?.settled ? [{ tag: 'markdown', element_id: 'recovery_note', content: larkQuietSettledNote(continueCause) }] : []),
-          ...(explicit ? [] : task.steered ? [{ tag: 'markdown', element_id: 'steer_note', content: task.steerNote ?? steeringOutcomeText(task.steered) }] : renderLarkResultElements(verifiedOutput ? [verifiedOutput] : task.events, { state, agentName: cardContext.agentName })),
+          ...(explicit ? [] : task.steered ? [{ tag: 'markdown', element_id: 'steer_note', content: task.steerNote ?? steeringOutcomeText(task.steered) }] : renderLarkResultElements(verifiedOutput ? [verifiedOutput] : task.events, plan.resultOptions)),
           ...(context && this.workflows ? await this.workflows.result(context, '') : []),
           ...(verification.element ? [verification.element] : []),
           ...(turnDiff ? [turnDiff] : []),
@@ -1847,12 +1864,14 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
       } catch (error) {
         if (this.stopped || task.turn !== currentTurn || await closePreparedTurn()) return;
         this.log.warn({ error, chatId: event.chatId, messageId: event.messageId }, '执行前读取群上下文失败');
-        this.pushTaskError(task, '上下文读取超时或失败，Agent 尚未执行。请稍后重新发送请求。');
-        task.state = 'failed'; task.retryable = false;
-        await this.failPendingInbox(task, '上下文读取超时或失败');
-        await deliverTerminal('failed', false);
-        await clearAcknowledgement();
-        return;
+        if (!previous) {
+          this.pushTaskError(task, '上下文读取超时或失败，Agent 尚未执行。请稍后重新发送请求。');
+          task.state = 'failed'; task.retryable = false;
+          await this.failPendingInbox(task, '上下文读取超时或失败');
+          await deliverTerminal('failed', false);
+          await clearAcknowledgement();
+          return;
+        }
       }
     }
     if (this.stopped || task.turn !== currentTurn || await closePreparedTurn()) return;
@@ -2078,7 +2097,7 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
       });
       try {
         // 重启后接上的任务没有开始时的指纹，共享目录里就不自动验证。
-        if (!resumeTask) {
+        if (!previous) {
           codeBefore = await this.sharedWorkspaceFingerprint(task, session);
           codeSignatureBefore = await readGitCodeSignature(session.cwd);
         }
@@ -2088,7 +2107,7 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
         let frozenUsage: Awaited<ReturnType<typeof freezePromptUsage>> = undefined;
         try {
           if (this.workflowOptions.store) frozenUsage = await freezePromptUsage(this.workflowOptions.store,
-            pendingUsageKey, resumeTask || accepted?.task ? undefined : promptUsage);
+            pendingUsageKey, previous ? undefined : promptUsage);
         } catch (error) {
           if (error instanceof LarkServiceError && error.code === 'PROMPT_USAGE_CONFLICT') throw error;
           this.log.warn({ error, taskId: task.id }, '冻结提示词版本失败，继续派发');
@@ -2097,7 +2116,6 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
         if (task.epoch !== (group.epoch ?? 0) || task.cancelRequested) { await closePreparedTurn(); cleanup(); return; }
         task.submissionStarted = true;
         const idleCompactHours = config.idleCompactEnabled !== false ? config.idleCompactHours ?? defaultLarkIdleCompactHours : undefined;
-        const previous = accepted?.task ?? resumeTask;
         // Keep the known acceptance even if refreshing its status after subscribing fails.
         if (previous) runtimeTaskId = previous.id;
         const runtimeTask = previous

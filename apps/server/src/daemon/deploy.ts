@@ -361,7 +361,7 @@ function pointCurrent(releases: string, release: string): void {
 const sha256 = (file: string) => createHash('sha256').update(readFileSync(file)).digest('hex');
 
 /** 比较持久 schema 和迁移集合，不比较任务、配置等运行数据；打不开或迁移记录非法时拒绝自动回滚。 */
-function databaseSchema(file: string): { version: number; required: number; fingerprint: string } | undefined {
+function databaseSchema(file: string) {
   try {
     const db = new Database(file, { readonly: true, fileMustExist: true });
     try {
@@ -374,10 +374,10 @@ function databaseSchema(file: string): { version: number; required: number; fing
         const compatibility = versions.length ? readerVersions(db) : { required: 0, invalid: 0 };
         if (compatibility.invalid) return undefined;
         const metadata = (db.pragma('table_info(schema_migrations)') as Array<{ name: string }>).some(col => col.name === 'compatible_reader_version')
-          ? db.prepare('SELECT * FROM schema_migrations ORDER BY version').all() : undefined;
+          ? db.prepare('SELECT * FROM schema_migrations ORDER BY version').all() as Array<{ version: number; name?: string | null }> : undefined;
         const userVersion = db.pragma('user_version', { simple: true });
         return {
-          version: versions.at(-1) ?? 0, required: compatibility.required,
+          version: versions.at(-1) ?? 0, required: compatibility.required, migrations: metadata,
           fingerprint: createHash('sha256').update(JSON.stringify({ schema, versions, userVersion, metadata })).digest('hex')
         };
       })();
@@ -696,11 +696,21 @@ async function confirmDrained(drain: DrainResult, renewing: ReturnType<typeof ke
   return undefined;
 }
 
-function releaseSupportsReader(release: string, required: number): boolean {
+function rollbackReaderError(release: string, current: NonNullable<ReturnType<typeof databaseSchema>>): string | undefined {
+  let marker;
   try {
-    const marker = JSON.parse(readFileSync(join(release, 'dist/schema-reader.json'), 'utf8'));
-    return marker.protocol === 1 && Number.isSafeInteger(marker.schemaVersion) && marker.schemaVersion >= required;
-  } catch { return false; }
+    marker = JSON.parse(readFileSync(join(release, 'dist/schema-reader.json'), 'utf8'));
+  } catch { /* Older releases have no reader capability marker. */ }
+  if (marker?.protocol !== 1 || !Number.isSafeInteger(marker.schemaVersion) || marker.schemaVersion < current.required) {
+    return `无法核实上一版支持兼容读版本 ${current.required}。`;
+  }
+  const names = marker.migrationNames;
+  if (!names || typeof names !== 'object' || Array.isArray(names) || !current.migrations) return '无法核实上一版与当前数据库的迁移名称。';
+  for (const { version, name } of current.migrations) {
+    if (version > marker.schemaVersion) continue;
+    if (typeof name !== 'string' || typeof names[version] !== 'string') return `无法核实迁移 ${version} 的名称。`;
+    if (names[version] !== name) return `迁移 ${version} 的名称与上一版不一致。`;
+  }
 }
 
 /** 已确认停服后才调用；部署前快照只用于兼容检查和人工恢复，绝不覆盖当前数据库。 */
@@ -719,7 +729,10 @@ async function checkDatabaseForRollback(
     const changed = `数据库 schema 已变化（迁移版本 ${before.version} → ${current.version}）。`;
     if (current.version <= before.version) reason = changed + '无法核实新增迁移的兼容读版本。';
     else if (current.required > before.version) reason = changed + `兼容读版本 ${current.required} 超过部署前的 schema 版本。`;
-    else if (!releaseSupportsReader(previousRelease, current.required)) reason = changed + `无法核实上一版支持兼容读版本 ${current.required}。`;
+    else {
+      const readerError = rollbackReaderError(previousRelease, current);
+      if (readerError) reason = changed + readerError;
+    }
   }
   if (!reason) return undefined;
 

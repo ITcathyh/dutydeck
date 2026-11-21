@@ -1,6 +1,6 @@
-import type { AgentDriver, ExecutionBlocker, TaskRecord } from '@dutydeck/shared';
+import type { AgentDriver, ExecutionBlocker, runtimeStateKeys, TaskRecord } from '@dutydeck/shared';
 
-type StopBlock = { sessionId: string; runId?: string; reason: string };
+type StopBlock = ReturnType<typeof runtimeStateKeys.driverStopBlock.read>;
 type BlockedDriver = { driver: AgentDriver; reason: string };
 type Recheck = { timer: ReturnType<typeof setTimeout>; since: string };
 type StopRecord = { block?: StopBlock; driver?: BlockedDriver; recheck?: Recheck };

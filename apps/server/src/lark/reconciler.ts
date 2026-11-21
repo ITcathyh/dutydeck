@@ -397,7 +397,7 @@ export async function performLarkCardReconcile(input: {
         if (input.skipTask?.(mapping.externalId, mapping.sessionId, persisted.turn ?? 0)) return;
         const finalContext = explicitFinalContext(mapping, persisted, runtimeTask.currentAttemptId);
         const explicit = await hasExplicitFinal(input.deliveryStore, finalContext, state);
-        const plan = planTerminalDelivery(persisted, mapping.externalId, effective, { state, now: Date.now(), explicit,
+        const plan = planTerminalDelivery(persisted, mapping.externalId, effective, { state, agentName, now: Date.now(), explicit,
           quiet: Boolean(quietNote), hasReport: reportElements.length > 0, steered: Boolean(steered),
           interruptedByUser: Boolean(runtimeTask.interruptedByActor), resultDue, receiptOnly });
         let updated = !plan.closeProcess;
@@ -472,7 +472,7 @@ export async function performLarkCardReconcile(input: {
             // 发起人是机器人时同样不 @ 回去：刷屏事故里最容易触发的恰好是重启对账这条路。
             const mention = plan.mention;
             const decoration = !receiptOnly ? await input.terminalDecoration?.(mapping, { ...persisted, runtime_task_id: runtimeTask.id, state }, effective) : undefined;
-            const resultBody = explicit ? [] : steered ? [{ tag: 'markdown', element_id: 'steer_note', content: steeringOutcomeText(steered) }] : renderLarkResultElements(verifiedOutput ? [verifiedOutput] : events);
+            const resultBody = explicit ? [] : steered ? [{ tag: 'markdown', element_id: 'steer_note', content: steeringOutcomeText(steered) }] : renderLarkResultElements(verifiedOutput ? [verifiedOutput] : events, plan.resultOptions);
             const prose = resultBody.find(element => element.element_id === 'final_output');
             if (plan.polish
               && typeof prose?.content === 'string' && input.polishReply) {

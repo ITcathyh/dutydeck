@@ -1,5 +1,6 @@
 import { isDeepStrictEqual } from 'node:util';
 import { z } from 'zod';
+import { serialByKey } from '@dutydeck/shared';
 import type { StoredLarkConfig } from './config.js';
 import type { LarkTask, LarkTaskState } from './coordinator.js';
 import type { LarkMessageEvent } from './listener.js';
@@ -110,13 +111,22 @@ function project(task: LarkTask, state: LarkTaskState, taskName: string): Persis
   };
 }
 
-// Keep the original representation (including missing legacy fields) while a restored turn is live.
-const originals = new WeakMap<LarkTask, { record: PersistedLarkCardTask; projection: PersistedLarkCardTask; sessionId: string }>();
+// The last committed JSON may include fields that have no representation on the live task.
+type RecordBaseline = { record: PersistedLarkCardTask; projection: PersistedLarkCardTask; sessionId: string };
+const baselines = new WeakMap<LarkTask, RecordBaseline>();
+const pendingSaves = new Map<LarkTask, Promise<unknown>>();
 
-export function toRecord(task: LarkTask, state = task.state, taskName = originals.get(task)?.record.task_name ?? task.prompt) {
-  const fields = project(task, state, taskName);
-  const original = originals.get(task);
-  if (!original || original.sessionId !== task.sessionId || original.projection.turn !== task.turn) return fields;
+export function toRecord(task: LarkTask, state = task.state, taskName = baselines.get(task)?.record.task_name ?? task.prompt) {
+  return applyProjection(project(task, state, taskName), restoredBaseline(task));
+}
+
+function restoredBaseline(task: LarkTask) {
+  const baseline = baselines.get(task);
+  return baseline && baseline.sessionId === task.sessionId && baseline.projection.turn === task.turn ? baseline : undefined;
+}
+
+function applyProjection(fields: PersistedLarkCardTask, original?: RecordBaseline) {
+  if (!original) return fields;
   const record = { ...original.record };
   for (const field of new Set([...Object.keys(fields), ...Object.keys(original.projection)])) {
     if (!isDeepStrictEqual(fields[field], original.projection[field])) record[field] = fields[field];
@@ -124,10 +134,29 @@ export function toRecord(task: LarkTask, state = task.state, taskName = original
   return record;
 }
 
+export type TurnRecordWrite = { saved: true; json: string } | { saved: false; reason: string };
+
+export async function saveTurnRecord(task: LarkTask, state: LarkTaskState, title: string,
+  write: (fields: PersistedLarkCardTask) => Promise<TurnRecordWrite>) {
+  const fields = project(task, state, title);
+  const baseline = restoredBaseline(task);
+  if (!baseline) return write(fields);
+  // Capture nested elements before waiting. Later saves compare against the last successful write in call order.
+  const snapshot: PersistedLarkCardTask = JSON.parse(JSON.stringify(fields));
+  return serialByKey(pendingSaves, task, async () => {
+    const result = await write(applyProjection(snapshot, baseline));
+    if (result.saved) {
+      baseline.record = JSON.parse(result.json);
+      baseline.projection = snapshot;
+    }
+    return result;
+  });
+}
+
 // Restored snapshots may be older than reconciliation or a recovery decision. Only overlay their changes on today's row.
 export function mergeRestoredRecord(task: LarkTask, fields: PersistedLarkCardTask, latest: PersistedLarkCardTask) {
-  const original = originals.get(task);
-  if (!original || original.sessionId !== task.sessionId || original.projection.turn !== fields.turn) return { ...latest, ...fields };
+  const original = baselines.get(task);
+  if (!original || original.sessionId !== task.sessionId || original.projection.turn !== (fields.turn ?? 0)) return { ...latest, ...fields };
   const merged = { ...latest };
   for (const field of Object.keys(fields)) {
     if (!isDeepStrictEqual(fields[field], original.record[field])) merged[field] = fields[field];
@@ -158,6 +187,6 @@ export function fromRecord(saved: PersistedLarkCardTask, mapping: Mapping, confi
     retryMaterialPrompt: saved.retry_material_prompt,
     event: recordEvent(saved, mapping.externalId)
   };
-  originals.set(task, structuredClone({ record: saved, projection: project(task, task.state, saved.task_name), sessionId: mapping.sessionId }));
+  baselines.set(task, structuredClone({ record: saved, projection: project(task, task.state, saved.task_name), sessionId: mapping.sessionId }));
   return task;
 }

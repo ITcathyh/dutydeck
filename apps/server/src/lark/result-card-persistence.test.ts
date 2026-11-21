@@ -422,3 +422,47 @@ it.each(['read', 'invalid', 'cas', 'write'] as const)('reports an unsaved mappin
   expect(h.log.warn).toHaveBeenCalledWith(expect.objectContaining({ taskId: task.id, reason: expect.any(String) }), expect.any(String));
   expect((await repo.list(h.channel))[0]).toEqual(mapping);
 });
+
+it('clears verification after consecutive saves of one restored card', async () => {
+  const h = await harness();
+  await h.coordinator.handle(event('om_1'), h.config);
+  await h.resultCard();
+  const [mapping] = await h.repos.channelMappings.list(h.channel);
+  const restored = (h.coordinator as any).restoredCardTask(h.config, mapping!, await h.persisted());
+  const save = () => (h.coordinator as any).persistCardTask(restored, 'completed');
+  restored.autoVerification = { phase: 'running', turn: restored.turn };
+  expect(await save()).toEqual({ saved: true });
+  expect((await h.persisted()).verification_auto).toEqual(restored.autoVerification);
+  await h.patchPersisted({ result_feedback_state: 'accepted' });
+  restored.autoVerification = undefined;
+  const conflict = vi.spyOn(h.repos.channelMappings, 'compareAndSetExtra').mockResolvedValue(false);
+  expect(await save()).toMatchObject({ saved: false });
+  conflict.mockRestore();
+  expect(await save()).toEqual({ saved: true });
+  const final = await h.persisted();
+  expect(final).not.toHaveProperty('verification_auto');
+  expect(final.result_feedback_state).toBe('accepted');
+});
+
+it('persists overlapping restored-card saves in order using each captured projection', async () => {
+  const h = await harness();
+  await h.coordinator.handle(event('om_1'), h.config);
+  await h.resultCard();
+  const [mapping] = await h.repos.channelMappings.list(h.channel);
+  const restored = (h.coordinator as any).restoredCardTask(h.config, mapping!, await h.persisted());
+  const repo = h.repos.channelMappings;
+  const cas = repo.compareAndSetExtra.bind(repo);
+  const writes: Array<string | undefined> = [];
+  vi.spyOn(repo, 'compareAndSetExtra').mockImplementation(async (id, expected, extra) => {
+    writes.push(JSON.parse(extra!).verification_auto?.phase);
+    return cas(id, expected, extra);
+  });
+  restored.autoVerification = { phase: 'running', turn: restored.turn };
+  const started = (h.coordinator as any).persistCardTask(restored, 'completed');
+  restored.autoVerification = undefined;
+  const cleared = (h.coordinator as any).persistCardTask(restored, 'completed');
+  restored.autoVerification = { phase: 'interrupted', turn: restored.turn };
+  expect(await Promise.all([started, cleared])).toEqual([{ saved: true }, { saved: true }]);
+  expect(writes).toEqual(['running', undefined]);
+  expect(await h.persisted()).not.toHaveProperty('verification_auto');
+});

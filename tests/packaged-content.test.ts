@@ -5,7 +5,7 @@ import { dirname, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
 import { expect, it } from 'vitest';
-import { latestSchemaVersion } from '@dutydeck/storage';
+import { latestSchemaVersion, migrations } from '../packages/storage/src/migrations.js';
 import { missingRelativeImports } from '../apps/server/src/daemon/import-closure.mjs';
 
 const execFileAsync = promisify(execFile);
@@ -64,7 +64,9 @@ it('packs every deferred chunk and resource without acpx or drizzle as productio
     expect(metadata.dependencies).not.toHaveProperty('drizzle-orm');
     for (const name of ['acpx', 'drizzle-orm']) expect(await stat(join(pkg, 'node_modules', name)).catch(() => undefined)).toBeUndefined();
 
-    expect(JSON.parse(await readFile(join(pkg, 'dist/schema-reader.json'), 'utf8'))).toEqual({ protocol: 1, schemaVersion: latestSchemaVersion });
+    expect(JSON.parse(await readFile(join(pkg, 'dist/schema-reader.json'), 'utf8'))).toEqual({
+      protocol: 1, schemaVersion: latestSchemaVersion, migrationNames: Object.fromEntries(migrations.map(m => [m.version, m.name]))
+    });
     const cli = join(pkg, 'dist/cli.js');
     const internalAgentCli = join(pkg, 'dist/internal-agent-cli.js');
     expect(missingRelativeImports(cli)).toEqual([]);

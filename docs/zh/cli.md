@@ -131,13 +131,13 @@ dutydeck deploy prune --releases /path/to/releases
 - **失败与中断**：部署失败、中途出错或被 Ctrl-C / kill / ssh 断开打断时，都会写 `status: failed` 的部署记录（被信号打断的另记 `aborted_by`），先等已发出的排空续期请求结束，再让旧服务退出排空、恢复执行新任务，不再等租约到期，避免迟到的续期再次暂停服务；被打断后不再切换版本、重启或回滚。
 - **并发部署与清理**：共用同一个实际发布根目录的操作互斥，包括不同 unit 的部署、`--no-restart` 和手动 `deploy prune`（含 `--dry-run`）。已有操作进行时，后来的命令会明确报忙并拒绝执行，待前一操作结束后重试；不同发布根目录可独立操作。
 - **备份期间保持暂停接单**：排空后先备份数据库再切换版本，备份期间每 5 秒续一次排空。续期失败，或备份结束时又有任务在执行，部署不切换版本、不重启，旧服务继续运行，记为失败并写明原因；等任务结束后重新部署，确认可以中断任务时加 `--force`。
-- **回滚**：健康检查不过时先停服务。多个 unit 共用同一个 `current` 时，以目标 unit 实际运行的版本为回滚目标；无法核实运行版本时拒绝切换。目标已停服时，历史上部署成功的版本只有在数据库 schema 与当前匹配才作为回滚候选。备份指纹核验通过后，schema 未变可自动切回。若新增迁移声明兼容，最低读版本也在部署前 schema 和上一版构建的支持范围内，可用当前数据库重启上一版。详见[升级说明](upgrading.md)。
+- **回滚**：健康检查不过时先停服务。多个 unit 共用同一个 `current` 时，以目标 unit 实际运行的版本为回滚目标；无法核实运行版本时拒绝切换。目标已停服时，历史上部署成功的版本只有在数据库 schema 与当前匹配才作为回滚候选。备份指纹核验通过后，schema 未变可自动切回。若新增迁移声明兼容，最低读版本在部署前 schema 和上一版构建的支持范围内，且当前库与上一版发布包在该范围内的迁移同号同名，可用当前数据库重启上一版。详见[升级说明](upgrading.md)。
 - **缺地址或数据库时拒绝**：目标 unit 没记录可用的健康检查地址或数据库路径（例如被 `dutydeck stop` 停过）时，deploy 直接拒绝，不切换版本也不重启。先启动该 unit 让它记下地址，或用 `--runtime` 指向写有 `address`、`databasePath` 的 `deployment.json`。
 - **自动清理**：每次部署成功后保留最新 5 个发布目录；部署记录按 unit 分别保留最新 5 个，每个 unit 只有最新 2 份记录留着数据库备份（含本次），同一发布根下依次部署多个 unit 时互不挤占。更早的记录只删备份文件、保留 `manifest.json`；`manifest.json` 里没记 unit 的旧记录不按份数删备份。deploy 建的记录超过 24 小时仍没有 `manifest.json`（部署进程被强制杀掉留下的），不占保留个数，直接删除。`current`、它的上一版和仍被运行中进程引用的版本永远保留；自动清理和手动 `deploy prune` 都会额外保留各 unit 最近一次成功部署的版本。清理失败只告警，不影响部署结果。
 - **历史数据保留**：服务每小时分批清理一次数据库里的历史数据，只动已结束的任务，未结束、结果未知和旧版待退役会话的数据不动：终端模式超过 30 天的轮次只留最后一屏的内容；旧版本存的会话状态快照和工具调用镜像超过 30 天删除；群策略、群绑定、群信息和角色的修订记录每项只留最近 20 条。事件记录本身不删，Web 历史仍然完整连续。已有旧库的终端输出存在缺口时，网页仍可展开历史轮次、原始日志和执行追踪，显示剩余记录；读取未到达请求终点或分页异常仍会报错，可重试。清理不做 VACUUM，数据库文件不会变小，腾出的空间留给后续写入复用；要缩小文件，按下面的[停机 VACUUM](#vacuum)步骤操作。`dutydeck doctor` 在空闲页占库文件三成以上且不少于 64MB 时提示一次，不会自动执行。
 - **手动清理** `deploy prune`：选项 `--releases/--runtime/--unit`、`--keep N`（默认 5）、`--dry-run`、`--include-unmarked`、`--json`。手工部署留下的记录（没有 `created_by: dutydeck deploy` 标记）默认不动，只有加 `--include-unmarked` 才会清，并且仍被进程引用或 1 小时内改过的会跳过。最近 1 小时内改过的 `.partial` 目录同样跳过（可能是正在进行的部署）。
 - **单 Bot 独立进程**：`dutydeck start --foreground --database /path/to/bot.db --bot-app-id cli_xxx`。
-- **拆分机器人数据**：`scripts/split-bot-runtimes.mts` 会把空闲终端状态、排队受阻和结果未知提醒、计划逾期提醒随所属会话迁入对应机器人的库；未知或无法确认归属的记录仍会阻止拆分。
+- **拆分机器人数据**：`scripts/split-bot-runtimes.mts` 会把空闲终端状态、排队受阻和结果未知提醒、计划逾期提醒随所属会话迁入对应机器人的库；会话名称按完整会话 ID 分配。模型设置引用本地密钥文件时，预检会列出配置键并阻止拆分。未知或无法确认归属的记录仍会阻止拆分。在已运行 `pnpm build:packages` 的检出目录中，用 `node scripts/split-bot-runtimes.mts --help` 查看参数。
 - **systemd 服务与数据库解析**：对直接以 `node cli.js` 启动的 unit，管理命令（`restart`、`status`、`deploy` 等）按 ExecStart 显式参数 > unit 环境变量 > `WorkingDirectory/.env` 解析目标数据库和监听地址；相对工作目录以 `WorkingDirectory` 为基准。unit 环境变量包括 `Environment=` 和 `EnvironmentFile=`，后者按 systemd 的引号与注释规则解析，并按顺序覆盖前者。缺少 `.env` 可继续，不可读或关键配置无效时拒绝操作；`EnvironmentFile=` 只有带 `-` 前缀且文件不存在时跳过，其他读不到的文件、相对路径或通配路径，以及无法解析的 `Environment=` 项，都会拒绝操作；数据库未配置时回落到 `<cwd>/.dutydeck/dutydeck.db`。部署备份和 schema 回滚检查使用同一实际数据库。`start --foreground` 仍读取守护状态，`deploy --runtime` 显式元数据继续优先。
 
 ### systemd socket 激活（重启不拒绝连接）<a id="socket-activation"></a>

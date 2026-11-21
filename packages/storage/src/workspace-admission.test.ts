@@ -279,8 +279,27 @@ it('freezes non-Git directory identity at acceptance and blocks replacements wit
   const h=fixture(),cwd=join(h.root,'plain'),other=join(h.root,'other');mkdirSync(cwd);mkdirSync(other);
   const one=h.session('one',cwd),two=h.session('two',other);h.accept(one);h.accept(two);
   renameSync(cwd,join(h.root,'original-directory'));mkdirSync(cwd);
-  expect(()=>h.x.claimNext(one)).toThrow(expect.objectContaining({code:'WORKSPACE_RESOURCE_BLOCKED'}));
+  expect(()=>h.x.claimNext(one)).toThrow(expect.objectContaining({
+    code:'WORKSPACE_RESOURCE_BLOCKED', statusCode:409, message:"This session's workspace needs recovery",
+    details:[{code:'WORKSPACE_RESOURCE_UNVERIFIABLE',sessionId:one.sessionId}]
+  }));
   expect(h.x.claimNext(two)!.attempt).toBeDefined();
+});
+
+it('reports the other session blocking a queued insertion', async () => {
+  const h = fixture(), cwd = h.repo('repo');
+  const target = h.session('target', cwd), other = h.session('other', cwd);
+  h.accept(target);
+  const attempt = h.x.claimNext(target)!.attempt!;
+  h.x.markSubmissionPending(af(attempt), {submissionId:'send', inputDigest:digest('input'), resourceRefs:[], authorizationRefs:[]});
+  const queued = h.accept(target, 'insert');
+  await h.repos.config.set('runtime_verification:other:check', JSON.stringify({sessionId:other.sessionId, status:'running'}));
+  expect(() => h.x.beginQueuedSteering(target, queued.id, queued.revision, {
+    operationId: 'insert', actor, target: {taskId: attempt.taskId, attemptId: attempt.attemptId}
+  })).toThrow(expect.objectContaining({
+    code: 'WORKSPACE_RESOURCE_BLOCKED', statusCode: 409, message: 'Workspace is held by another session',
+    details: [{code: 'VERIFICATION_RESOURCE_UNKNOWN', sessionId: other.sessionId}]
+  }));
 });
 
 it('keeps unknown steering and legacy unresolved attempts holding their repository until audited recovery', () => {
