@@ -1683,3 +1683,25 @@ describe('已结算的结果未知卡收敛与按需扫描', () => {
     expect([...next]).toEqual([['om_stuck', false]]);
   });
 });
+
+it.each(['exact', 'missing', 'legacy'] as const)('only uses the exact task ID to resolve same-prompt tasks, case %s', async mode => {
+  const startedAt = Date.now() - 3_600_000;
+  const original: TaskRecord = { id: 'original', sessionId: 'audit-session', prompt: '同一句请求',
+    status: 'running', createdAt: new Date(startedAt).toISOString(), updatedAt: new Date(startedAt).toISOString() };
+  const later = { ...original, id: 'later', createdAt: new Date(startedAt + 1_800_000).toISOString() };
+  const mapping = createMapping('audit', 'original-message', original.sessionId, {
+    ...(mode !== 'legacy' ? { runtime_task_id: original.id } : {}),
+    prompt: original.prompt, turn: 1, started_at: startedAt, progress_frozen: true
+  });
+  const cardMappings = createMemoryChannelMappingRepo([mapping]);
+  const runtime = { getTasks: async () => mode === 'missing' ? [later] : [original, later], getEvents: async () => [] };
+  const warn = vi.fn();
+  const input = { runtime: runtime as any, service: {} as any, cardMappings, config, channel: mapping.channel,
+    log: { info: vi.fn(), warn, error: vi.fn() }, missingTaskWarnings: new Set<string>() };
+  await performLarkCardReconcile(input);
+  if (mode !== 'exact') {
+    expect(await performLarkCardReconcile(input)).toBe(1);
+    expect(warn).toHaveBeenCalledTimes(1);
+  }
+  expect(JSON.parse(cardMappings.mappings[0]!.extra!).runtime_task_id).toBe(mode === 'legacy' ? undefined : original.id);
+});

@@ -1779,7 +1779,13 @@ describe('Lark message coordinator', () => {
     const runtime = {
       start: vi.fn(async () => session), getSession: vi.fn(async () => session),
       subscribe: vi.fn((_id: string, listener: (event: AgentEvent) => void) => { subscriber = listener; return vi.fn(); }),
-      send: vi.fn(async () => { subscriber?.(output); }), interrupt: vi.fn(async () => {})
+      dispatch: vi.fn(async () => {
+        const id = 'runtime-anchor';
+        subscriber?.(agentEvent(1, 'task', { task: { id, status: 'running' } }));
+        subscriber?.(output);
+        subscriber?.(agentEvent(3, 'task', { task: { id, status: 'completed' } }));
+        return { id, status: 'running' };
+      }), interrupt: vi.fn(async () => {})
     };
     const mapping = { id: 'lark-card:cli_test:om_anchor_fail', channel: 'lark-card:cli_test', externalId: 'om_anchor_fail', sessionId: session.id, createdAt: '', extra: '' };
     let blockAnchor = true;

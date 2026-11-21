@@ -406,3 +406,19 @@ describe('卡片映射的并发写', () => {
     expect((await h.repos.channelMappings.list(h.channel))[0]?.sessionId).toBe('ses_legitimate');
   });
 });
+
+it.each(['read', 'invalid', 'cas', 'write'] as const)('reports an unsaved mapping after %s failure', async failure => {
+  const h = await harness();
+  await h.coordinator.handle(event('om_1'), h.config);
+  await h.resultCard();
+  const repo = h.repos.channelMappings;
+  const [mapping] = await repo.list(h.channel);
+  const task = (h.coordinator as any).restoredCardTask(h.config, mapping!, JSON.parse(mapping!.extra!));
+  if (failure === 'read') vi.spyOn(repo, 'get').mockRejectedValue(new Error('read failed'));
+  if (failure === 'invalid') vi.spyOn(repo, 'get').mockResolvedValue({ ...mapping!, extra: '{' });
+  if (failure === 'cas') vi.spyOn(repo, 'compareAndSetExtra').mockResolvedValue(false);
+  if (failure === 'write') vi.spyOn(repo, 'compareAndSetExtra').mockRejectedValue(new Error('write failed'));
+  expect(await (h.coordinator as any).saveCardTask(task, 'running')).toMatchObject({ saved: false, reason: expect.any(String) });
+  expect(h.log.warn).toHaveBeenCalledWith(expect.objectContaining({ taskId: task.id, reason: expect.any(String) }), expect.any(String));
+  expect((await repo.list(h.channel))[0]).toEqual(mapping);
+});

@@ -44,7 +44,7 @@ async function harness(firstCardFailures: number) {
   const runtime = {
     start: vi.fn(async () => session), getSession: vi.fn(async () => session),
     subscribe: vi.fn((_id: string, listener: (event: AgentEvent) => void) => { listeners.push(listener); return vi.fn(); }),
-    dispatch: vi.fn(async (..._args: unknown[]) => ({ id: 'task_runtime', sessionId: session.id, status: 'queued', queuedAhead: 0 })),
+    getAcceptedTask: vi.fn(), dispatchRequest: vi.fn(async (_request: import('@dutydeck/shared').TaskRequestV1, _material: import('@dutydeck/runtime').TaskRequestMaterial) => ({ id: 'task_runtime', sessionId: session.id, status: 'queued', queuedAhead: 0 })),
     send: vi.fn(), interrupt: vi.fn(), stop: vi.fn(async (..._args: unknown[]) => {})
   };
   let failures = firstCardFailures;
@@ -85,7 +85,7 @@ it('keeps the request pending after the first card fails and delivers exactly on
   // 失败后不标 failed、不发兜底，入站记录保持 received 并交还认领
   expect(await h.inbox()).toMatchObject({ state: 'received', boot: '' });
   expect(h.service.replyText).not.toHaveBeenCalled();
-  expect(h.runtime.dispatch).not.toHaveBeenCalled();
+  expect(h.runtime.dispatchRequest).not.toHaveBeenCalled();
 
   await vi.advanceTimersByTimeAsync(29_000);
   await settle();
@@ -96,7 +96,7 @@ it('keeps the request pending after the first card fails and delivers exactly on
   expect(h.processCards()).toHaveLength(2);
   expect(new Set(h.processCards().map(input => input.idempotencyKey))).toEqual(new Set(['task_om_request_1']));
   expect(h.delivered.filter(input => input.cardKind === 'process')).toHaveLength(1);
-  expect(h.runtime.dispatch).toHaveBeenCalledOnce();
+  expect(h.runtime.dispatchRequest).toHaveBeenCalledOnce();
   expect(await h.inbox()).toMatchObject({ state: 'accepted', taskId: 'task_runtime', cardId: 'om_card_1' });
   expect(h.service.replyText).not.toHaveBeenCalled();
 });
@@ -111,11 +111,11 @@ it('retries an undelivered first PATCH on a recovered existing card before accep
   await coordinator.initializeWorkflows(config);
   await settle();
   expect(await h.inbox()).toMatchObject({ state: 'received', boot: '', cardId: 'om_existing' });
-  expect(h.runtime.dispatch).not.toHaveBeenCalled();
+  expect(h.runtime.dispatchRequest).not.toHaveBeenCalled();
   expect(h.service.send).not.toHaveBeenCalled();
   await vi.advanceTimersByTimeAsync(30_000);
   await settle();
-  expect(h.runtime.dispatch).toHaveBeenCalledOnce();
+  expect(h.runtime.dispatchRequest).toHaveBeenCalledOnce();
   expect(await h.inbox()).toMatchObject({ state: 'accepted', taskId: 'task_runtime', cardId: 'om_existing' });
   expect(h.service.update.mock.calls.map(([input]) => input.messageId)).toEqual(['om_existing', 'om_existing', 'om_existing']);
   expect(h.service.replyText).not.toHaveBeenCalled();
@@ -140,7 +140,7 @@ it('replies in plain text and marks the request failed after both retries fail',
   expect(h.service.replyText).toHaveBeenCalledOnce();
   expect(h.service.replyText).toHaveBeenCalledWith(expect.objectContaining({ messageId: 'om_request', text: '这条请求没有执行，请重发。' }));
   expect(await h.inbox()).toMatchObject({ state: 'failed' });
-  expect(h.runtime.dispatch).not.toHaveBeenCalled();
+  expect(h.runtime.dispatchRequest).not.toHaveBeenCalled();
   expect(h.delivered).toEqual([]);
   // 不再有排定的重试
   await vi.advanceTimersByTimeAsync(600_000);
@@ -163,7 +163,7 @@ it('keeps the existing handling for failures after the runtime has accepted the 
   await vi.advanceTimersByTimeAsync(180_000);
   await settle();
 
-  expect(h.runtime.dispatch).toHaveBeenCalledOnce();
+  expect(h.runtime.dispatchRequest).toHaveBeenCalledOnce();
   expect(h.processCards()).toHaveLength(1);
   expect(h.service.replyText).not.toHaveBeenCalled();
   expect(await h.inbox()).toMatchObject({ state: 'accepted', taskId: 'task_runtime' });
@@ -183,7 +183,7 @@ it('leaves the pending request to restart recovery when the process exits during
   // 旧进程排定的重试不会再跑
   await vi.advanceTimersByTimeAsync(180_000);
   await settle();
-  expect(h.runtime.dispatch).toHaveBeenCalledOnce();
+  expect(h.runtime.dispatchRequest).toHaveBeenCalledOnce();
   expect(h.processCards().map(input => input.idempotencyKey)).toEqual(['task_om_request_1', 'task_om_request_1']);
 });
 
@@ -198,7 +198,7 @@ it('drops the retry when the user has already resent the same request', async ()
 
   await vi.advanceTimersByTimeAsync(180_000);
   await settle();
-  expect(h.runtime.dispatch).toHaveBeenCalledOnce();
+  expect(h.runtime.dispatchRequest).toHaveBeenCalledOnce();
   expect(await h.inbox()).toMatchObject({ state: 'failed', error: '用户已重新发送同一请求' });
   expect(h.service.replyText).not.toHaveBeenCalled();
 });
@@ -217,7 +217,7 @@ it('cancels the pending retry and drops the old request when the user sends /new
   await vi.advanceTimersByTimeAsync(180_000);
   await settle();
   expect(h.processCards()).toHaveLength(1);
-  expect(h.runtime.dispatch).not.toHaveBeenCalled();
+  expect(h.runtime.dispatchRequest).not.toHaveBeenCalled();
   expect(h.service.replyText).not.toHaveBeenCalled();
 });
 
@@ -241,7 +241,7 @@ it('drops the old request when /new arrives after the retry has reclaimed it but
   await settle();
   expect((await h.inbox()).boot).not.toBe('');
   expect(runTurn).not.toHaveBeenCalled();
-  expect(h.runtime.dispatch).not.toHaveBeenCalled();
+  expect(h.runtime.dispatchRequest).not.toHaveBeenCalled();
   await coordinator.handle(message('om_new', '/new'), config);
   await settle();
   expect(h.delivered.map(input => input.taskName)).toContain('/new 已受理');
@@ -251,7 +251,7 @@ it('drops the old request when /new arrives after the retry has reclaimed it but
   await settle();
 
   expect(runTurn).not.toHaveBeenCalled();
-  expect(h.runtime.dispatch).not.toHaveBeenCalled();
+  expect(h.runtime.dispatchRequest).not.toHaveBeenCalled();
   expect(await h.inbox()).toMatchObject({ state: 'failed', error: '请求在执行前被 /new 作废' });
   await vi.advanceTimersByTimeAsync(180_000);
   await settle();
@@ -282,7 +282,7 @@ it('keeps /new working when it lands between the retry reclaiming the record and
   proceed();
   await settle();
 
-  expect(h.runtime.dispatch).not.toHaveBeenCalled();
+  expect(h.runtime.dispatchRequest).not.toHaveBeenCalled();
   expect(h.processCards()).toHaveLength(1);
   expect(await h.inbox()).toMatchObject({ state: 'failed', error: '请求在执行前被 /new 作废' });
 });
@@ -321,7 +321,7 @@ it('still retries an image request after the same user sends a different image',
   await vi.advanceTimersByTimeAsync(30_000);
   // 两张图的文字摘要一样，但不算重发：第一张照常重试并执行
   await until(async () => {
-    expect(h.runtime.dispatch).toHaveBeenCalledTimes(2);
+    expect(h.runtime.dispatchRequest).toHaveBeenCalledTimes(2);
     expect(await h.inbox(first)).toMatchObject({ state: 'accepted' });
   });
 }, 30_000);
@@ -355,6 +355,6 @@ it('keeps the chat queue alive when marking a failed request also hits a write e
   expect(unhandled).toEqual([]);
   expect(await h.inbox()).toMatchObject({ state: 'received' });
   // 同一会话的下一条消息照常执行，不被上一条的错误顶替
-  expect(h.runtime.dispatch).toHaveBeenCalledOnce();
+  expect(h.runtime.dispatchRequest).toHaveBeenCalledOnce();
   expect(await h.inbox('om_next')).toMatchObject({ state: 'accepted', taskId: 'task_runtime' });
 });

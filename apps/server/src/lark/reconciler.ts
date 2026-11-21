@@ -137,6 +137,7 @@ export async function performLarkCardReconcile(input: {
   unknownTaskNotice?: (mapping: ChannelMapping, saved: PersistedLarkCardTask, runtimeTask: TaskRecord, effective: StoredLarkConfig) => Promise<unknown>;
   /** 只核对这些映射（externalId），按 ID 读；缺省读出全部映射。 */
   only?: ReadonlySet<string>;
+  missingTaskWarnings?: Set<string>;
   /** 本轮没收敛的映射记在这里；值为 true 表示在等排队或执行中的任务往前走。 */
   pending?: Map<string, boolean>;
 }): Promise<number> {
@@ -258,12 +259,19 @@ export async function performLarkCardReconcile(input: {
         }
         continue;
       }
-      let runtimeTasks: TaskRecord[];
-      try { runtimeTasks = await runtime.getTasks(mapping.sessionId); }
+      let runtimeTask: TaskRecord | undefined;
+      try {
+        if (persisted.runtime_task_id) runtimeTask = (await runtime.getTasks(mapping.sessionId)).find(item => item.id === persisted.runtime_task_id);
+      }
       catch (error) { unresolved++; log.warn({ error, sessionId: mapping.sessionId, externalId: mapping.externalId }, '读取待补偿飞书任务失败'); continue; }
-      const runtimeTask = (persisted.runtime_task_id ? runtimeTasks.find(item => item.id === persisted.runtime_task_id) : undefined)
-        ?? [...runtimeTasks].reverse().find(item => item.prompt === persisted.prompt && Date.parse(item.createdAt) >= persisted.started_at - 5_000);
-      if (!runtimeTask) { unresolved++; continue; }
+      if (!runtimeTask) {
+        unresolved++;
+        if (!input.missingTaskWarnings?.has(mapping.externalId)) {
+          input.missingTaskWarnings?.add(mapping.externalId);
+          log.warn({ externalId: mapping.externalId, sessionId: mapping.sessionId, taskId: persisted.runtime_task_id }, '飞书卡片缺少可核对的执行记录');
+        }
+        continue;
+      }
       const registeredConfirmation = await input.deferredTask?.(mapping.sessionId, runtimeTask.id);
       if (registeredConfirmation && !terminalTaskStates.has(runtimeTask.status)) { unresolved++; continue; }
       if (runtimeTask.status === 'reconcile_required') {

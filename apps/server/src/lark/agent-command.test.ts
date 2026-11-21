@@ -430,7 +430,7 @@ describe('busy message triage through real runtime and confirmation cards', () =
   it('answers progress from host state without changing the running turn or queuing', async () => {
     const h = await busyHarness();
     h.triage.mockResolvedValue({ kind: 'progress' });
-    const dispatch = vi.spyOn(h.runtime, 'dispatch');
+    const dispatch = vi.spyOn(h.runtime, 'dispatchRequest');
     const inject = vi.spyOn(h.runtime, 'injectQueued');
     const stop = vi.spyOn(h.runtime, 'stop');
     const interrupt = vi.spyOn(h.runtime, 'interrupt');
@@ -569,7 +569,7 @@ describe('busy message triage through real runtime and confirmation cards', () =
     Object.assign((h.coordinator as any).workflowOptions, { automation,
       scheduleRequests: { prepareDelivery: integration.prepareMessageDelivery, sendConfirmation: integration.sendScheduleRequest } });
     h.triage.mockResolvedValue(parseBusyTriageResult('{"kind":"command","action":"schedule.create","params":{"prompt":"看下 CI","cron":"0 9 * * *"}}'));
-    const dispatch = vi.spyOn(h.runtime, 'dispatch');
+    const dispatch = vi.spyOn(h.runtime, 'dispatchRequest');
     await h.receive('每天九点看下 CI', { senderOpenId: 'ou_bob', ...(mode === 'chat' ? { threadId: undefined, rootId: undefined } : {}) });
     const schedules = (await automation.listBySession(h.active.sessionId, 'ou_bob')).schedules;
     expect(schedules).toHaveLength(1);

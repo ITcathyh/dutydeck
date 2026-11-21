@@ -1,3 +1,5 @@
+import { installLarkHook } from './security-hooks.js';
+import { executionTaskId } from '@dutydeck/storage/helpers';
 import { LarkGroupParticipation } from './group-participation.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import '../../../../tests/support/fast-wait-for.js';
@@ -161,7 +163,7 @@ async function harness(kind: 'normal' | 'ask' | 'permission' = 'normal', options
       return mapping.externalId === 'om_task' && saved.state === 'completed' && saved.final_delivery_state === 'delivered';
     })).toBe(true));
   };
-  return { repos, runtime, broker, config, coordinator, createCoordinator, groupManager, service, cards, files, log, send, compact, resolvePermission, resolveReasons, interactions, completed };
+  return { repos, runtime, broker, config, coordinator, createCoordinator, participation, groupManager, service, cards, files, log, send, compact, resolvePermission, resolveReasons, interactions, completed };
 }
 
 async function seedLegacyResult(h: Awaited<ReturnType<typeof harness>>) {
@@ -1276,6 +1278,8 @@ describe('Feishu workflows through coordinator, Runtime and persistent storage',
     expect(h.send).toHaveBeenCalledOnce();
     expect(await h.repos.config.list!('bot_prompt_version/pending/')).toHaveLength(1);
     h.coordinator.stop(); h.repos.config.compareAndSet = compareAndSet;
+    const [updated] = await saveLarkConfig(h.repos.config, undefined, { originalAppId: h.config.appId, preInjectPrompt: '重启后的提示词版本' });
+    Object.assign(h.config, updated);
     h.service.listChatMessages.mockResolvedValue({ items: [{ messageId: 'om_late', chatId: 'oc_group', threadId: 'omt_topic', createTime: '2000',
       messageType: 'text', rawContent: JSON.stringify({ text: '停机期间新增的材料' }), sender: { type: 'user' }, mentions: [] }] as any, hasMore: false });
     const restored = h.createCoordinator();
@@ -1296,7 +1300,7 @@ describe('Feishu workflows through coordinator, Runtime and persistent storage',
     } finally { restored.stop(); }
   });
 
-  it('replays a received waiter after mapping persistence fails without dispatching a second runtime task', async () => {
+  it('reattaches an accepted waiter after mapping persistence fails without dispatching a second runtime task', async () => {
     const h = await harness('ask');
     const saveMapping = h.repos.channelMappings.save.bind(h.repos.channelMappings);
     const casMapping = h.repos.channelMappings.compareAndSetExtra.bind(h.repos.channelMappings);
@@ -1313,7 +1317,7 @@ describe('Feishu workflows through coordinator, Runtime and persistent storage',
     };
     await h.coordinator.handle(event('om_task', '等待恢复'), h.config);
     await vi.waitFor(async () => expect((await h.interactions()).find(item => item.kind === 'ask')?.cardId).toBeTruthy());
-    expect(JSON.parse((await h.repos.config.get('lark.inbox.cli_workflows.om_task'))!)).toMatchObject({ state: 'received' });
+    expect(JSON.parse((await h.repos.config.get('lark.inbox.cli_workflows.om_task'))!)).toMatchObject({ state: 'accepted' });
     const firstAsk = (await h.interactions()).find(item => item.kind === 'ask')!;
     expect(await h.repos.channelMappings.list('lark-card:cli_workflows')).toHaveLength(1);
 
@@ -1505,4 +1509,195 @@ describe('Feishu workflows through coordinator, Runtime and persistent storage',
     await h.coordinator.handle(event('om_tasks2', '/tasks'), h.config);
     expect(JSON.stringify([...h.cards.values()].find(item => item.taskId === 'om_tasks2'))).not.toContain('等你决定');
   });
+});
+
+it.each([false, true])('restores the original waiter with mapping reads failing before restart = %s', async failReads => {
+  const h = await harness('ask');
+  const channel = 'lark-card:' + h.config.appId;
+  const receiptKey = 'lark.inbox.' + h.config.appId + '.om_task';
+  const originalGet = h.repos.channelMappings.get.bind(h.repos.channelMappings);
+  const reader = vi.spyOn(h.repos.channelMappings, 'get').mockImplementation(async (key, id) => {
+    if (failReads && key === channel && id === 'om_task') throw new Error('synthetic mapping read failure');
+    return originalGet(key, id);
+  });
+
+  await h.coordinator.handle(event('om_task', '等待回答'), h.config);
+  const questions = async () => (await h.interactions()).filter(row => row.kind === 'ask' && row.cardId);
+  await vi.waitFor(async () => expect(await questions()).toHaveLength(1));
+  await vi.waitFor(async () => expect(JSON.parse((await h.repos.config.get(receiptKey))!).state).toBe('accepted'));
+  const [oldQuestion] = await questions();
+  h.coordinator.stop();
+  reader.mockRestore();
+
+  const restored = h.createCoordinator();
+  try {
+    await restored.initializeWorkflows(h.config);
+    await restored.startReconciliation(h.config);
+    await restored.reconcile(h.config);
+    const newQuestion = async () => (await questions()).find(row => row.boot !== oldQuestion!.boot && row.state === 'pending');
+    await vi.waitFor(async () => expect(await newQuestion()).toBeDefined());
+    const accepted = JSON.parse((await h.repos.config.get(receiptKey))!);
+    expect(JSON.parse((await originalGet(channel, 'om_task'))!.extra!)).toMatchObject({
+      runtime_task_id: accepted.taskId, card_message_id: accepted.cardId
+    });
+    expect((await questions()).find(row => row.id === oldQuestion!.id)?.state).toBe('expired');
+    const [session] = await h.runtime.listSessions();
+    const tasks = await h.runtime.getTasks(session!.id);
+    expect(tasks.map(task => task.status)).toEqual(['running']);
+    const question = (await newQuestion())!;
+    await restored.handle(event('om_reply', '继续', { parentId: question.cardId, mentions: [] }), h.config);
+    await h.completed();
+    expect(h.broker.get(question.nativeId)).toMatchObject({ status: 'answered', answer: '继续' });
+    expect(h.send).toHaveBeenCalledOnce();
+  } finally { restored.stop(); }
+});
+
+it.each([
+  ['legacy', 'same'], ['current', 'same'], ['legacy', 'prompt'], ['current', 'prompt'],
+  ['legacy', 'actor'], ['current', 'actor'], ['current', 'next turn']
+] as const)('replays a %s turn with %s identity', async (format, change) => {
+  const h = await harness('normal', { participationMode: 'observe' });
+  const groupContext = vi.spyOn(h.participation!, 'taskContext').mockResolvedValue({ text: '首次派发的群消息', watermark: '1' });
+  const agent = { ...(await h.repos.agents.get('mock'))!, adapterId: 'claude' };
+  await h.repos.agents.save(agent);
+  await installLarkHook(agent.id, h.config.workspace, agent);
+  h.config.riskControlMode = 'enforced';
+  await h.repos.config.set(larkBotsConfigKey, JSON.stringify([h.config]));
+  const original = event('om_task', '原请求');
+  const inboxKey = 'lark.inbox.' + h.config.appId + '.' + original.messageId;
+  const key = 'lark:' + h.config.appId + ':' + original.messageId + ':1';
+  // A historical writer accepts through the positional API, with the same material the bot prepared.
+  if (format === 'legacy') vi.spyOn(h.runtime, 'dispatchRequest').mockImplementationOnce((req, material = {}) =>
+    h.runtime.dispatch(req.sessionId, req.prompt, req.mode, material.agentPrompt, material.riskPolicy,
+      original.senderOpenId, req.key, req.skills, undefined, material.idleCompactHours, material.promptParts, req.options.permissionMode));
+  await h.coordinator.handle(original, h.config);
+  await h.completed();
+  h.coordinator.stop();
+  const receipt = JSON.parse((await h.repos.config.get(inboxKey))!);
+  const originalId = executionTaskId('runtime', receipt.sessionId, key);
+  expect(receipt.taskId).toBe(originalId);
+  const accepted = h.repos.execution.getAcceptedTask(originalId)!;
+  if (format === 'current') {
+    expect(accepted.request?.sourcePayload).toEqual({});
+    expect(accepted.input?.executionContext.promptParts?.length).toBeGreaterThan(0);
+    await expect(h.runtime.dispatch(receipt.sessionId, '原请求', 'queue', '旧程序重新准备的材料', undefined,
+      original.senderOpenId, key)).rejects.toMatchObject({ code: 'TASK_IDEMPOTENCY_CONFLICT' });
+    // Previous releases recovered the task with this derived ID on conflict.
+    expect((await h.runtime.getTasks(receipt.sessionId)).find(t => t.id === originalId)?.id).toBe(receipt.taskId);
+  } else expect(accepted.request?.sourcePayload).toHaveProperty('agentPrompt');
+  const policy = accepted.input?.executionContext.riskPolicy;
+  expect(policy).toMatchObject({ enabled: true, authorized: true });
+  expect(JSON.parse(await readFile(join(h.config.workspace!, '.dutydeck', 'security', 'sessions', receipt.sessionId + '.json'), 'utf8'))).toEqual(policy);
+  const usage = await h.repos.config.get('bot_prompt_version/usage/' + originalId);
+  expect(usage).toBeTruthy();
+  const firstMaterial = h.send.mock.calls[0]![0];
+  expect(firstMaterial).toContain('首次派发的群消息');
+  groupContext.mockResolvedValue({ text: '重放时更新的材料', watermark: '2' });
+  const dispatch = vi.spyOn(h.runtime, 'dispatchRequest');
+  dispatch.mockClear();
+  if (change === 'prompt') receipt.request.prompt = '被更改的请求';
+  if (change === 'actor') receipt.event.senderOpenId = 'ou_bob';
+  if (change === 'next turn') receipt.turn++;
+  await h.repos.config.set(inboxKey, JSON.stringify({ ...receipt, state: 'received', boot: 'previous', taskId: undefined }));
+  const restored = h.createCoordinator();
+  try {
+    await restored.initializeWorkflows(h.config);
+    const read = async () => JSON.parse((await h.repos.config.get(inboxKey))!);
+    if (change === 'prompt' || change === 'actor') {
+      const error = '这条消息的执行记录对不上，系统没有自动重发。请在网页控制台核对这一轮。';
+      await vi.waitFor(async () => expect(await read()).toMatchObject({ state: 'failed', error }));
+      await vi.waitFor(() => expect(h.cards.get(receipt.cardId)).toMatchObject({ state: 'failed', markdown: error }));
+      expect(h.log.warn).toHaveBeenCalledWith(expect.objectContaining({ appId: h.config.appId, messageId: original.messageId,
+        turn: 1, taskId: originalId, mismatch: change }), expect.any(String));
+    } else {
+      await vi.waitFor(async () => expect(await read()).toMatchObject({ state: 'accepted',
+        taskId: executionTaskId('runtime', receipt.sessionId, key.slice(0, -1) + receipt.turn) }));
+    }
+    await vi.waitFor(() => expect(h.send).toHaveBeenCalledTimes(change === 'next turn' ? 2 : 1));
+    expect(dispatch).toHaveBeenCalledTimes(change === 'next turn' ? 1 : 0);
+    if (change === 'same') expect(groupContext).toHaveBeenCalledTimes(2);
+    if (change === 'next turn') expect(h.send.mock.calls[1]![0]).toContain('重放时更新的材料');
+    expect(await h.repos.config.get('bot_prompt_version/usage/' + originalId)).toBe(usage);
+    expect(accepted.input?.executionContext.agentPrompt).toBe(firstMaterial);
+    expect(h.send.mock.calls[0]![0]).not.toContain('重放时更新的材料');
+  } finally { restored.stop(); }
+});
+
+it.each(['session', 'chat', 'sender', 'task'] as const)('holds the process card for review when the accepted inbox has a different %s', async field => {
+  const h = await harness('ask');
+  await h.coordinator.handle(event('om_task', '等待回答'), h.config);
+  await vi.waitFor(async () => expect((await h.interactions()).some(i => i.kind === 'ask' && i.cardId)).toBe(true));
+  h.coordinator.stop();
+  const key = 'lark.inbox.' + h.config.appId + '.om_task';
+  const stored = JSON.parse((await h.repos.config.get(key))!);
+  expect(stored.state).toBe('accepted');
+  if (field === 'session') stored.sessionId = 'another_session';
+  if (field === 'chat') stored.event.chatId = 'oc_other';
+  if (field === 'sender') stored.event.senderOpenId = 'ou_bob';
+  if (field === 'task') stored.taskId = 'missing_execution';
+  await h.repos.config.set(key, JSON.stringify(stored));
+  h.service.update.mockClear();
+  const restored = h.createCoordinator();
+  try {
+    await restored.initializeWorkflows(h.config);
+    expect(await restored.startReconciliation(h.config)).toBeGreaterThan(0);
+    expect(h.service.update.mock.calls.some(([card]) => card.messageId === stored.cardId)).toBe(false);
+    expect((await h.interactions()).filter(i => i.kind === 'ask' && i.state === 'pending')).toEqual([]);
+    expect(h.send).toHaveBeenCalledOnce();
+  } finally { restored.stop(); }
+});
+
+it('rebuilds a live mapping on the next reconciliation after storage recovers', async () => {
+  const h = await harness('ask');
+  const channel = 'lark-card:' + h.config.appId;
+  const get = h.repos.channelMappings.get.bind(h.repos.channelMappings);
+  const outage = vi.spyOn(h.repos.channelMappings, 'get').mockImplementation(async (key, id) => {
+    if (key === channel && id === 'om_task') throw new Error('read failed');
+    return get(key, id);
+  });
+  await h.coordinator.handle(event('om_task', '等待回答'), h.config);
+  await vi.waitFor(async () => expect((await h.interactions()).some(i => i.kind === 'ask' && i.cardId)).toBe(true));
+  await h.coordinator.reconcile(h.config);
+  expect(await get(channel, 'om_task')).toBeUndefined();
+  outage.mockRestore();
+  await h.coordinator.reconcile(h.config);
+  const receipt = JSON.parse((await h.repos.config.get('lark.inbox.' + h.config.appId + '.om_task'))!);
+  expect(JSON.parse((await get(channel, 'om_task'))!.extra!)).toMatchObject({ runtime_task_id: receipt.taskId, card_message_id: receipt.cardId });
+  expect(h.send).toHaveBeenCalledOnce();
+});
+
+it('creates the missing process card for an accepted queued turn before it starts', async () => {
+  const h = await harness();
+  h.runtime.setQueueHeld(true);
+  const channel = 'lark-card:' + h.config.appId;
+  const get = h.repos.channelMappings.get.bind(h.repos.channelMappings);
+  const outage = vi.spyOn(h.repos.channelMappings, 'get').mockImplementation(async (key, id) => {
+    if (key === channel && id === 'om_task') throw new Error('read failed');
+    return get(key, id);
+  });
+  h.config.silentProgress = true;
+  await h.repos.config.set(larkBotsConfigKey, JSON.stringify([h.config]));
+  await h.coordinator.handle(event('om_task', '等待执行'), h.config);
+  const read = async () => JSON.parse((await h.repos.config.get('lark.inbox.' + h.config.appId + '.om_task'))!);
+  await vi.waitFor(async () => expect(await read()).toMatchObject({ state: 'accepted' }));
+  expect((await read()).cardId).toBeUndefined();
+  h.coordinator.stop();
+  outage.mockRestore();
+  expect(await get(channel, 'om_task')).toBeUndefined();
+
+  h.config.silentProgress = false;
+  await h.repos.config.set(larkBotsConfigKey, JSON.stringify([h.config]));
+  const restored = h.createCoordinator();
+  try {
+    await restored.initializeWorkflows(h.config);
+    await vi.waitFor(async () => {
+      const receipt = await read();
+      expect(h.cards.get(receipt.cardId)).toMatchObject({ taskId: 'om_task', state: 'queued' });
+      expect(JSON.parse((await get(channel, 'om_task'))!.extra!)).toMatchObject({ runtime_task_id: receipt.taskId, card_message_id: receipt.cardId });
+    });
+    expect(h.send).not.toHaveBeenCalled();
+    h.runtime.setQueueHeld(false);
+    await h.completed();
+    expect(h.send).toHaveBeenCalledOnce();
+  } finally { restored.stop(); }
 });

@@ -63,6 +63,7 @@ export abstract class LarkCoordinatorRecovery extends LarkCoordinatorCards {
   /** 连续没收敛又没有新事件的轮数，决定下一轮的间隔。 */
   private reconcileBackoff = 0;
   private reconcileDueAt = 0;
+  private readonly missingTaskWarnings = new Set<string>();
   /** 下一轮读出全部卡片映射；为 false 时只按 ID 读上一轮没收敛的那些。 */
   private reconcileFullScan = true;
   private reconcilePending = new Map<string, boolean>();
@@ -91,10 +92,13 @@ export abstract class LarkCoordinatorRecovery extends LarkCoordinatorCards {
   }
 
   private async reconcileRound(config: StoredLarkConfig, cardMappings: ChannelMappingRepository, fullScan: boolean) {
+    const only = fullScan ? undefined : new Set(this.reconcilePending.keys());
+    const held = await this.recoverAcceptedCards(config, only);
     const pending = new Map<string, boolean>();
     let unresolved = await timeLoop('lark.reconcile.cards', this.log, () => performLarkCardReconcile({
-      ...(fullScan ? {} : { only: new Set(this.reconcilePending.keys()) }),
+      only,
       pending,
+      missingTaskWarnings: this.missingTaskWarnings,
       runtime: this.runtime,
       service: this.service,
       cardMappings,
@@ -103,7 +107,7 @@ export abstract class LarkCoordinatorRecovery extends LarkCoordinatorCards {
       channel: larkCardChannel(config.appId),
       skipTask: (id, sessionId, turn) => {
         const live = this.tasks.get(id);
-        return this.stopped || Boolean(live && (
+        return this.stopped || held.has(id) || Boolean(live && (
           live.sessionId !== sessionId || live.turn !== turn ||
           live.requestUpdate && isLarkLauncherVersionChanged(live.events)
           || live.launcherRecoveryAttempted && (live.launcherRecoveryPending || live.sessionId !== sessionId || live.turn !== turn)
@@ -147,11 +151,14 @@ export abstract class LarkCoordinatorRecovery extends LarkCoordinatorCards {
             ...cause ? { canContinueInPlace: true } : {} } } };
       }
     }), undefined, config.appId);
+    for (const id of held) pending.set(id, false);
+    unresolved += held.size;
     this.reconcilePending = pending;
     // Completed tasks need evidence repair too; never infer it from prompts or current settings.
     const repairAuthorization = fullScan || this.reconcileAuthorizationRetry;
     this.reconcileAuthorizationRetry = false;
     if (repairAuthorization && this.workflowOptions.store && this.inbox) for (const mapping of await cardMappings.list(larkCardChannel(config.appId))) {
+      if (held.has(mapping.externalId)) continue;
       try {
         const saved = parseOptionalCardTask(mapping.extra);
         if (!saved?.runtime_task_id || saved.app_id !== config.appId
@@ -1161,6 +1168,7 @@ export abstract class LarkCoordinatorRecovery extends LarkCoordinatorCards {
   }
 
   // 由上层实现、在本层调用。
+  protected abstract recoverAcceptedCards(config: StoredLarkConfig, only?: ReadonlySet<string>): Promise<Set<string>>;
   protected abstract scheduleTaskAgentPoll(config: StoredLarkConfig): void;
   protected abstract sessionFor(group: LarkGroup, config: StoredLarkConfig, chatId: string, chatType: LarkMessageEvent['chatType'], scopeId: string, launchOptions?: LarkLaunchOptions): ReturnType<typeof resolveLarkSession>;
   protected abstract runTurn(task: LarkTask): Promise<void>;

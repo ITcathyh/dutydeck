@@ -7,6 +7,7 @@ import { createRepositories } from '@dutydeck/storage';
 import { canonicalExecutionJson, type AcceptedTaskInputV2, type TaskRequestV1 } from '@dutydeck/shared';
 import { leaderLedger } from './leader-mode.js';
 import { LarkMessageCoordinator } from './lark/coordinator.js';
+import { larkTurnRequest } from './lark/coordinator-dispatch.js';
 import { LarkTaskInbox } from './lark/task-inbox.js';
 import { buildEditedMessageEvent } from './lark/edited-message.js';
 import type { LarkMessageEvent } from './lark/listener.js';
@@ -41,15 +42,16 @@ async function harness() {
     agentId: 'fake', state: 'idle', cwd: directory, protocol: 'acp', permissionMode: 'ask', createdAt: '2026-11-11T00:00:00Z', updatedAt: '2026-11-11T00:00:00Z' } as const;
   cleanups.push(async () => { claim.release(); repos.close(); await rm(directory, { recursive: true, force: true }); });
   execution.createSession(session);
-  const dispatch = vi.fn(async (id: string, prompt: string, mode: 'queue', agentPrompt: string, _risk: unknown, actorId: string, key: string) => {
-    const request: TaskRequestV1 = { version: 1, namespace: 'runtime', sessionId: id, key,
-      actor: { kind: 'channel', id: actorId, appId: config.appId }, prompt, mode, skills: [], options: {}, sources: [], sourcePayload: { agentPrompt, skills: [] } };
-    const content = { version: 2 as const, prompt, executionContext: { actorId, agentPrompt }, contentSources: [], executionOptions: { permissionMode: 'ask' as const } };
+  const dispatch = vi.fn(async (request: TaskRequestV1, { agentPrompt }: { agentPrompt: string }) => {
+    const { sessionId: id, prompt, actor } = request;
+    const content = { version: 2 as const, prompt, executionContext: { ...(actor.kind === 'channel' ? { actorId: actor.id } : {}), agentPrompt },
+      contentSources: [], executionOptions: { permissionMode: 'ask' as const } };
     const input: AcceptedTaskInputV2 = { ...content, digest: createHash('sha256').update(canonicalExecutionJson(content)).digest('hex') };
     const task = execution.acceptTask({ sessionId: id, runId: session.runId }, request, input, 'back').task!;
     return { ...task, queuedAhead: 0 };
   });
-  const runtime = { start: vi.fn(async () => session), getSession: vi.fn(async () => session), subscribe: vi.fn(() => () => {}), dispatch };
+  const runtime = { start: vi.fn(async () => session), getSession: vi.fn(async () => session), subscribe: vi.fn(() => () => {}),
+    getAcceptedTask: (id: string) => repos.execution.getAcceptedTask(id), dispatchRequest: dispatch };
   const service = { send: vi.fn(async () => ({ messageId: 'om_card' })), reply: vi.fn(async () => ({ messageId: 'om_card' })),
     update: vi.fn(async () => ({ messageId: 'om_card' })), addReaction: vi.fn(async () => ({ reactionId: 'reaction' })), deleteReaction: vi.fn(async () => {}),
     listChatMessages: vi.fn(async () => ({ items: [], hasMore: false })), getMessageItems: vi.fn(async () => []) };
@@ -99,7 +101,7 @@ it('does not turn an adopted bot receipt into human authorization', async () => 
   const captured = (await inbox.capture(config.appId, original))!;
   await inbox.update(captured, { state: 'ignored' });
   const adopted = (await inbox.claim(config.appId, original, true, { senderType: 'user', senderOpenId: 'ou_author' }))!;
-  const accepted = await h.dispatch(h.session.id, originalText, 'queue', originalText, undefined, 'ou_author', `lark:${config.appId}:${original.messageId}:1`);
+  const accepted = await h.dispatch(larkTurnRequest(h.session.id, config.appId, adopted.event, 1, originalText), { agentPrompt: originalText });
   await inbox.update(adopted, { state: 'accepted', sessionId: h.session.id, taskId: accepted.id, turn: 1 });
   const ledger = await leaderLedger(h.repos, { parentSessionId: h.session.id, parentTaskId: accepted.id, actorId: 'ou_author' });
   expect(ledger).not.toContain('发起人原话：');

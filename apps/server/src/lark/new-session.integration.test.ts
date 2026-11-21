@@ -1,3 +1,4 @@
+import { executionTaskId } from '@dutydeck/storage/helpers';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { execFileSync } from 'node:child_process';
 import { mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
@@ -562,11 +563,16 @@ describe('managed first-turn recovery authorization', () => {
     const admin = await h.repos.roleAssignments.create({ id: 'test_admin', channelBotId: group.channelBotId!, groupBindingId: group.binding!.id,
       principalId: actor.principalId, role: 'admin', operateScope: 'none' });
     const authorization = vi.spyOn(manager, 'authorize');
-    const dispatch = vi.fn(async (sessionId: string, prompt: string, _mode: string, _agentPrompt: string, _risk: unknown, actorId?: string) => {
+    const accepted = new Map<string, unknown>();
+    const dispatch = vi.fn(async (request: import('@dutydeck/shared').TaskRequestV1) => {
+      const { sessionId, prompt } = request;
+      const actorId = request.actor.kind === 'channel' ? request.actor.id : undefined;
       const commit = await manager.prepareTurn(sessionId, actorId); await commit?.();
-      return { id: 'task_managed', sessionId, prompt, status: 'queued', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
+      const task = { id: executionTaskId('runtime', sessionId, request.key), sessionId, prompt, status: 'queued', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
+      accepted.set(task.id, { task, request });
+      return task;
     });
-    Object.assign(h.runtime, { dispatch });
+    Object.assign(h.runtime, { dispatchRequest: dispatch, getAcceptedTask: (id: string) => accepted.get(id) });
     const coordinate = () => {
       const coordinator = new LarkMessageCoordinator(h.runtime as any, h.service as any, silentLog(), Math.random, 'ou_bot', undefined,
         h.repos.channelMappings, async () => 'group', undefined, manager, { store: h.repos.config });
@@ -631,7 +637,7 @@ describe('managed first-turn recovery authorization', () => {
     await recovered.initializeWorkflows(h.config); await settled(recovered);
     expect(h.runtime.start).toHaveBeenCalledOnce();
     expect(h.dispatch).toHaveBeenCalledOnce();
-    expect(h.dispatch.mock.calls[0]?.[0]).toBe('ses_1');
+    expect(h.dispatch.mock.calls[0]?.[0].sessionId).toBe('ses_1');
     expect(h.authorization.mock.calls.map(call => call[3])).not.toContain('run.change_model');
     expect(await inbox.lookup(h.config.appId, event.messageId)).toMatchObject({ state: 'accepted', sessionId: 'ses_1' });
     // An accepted queued task is reattached, without resubmitting or changing its launch options.
@@ -662,7 +668,7 @@ describe('durable pre-dispatch rejection', () => {
 
   it('does not dispatch after /new during the auto-verification fingerprint read', async () => {
     const state = persistentRuntime();
-    const runtime = Object.assign(state.runtime, { dispatch: vi.fn(async () => ({ id: 'task_a', status: 'queued' })) });
+    const runtime = Object.assign(state.runtime, { getAcceptedTask: vi.fn(), dispatchRequest: vi.fn(async () => ({ id: 'task_a', status: 'queued' })) });
     const h = await harness({ runtime });
     const coordinator = h.createCoordinator();
     let release!: () => void;
@@ -675,9 +681,9 @@ describe('durable pre-dispatch rejection', () => {
       expect(await new LarkTaskInbox(h.repos.config).recoverable(h.config.appId)).toEqual([]);
       release();
       await vi.waitFor(() => expect(h.service.send).toHaveBeenCalledWith(expect.objectContaining({ cardKind: 'result', state: 'interrupted' })));
-      expect(runtime.dispatch).not.toHaveBeenCalled();
+      expect(runtime.dispatchRequest).not.toHaveBeenCalled();
       await h.createCoordinator().initializeWorkflows(h.config);
-      expect(runtime.dispatch).not.toHaveBeenCalled();
+      expect(runtime.dispatchRequest).not.toHaveBeenCalled();
     } finally { release(); }
   });
 
@@ -719,14 +725,14 @@ describe('dispatch terminal event isolation', () => {
     const task = { id: 'task_a', sessionId: 'ses_1', prompt: 'A', status: 'running', queuedAhead: 0,
       createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
     const runtime = Object.assign(state.runtime, {
-      dispatch: vi.fn(async () => task),
+      getAcceptedTask: vi.fn(), dispatchRequest: vi.fn(async () => task),
       getTaskRecovery: vi.fn(async () => { await gate; return undefined; })
     });
     runtime.subscribe.mockImplementation((_sessionId: string, callback: (event: AgentEvent) => void) => { receive = callback; return vi.fn(); });
     const h = await harness({ runtime });
     const coordinator = h.createCoordinator();
     await coordinator.handle(dm('om_isolation', 'A'), h.config);
-    await vi.waitFor(() => expect(runtime.dispatch).toHaveBeenCalledOnce());
+    await vi.waitFor(() => expect(runtime.dispatchRequest).toHaveBeenCalledOnce());
     await vi.waitFor(async () => expect(JSON.parse((await h.repos.config.get(`lark.inbox.${h.config.appId}.om_isolation`))!).state).toBe('accepted'));
     let sequence = 0;
     const emit = (type: AgentEvent['type'], data: unknown, taskId?: string) => receive({ id: `ev_${++sequence}`, sequence,

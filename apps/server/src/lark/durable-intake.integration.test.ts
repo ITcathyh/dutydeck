@@ -7,11 +7,11 @@ import { afterAll, afterEach, beforeAll, expect, it, vi } from 'vitest';
 import '../../../../tests/support/fast-wait-for.js';
 import { bundleForTest } from '../../../../tests/support/bundle-for-test.js';
 import { createRepositories } from '@dutydeck/storage';
-import { RuntimeError, type ConfigRepository } from '@dutydeck/shared';
+import type { ConfigRepository } from '@dutydeck/shared';
 import { larkBotsConfigKey, type StoredLarkConfig } from './config.js';
 import { LarkLongConnectionListener, type LarkMessageEvent } from './listener.js';
 import { LarkMessageCoordinator } from './coordinator.js';
-import { larkTurnRuntimeTaskId } from './coordinator-dispatch.js';
+import { larkTurnRequest, larkTurnRuntimeTaskId } from './coordinator-dispatch.js';
 import { LarkTaskInbox } from './task-inbox.js';
 import { LarkGroupParticipation } from './group-participation.js';
 import type { LarkScenarioAdoption } from './scenario-direct.js';
@@ -79,7 +79,7 @@ async function harness(existing?: { directory: string; exit: Promise<ChildExit> 
   if (!existing) await repositories.config.set(larkBotsConfigKey, JSON.stringify([config]));
   const session = { id: 'ses_durable', agentId: 'codex', state: 'idle', cwd: directory, protocol: 'acp', permissionMode: 'ask', createdAt: '', updatedAt: '' };
   const runtime = { start: vi.fn(async () => session), getSession: vi.fn(async () => session), subscribe: vi.fn(() => vi.fn()),
-    dispatch: vi.fn(async (..._args: unknown[]) => ({ id: 'task_durable', sessionId: session.id, status: 'queued', queuedAhead: 0 })) };
+    getAcceptedTask: vi.fn(), dispatchRequest: vi.fn(async (_request: import('@dutydeck/shared').TaskRequestV1, _material: import('@dutydeck/runtime').TaskRequestMaterial) => ({ id: 'task_durable', sessionId: session.id, status: 'queued', queuedAhead: 0 })) };
   const service = { send: vi.fn(async () => ({ messageId: 'om_card' })), reply: vi.fn(async () => ({ messageId: 'om_card' })),
     update: vi.fn(async () => ({ messageId: 'om_card' })), addReaction: vi.fn(async () => ({ reactionId: 'reaction' })), deleteReaction: vi.fn(async () => {}),
     listChatMessages: vi.fn(async () => ({ items: [], hasMore: false })), getMessageItems: vi.fn(async () => []) };
@@ -116,10 +116,10 @@ it('the registered SDK handler returns after SQLite receipt while slow permissio
   await sdk.handlers['im.message.receive_v1']!(notification(message()));
   expect(await h.inbox()).toMatchObject({ state: 'unrouted', event: message() });
   expect(groupManager.resolved).not.toHaveBeenCalled();
-  expect(h.runtime.dispatch).not.toHaveBeenCalled();
+  expect(h.runtime.dispatchRequest).not.toHaveBeenCalled();
   expect(performance.now() - started).toBeLessThan(500);
   await vi.waitFor(() => expect(groupManager.resolved).toHaveBeenCalledOnce());
-  expect(h.runtime.dispatch).not.toHaveBeenCalled();
+  expect(h.runtime.dispatchRequest).not.toHaveBeenCalled();
   listener.stop(); release();
 });
 
@@ -179,7 +179,7 @@ it.each(['throw', 'reject'] as const)('a local storage %s rejects the registered
   const listener = new LarkLongConnectionListener(h.log, { runtime: h.runtime as any, workflowStore: store, fetcher: fetcher as typeof fetch });
   cleanups.push(() => listener.stop()); await listener.start(config);
   await expect(sdk.handlers['im.message.receive_v1']!(notification(message()))).rejects.toThrow('disk failed');
-  expect(await h.inbox()).toBeUndefined(); expect(h.runtime.dispatch).not.toHaveBeenCalled();
+  expect(await h.inbox()).toBeUndefined(); expect(h.runtime.dispatchRequest).not.toHaveBeenCalled();
 });
 
 it('survives SIGKILL after durable intake and before routing, then recovers the original exactly once', async () => {
@@ -192,7 +192,7 @@ it('survives SIGKILL after durable intake and before routing, then recovers the 
   await vi.waitFor(async () => expect(await h.inbox()).toMatchObject({ state: 'accepted' }));
   await coordinator.receive({ ...original, content: '{"text":"forged replacement"}' }, config);
   await coordinator.handle({ ...original, content: '{"text":"forged replacement"}' }, config);
-  expect(h.runtime.dispatch).toHaveBeenCalledOnce(); expect(await h.inbox()).toMatchObject({ event: original });
+  expect(h.runtime.dispatchRequest).toHaveBeenCalledOnce(); expect(await h.inbox()).toMatchObject({ event: original });
 });
 
 it('canonicalizes concurrent modified redelivery before wake and authorization and routes only once', async () => {
@@ -202,7 +202,7 @@ it('canonicalizes concurrent modified redelivery before wake and authorization a
   await Promise.all([coordinator.receive(original, config), coordinator.receive({ ...original, content: '{"text":"/new"}', senderOpenId: 'ou_forged' }, config)]);
   await vi.waitFor(async () => expect(await h.inbox()).toMatchObject({ state: 'accepted' }));
   expect(groupManager.resolved).toHaveBeenCalledOnce(); expect(groupManager.authorize.mock.calls[0]?.[2]).toBe('ou_author');
-  expect(h.runtime.dispatch).toHaveBeenCalledOnce(); expect(await h.inbox()).toMatchObject({ event: original });
+  expect(h.runtime.dispatchRequest).toHaveBeenCalledOnce(); expect(await h.inbox()).toMatchObject({ event: original });
 });
 
 it.each(['disabled', 'unmentioned', 'bot', 'revoked'] as const)('raw recovery rechecks %s without forcing adoption', async reason => {
@@ -212,7 +212,7 @@ it.each(['disabled', 'unmentioned', 'bot', 'revoked'] as const)('raw recovery re
   if (reason === 'disabled') await h.repositories.config.set(larkBotsConfigKey, JSON.stringify([{ ...config, listening: false }]));
   const groupManager = { resolved: vi.fn(async () => config), authorize: vi.fn(async () => reason === 'revoked' ? { allowed: false, reason: 'revoked' } : undefined) };
   const coordinator = h.createCoordinator({ groupManager }); await coordinator.initializeWorkflows(config);
-  expect(h.runtime.start).not.toHaveBeenCalled(); expect(h.runtime.dispatch).not.toHaveBeenCalled();
+  expect(h.runtime.start).not.toHaveBeenCalled(); expect(h.runtime.dispatchRequest).not.toHaveBeenCalled();
   expect(await h.inbox()).toMatchObject({ state: reason === 'revoked' ? 'failed' : 'ignored' });
 });
 
@@ -222,20 +222,20 @@ it('keeps transient pre-route failure retryable instead of converting it to igno
   await new LarkTaskInbox(h.repositories.config).capture(config.appId, message());
   const coordinator = h.createCoordinator({ groupManager }); await coordinator.initializeWorkflows(config);
   expect(await h.inbox()).toMatchObject({ state: 'unrouted', boot: '' });
-  expect(h.runtime.dispatch).not.toHaveBeenCalled();
+  expect(h.runtime.dispatchRequest).not.toHaveBeenCalled();
   await vi.advanceTimersByTimeAsync(30_001);
   vi.useRealTimers();
   await vi.waitFor(async () => expect(await h.inbox()).toMatchObject({ state: 'accepted' }));
-  expect(h.runtime.dispatch).toHaveBeenCalledOnce();
+  expect(h.runtime.dispatchRequest).toHaveBeenCalledOnce();
 });
 
 it('allows a validated edit after ignored termination while receive redeliveries stay suppressed', async () => {
   const h = await harness(); const coordinator = h.createCoordinator(); const original = message({ mentions: [] });
   await coordinator.receive(original, config); await vi.waitFor(async () => expect(await h.inbox()).toMatchObject({ state: 'ignored' }));
   const edited = message({ content: '{"text":"@bot edited"}' });
-  await coordinator.receive(edited, config); expect(h.runtime.dispatch).not.toHaveBeenCalled();
+  await coordinator.receive(edited, config); expect(h.runtime.dispatchRequest).not.toHaveBeenCalled();
   await coordinator.handleEdited(edited, config); await vi.waitFor(async () => expect(await h.inbox()).toMatchObject({ state: 'accepted', event: edited }));
-  expect(h.runtime.dispatch).toHaveBeenCalledOnce();
+  expect(h.runtime.dispatchRequest).toHaveBeenCalledOnce();
 });
 
 it('preserves an explicit participation adoption after the original observation was ignored', async () => {
@@ -243,7 +243,7 @@ it('preserves an explicit participation adoption after the original observation 
   await coordinator.receive(original, config); await vi.waitFor(async () => expect(await h.inbox()).toMatchObject({ state: 'ignored' }));
   await coordinator.adopt({ ...original, content: '{"text":"replacement"}' }, config);
   await vi.waitFor(async () => expect(await h.inbox()).toMatchObject({ state: 'accepted', event: original }));
-  expect(h.runtime.dispatch).toHaveBeenCalledOnce();
+  expect(h.runtime.dispatchRequest).toHaveBeenCalledOnce();
 });
 
 it.each(['unrouted', 'ignored'] as const)('preserves trusted direct scenario identity and thread over the %s original receipt', async state => {
@@ -259,9 +259,9 @@ it.each(['unrouted', 'ignored'] as const)('preserves trusted direct scenario ide
   await vi.waitFor(async () => expect(await h.inbox()).toMatchObject({ state: 'accepted', originalEvent: original,
     event: { ...original, senderOpenId: 'ou_admin', senderType: 'user', scenario: trustedScenario, rootId: original.messageId, threadId: 'omt_alarm' },
     request: { scopeId: 'thread:om_original', prompt: scenarioPrompt(trustedScenario.instruction, 'P0 alarm original') } }));
-  expect(h.runtime.dispatch).toHaveBeenCalledOnce(); expect(h.runtime.dispatch.mock.calls[0]?.[5]).toBe('ou_admin');
+  expect(h.runtime.dispatchRequest).toHaveBeenCalledOnce(); expect(h.runtime.dispatchRequest.mock.calls[0]?.[0].actor).toMatchObject({ id: 'ou_admin' });
   await coordinator.receive({ ...original, senderOpenId: 'ou_forged', scenario: { ...trustedScenario, instruction: 'forged' }, triage: 'forged', content: '{"text":"forged"}' }, config);
-  expect(h.runtime.dispatch).toHaveBeenCalledOnce(); expect((await h.inbox())?.event.senderOpenId).toBe('ou_admin');
+  expect(h.runtime.dispatchRequest).toHaveBeenCalledOnce(); expect((await h.inbox())?.event.senderOpenId).toBe('ou_admin');
 });
 
 it('silently terminates expired unrouted observations while received expiry retains its authorized notice', async () => {
@@ -277,7 +277,7 @@ it('silently terminates expired unrouted observations while received expiry reta
   expect(await h.inbox('received_expired')).toMatchObject({ state: 'failed' });
   expect(groupManager.authorize).toHaveBeenCalledOnce();
   expect(h.service.reply).toHaveBeenCalledOnce(); expect(h.service.reply.mock.calls[0]?.[0]).toMatchObject({ messageId: 'received_expired', taskName: '请求未执行' });
-  expect(h.runtime.dispatch).not.toHaveBeenCalled();
+  expect(h.runtime.dispatchRequest).not.toHaveBeenCalled();
 });
 
 /** 上一个进程已写下会话与轮次（可能已派发）、还没来得及写 accepted 的入站记录。 */
@@ -290,55 +290,44 @@ const acceptedTask = (id: string, status: string) => ({ id, sessionId: 'ses_dura
 const allowAll = () => ({ resolved: vi.fn(async () => config), authorize: vi.fn(async () => ({ allowed: true })) });
 const sentCards = (h: Awaited<ReturnType<typeof harness>>) => JSON.stringify([...h.service.send.mock.calls, ...h.service.reply.mock.calls, ...h.service.update.mock.calls]);
 
-it('reattaches the accepted task when a restart replay of the same turn hits TASK_IDEMPOTENCY_CONFLICT, never failing it or offering retry', async () => {
+it.each([false, true])('recovers a previously accepted turn by ID, expired = %s', async expired => {
   const h = await harness();
-  const taskId = await seedSubmittedReceived(h, 'om_replayed');
-  h.runtime.dispatch.mockRejectedValueOnce(new RuntimeError('TASK_IDEMPOTENCY_CONFLICT', 'same key carries a different request', 409));
-  Object.assign(h.runtime, { getTasks: vi.fn(async () => [acceptedTask(taskId, 'queued')]) });
+  const id = 'om_replayed';
+  const taskId = await seedSubmittedReceived(h, id, expired ? new Date(Date.now() - 90 * 60_000).toISOString() : undefined);
+  const task = acceptedTask(taskId, 'queued');
+  const request = larkTurnRequest(task.sessionId, config.appId, message({ messageId: id }), 1, task.prompt);
+  h.runtime.getAcceptedTask.mockImplementation(key => key === taskId ? { task, request } : undefined);
   const coordinator = h.createCoordinator({ groupManager: allowAll() }); await coordinator.initializeWorkflows(config);
-  await vi.waitFor(async () => expect(await h.inbox('om_replayed')).toMatchObject({ state: 'accepted', taskId }));
-  expect(h.runtime.dispatch).toHaveBeenCalledOnce();
-  expect(h.runtime.dispatch.mock.calls[0]?.[6]).toBe(`lark:${config.appId}:om_replayed:1`);
+  await vi.waitFor(async () => expect(await h.inbox(id)).toMatchObject({ state: 'accepted', taskId }));
+  expect(h.runtime.dispatchRequest).not.toHaveBeenCalled();
   expect(sentCards(h)).not.toContain('"state":"failed"');
 });
 
-it('a TASK_IDEMPOTENCY_CONFLICT whose accepted task cannot be read is handed to reconciliation, not failed', async () => {
+it('keeps an unreadable acceptance pending without submitting or failing the turn', async () => {
   const h = await harness();
   await seedSubmittedReceived(h, 'om_replayed');
-  h.runtime.dispatch.mockRejectedValueOnce(new RuntimeError('TASK_IDEMPOTENCY_CONFLICT', 'same key carries a different request', 409));
-  Object.assign(h.runtime, { getTasks: vi.fn(async () => { throw new Error('database is locked'); }) });
+  h.runtime.getAcceptedTask.mockImplementation(() => { throw new Error('database is locked'); });
   const coordinator = h.createCoordinator({ groupManager: allowAll() }); await coordinator.initializeWorkflows(config);
-  await vi.waitFor(() => expect(h.log.warn).toHaveBeenCalledWith(expect.anything(), '任务已接收，后续步骤失败，结果交给订阅与对账'));
+  await vi.waitFor(() => expect(h.log.warn).toHaveBeenCalledWith(expect.anything(), '执行记录暂时无法核验，保留入站记录'));
   expect(await h.inbox('om_replayed')).toMatchObject({ state: 'received' });
+  expect(h.runtime.dispatchRequest).not.toHaveBeenCalled();
   expect(sentCards(h)).not.toContain('"state":"failed"');
-});
-
-it('expired received record whose turn the ledger accepted replays under the same key instead of claiming it never ran', async () => {
-  const h = await harness();
-  const taskId = await seedSubmittedReceived(h, 'om_expired_accepted', new Date(Date.now() - 90 * 60_000).toISOString());
-  h.runtime.dispatch.mockResolvedValueOnce({ id: taskId, sessionId: 'ses_durable', status: 'queued', queuedAhead: 0, replayed: true } as any);
-  Object.assign(h.runtime, { getTasks: vi.fn(async () => [acceptedTask(taskId, 'queued')]) });
-  const coordinator = h.createCoordinator({ groupManager: allowAll() }); await coordinator.initializeWorkflows(config);
-  await vi.waitFor(async () => expect(await h.inbox('om_expired_accepted')).toMatchObject({ state: 'accepted', taskId }));
-  expect(h.runtime.dispatch).toHaveBeenCalledOnce();
-  expect(h.runtime.dispatch.mock.calls[0]?.[6]).toBe(`lark:${config.appId}:om_expired_accepted:1`);
-  expect(sentCards(h)).not.toContain('请求未执行');
 });
 
 it.each([
-  ['absent from the ledger', async () => [], '请求未执行', '没有执行'],
-  ['unreadable', async () => { throw new Error('database is locked'); }, '请求结果未知', '无法确认这条请求是否已经执行']
-] as const)('expired received record whose turn is %s is closed without dispatch and says so', async (_case, getTasks, taskName, wording) => {
+  ['absent from the ledger', () => undefined, '请求未执行', '没有执行'],
+  ['unreadable', () => { throw new Error('database is locked'); }, '请求结果未知', '无法确认这条请求是否已经执行']
+] as const)('expired received record whose turn is %s is closed without dispatch and says so', async (_case, readAccepted, taskName, wording) => {
   const h = await harness();
   await seedSubmittedReceived(h, 'om_expired', new Date(Date.now() - 90 * 60_000).toISOString());
-  Object.assign(h.runtime, { getTasks: vi.fn(getTasks) });
+  h.runtime.getAcceptedTask.mockImplementation(readAccepted);
   const coordinator = h.createCoordinator({ groupManager: allowAll() }); await coordinator.initializeWorkflows(config);
   expect(await h.inbox('om_expired')).toMatchObject({ state: 'failed', reason: 'backlog_expired' });
   expect(h.service.reply).toHaveBeenCalledOnce();
   expect(h.service.reply.mock.calls[0]?.[0]).toMatchObject({ messageId: 'om_expired', taskName });
   expect(JSON.stringify(h.service.reply.mock.calls[0])).toContain(wording);
   if (taskName === '请求结果未知') expect(JSON.stringify(h.service.reply.mock.calls[0])).not.toContain('没有执行');
-  expect(h.runtime.dispatch).not.toHaveBeenCalled();
+  expect(h.runtime.dispatchRequest).not.toHaveBeenCalled();
 });
 
 it.each(['before_route', 'slow_route'] as const)('queues a validated edit after its unmentioned original %s, then executes the edit once', async phase => {
@@ -353,11 +342,11 @@ it.each(['before_route', 'slow_route'] as const)('queues a validated edit after 
   if (phase === 'slow_route') {
     await vi.waitFor(() => expect(groupManager.resolved).toHaveBeenCalledOnce());
     expect(await h.inbox()).toMatchObject({ state: 'unrouted', event: original });
-    expect(h.runtime.dispatch).not.toHaveBeenCalled(); release();
+    expect(h.runtime.dispatchRequest).not.toHaveBeenCalled(); release();
   }
   await edit;
   await vi.waitFor(async () => expect(await h.inbox()).toMatchObject({ state: 'accepted', event: edited }));
-  expect(h.runtime.dispatch).toHaveBeenCalledOnce();
+  expect(h.runtime.dispatchRequest).toHaveBeenCalledOnce();
 });
 
 it('does not replace or replay an accepted request when a validated edit is queued', async () => {
@@ -365,7 +354,7 @@ it('does not replace or replay an accepted request when a validated edit is queu
   await coordinator.receive(original, config);
   await vi.waitFor(async () => expect(await h.inbox()).toMatchObject({ state: 'accepted' }));
   await coordinator.handleEdited({ ...original, content: '{"text":"@bot another request"}' }, config);
-  expect(await h.inbox()).toMatchObject({ state: 'accepted', event: original }); expect(h.runtime.dispatch).toHaveBeenCalledOnce();
+  expect(await h.inbox()).toMatchObject({ state: 'accepted', event: original }); expect(h.runtime.dispatchRequest).toHaveBeenCalledOnce();
 });
 
 it.each([1, 3])('keeps the verified edit authoritative through %i transient original/edited route failures and stale retry timers', async failures => {
@@ -378,14 +367,14 @@ it.each([1, 3])('keeps the verified edit authoritative through %i transient orig
   await coordinator.receive(original, config); await coordinator.handleEdited(edited, config);
   if (failures > 1) {
     expect(await h.inbox()).toMatchObject({ state: 'unrouted', boot: '', event: edited, originalEvent: original });
-    expect(h.runtime.dispatch).not.toHaveBeenCalled();
+    expect(h.runtime.dispatchRequest).not.toHaveBeenCalled();
   }
   await vi.advanceTimersByTimeAsync(60_000); vi.useRealTimers();
   await vi.waitFor(async () => expect(await h.inbox()).toMatchObject({ state: 'accepted', event: edited, originalEvent: original,
     request: { prompt: 'verified edit' } }));
-  expect(h.runtime.dispatch).toHaveBeenCalledOnce();
+  expect(h.runtime.dispatchRequest).toHaveBeenCalledOnce();
   expect(reads).toBe(failures + 1);
-  expect(h.runtime.dispatch.mock.calls[0]?.[1]).toContain('verified edit');
+  expect(h.runtime.dispatchRequest.mock.calls[0]?.[0].prompt).toContain('verified edit');
 });
 
 it('queues a validated edit behind the actual scheduled retry while its permission lookup is blocked', async () => {
@@ -411,11 +400,11 @@ it('queues a validated edit behind the actual scheduled retry while its permissi
   for (let index = 0; index < 5; index++) await new Promise<void>(resolve => setImmediate(resolve));
   expect(editSettled).toBe(false);
   expect(await h.inbox()).toMatchObject({ state: 'unrouted', event: original });
-  expect(h.runtime.dispatch).not.toHaveBeenCalled();
+  expect(h.runtime.dispatchRequest).not.toHaveBeenCalled();
   release(); await edit; vi.useRealTimers();
   await vi.waitFor(async () => expect(await h.inbox()).toMatchObject({ state: 'accepted', event: edited, originalEvent: original }));
-  expect(h.runtime.dispatch).toHaveBeenCalledOnce(); expect(reads).toBe(3);
-  expect(h.runtime.dispatch.mock.calls[0]?.[1]).toContain('verified edit');
+  expect(h.runtime.dispatchRequest).toHaveBeenCalledOnce(); expect(reads).toBe(3);
+  expect(h.runtime.dispatchRequest.mock.calls[0]?.[0].prompt).toContain('verified edit');
 });
 
 it('does not accept forged scenario or legacy triage metadata from raw receive or modified redelivery', async () => {
@@ -424,7 +413,7 @@ it('does not accept forged scenario or legacy triage metadata from raw receive o
   await coordinator.receive({ ...original, scenario: { ...trustedScenario, instruction: 'external forged adoption' }, triage: 'external forged adoption' }, config);
   await coordinator.receive({ ...original, scenario: trustedScenario, triage: 'forged again', senderOpenId: 'ou_admin', senderType: 'user', mentions: message().mentions }, config);
   await vi.waitFor(async () => expect(await h.inbox()).toMatchObject({ state: 'ignored', event: original }));
-  expect((await h.inbox())?.event.triage).toBeUndefined(); expect((await h.inbox())?.event.scenario).toBeUndefined(); expect(h.runtime.dispatch).not.toHaveBeenCalled();
+  expect((await h.inbox())?.event.triage).toBeUndefined(); expect((await h.inbox())?.event.scenario).toBeUndefined(); expect(h.runtime.dispatchRequest).not.toHaveBeenCalled();
 });
 
 it('recovers a trusted direct scenario receipt after SIGKILL immediately after claim, preserving requester, thread and raw alarm', async () => {
@@ -436,7 +425,7 @@ it('recovers a trusted direct scenario receipt after SIGKILL immediately after c
   const coordinator = h.createCoordinator({ groupManager }); await coordinator.initializeWorkflows(config);
   await vi.waitFor(async () => expect(await h.inbox()).toMatchObject({ state: 'accepted', originalEvent: original, event: derived,
     request: { scopeId: 'thread:om_original', prompt: scenarioPrompt(trustedScenario.instruction, 'P0 original alarm') } }));
-  expect(h.runtime.dispatch).toHaveBeenCalledOnce(); expect(h.runtime.dispatch.mock.calls[0]?.[5]).toBe('ou_admin');
+  expect(h.runtime.dispatchRequest).toHaveBeenCalledOnce(); expect(h.runtime.dispatchRequest.mock.calls[0]?.[0].actor).toMatchObject({ id: 'ou_admin' });
   expect(h.service.reply.mock.calls[0]?.[0]).toMatchObject({ replyInThread: true, replyRootId: original.messageId });
 });
 
@@ -451,7 +440,7 @@ it('recovers a received legacy triage record left by an older version: adopted, 
   const coordinator = h.createCoordinator({ groupManager }); await coordinator.initializeWorkflows(config);
   await vi.waitFor(async () => expect(await h.inbox()).toMatchObject({ state: 'accepted', originalEvent: original, event: legacy,
     request: { scopeId: 'thread:om_original', prompt: `${legacy.triage}\nP0 original alarm` } }));
-  expect(h.runtime.dispatch).toHaveBeenCalledOnce(); expect(h.runtime.dispatch.mock.calls[0]?.[5]).toBe('ou_admin');
+  expect(h.runtime.dispatchRequest).toHaveBeenCalledOnce(); expect(h.runtime.dispatchRequest.mock.calls[0]?.[0].actor).toMatchObject({ id: 'ou_admin' });
   expect(groupManager.authorize).toHaveBeenCalledWith(config.appId, original.chatId, 'ou_admin', 'task.create', undefined, expect.objectContaining({ memberObserved: false }));
   expect(h.service.reply.mock.calls[0]?.[0]).toMatchObject({ replyInThread: true, replyRootId: original.messageId });
 });
@@ -476,9 +465,9 @@ it('routes a subscribed bot alarm through real group participation and its trust
   await vi.waitFor(async () => expect(await h.inbox()).toMatchObject({ state: 'accepted', originalEvent: original,
     event: { senderOpenId: 'ou_admin', senderType: 'user', rootId: original.messageId, threadId: 'omt_alarm', scenario: expect.objectContaining({ mode: 'direct', packId: 'alarm', instruction: expect.stringContaining('[告警初筛]') }) },
     request: { scopeId: `thread:${original.messageId}`, prompt: expect.stringContaining('P0 original alarm') } }));
-  expect(h.runtime.dispatch).toHaveBeenCalledOnce(); expect(h.runtime.dispatch.mock.calls[0]?.[5]).toBe('ou_admin');
+  expect(h.runtime.dispatchRequest).toHaveBeenCalledOnce(); expect(h.runtime.dispatchRequest.mock.calls[0]?.[0].actor).toMatchObject({ id: 'ou_admin' });
   // direct 场景请求与普通 @ 请求走同一条派发路径，角色注入也在其中：角色块是宿主规则，位于初筛材料之前。
-  const agentPrompt = String(h.runtime.dispatch.mock.calls[0]?.[3]);
+  const agentPrompt = String(h.runtime.dispatchRequest.mock.calls[0]?.[1].agentPrompt);
   expect(agentPrompt).toContain('[Dutydeck 角色 · 管理者配置]\n你在群里的角色是「告警值班」，负责：报警和告警排查');
   expect(agentPrompt.indexOf('[Dutydeck 角色 · 管理者配置]')).toBeLessThan(agentPrompt.indexOf('[告警初筛]'));
   expect(decide).not.toHaveBeenCalled();
@@ -511,7 +500,7 @@ it('sends the rejection card when a bot alarm adopted by its scenario is denied:
   // 场景包收养在原消息自己的 handle 里同步完成：这条记录从没变成 ignored，也就不会被换成摘要。
   expect(ignored.mock.calls.filter(([, patch]) => patch.state === 'ignored')).toHaveLength(0);
   expect((await h.inbox())?.snippet).toBeUndefined();
-  expect(h.runtime.dispatch).not.toHaveBeenCalled();
+  expect(h.runtime.dispatchRequest).not.toHaveBeenCalled();
 });
 
 it('stalled welcome and reaction requests do not delay ACK or start the agent before the reaction settles', async () => {
@@ -534,5 +523,5 @@ it('stalled welcome and reaction requests do not delay ACK or start the agent be
   expect(await h.inbox()).toMatchObject({ state: 'unrouted', event });
   await vi.waitFor(() => expect(fetcher.mock.calls.some(([url]) => String(url).includes('/reactions'))).toBe(true));
   expect(fetcher.mock.calls.some(([url]) => String(url).includes('/im/v1/messages?'))).toBe(true);
-  expect(h.runtime.dispatch).not.toHaveBeenCalled();
+  expect(h.runtime.dispatchRequest).not.toHaveBeenCalled();
 });

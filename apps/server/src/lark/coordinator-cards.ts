@@ -72,18 +72,20 @@ export abstract class LarkCoordinatorCards extends LarkCoordinatorCore {
 
   protected async saveCardTask(task: LarkTask, state = task.state) {
     // 新轮尚未派发时保留旧失败映射，重启只补失败回执，不能再次自动执行。
-    if (task.launcherRecoveryPending && !task.runtimeTaskId) return;
+    if (task.launcherRecoveryPending && !task.runtimeTaskId) return { saved: false as const, reason: 'launcher_recovery_pending' };
     const turn = task.turn;
-    await this.persistCardTask(task, state);
+    const result = await this.persistCardTask(task, state);
+    if (!result.saved) this.log.warn({ taskId: task.id, turn, reason: result.reason }, '飞书卡片映射未保存');
     // 任务通道派来的任务：同一处状态汇聚点顺带把进度写成飞书任务记录；状态和轮次都属于保存开始时的那一轮。
     await this.writeLarkTaskStep(task, state, turn);
+    return result;
   }
 
-  private async persistCardTask(task: LarkTask, state: LarkTaskState) {
+  private async persistCardTask(task: LarkTask, state: LarkTaskState): Promise<{ saved: true } | { saved: false; reason: string }> {
     // 静默进展下没有过程卡，映射仍然要落库：没有它，重启后这条任务就彻底失联。
     const mappings = this.cardMappings;
     const { sessionId, turn, runtimeTaskId } = task;
-    if (!mappings || !sessionId || !task.startedAt) return;
+    if (!mappings || !sessionId || !task.startedAt) return { saved: false, reason: 'missing_mapping_context' };
     const extra: PersistedLarkCardTask = {
       ...(task.launcherRecoveryNote ? { launcher_recovery_note: true } : {}),
       anchor_message_id: larkMessageAnchor(task.event),
@@ -133,14 +135,14 @@ export abstract class LarkCoordinatorCards extends LarkCoordinatorCore {
       let current: { sessionId: string; extra?: string | null } | undefined;
       try { current = await mappings.get(channel, task.id); }
       catch (error) {
-        this.log.warn({ error, taskId: task.id, turn }, '飞书卡片映射读取失败，保留现有记录并等待下次保存');
-        return;
+        return { saved: false, reason: `read: ${String(error)}` };
       }
       let saved: PersistedLarkCardTask | undefined;
-      try { saved = parseOptionalCardTask(current?.extra); }
-      catch {
-        this.log.warn({ taskId: task.id, turn }, '飞书卡片映射现有内容无法核验，禁止旧快照整行覆写');
-        return;
+      try {
+        saved = parseOptionalCardTask(current?.extra);
+        if (current?.extra && (!saved || typeof saved !== 'object' || Array.isArray(saved))) return { saved: false, reason: 'invalid_mapping' };
+      } catch {
+        return { saved: false, reason: 'invalid_mapping' };
       }
       const sameSession = current?.sessionId === sessionId;
       const currentTurn = saved?.turn ?? 0;
@@ -153,26 +155,29 @@ export abstract class LarkCoordinatorCards extends LarkCoordinatorCore {
       // 没有退休证据时，同级或更高轮次的另一个会话绝不能被本次旧快照换回；更高持久轮次始终优先。
       // 同轮但 runtime task 不同也无法证明属于同一次执行，不能按普通字段合并放行。
       if (current && (currentTurn > turn || !replacesRetiredSession && !sameSession && saved !== undefined && currentTurn >= turn
-        || sameSession && currentTurn === turn && saved?.runtime_task_id && runtimeTaskId && saved.runtime_task_id !== runtimeTaskId)) return;
+        || sameSession && currentTurn === turn && saved?.runtime_task_id && runtimeTaskId && saved.runtime_task_id !== runtimeTaskId)) return { saved: false, reason: 'obsolete_turn' };
       const merged = JSON.stringify(this.mergeCardTaskExtra(current?.extra, extra, turn, sameSession));
-      // 新建记录或换了会话（/new 之后 sessionId 变了）必须整行落库；存储没有 CAS（测试替身）时也只能如此。
-      // 写前再核对任务对象没有在 await 期间推进，避免无 CAS 的整行写绕开上面的持久归属检查。
-      if (!current || !sameSession || typeof mappings.compareAndSetExtra !== 'function') {
-        // 整行写没有 CAS 保护，落库前必须再读一次，不能拿最初那份快照覆盖等待期间的新归属。
-        if (!confirmWholeRow) { confirmWholeRow = true; continue; }
-        if (task.sessionId !== sessionId || task.turn !== turn || task.runtimeTaskId !== runtimeTaskId) return;
-        await mappings.save({ ...row, extra: merged });
-        return;
+      try {
+        // 新建记录或换了会话（/new 之后 sessionId 变了）必须整行落库；存储没有 CAS（测试替身）时也只能如此。
+        // 写前再核对任务对象没有在 await 期间推进，避免无 CAS 的整行写绕开上面的持久归属检查。
+        if (!current || !sameSession || typeof mappings.compareAndSetExtra !== 'function') {
+          // 整行写没有 CAS 保护，落库前必须再读一次，不能拿最初那份快照覆盖等待期间的新归属。
+          if (!confirmWholeRow) { confirmWholeRow = true; continue; }
+          if (task.sessionId !== sessionId || task.turn !== turn || task.runtimeTaskId !== runtimeTaskId) return { saved: false, reason: 'obsolete_turn' };
+          await mappings.save({ ...row, extra: merged });
+          return { saved: true };
+        }
+        // CAS 到上限也不能退回无条件的整行覆写；保留当前记录，下一次心跳或对账可基于新读重试。
+        if (attempt >= 5) {
+          return { saved: false, reason: 'cas_conflict' };
+        }
+        // 心跳帧多数没有新内容：合并结果与库里一致时，CAS 写入也只是原值覆盖，直接跳过。
+        if (merged === current.extra) return { saved: true };
+        if (task.sessionId !== sessionId || task.turn !== turn || task.runtimeTaskId !== runtimeTaskId) return { saved: false, reason: 'obsolete_turn' };
+        if (await mappings.compareAndSetExtra(row.id, current.extra, merged)) return { saved: true };
+      } catch (error) {
+        return { saved: false, reason: error instanceof Error ? error.message : String(error) };
       }
-      // CAS 到上限也不能退回无条件的整行覆写；保留当前记录，下一次心跳或对账可基于新读重试。
-      if (attempt >= 5) {
-        this.log.warn({ taskId: task.id, turn }, '飞书卡片映射并发写冲突反复失败，保留当前记录并等待下次保存');
-        return;
-      }
-      // 心跳帧多数没有新内容：合并结果与库里一致时，CAS 写入也只是原值覆盖，直接跳过。
-      if (merged === current.extra) return;
-      if (task.sessionId !== sessionId || task.turn !== turn || task.runtimeTaskId !== runtimeTaskId) return;
-      if (await mappings.compareAndSetExtra(row.id, current.extra, merged)) return;
     }
   }
 

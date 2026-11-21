@@ -1366,7 +1366,8 @@ describe('实时静默轮次仍交付恢复异常', () => {
         return { status: task?.status, blockers: task?.status === 'queued' ? [{ code: 'DRIVER_STOP_BLOCKED' }] : [] };
       }),
       subscribe: vi.fn((_id: string, callback: (event: any) => void) => { listener = callback; return () => { listener = undefined; }; }),
-      dispatch: vi.fn(async (id: string) => {
+      getAcceptedTask: vi.fn(),
+      dispatchRequest: vi.fn(async ({ sessionId: id }: { sessionId: string }) => {
         const task = runtimeTask({ id: 'blocked_task', sessionId: id, status: 'queued' });
         h.tasks.set(id, [task]);
         return { ...task, queuedAhead: 0 };
@@ -1410,7 +1411,8 @@ describe('实时静默轮次仍交付恢复异常', () => {
       getEvents: vi.fn(async () => []),
       getTaskRecovery: vi.fn(async () => ({ status: 'reconcile_required', blockers: [{ code: 'DRIVER_RESOURCE_UNSAFE' }] })),
       subscribe: vi.fn((_id: string, callback: (event: any) => void) => { listener = callback; return () => { listener = undefined; }; }),
-      dispatch: vi.fn(async (id: string) => {
+      getAcceptedTask: vi.fn(),
+      dispatchRequest: vi.fn(async ({ sessionId: id }: { sessionId: string }) => {
         const task = runtimeTask({ id: 'unknown_task', sessionId: id, status: 'reconcile_required' });
         h.tasks.set(id, [task]);
         listener?.({ type: 'task', data: { task } });

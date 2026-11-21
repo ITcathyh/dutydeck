@@ -197,12 +197,12 @@ it('失败事件先于 dispatch 返回时先缓存，取得任务号后仍能自
   let count = 0;
   const h = await setup(async () => { if (++count === 1) throw new Error(LAUNCHER_ERROR); });
   cleanups.push(() => h.teardown());
-  const dispatch = h.runtime.dispatch.bind(h.runtime);
+  const dispatch = h.runtime.dispatchRequest.bind(h.runtime);
   let failedTaskId: string | undefined;
-  vi.spyOn(h.runtime, 'dispatch').mockImplementationOnce(async (...args) => {
+  vi.spyOn(h.runtime, 'dispatchRequest').mockImplementationOnce(async (...args) => {
     let failed!: (taskId: string) => void;
     const failure = new Promise<string>(resolve => { failed = resolve; });
-    const unsubscribe = h.runtime.subscribe(args[0], event => {
+    const unsubscribe = h.runtime.subscribe(args[0].sessionId, event => {
       const task = event.type === 'task' ? (event.data as any)?.task : undefined;
       if (task?.status === 'failed') failed(task.id);
     });
@@ -641,10 +641,10 @@ it('托管群里别人的请求正在派发途中时不换会话，不把它打�
   const old = await h.runTurn('om_inflight_owner', { ...top, senderOpenId: 'ou_owner' });
   const stop = vi.spyOn(h.runtime, 'stop');
   // Owner 的第二条停在 runtime.dispatch 里：已过 epoch 检查，runtime 里还没有这条任务。
-  const dispatch = h.runtime.dispatch.bind(h.runtime);
+  const dispatch = h.runtime.dispatchRequest.bind(h.runtime);
   let dispatching = false;
-  vi.spyOn(h.runtime, 'dispatch').mockImplementation(async (...args) => {
-    if (String(args[1]).includes('Owner 的第二条')) { dispatching = true; await dispatchGate; }
+  vi.spyOn(h.runtime, 'dispatchRequest').mockImplementation(async (...args) => {
+    if (args[0].prompt.includes('Owner 的第二条')) { dispatching = true; await dispatchGate; }
     return dispatch(...args);
   });
   await h.coordinator.handle({ ...groupMessage('om_inflight_failed'), ...top }, h.config);

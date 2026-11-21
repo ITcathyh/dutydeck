@@ -220,7 +220,7 @@ describe('daemon restart recovery through Runtime and Lark workflow coordinator'
     restored.stop();
   });
 
-  it.each(['start', 'dispatch'] as const)('defers a request rejected by daemon shutdown at %s without delivering a failure card', async phase => {
+  it.each(['start', 'dispatchRequest'] as const)('defers a request rejected by daemon shutdown at %s without delivering a failure card', async phase => {
     const file = database(); const backend = persistentBackend(); const service = cardService();
     const first = open(file, backend.factory);
     await first.runtime.initialize([agent]);
