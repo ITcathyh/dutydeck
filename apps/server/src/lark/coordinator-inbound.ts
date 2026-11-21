@@ -2292,14 +2292,17 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
       currentAccess: this.currentAccess.bind(this),
       executeRepairFlight: this.executeRepairFlight.bind(this),
       groupManager: this.groupManager,
+      handleAction: this.handleAction.bind(this),
       isOperatorAllowed: this.isOperatorAllowed.bind(this),
       isRepairOperatorAllowed: this.isRepairOperatorAllowed.bind(this),
       larkRouteCapabilities: this.larkRouteCapabilities.bind(this),
       log: this.log,
       memory: this.memory,
       get reconcileConfig() { return host.reconcileConfig; },
+      refreshResultFeedback: this.refreshResultFeedback.bind(this),
       refreshResultMemory: this.refreshResultMemory.bind(this),
       repairInFlight: this.repairInFlight,
+      respondFromQueuedCard: this.respondFromQueuedCard.bind(this),
       runtime: this.runtime,
       service: this.service,
       taskDashboard: this.taskDashboard.bind(this),
@@ -2308,6 +2311,7 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
       participation: this.workflowOptions.participation,
       store: this.workflowOptions.store,
       workbench: this.workflowOptions.workbench,
+      workflows: this.workflows,
     };
   }
 
@@ -2319,81 +2323,6 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
         const [key, , handle] = callback;
         return handle(this.buttonDependencies(), { key, workflow, operatorOpenId, context });
       }
-    }
-    // 排队卡上的「允许本次」「拒绝」：按钮值与审批卡同形，剥掉另带的两个字段后照常交给下面的审批分支。
-    // 另带的字段只用来核对，关联哪条排队任务按这张卡在服务端查（见 respondFromQueuedCard）。
-    if (workflow && typeof workflow.dutydeck_queued_task === 'string') {
-      const { dutydeck_queued_task: queuedTaskId, queued_turn: queuedTurn, ...approval } = workflow;
-      return this.respondFromQueuedCard({ taskId: queuedTaskId, turn: queuedTurn }, approval, operatorOpenId, context?.messageId,
-        (): Promise<{ type: string; content: string }> => this.handleAction(approval, operatorOpenId, context));
-    }
-    // 按钮的 callback value 存在飞书服务器上，不在本地：改名前发出的审批卡带的是
-    // dockmux_workflow，升级后仍挂在群里等人点。两个键都认，老卡片才不会变成死按钮。
-    const workflowAction = workflow && typeof workflow.dutydeck_workflow === 'string'
-      ? workflow.dutydeck_workflow
-      : workflow && typeof workflow.dockmux_workflow === 'string' ? workflow.dockmux_workflow : undefined;
-    if (workflow && workflowAction !== undefined) {
-      if (!this.workflows || !context?.messageId || !context.chatId || !this.reconcileConfig) return { type: 'error', content: '卡片身份不完整或已失效。' };
-      const action = workflowAction;
-      if (!['approve', 'reject', 'accept', 'changes', 'answer', 'allow_session', 'allow_workspace', 'plan_approve', 'plan_revise', 'plan_cancel'].includes(action)) return { type: 'error', content: '无法识别任务操作。' };
-      // P0-1：overflow 菜单只承载唯一的回调选项（审批行的「拒绝」），其余点选一律拒绝，
-      // 防止共用 behaviors.value 被误当成任意动作执行。
-      if (context.actionTag === 'overflow' && !(action === 'reject' && context.option === 'reject')) {
-        return { type: 'error', content: '该菜单不支持此操作。' };
-      }
-      try {
-        const requestId = String(workflow.request_id ?? '');
-        // 区分原审批卡回调与 /tasks 行内审批：后者记录的 cardId 是另一张审批卡，
-        // 走斜杠形态（不做 cardId/generation 回调校验），但世代必须与渲染时一致。
-        // 决议的一次性 CAS、liveness、授权仍全部由 respond 内部保证，不存在旁路。
-        const record = (await this.workflows.list(this.reconcileConfig.appId)).find(item => item.id === requestId);
-        const fromDashboard = !record?.cardId || record.cardId !== context.messageId;
-        // 非原审批卡的回调只可能来自已登记的 /tasks 卡：行内按钮的 value 与原卡按钮同形，
-        // 不验卡来源就等于接受任意 messageId 上的伪造回调。kv 在发送 /tasks 时持久化。
-        if (fromDashboard) {
-          const dashboardOrigin = await this.workflowOptions.store?.get(
-            `lark.task_dashboard.${this.reconcileConfig.appId}.${context.messageId}`);
-          if (!dashboardOrigin) return { type: 'error', content: '请在最新的审批卡片或 /tasks 卡片上操作。' };
-        }
-        if (fromDashboard && String(workflow.generation ?? '') !== record?.boot) {
-          return { type: 'warning', content: '审批已失效，请刷新 /tasks 后重试。' };
-        }
-        let answer: { answer?: string; reason?: string; selected?: string[]; other?: string } = {};
-        if (action === 'reject') {
-          // 「拒绝并说明」表单的输入在 form_value.reason；普通「拒绝」按钮没有 form_value。
-          const formReason = (workflow.form_value as { reason?: unknown } | undefined)?.reason;
-          if (typeof formReason === 'string') answer = { reason: formReason };
-        }
-        if (action === 'plan_revise') {
-          const formAnswer = (workflow.form_value as { answer?: unknown } | undefined)?.answer;
-          answer = { answer: typeof formAnswer === 'string' ? formAnswer : '' };
-        }
-        if (action === 'answer') {
-          if (workflow.multiple === true) {
-            // 多选值由平台放在 form_value.answer（string[]）；容忍单值形态，过滤去重在 respond 内。
-            const formValue = workflow.form_value as { answer?: unknown; other?: unknown } | undefined;
-            const raw = formValue?.answer;
-            // 「其他」输入在 form_value.other；旧卡片没有这个字段。
-            answer = { selected: Array.isArray(raw) ? raw : typeof raw === 'string' ? [raw] : [],
-              ...(typeof formValue?.other === 'string' ? { other: formValue.other } : {}) };
-          } else if (workflow.other === true) {
-            // 单选卡的「其他」表单：回调带 other:true，文字在 form_value.other；点选项按钮没有这个标记。
-            const formOther = (workflow.form_value as { other?: unknown } | undefined)?.other;
-            answer = { other: typeof formOther === 'string' ? formOther : '' };
-          } else {
-            // 单选按钮直接带 answer；自由文本 input 的提交值在 form_value.answer。
-            const formAnswer = (workflow.form_value as { answer?: unknown } | undefined)?.answer;
-            answer = { answer: typeof workflow.answer === 'string' ? workflow.answer
-              : typeof formAnswer === 'string' ? formAnswer : '' };
-          }
-        }
-        const content = await this.workflows.respond({ appId: this.reconcileConfig.appId, chatId: context.chatId, deferClose: true,
-          actorId: operatorOpenId, requestId, action: action as 'answer' | 'approve' | 'reject' | 'accept' | 'changes' | 'allow_session' | 'allow_workspace' | 'plan_approve' | 'plan_revise' | 'plan_cancel',
-          ...(fromDashboard ? {} : { cardId: context.messageId, generation: String(workflow.generation ?? ''), callback: true }),
-          ...answer });
-        if (action === 'accept' || action === 'changes') await this.refreshResultFeedback(this.reconcileConfig, requestId).catch(error => this.log.warn({ error }, '验收已记录，卡片刷新失败'));
-        return { type: 'success', content };
-      } catch (error) { return { type: 'error', content: error instanceof Error ? error.message : String(error) }; }
     }
     // 解析交给 card-actions.ts 的共享解析器：渲染端与回调端共用一套形状校验，
     // 不存在「一端认、另一端不认」的权限缝隙。同时兼容线上遗留的 {action, task_id}。

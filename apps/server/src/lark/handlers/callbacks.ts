@@ -1,4 +1,4 @@
-import { confirm } from './workflow-buttons.js';
+import { confirm, queuedApproval, workflowAction } from './workflow-buttons.js';
 import { exportTrace } from './result-buttons.js';
 import { repair } from './access-buttons.js';
 import { scheduleToggle, ciFix, pullRequest, mandate, workItem } from './automation-buttons.js';
@@ -20,6 +20,9 @@ const callbacks: ReadonlyArray<[string, 'present' | 'string' | 'download', Callb
   ['dutydeck_pr', 'string', pullRequest],
   ['dutydeck_mandate', 'string', mandate],
   ['dutydeck_work_item', 'string', workItem],
+  ['dutydeck_queued_task', 'string', queuedApproval],
+  ['dutydeck_workflow', 'string', workflowAction],
+  ['dockmux_workflow', 'string', workflowAction],
 ];
 
 export function resolveCallback(workflow: Record<string, unknown>) {
