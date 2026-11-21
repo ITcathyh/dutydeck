@@ -2,7 +2,7 @@ import { assertConfigWrite } from './config-write.js';
 import type Database from 'better-sqlite3';
 import { createHash, randomUUID } from 'node:crypto';
 import {
-  executionActorSchema, acceptedTaskInputSchema, isTerminalTaskStatus, acceptedTaskInputV2Schema, canonicalExecutionJson, taskExecutionSchemas, taskRequestV1Schema, steeringRecoveryDecisionSchema, steerableTaskNamespace, parseLarkSourceId, RuntimeError, now as timestamp,
+  runtimeStateKeys, executionActorSchema, acceptedTaskInputSchema, isTerminalTaskStatus, acceptedTaskInputV2Schema, canonicalExecutionJson, taskExecutionSchemas, taskRequestV1Schema, steeringRecoveryDecisionSchema, steerableTaskNamespace, parseLarkSourceId, RuntimeError, now as timestamp,
   type AcceptedTask, type AcceptedTaskInput, type AgentEvent, type AttemptFence, type BoundExecutionRepository,
   type CommitResult, type DriverResource, type ExecutionBlocker, type ExecutionController, type ExecutionRepository,
   type ExecutionTask, type ExecutionUpgradeCounts, type ExecutionUpgradeSnapshot, type QueueAction, type RecoveryDecisionInput, type ResourceCheckRef, type Session,
@@ -19,6 +19,9 @@ import { compactTerminalScreens } from './retention.js';
 
 const { id, revision, fenceSchema, attemptFenceSchema, checksSchema, decisionSchema, identitySchema, observationSchema, intentSchema, sessionSchema } = taskExecutionSchemas;
 function fail(code: string, detail = code): never { throw new RuntimeError(code, detail, 409); }
+function workspaceBlocked(blockers: ExecutionBlocker[]): never {
+  throw new RuntimeError('WORKSPACE_RESOURCE_BLOCKED', 'Workspace is held by another session', 409, blockers);
+}
 function parse<T>(schema: { parse(value: unknown): T }, value: unknown): T {
   try { canonicalExecutionJson(value); return schema.parse(value); } catch { return fail('EXECUTION_INVALID_INPUT'); }
 }
@@ -141,14 +144,14 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
   };
   const externalBlockers = (sessionId: string, stored?: Array<{ key: string; value: string }>): ExecutionBlocker[] => {
     const result: ExecutionBlocker[] = [];
-    const rows = stored ?? cached("SELECT key,value FROM configs WHERE key IN (?,?) OR (key>=? AND key<?)").all(`runtime_driver_stop_block:${sessionId}`, `runtime_workspace:${sessionId}`, `runtime_verification:${sessionId}:`, `runtime_verification:${sessionId};`) as Array<{ key: string; value: string }>;
+    const rows = stored ?? cached("SELECT key,value FROM configs WHERE key IN (?,?) OR (key>=? AND key<?)").all(runtimeStateKeys.driverStopBlock.key(sessionId), runtimeStateKeys.workspace.key(sessionId), runtimeStateKeys.verification.sessionPrefix(sessionId), runtimeStateKeys.verification.sessionUpperBound(sessionId)) as Array<{ key: string; value: string }>;
     for (const row of rows) {
-      if (row.key === `runtime_driver_stop_block:${sessionId}` && row.value === '') continue;
+      if (row.key === runtimeStateKeys.driverStopBlock.key(sessionId) && row.value === '') continue;
       try {
         const v = JSON.parse(row.value);
-        if (row.key.startsWith('runtime_driver_stop_block:')) result.push({ sessionId, code: 'DRIVER_STOP_BLOCKED' });
-        else if (row.key.startsWith('runtime_workspace:') && ['preparing', 'cleaning', 'failed'].includes(v.state)) result.push({ sessionId, code: 'WORKSPACE_RECOVERY_REQUIRED' });
-        else if (row.key.startsWith('runtime_verification:')) {
+        if (row.key.startsWith(runtimeStateKeys.driverStopBlock.prefix)) result.push({ sessionId, code: 'DRIVER_STOP_BLOCKED' });
+        else if (row.key.startsWith(runtimeStateKeys.workspace.prefix) && ['preparing', 'cleaning', 'failed'].includes(v.state)) result.push({ sessionId, code: 'WORKSPACE_RECOVERY_REQUIRED' });
+        else if (row.key.startsWith(runtimeStateKeys.verification.prefix)) {
           if (!v || v.sessionId !== sessionId || !['running', 'passed', 'failed', 'timed_out', 'interrupted', 'unverified'].includes(v.status)) {
             result.push({ sessionId, code: 'RESOURCE_EVIDENCE_INVALID', detail: row.key });
           } else if (v.status === 'running') result.push({ sessionId, code: 'VERIFICATION_RESOURCE_UNKNOWN' });
@@ -164,10 +167,10 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
   ];
   const workspaceIdentity = (sessionId: string, freeze = false): ExecutionWorkspaceIdentity => {
     const current = resolveExecutionWorkspace(session(sessionId).cwd);
-    const key = `runtime_execution_workspace:${sessionId}`;
+    const key = runtimeStateKeys.executionWorkspace.key(sessionId);
     const stored = cached('SELECT value FROM configs WHERE key=?').get(key) as { value: string } | undefined;
     if (stored && !same(JSON.parse(stored.value), current)) fail('WORKSPACE_RESOURCE_IDENTITY_CHANGED');
-    const workspace = cached('SELECT value FROM configs WHERE key=?').get(`runtime_workspace:${sessionId}`) as { value: string } | undefined;
+    const workspace = cached('SELECT value FROM configs WHERE key=?').get(runtimeStateKeys.workspace.key(sessionId)) as { value: string } | undefined;
     if (workspace) {
       const value = JSON.parse(workspace.value);
       if (value.gitCommonDir && current.key !== `git:${value.gitCommonDir}`) fail('WORKSPACE_RESOURCE_IDENTITY_CHANGED');
@@ -231,25 +234,25 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
     const orchestrated = (source: string | null | undefined) => source === 'work_item' || source === 'lark-leader';
     // LIKE is ASCII case-insensitive and treats '_' as a wildcard. Preserve its candidates whenever
     // stop/verification evidence could make a LIKE-only orphan produce a blocker.
-    const requiresLikeCandidates = cached("SELECT 1 FROM configs WHERE key GLOB 'runtime_verification:*' LIMIT 1").get()
-      || cached("SELECT 1 FROM configs WHERE key GLOB 'runtime_driver_stop_block:*' AND value!='' LIMIT 1").get();
+    const requiresLikeCandidates = cached(`SELECT 1 FROM configs WHERE key GLOB '${runtimeStateKeys.verification.prefix}*' LIMIT 1`).get()
+      || cached(`SELECT 1 FROM configs WHERE key GLOB '${runtimeStateKeys.driverStopBlock.prefix}*' AND value!='' LIMIT 1`).get();
     const candidates = (requiresLikeCandidates ? cached(`SELECT DISTINCT session_id FROM task_attempts WHERE state IN ('preparing','active','reconcile_required','legacy_unresolved')
       UNION SELECT session_id FROM tasks WHERE status='reconcile_required'
       ${preparation ? "UNION SELECT session_id FROM tasks WHERE status='queued'" : ''}
       UNION SELECT session_id FROM task_steering_operations WHERE state IN ('pending','unknown')
       UNION SELECT session_id FROM driver_resources
-      UNION SELECT substr(key,length('runtime_workspace:')+1) AS session_id FROM configs WHERE key LIKE 'runtime_workspace:%'
-      UNION SELECT substr(key,length('runtime_driver_configuration:')+1) AS session_id FROM configs WHERE key LIKE 'runtime_driver_configuration:%' AND value!=''
-      UNION SELECT id AS session_id FROM sessions WHERE id IN (SELECT substr(key,length('runtime_driver_stop_block:')+1) FROM configs WHERE key LIKE 'runtime_driver_stop_block:%' AND value!='')
-      UNION SELECT id AS session_id FROM sessions s WHERE EXISTS (SELECT 1 FROM configs WHERE key>=('runtime_verification:'||s.id||':') AND key<('runtime_verification:'||s.id||';'))`) : cached(`SELECT DISTINCT session_id FROM task_attempts WHERE state IN ('preparing','active','reconcile_required','legacy_unresolved')
+      UNION SELECT substr(key,length('${runtimeStateKeys.workspace.prefix}')+1) AS session_id FROM configs WHERE key LIKE '${runtimeStateKeys.workspace.prefix}%'
+      UNION SELECT substr(key,length('${runtimeStateKeys.driverConfiguration.prefix}')+1) AS session_id FROM configs WHERE key LIKE '${runtimeStateKeys.driverConfiguration.prefix}%' AND value!=''
+      UNION SELECT id AS session_id FROM sessions WHERE id IN (SELECT substr(key,length('${runtimeStateKeys.driverStopBlock.prefix}')+1) FROM configs WHERE key LIKE '${runtimeStateKeys.driverStopBlock.prefix}%' AND value!='')
+      UNION SELECT id AS session_id FROM sessions s WHERE EXISTS (SELECT 1 FROM configs WHERE key>=('${runtimeStateKeys.verification.prefix}'||s.id||':') AND key<('${runtimeStateKeys.verification.prefix}'||s.id||';'))`) : cached(`SELECT DISTINCT session_id FROM task_attempts WHERE state IN ('preparing','active','reconcile_required','legacy_unresolved')
       UNION SELECT session_id FROM tasks WHERE status='reconcile_required'
       ${preparation ? "UNION SELECT session_id FROM tasks WHERE status='queued'" : ''}
       UNION SELECT session_id FROM task_steering_operations WHERE state IN ('pending','unknown')
       UNION SELECT session_id FROM driver_resources
-      UNION SELECT substr(key,length('runtime_workspace:')+1) AS session_id FROM configs WHERE key GLOB 'runtime_workspace:*'
-      UNION SELECT substr(key,length('runtime_driver_configuration:')+1) AS session_id FROM configs WHERE key GLOB 'runtime_driver_configuration:*' AND value!=''
-      UNION SELECT id AS session_id FROM sessions WHERE id IN (SELECT substr(key,length('runtime_driver_stop_block:')+1) FROM configs WHERE key GLOB 'runtime_driver_stop_block:*' AND value!='')
-      UNION SELECT id AS session_id FROM sessions s WHERE EXISTS (SELECT 1 FROM configs WHERE key>=('runtime_verification:'||s.id||':') AND key<('runtime_verification:'||s.id||';'))`)).all() as Array<{session_id:string}>;
+      UNION SELECT substr(key,length('${runtimeStateKeys.workspace.prefix}')+1) AS session_id FROM configs WHERE key GLOB '${runtimeStateKeys.workspace.prefix}*'
+      UNION SELECT substr(key,length('${runtimeStateKeys.driverConfiguration.prefix}')+1) AS session_id FROM configs WHERE key GLOB '${runtimeStateKeys.driverConfiguration.prefix}*' AND value!=''
+      UNION SELECT id AS session_id FROM sessions WHERE id IN (SELECT substr(key,length('${runtimeStateKeys.driverStopBlock.prefix}')+1) FROM configs WHERE key GLOB '${runtimeStateKeys.driverStopBlock.prefix}*' AND value!='')
+      UNION SELECT id AS session_id FROM sessions s WHERE EXISTS (SELECT 1 FROM configs WHERE key>=('${runtimeStateKeys.verification.prefix}'||s.id||':') AND key<('${runtimeStateKeys.verification.prefix}'||s.id||';'))`)).all() as Array<{session_id:string}>;
     // Keep only raw rows for a bounded candidate chunk. Parsing and validation still happen below,
     // in candidate order and before any workspace comparison can discard that candidate.
     for (let offset = 0; offset < candidates.length; offset += 32) {
@@ -290,14 +293,14 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
         const values = resourcesBySession.get(row.session_id) ?? [];values.push(row);resourcesBySession.set(row.session_id,values);
       }
       const exactConfigs = cached(`SELECT key,value FROM configs WHERE key IN (${ids.map(() => '?,?,?').join(',')})`).all(...ids.flatMap(id => [
-        `runtime_driver_stop_block:${id}`,`runtime_workspace:${id}`,`runtime_driver_configuration:${id}`
+        runtimeStateKeys.driverStopBlock.key(id),runtimeStateKeys.workspace.key(id),runtimeStateKeys.driverConfiguration.key(id)
       ])) as Array<{key:string;value:string}>;
       const verificationConfigs = cached(`SELECT key,value FROM configs WHERE ${ids.map(() => '(key>=? AND key<?)').join(' OR ')}`).all(...ids.flatMap(id => [
-        `runtime_verification:${id}:`,`runtime_verification:${id};`
+        runtimeStateKeys.verification.sessionPrefix(id),runtimeStateKeys.verification.sessionUpperBound(id)
       ])) as Array<{key:string;value:string}>;
       const configsBySession = new Map<string,Array<{key:string;value:string}>>();
       for (const row of [...exactConfigs,...verificationConfigs]) for (const id of ids) {
-        if ([`runtime_driver_stop_block:${id}`,`runtime_workspace:${id}`,`runtime_driver_configuration:${id}`].includes(row.key) || row.key.startsWith(`runtime_verification:${id}:`)) {
+        if ([runtimeStateKeys.driverStopBlock.key(id),runtimeStateKeys.workspace.key(id),runtimeStateKeys.driverConfiguration.key(id)].includes(row.key) || row.key.startsWith(runtimeStateKeys.verification.sessionPrefix(id))) {
           const values = configsBySession.get(id) ?? [];values.push(row);configsBySession.set(id,values);
         }
       }
@@ -313,14 +316,14 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
         const notExited = recorded.filter(r => !resourceSafe(r) && !retiredLegacyResourceSafe(r));
         const unsafe = notExited.filter(r => !idleResourceSafe(r,checks,owner));
         const storedConfigs = configsBySession.get(otherId) ?? [];
-        const configuration = storedConfigs.find(row => row.key === `runtime_driver_configuration:${otherId}`);
-        const externalRows = storedConfigs.filter(row => row.key === `runtime_driver_stop_block:${otherId}` || row.key === `runtime_workspace:${otherId}` || row.key.startsWith(`runtime_verification:${otherId}:`));
+        const configuration = storedConfigs.find(row => row.key === runtimeStateKeys.driverConfiguration.key(otherId));
+        const externalRows = storedConfigs.filter(row => row.key === runtimeStateKeys.driverStopBlock.key(otherId) || row.key === runtimeStateKeys.workspace.key(otherId) || row.key.startsWith(runtimeStateKeys.verification.sessionPrefix(otherId)));
         const external = [...externalBlockers(otherId,externalRows),...(configuration?.value ? [{code:'DRIVER_CONFIGURATION_UNKNOWN',sessionId:otherId}] : [])];
         if (!unresolved && !queued && !unknown && !steering.length && !unsafe.length && !external.length) continue;
         let other: ExecutionWorkspaceIdentity;
         try { other = workspaceIdentity(otherId, freeze); }
         catch {
-          const frozen = cached('SELECT value FROM configs WHERE key=?').get(`runtime_execution_workspace:${otherId}`) as {value:string}|undefined;
+          const frozen = cached('SELECT value FROM configs WHERE key=?').get(runtimeStateKeys.executionWorkspace.key(otherId)) as {value:string}|undefined;
           let knownKey: string | undefined, knownPath: string | undefined;
           try { const known = frozen ? JSON.parse(frozen.value) : undefined; knownKey = known?.key; knownPath = known?.cwd?.path; } catch { /* Corrupt identity remains unknown. */ }
           if (directoryOnly ? knownPath && knownPath !== identity.cwd.path : knownKey && knownKey !== identity.key) continue;
@@ -349,7 +352,7 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
           WHERE t.session_id=s.id AND t.status='reconcile_required' AND (a.id IS NULL OR a.state!='settled'))
         OR EXISTS (SELECT 1 FROM task_steering_operations o WHERE o.session_id=s.id AND o.state IN ('pending','unknown'))
         OR EXISTS (SELECT 1 FROM driver_resources r WHERE r.session_id=s.id)
-        OR EXISTS (SELECT 1 FROM configs c WHERE c.key='runtime_driver_stop_block:'||s.id AND c.value!=''))`).all(sessionId) as Array<{id:string;config_key:string|null}>;
+        OR EXISTS (SELECT 1 FROM configs c WHERE c.key='${runtimeStateKeys.driverStopBlock.prefix}'||s.id AND c.value!=''))`).all(sessionId) as Array<{id:string;config_key:string|null}>;
     const occupied = candidates.filter(row => attempts(row.id).some(attempt => ['preparing','active','reconcile_required','legacy_unresolved'].includes(attempt.state))
       || unresolvedUnknownTask(row.id) || steeringBlockers(row.id).length || externalBlockers(row.id).length
       || resources(row.id).some(resource => !resourceSafe(resource) && !retiredLegacyResourceSafe(resource) && !idleResourceSafe(resource,checks,owner)));
@@ -433,10 +436,9 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
     if (!Number.isSafeInteger(n)) fail('QUEUE_POSITION_EXHAUSTED');
     return n;
   };
-  const nativeKey = (sessionId: string) => `runtime_native_context:${sessionId}`;
   const nativeSelection = (sessionId: string): NativeContextSelection | undefined => {
-    const row = cached('SELECT value FROM configs WHERE key=?').get(nativeKey(sessionId)) as {value:string} | undefined;
-    return row?.value ? parse(taskExecutionSchemas.nativeSelectionSchema, JSON.parse(row.value)) : undefined;
+    const row = cached('SELECT value FROM configs WHERE key=?').get(runtimeStateKeys.nativeContext.key(sessionId)) as {value:string} | undefined;
+    return row?.value ? parse(runtimeStateKeys.nativeContext.value, JSON.parse(row.value)) : undefined;
   };
   const nativeResource = (sessionId: string, ref: NativeContextRef) => {
     parse(taskExecutionSchemas.nativeContextRefSchema, ref);
@@ -447,11 +449,14 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
     return r;
   };
   const nextNativeRevision = (sessionId:string) => {
-    const row=cached('SELECT value FROM configs WHERE key=?').get(`${nativeKey(sessionId)}:revision`) as {value:string}|undefined;
+    const row=cached('SELECT value FROM configs WHERE key=?').get(runtimeStateKeys.nativeContext.revisionKey(sessionId)) as {value:string}|undefined;
     const value=row?Number(row.value):0;if(!Number.isSafeInteger(value)||value<0||value===Number.MAX_SAFE_INTEGER)fail('NATIVE_CONTEXT_REVISION_INVALID');return value+1;
   };
   const saveNativeSelection = (sessionId: string, selection: NativeContextSelection) => {
-    for (const [key, value] of [[`${nativeKey(sessionId)}:revision`, String(selection.revision)], [nativeKey(sessionId), stable(selection)]] as const) {
+    for (const [key, value] of [
+      [runtimeStateKeys.nativeContext.revisionKey(sessionId), String(selection.revision)],
+      [runtimeStateKeys.nativeContext.key(sessionId), stable(selection)]
+    ] as const) {
       assertConfigWrite(db, key, value);
       cached('INSERT INTO configs(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value').run(key, value);
     }
@@ -594,7 +599,6 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
     return { tasks: tasksCount, attempts: attemptsCount, resources: resourcesCount, registeredAccess };
   };
   const legacyResourceId = (sessionId: string) => `legacy_resource_${hash(sessionId)}`;
-  const retirementKey = (sessionId: string) => `legacy_retirement:${sessionId}`;
   const retirementSnapshotDigest = (sessionId: string): string => {
     const rows = (sql: string, ...params: unknown[]) => db.prepare(sql).all(...params);
     return hash(stable({
@@ -611,9 +615,9 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
       errors: rows('SELECT * FROM errors WHERE session_id=? ORDER BY id', sessionId),
       channelMappings: rows('SELECT * FROM channel_mappings WHERE session_id=? ORDER BY id', sessionId),
       runtimeConfigs: rows("SELECT key,value FROM configs WHERE key IN (?,?,?,?,?,?,?) OR substr(key,1,length(?))=? OR key LIKE ? ESCAPE '\\' ORDER BY key",
-        `runtime_driver_stop_block:${sessionId}`, `runtime_workspace:${sessionId}`, `runtime_driver_configuration:${sessionId}`,
-        `runtime_native_context:${sessionId}`, `runtime_native_context:${sessionId}:revision`, `lark.run-context.${sessionId}`,
-        retirementKey(sessionId), `runtime_verification:${sessionId}:`, `runtime_verification:${sessionId}:`,
+        runtimeStateKeys.driverStopBlock.key(sessionId), runtimeStateKeys.workspace.key(sessionId), runtimeStateKeys.driverConfiguration.key(sessionId),
+        runtimeStateKeys.nativeContext.key(sessionId), runtimeStateKeys.nativeContext.revisionKey(sessionId), `lark.run-context.${sessionId}`,
+        runtimeStateKeys.legacyRetirement.key(sessionId), runtimeStateKeys.verification.sessionPrefix(sessionId), runtimeStateKeys.verification.sessionPrefix(sessionId),
         `lark.context.%.${sessionId.replaceAll('\\', '\\\\').replaceAll('%', '\\%').replaceAll('_', '\\_')}`)
     }));
   };
@@ -643,8 +647,8 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
     return result;
   };
   const readRetirementReceipt = (sessionId: string): LegacyRetirementReceipt | undefined => {
-    const row = cached('SELECT value FROM configs WHERE key=?').get(retirementKey(sessionId)) as { value: string } | undefined;
-    return row ? parse(taskExecutionSchemas.legacyRetirementReceiptSchema, JSON.parse(row.value)) : undefined;
+    const row = cached('SELECT value FROM configs WHERE key=?').get(runtimeStateKeys.legacyRetirement.key(sessionId)) as { value: string } | undefined;
+    return row ? parse(runtimeStateKeys.legacyRetirement.value, JSON.parse(row.value)) : undefined;
   };
   const listLegacyRetirementCandidates = (): LegacyRetirementCandidate[] => {
     control.assertMaintenance(db);
@@ -703,9 +707,9 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
         const updated = cached("UPDATE sessions SET state='stopped',archived_at=?,error=?,updated_at=? WHERE id=? AND run_id=? AND archived_at IS ?")
           .run(receipt.archivedAt, error, receipt.verifiedAt, s.id, s.runId, s.archivedAt ?? null);
         if (updated.changes !== 1) fail('LEGACY_RETIREMENT_SNAPSHOT_CONFLICT');
-        const value = stable(receipt);
-        assertConfigWrite(db, retirementKey(s.id), value);
-        cached('INSERT INTO configs (key,value) VALUES (?,?)').run(retirementKey(s.id), value);
+        const key = runtimeStateKeys.legacyRetirement.key(s.id), value = stable(receipt);
+        assertConfigWrite(db, key, value);
+        cached('INSERT INTO configs (key,value) VALUES (?,?)').run(key, value);
         return { session: session(s.id), receipt, replayed: false };
       }).immediate();
   };
@@ -970,7 +974,7 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
           if (replay) return { ...result(f, replay.task, replay.task.currentAttemptId ? attempt(replay.task.currentAttemptId) : undefined, [], true), accepted: replay };
           const s = session(f.sessionId);
           try { workspaceIdentity(f.sessionId,true); } catch {
-            const key = `runtime_execution_workspace:${f.sessionId}`, value = json({version:1,unverifiable:true});
+            const key = runtimeStateKeys.executionWorkspace.key(f.sessionId), value = json({version:1,unverifiable:true});
             assertConfigWrite(db, key, value);
             cached('INSERT OR IGNORE INTO configs(key,value) VALUES(?,?)').run(key, value);
           }
@@ -1012,7 +1016,7 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
           const t = task(row.id)!;
           parse(checksSchema,idleResources);
           const admission = workspaceBlockers(f.sessionId,idleResources,owner,true);
-          if (admission.length) fail('WORKSPACE_RESOURCE_BLOCKED',json(admission));
+          if (admission.length) workspaceBlocked(admission);
           assertWorkItemCapacity(f.sessionId,idleResources,owner);
           requireInputOptions(t.id);
           let a = t.currentAttemptId ? attempt(t.currentAttemptId) : undefined;
@@ -1059,7 +1063,7 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
             if(getAcceptedTask(taskId)?.request?.namespace!==steerableTaskNamespace) fail('STEERING_TASK_OWNED');
             parse(checksSchema,idleResources);
             const admission=workspaceBlockers(f.sessionId,idleResources,owner,true);
-            if(admission.length)fail('WORKSPACE_RESOURCE_BLOCKED',json(admission));
+            if(admission.length)workspaceBlocked(admission);
             const target=attempt(input.target.attemptId);
             if(!target || target.taskId!==input.target.taskId || target.sessionId!==f.sessionId || target.runId!==f.runId || target.state!=='active' || target.submissionState==='not_submitted') fail('STEERING_TARGET_CONFLICT');
             const value: SteeringOperation = {...f,...input,taskId,controller:owner,state:'pending',revision:1,createdAt:timestamp(),updatedAt:timestamp()};
@@ -1147,7 +1151,7 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
               if (selection.runId !== f.runId || !input.nativeContextRef || !same(input.nativeContextRef,selection.context)) fail('NATIVE_CONTEXT_SELECTION_CONFLICT');
               const native = nativeResource(f.sessionId,selection.context);
               if (!native.nativeBindings?.some(b => b.proofId === input.contextProofId && b.runId === f.runId && b.driverInstanceId === input.driverInstanceId && sameController(b.controller,owner))) fail('NATIVE_CONTEXT_PROOF_REQUIRED');
-              const configuration = cached('SELECT value FROM configs WHERE key=?').get(`runtime_driver_configuration:${f.sessionId}`) as {value:string} | undefined;
+              const configuration = cached('SELECT value FROM configs WHERE key=?').get(runtimeStateKeys.driverConfiguration.key(f.sessionId)) as {value:string} | undefined;
               if (configuration?.value) fail('DRIVER_CONFIGURATION_UNKNOWN');
             } else if (input.nativeContextRef || input.contextProofId) fail('NATIVE_CONTEXT_SELECTION_CONFLICT');
             a.submission=input;a.submissionController=owner;a.submissionState='intent_recorded';a.state='active';touch(t,a);
@@ -1329,7 +1333,7 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
         }); },
         finalizeSessionWorkspace(rawFence, rawProof) { return write(() => {
           const f = readFence(rawFence); const proof = parse(taskExecutionSchemas.workspaceProof, rawProof);
-          const row = cached('SELECT value FROM configs WHERE key=?').get(`runtime_workspace:${f.sessionId}`) as { value: string } | undefined;
+          const row = cached('SELECT value FROM configs WHERE key=?').get(runtimeStateKeys.workspace.key(f.sessionId)) as { value: string } | undefined;
           if (!row || hash(row.value) !== proof.workspaceDigest) fail('WORKSPACE_PROOF_CONFLICT');
           let decoded: unknown;
           try { decoded = JSON.parse(row.value); } catch { fail('WORKSPACE_PROOF_CONFLICT'); }
@@ -1461,7 +1465,7 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
               const selection = nativeSelection(f.sessionId);
               if (!selection || selection.runId !== f.runId || selection.revision !== scope.selectionRevision || !same(selection.context,scope.context)) fail('NATIVE_CONTEXT_SELECTION_CONFLICT');
               nativeResource(f.sessionId,scope.context); assertResources(f,undefined,owner);
-              const configuration = cached('SELECT value FROM configs WHERE key=?').get(`runtime_driver_configuration:${f.sessionId}`) as {value:string} | undefined;
+              const configuration = cached('SELECT value FROM configs WHERE key=?').get(runtimeStateKeys.driverConfiguration.key(f.sessionId)) as {value:string} | undefined;
               if (configuration?.value && !scope.repairConfiguration) fail('DRIVER_CONFIGURATION_UNKNOWN');
             } else assertResources(f,undefined,owner);
             const source = control.creationSource(db, claim);
@@ -1489,7 +1493,7 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
         assertDriverSubmission(rawFence,rawInput) {return write(owner=>{
           const f=readFence(rawFence),input=parse(taskExecutionSchemas.driverSubmission,rawInput),a=attempt(input.attemptId),t=task(input.taskId);
           if(!a||!t||a.taskId!==input.taskId||t.currentAttemptId!==a.attemptId||a.sessionId!==f.sessionId||a.runId!==f.runId||a.state!=='active'||a.submission?.submissionId!==input.submissionId||a.submission.inputDigest!==input.inputDigest||a.submission.driverInstanceId!==input.driverInstanceId||!sameController(a.controller,owner))fail('SUBMISSION_SCOPE_CONFLICT');
-          const configuration=cached('SELECT value FROM configs WHERE key=?').get(`runtime_driver_configuration:${f.sessionId}`) as {value:string}|undefined;
+          const configuration=cached('SELECT value FROM configs WHERE key=?').get(runtimeStateKeys.driverConfiguration.key(f.sessionId)) as {value:string}|undefined;
           if(configuration?.value)fail('DRIVER_CONFIGURATION_UNKNOWN');
         });},
         authorizeNativeContextControl(rawFence,actor) { return write(()=>{validateNativeActor(readFence(rawFence),actor);}); },
@@ -1510,7 +1514,7 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
         }); },
         clearVerifiedStopBlock(rawFence, expectedValue) { return write(() => {
           const f = readFence(rawFence);
-          const key = `runtime_driver_stop_block:${f.sessionId}`;
+          const key = runtimeStateKeys.driverStopBlock.key(f.sessionId);
           const row = cached('SELECT value FROM configs WHERE key=?').get(key) as { value: string } | undefined;
           if (!row?.value) return false;
           if (row.value !== expectedValue) fail('DRIVER_STOP_BLOCK_CONFLICT');
@@ -1584,8 +1588,9 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
             r.nativeReplacement=decision;r.revision++;saveResource(r);
             const selection=nativeSelection(f.sessionId);
             if (selection?.context.resourceId === r.resourceId) {
-              assertConfigWrite(db, nativeKey(f.sessionId), '');
-              cached('DELETE FROM configs WHERE key=?').run(nativeKey(f.sessionId));
+              const key = runtimeStateKeys.nativeContext.key(f.sessionId);
+              assertConfigWrite(db, key, '');
+              cached('DELETE FROM configs WHERE key=?').run(key);
             }
             return {replaced:r.resourceId};
           });
@@ -1653,7 +1658,7 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
         }); },
         adoptIdleTmux(rawFence,resourceId,expectedRevision,receipt,rawObservation) { return write(owner => {
           const f=readFence(rawFence), s=session(f.sessionId), observation=parse(observationSchema,rawObservation);
-          const stored=cached('SELECT value FROM configs WHERE key=?').get(`runtime_idle_terminal:${f.sessionId}`) as {value:string}|undefined;
+          const stored=cached('SELECT value FROM configs WHERE key=?').get(runtimeStateKeys.idleTerminal.key(f.sessionId)) as {value:string}|undefined;
           if (!stored || stored.value!==receipt) fail('IDLE_TERMINAL_RECEIPT_CHANGED');
           const proof=JSON.parse(receipt), r=resource(resourceId), parent=r?.parentResourceId && resource(r.parentResourceId);
           if (s.protocol!=='pty-cli' || s.terminalBackend!=='tmux' || s.permissionMode!=='full-trust' || s.archivedAt

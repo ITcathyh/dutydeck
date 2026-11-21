@@ -6,6 +6,7 @@ import { dirname, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { parseArgs, parseEnv } from 'node:util';
 import { createHash, randomUUID } from 'node:crypto';
+import { runtimeStateKeys } from '../packages/shared/src/runtime-state-keys.ts';
 import { observeProcess } from '../packages/storage/src/process-identity.ts';
 
 import { configKeyDefinition } from '../packages/storage/src/config-keys.ts';
@@ -118,23 +119,25 @@ export function inspect(db: DatabaseSync, database: string) {
     if (definition.scope === 'global' || definition.shareOnSplit) return shards;
     // This array is rewritten to contain only the shard's own bot at copy time.
     if (k === 'lark.bots') return shards;
-    const idleTerminal = k.match(/^runtime_idle_terminal:([^:/]+)$/);
-    if (idleTerminal && value && typeof value.runId === 'string' && typeof value.resourceId === 'string' && typeof value.identityId === 'string'
+    const idleTerminal = runtimeStateKeys.idleTerminal.parse(k);
+    if (idleTerminal && !/[:/]/.test(idleTerminal) && value && typeof value.runId === 'string' && typeof value.resourceId === 'string' && typeof value.identityId === 'string'
         && value.options && typeof value.options === 'object' && !Array.isArray(value.options) && value.identity && typeof value.identity === 'object' && !Array.isArray(value.identity)) {
-      const owner = ownerForSession(idleTerminal[1]!);
-      if (references.get('driver_resources')?.get(value.resourceId) !== idleTerminal[1]) block(`CONFIG_CROSS_SHARD_REFERENCE:${k}`);
+      const owner = ownerForSession(idleTerminal);
+      if (references.get('driver_resources')?.get(value.resourceId) !== idleTerminal) block(`CONFIG_CROSS_SHARD_REFERENCE:${k}`);
       return [owner];
     }
-    const workspaceNotice = k.match(/^runtime_notice:workspace_blocked:([^:/]+)$/);
-    if (workspaceNotice) {
-      const owner = ownerForSession(workspaceNotice[1]!);
-      if (references.get('tasks')?.get(r.value) !== workspaceNotice[1]) block(`CONFIG_CROSS_SHARD_REFERENCE:${k}`);
-      return [owner];
-    }
-    const attemptNotice = k.match(/^runtime_notice:unknown_task_(?:overdue|abandoned):([^:/]+)$/);
-    if (attemptNotice && r.value === 'sent') {
-      const sessionId = references.get('task_attempts')?.get(attemptNotice[1]!);
-      if (sessionId) return [ownerForSession(sessionId)];
+    const notice = runtimeStateKeys.notice.parse(k);
+    if (notice && !/[:/]/.test(notice[1])) {
+      const [kind, id] = notice;
+      if (kind === 'workspace_blocked') {
+        const owner = ownerForSession(id);
+        if (references.get('tasks')?.get(r.value) !== id) block(`CONFIG_CROSS_SHARD_REFERENCE:${k}`);
+        return [owner];
+      }
+      if ((kind === 'unknown_task_overdue' || kind === 'unknown_task_abandoned') && r.value === 'sent') {
+        const sessionId = references.get('task_attempts')?.get(id);
+        if (sessionId) return [ownerForSession(sessionId)];
+      }
     }
     const overdue = k.match(/^session_automation\/overdue\/([^/]+)$/);
     if (overdue && value?.version === 1 && ['sending', 'sent', 'error'].includes(value.status) && Number.isInteger(value.attempts) && value.attempts > 0
@@ -272,7 +275,7 @@ export function inspect(db: DatabaseSync, database: string) {
         const native = resource.purpose === 'acp_native_context' && (resource.nativeReplacement || resource.stage === 'created' && resource.identity);
         const gone = last?.state === 'gone' || resource.stage === 'not_created';
         if (!closed && !native && !gone) {
-          const stopBlock = parse(config.get(`runtime_driver_stop_block:${r.session_id}`) ?? '');
+          const stopBlock = parse(config.get(runtimeStateKeys.driverStopBlock.key(r.session_id)) ?? '');
           if (resource.kind === 'legacy' || resource.kind === 'local_only' && stopBlock?.sessionId === r.session_id && stopBlock?.runId === s?.run_id) warnings.push(`RESOURCE_REMAINS_BLOCKED:${r.id}`);
           else block(`RESOURCE_NOT_CLOSED:${r.id}`);
         }

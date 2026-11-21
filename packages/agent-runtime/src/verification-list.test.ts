@@ -41,3 +41,14 @@ it('lists no verifications without fingerprinting the repository, and still fing
     repos.close();
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
+
+it('recovers a partial verification record without preventing other sessions from starting', async () => {
+  const repos = createRepositories(':memory:');
+  try {
+    const key = 'runtime_verification:session:check';
+    await repos.config.set(key, JSON.stringify({ id: 'check', sessionId: 'session', revision: 1, status: 'running' }));
+    const blocked = await new VerificationManager(repos.config).interruptRunning();
+    expect([...blocked.keys()]).toEqual(['session']);
+    expect(JSON.parse((await repos.config.get(key))!)).toMatchObject({ revision: 2, status: 'running', error: blocked.get('session') });
+  } finally { repos.close(); }
+});

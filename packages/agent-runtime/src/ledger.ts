@@ -1,6 +1,6 @@
 import { ControlledDriverResources, localOnlyDriverContext } from './driver-context.js';
 import type { AcceptedTaskInputV2, AgentDriver, BoundExecutionRepository, DriverResource, ExecutionRepository, JsonValue, ResourceRef, SessionFence } from '@dutydeck/shared';
-import { canonicalExecutionJson, makeId, now, RuntimeError } from '@dutydeck/shared';
+import { runtimeStateKeys, canonicalExecutionJson, makeId, now, RuntimeError } from '@dutydeck/shared';
 import { digest } from './digest.js';
 
 export type ExecutionOptions = AcceptedTaskInputV2['executionOptions'];
@@ -144,9 +144,8 @@ interface ConfigurationOperation {
 export class DriverConfigurationLedger {
   private readonly active = new Set<string>();
   constructor(private readonly config: import('@dutydeck/shared').ConfigRepository) {}
-  private key(sessionId: string) { return `runtime_driver_configuration:${sessionId}`; }
   async assertClear(sessionId: string) {
-    const raw = await this.config.get(this.key(sessionId));
+    const raw = await this.config.get(runtimeStateKeys.driverConfiguration.key(sessionId));
     if (!raw) return;
     let pending = false;
     try {
@@ -159,7 +158,7 @@ export class DriverConfigurationLedger {
   }
   async begin(sessionId: string, driverIdentity: string, target: ExecutionOptions) {
     await this.assertClear(sessionId);
-    const key = this.key(sessionId), previous = await this.config.get(key);
+    const key = runtimeStateKeys.driverConfiguration.key(sessionId), previous = await this.config.get(key);
     if (previous) { await this.assertClear(sessionId); throw new RuntimeError('DRIVER_CONFIGURATION_UNKNOWN', 'Configuration evidence changed', 409); }
     const record: ConfigurationOperation = { version: 1, sessionId, operationId: makeId('configuration'), driverIdentity, state: 'pending', target };
     if (!this.config.compareAndSet || !await this.config.compareAndSet(key, previous, canonicalExecutionJson(record))) throw new RuntimeError('DRIVER_CONFIGURATION_UNKNOWN', 'Configuration intent was not recorded exclusively', 409);
@@ -170,13 +169,13 @@ export class DriverConfigurationLedger {
     if(!expectedRaw)throw new RuntimeError('DRIVER_CONFIGURATION_REPAIR_NOT_REQUIRED','No original configuration blocker was selected',409);
     const record:ConfigurationOperation={version:1,sessionId,operationId:makeId('configuration_repair'),driverIdentity,state:'pending',target};
     const value={...record,repair:{actor,previous:expectedRaw}};
-    if(!this.config.compareAndSet||!await this.config.compareAndSet(this.key(sessionId),expectedRaw,canonicalExecutionJson(value)))throw new RuntimeError('DRIVER_CONFIGURATION_UNKNOWN','Original configuration blocker changed',409);
+    if(!this.config.compareAndSet||!await this.config.compareAndSet(runtimeStateKeys.driverConfiguration.key(sessionId),expectedRaw,canonicalExecutionJson(value)))throw new RuntimeError('DRIVER_CONFIGURATION_UNKNOWN','Original configuration blocker changed',409);
     this.active.add(record.operationId);return value;
   }
   async finish(record: ConfigurationOperation, confirmed: boolean) {
     try {
       const value = confirmed ? '' : canonicalExecutionJson({ ...record, state: 'unknown' });
-      if (!this.config.compareAndSet || !await this.config.compareAndSet(this.key(record.sessionId), canonicalExecutionJson(record), value)) throw new RuntimeError('DRIVER_CONFIGURATION_UNKNOWN', 'The original configuration operation no longer matches', 409);
+      if (!this.config.compareAndSet || !await this.config.compareAndSet(runtimeStateKeys.driverConfiguration.key(record.sessionId), canonicalExecutionJson(record), value)) throw new RuntimeError('DRIVER_CONFIGURATION_UNKNOWN', 'The original configuration operation no longer matches', 409);
     } finally { this.active.delete(record.operationId); }
   }
 }

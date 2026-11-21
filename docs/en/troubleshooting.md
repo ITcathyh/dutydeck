@@ -18,6 +18,8 @@
 
 ## FAQ <a id="faq"></a>
 
+**Why does inserting a queued message report `Workspace is held by another session`?** Another session holds the same workspace. The message stays queued. Its execution details list the blocking sessions and reasons.
+
 **Startup reports `DATABASE_SCHEMA_TOO_NEW`, or a backup reports a schema mismatch?** The two versions in the error are the database's actual schema and the maximum supported by this build. Copy the complete read-only command with the actual path from the error; do not point `--database` at another instance:
 
 ```bash

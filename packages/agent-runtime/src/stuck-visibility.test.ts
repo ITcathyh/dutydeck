@@ -53,6 +53,18 @@ const noticeEvents = async (h: Awaited<ReturnType<typeof fixture>>, sessionId: s
   (await h.repos.events.list(sessionId)).filter(event => event.type === 'status' && (event.data as { state?: string }).state === 'notice');
 
 describe('a task held back by its repository is visible', () => {
+  it('uses structured blocker details when the workspace error has a human-readable message', async () => {
+    const h = await fixture();
+    const session = await h.runtime.start({ agentId: 'fixture', cwd: h.cwd });
+    const blockers = [{ sessionId: 'other', code: 'DRIVER_STOP_BLOCKED' }];
+    vi.spyOn((h.runtime as any).bound(), 'claimNext').mockImplementation(() => {
+      throw new RuntimeError('WORKSPACE_RESOURCE_BLOCKED', 'Workspace is held by another session', 409, blockers);
+    });
+    const queued = await h.runtime.dispatch(session.id, 'waiting');
+    await vi.waitFor(() => expect(h.notices).toHaveBeenCalledWith(expect.objectContaining({ id: session.id }),
+      expect.objectContaining({ kind: 'workspace_blocked', taskId: queued.id, sessionIds: ['other'] })));
+  });
+
   it('logs normal contention once without a notice and starts when the running turn ends', async () => {
     const h = await fixture();
     const one = await h.runtime.start({ agentId: 'fixture', cwd: h.cwd }), two = await h.runtime.start({ agentId: 'fixture', cwd: h.cwd });

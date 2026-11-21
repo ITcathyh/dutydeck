@@ -4,12 +4,11 @@ import { promisify } from 'node:util';
 import { lstat, readFile, readdir, readlink, realpath } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { ConfigRepository, VerificationCommandInput, VerificationRecord, VerificationResponse } from '@dutydeck/shared';
-import { makeId, mapLimit, now, RuntimeError, parseProcStat, procStatExited } from '@dutydeck/shared';
+import { runtimeStateKeys, makeId, mapLimit, now, RuntimeError, parseProcStat, procStatExited } from '@dutydeck/shared';
 import { SAFE_GIT_CONFIG } from '@dutydeck/shared/safe-git';
 import { minimalToolEnvironment } from './process-environment.js';
 
 const runFile = promisify(execFile);
-const VERIFICATION_KEY_PREFIX = 'runtime_verification:';
 const DEFAULT_TIMEOUT_SECONDS = 300;
 const MAX_TIMEOUT_SECONDS = 900;
 const MAX_OUTPUT_BYTES = 128 * 1024;
@@ -222,11 +221,8 @@ async function contentFingerprint(scan: RepositoryScan): Promise<string> {
 const mapSettled = <T>(items: readonly string[], task: (item: string, index: number) => Promise<T>): Promise<(T | Error)[]> =>
   mapLimit(items, ENTRY_CONCURRENCY, (item, index) => task(item, index).catch(error => error as Error));
 
-function key(sessionId: string, verificationId: string) {
-  return `${VERIFICATION_KEY_PREFIX}${sessionId}:${verificationId}`;
-}
-
 function parse(raw: string): StoredVerificationRecord {
+  // Recovery inspects partial evidence too and blocks only the affected session.
   try { return JSON.parse(raw) as StoredVerificationRecord; }
   catch { throw new RuntimeError('VERIFICATION_RECORD_INVALID', 'Verification record is invalid', 500); }
 }
@@ -250,7 +246,7 @@ export class VerificationManager {
     return this.commit ? this.commit(record.sessionId, write) : write();
   }
   private async replaceRecord(record: StoredVerificationRecord, expected?: StoredVerificationRecord): Promise<void> {
-    const storageKey = key(record.sessionId, record.id);
+    const storageKey = runtimeStateKeys.verification.key(record.sessionId, record.id);
     const expectedRaw = expected ? JSON.stringify(expected) : undefined;
     if (this.config.compareAndSet) {
       if (!await this.config.compareAndSet(storageKey, expectedRaw, JSON.stringify(record))) {
@@ -265,7 +261,7 @@ export class VerificationManager {
   async interruptRunning(): Promise<Map<string, string>> {
     const blocked = new Map<string, string>();
     if (!this.config.list) return blocked;
-    for (const { value } of await this.config.list(VERIFICATION_KEY_PREFIX)) {
+    for (const { value } of await this.config.list(runtimeStateKeys.verification.prefix)) {
       const record = parse(value);
       if (record.status !== 'running') continue;
       const recoveryError = await stopPersistedProcess(record);
@@ -290,7 +286,7 @@ export class VerificationManager {
 
   async list(sessionId: string, cwd: string): Promise<VerificationResponse[]> {
     if (!this.config.list) return [];
-    const records = (await this.config.list(`${VERIFICATION_KEY_PREFIX}${sessionId}:`)).map(item => parse(item.value));
+    const records = (await this.config.list(runtimeStateKeys.verification.sessionPrefix(sessionId))).map(item => parse(item.value));
     // No records means nothing to compare; skip the full-repository fingerprint.
     if (records.length === 0) return [];
     let current: string | undefined;

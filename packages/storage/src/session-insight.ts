@@ -1,3 +1,4 @@
+import { runtimeStateKeys } from '@dutydeck/shared';
 import type Database from 'better-sqlite3';
 import { cachedStatement } from './statement-cache.js';
 import { Buffer } from 'node:buffer';
@@ -215,7 +216,7 @@ export function createSessionInsightRepository(
       }
       const restoreSelectionRow = db
         .prepare('SELECT value FROM configs WHERE key = ?')
-        .get(`runtime_native_context:${observation.sessionId}`) as { value: string } | undefined;
+        .get(runtimeStateKeys.nativeContext.key(observation.sessionId)) as { value: string } | undefined;
       if (!restoreSelectionRow) {
         fail('NATIVE_CONTEXT_SELECTION_CONFLICT', 'No current native selection for restored driver');
       }
@@ -240,7 +241,7 @@ export function createSessionInsightRepository(
       // ACP live 引用须匹配当前 native selection（resourceId + identityId）；originRunId 可旧。
       const selectionRow = db
         .prepare('SELECT value FROM configs WHERE key = ?')
-        .get(`runtime_native_context:${observation.sessionId}`) as { value: string } | undefined;
+        .get(runtimeStateKeys.nativeContext.key(observation.sessionId)) as { value: string } | undefined;
       if (!selectionRow) {
         fail('NATIVE_CONTEXT_SELECTION_CONFLICT', 'No current native selection for this session');
       }
@@ -1008,7 +1009,7 @@ export function createSessionInsightRepository(
                     w.value AS workspace_json
              FROM sessions s
              LEFT JOIN insight_refresh r ON r.session_id = s.id
-             LEFT JOIN configs w ON w.key = 'runtime_workspace:' || s.id
+             LEFT JOIN configs w ON w.key = '${runtimeStateKeys.workspace.prefix}' || s.id
              ${pageWhere}
              ORDER BY s.created_at ASC, s.id ASC
              LIMIT ?`
@@ -1122,7 +1123,7 @@ export function createSessionInsightRepository(
             w.value AS workspaceJson,p.snapshot_id AS snapshotId,p.summary_json AS summaryJson,p.manifest_json AS manifestJson
           FROM sessions s
           LEFT JOIN insight_refresh r ON r.session_id=s.id
-          LEFT JOIN configs w ON w.key='runtime_workspace:' || s.id
+          LEFT JOIN configs w ON w.key='${runtimeStateKeys.workspace.prefix}' || s.id
           LEFT JOIN insight_snapshots p ON p.snapshot_id=r.current_snapshot_id AND p.tombstoned=0
             AND p.summary_json IS NOT NULL AND p.manifest_json IS NOT NULL AND p.host_evidence_json IS NOT NULL
           ${where} ORDER BY s.created_at,s.id`).all(...params) as Array<Omit<SessionInsightSummaryCatalogRow, 'snapshot' | 'tasks' | 'workspaceSourceCwd'> & {
@@ -1212,8 +1213,8 @@ export function createSessionInsightRepository(
 
         // 核验记录存于 configs，键前缀 runtime_verification:<sessionId>:。用闭区间范围而非 LIKE，
         // 避免 sessionId 中的 _ / % 被当成通配符而串到别的 session（同 task-execution 前缀方案）。
-        const verificationPrefix = `runtime_verification:${sessionId}:`;
-        const verificationUpper = `runtime_verification:${sessionId};`; // ':'(0x3A) 的下一个字符
+        const verificationPrefix = runtimeStateKeys.verification.sessionPrefix(sessionId);
+        const verificationUpper = runtimeStateKeys.verification.sessionUpperBound(sessionId); // ':'(0x3A) 的下一个字符
         const verificationRows = db
           .prepare('SELECT key, value FROM configs WHERE key >= ? AND key < ? ORDER BY key')
           .all(verificationPrefix, verificationUpper) as Array<{ key: string; value: string }>;
@@ -1257,7 +1258,7 @@ export function createSessionInsightRepository(
 
         const nativeSelectionRow = db
           .prepare('SELECT value FROM configs WHERE key = ?')
-          .get(`runtime_native_context:${sessionId}`) as { value: string } | undefined;
+          .get(runtimeStateKeys.nativeContext.key(sessionId)) as { value: string } | undefined;
         const nativeSelection = nativeSelectionRow ? JSON.parse(nativeSelectionRow.value) : null;
 
         return {

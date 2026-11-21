@@ -1,4 +1,4 @@
-import { RuntimeError } from '@dutydeck/shared';
+import { RuntimeError, runtimeStateKeys } from '@dutydeck/shared';
 import { assertBotProcessConfigWrite, type ConfigDatabase } from './bot-process.js';
 import { configKeyDefinition } from './config-keys.js';
 
@@ -20,5 +20,5 @@ export function assertConfigWrite(db: ConfigDatabase, key: string, value: string
 
 export function assertRepositoryConfigWrite(db: ConfigDatabase, key: string, value: string) {
   assertConfigWrite(db, key, value);
-  if (key.startsWith('runtime_native_context:')) throw new RuntimeError('EXECUTION_WRITE_REQUIRES_LEDGER', 'Native context selection requires a bound ledger command', 409);
+  if (key.startsWith(runtimeStateKeys.nativeContext.prefix)) throw new RuntimeError('EXECUTION_WRITE_REQUIRES_LEDGER', 'Native context selection requires a bound ledger command', 409);
 }

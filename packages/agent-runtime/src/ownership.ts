@@ -4,11 +4,10 @@ import { RuntimeError } from '@dutydeck/shared';
 export type RevocationReason = { code: string; by: string };
 
 export class RevokedOperation extends RuntimeError {
-  readonly details?: RevocationReason;
+  declare readonly details?: RevocationReason;
   constructor(token?: Owner) {
     const reason = revokedOwner(token)?.revokedBy;
-    super('OPERATION_REVOKED', reason ? `The session operation was revoked (${reason.code} by ${reason.by})` : 'The session operation was revoked', 409);
-    this.details = reason;
+    super('OPERATION_REVOKED', reason ? `The session operation was revoked (${reason.code} by ${reason.by})` : 'The session operation was revoked', 409, reason);
   }
 }
 export interface Owner {

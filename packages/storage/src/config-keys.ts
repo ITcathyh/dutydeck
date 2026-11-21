@@ -1,3 +1,5 @@
+import { runtimeStateKeys } from '@dutydeck/shared';
+
 type Scope = 'instance' | 'bot' | 'session' | 'global';
 type Deletion = 'never' | 'pending-prompt' | 'recovered-finding' | 'ignored-inbox';
 export interface ConfigKey {
@@ -29,9 +31,12 @@ const entries = [
   ...keys('agent-model-settings', 'bot', ['dutydeck.bot_agent_model.'], { ownerInKey: true }),
   ...keys('workspace', 'instance', ['workspace_organization:v1', 'project_memory:v1']),
   ...keys('lark/config', 'bot', ['lark.bots', 'lark.credentials']),
-  ...keys('agent-runtime', 'session', ['runtime_workspace:', 'runtime_execution_workspace:', 'runtime_driver_configuration:',
-    'runtime_driver_stop_block:', 'runtime_native_context:', 'runtime_pty_retirement:', 'runtime_verification:', 'legacy_retirement:'], { ownerInKey: true }),
-  ...keys('agent-runtime', 'session', ['runtime_idle_terminal:', 'runtime_notice:']),
+  ...keys('agent-runtime', 'session', [
+    runtimeStateKeys.workspace.prefix, runtimeStateKeys.executionWorkspace.prefix, runtimeStateKeys.driverConfiguration.prefix,
+    runtimeStateKeys.driverStopBlock.prefix, runtimeStateKeys.nativeContext.prefix, runtimeStateKeys.ptyRetirement.prefix,
+    runtimeStateKeys.verification.prefix, runtimeStateKeys.legacyRetirement.prefix
+  ], { ownerInKey: true }),
+  ...keys('agent-runtime', 'session', [runtimeStateKeys.idleTerminal.prefix, runtimeStateKeys.notice.prefix]),
   ...keys('session-name', 'session', ['session_name:'], { ownerInKey: true }),
   ...keys('turn-diff', 'session', ['turn_diff.'], { ownerInKey: true }),
   ...keys('plan-routes', 'session', ['plan.web.'], { ownerInKey: true }),
