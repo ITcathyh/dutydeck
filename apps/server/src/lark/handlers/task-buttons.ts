@@ -49,7 +49,7 @@ const steer: TaskButtonHandler = async (ctx, input) => {
 };
 
 const useCommand: TaskButtonHandler = async (ctx, input) => {
-  const { task, taskId, effectiveConfig, operatorOpenId } = input;
+  const { task, taskId, currentConfig, effectiveConfig, operatorOpenId } = input;
   const command = (await ctx.verificationView(task, effectiveConfig, task.state)).capabilities.verificationSuggestion;
   if (!command) return { type: 'warning', content: '这个机器人已经配置了验证命令，或这张卡没有可用的候选命令。' };
   if (!await ctx.isOperatorAllowed(effectiveConfig, operatorOpenId, task.event.chatId, task.sessionId, task.event.senderOpenId, 'channel_bot.update')) {

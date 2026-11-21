@@ -1,3 +1,4 @@
+import { helpReply } from './handlers/help.js';
 import type { ChatCommandHandler } from './handlers/command-context.js';
 /**
  * 飞书聊天内命令层：形状校验（唯一校验器）+ 命令注册表 + 能力/权限判定 + /help 渲染。
@@ -169,6 +170,8 @@ export type LarkCommandName = 'work' | 'schedule' | 'ci' | 'pr' | 'help' | 'repa
 export interface LarkCommandDefinition {
   name: LarkCommandName;
   execute?: ChatCommandHandler;
+  workflow?: import('./handlers/workflow-commands.js').WorkflowCommandHandler;
+  reply?: (parsed: ParsedSlashCommand, context: LarkCommandContext) => Extract<LarkCommandRoute, { kind: 'reply' }>;
   aliases?: string[];
   /** 简体中文摘要，「动作 + 对象 + 预期结果」，不用「处理」「继续」这类空动词。 */
   summary: string;
@@ -207,16 +210,16 @@ export const larkCommandRegistry: readonly LarkCommandDefinition[] = [
     unavailableReason: 'CI 续作未配置：还没有安装 CI 插件。安装方法：dutydeck plugin install <CI 插件目录或包> --yes，按插件说明用 dutydeck plugin config 填好令牌或 webhook 密钥，再执行 dutydeck restart 生效。用 webhook 的插件，把平台的 webhook 指向本服务的 /api/hooks/<插件提供方>。' },
   { name: 'pr', execute: async ctx => (await import('./handlers/automation.js')).handlePr(ctx), summary: '把本会话的改动推到 dutydeck/ 分支并开 PR（先发确认卡，确认后才推送），或认领已有的 PR；之后跟进 CI 和评审意见', usage: '/pr [标题]；/pr follow <PR 链接或编号>', mutating: true, requires: c => c.pr === true,
     unavailableReason: '开 PR 未配置：没有安装支持开 PR 的 CI 插件。安装方法：dutydeck plugin install <插件目录> --yes（仓库自带的 plugins/github 支持），再用 dutydeck plugin config 填好访问令牌，执行 dutydeck restart 生效。' },
-  { name: 'tasks', summary: '查看允许访问的待处理任务、运行进度和最近结果', usage: '/tasks [页码]', mutating: false, requires: c => c.tasks === true, unavailableReason: '当前机器人无法查询任务列表，/tasks 已停用。' },
-  { name: 'answer', summary: '回答 Agent 的问题并继续原任务', usage: '/answer <问题编号> <回答>', mutating: true, requires: c => c.answer === true, unavailableReason: '当前机器人无法接收问题回答，/answer 已停用。' },
-  { name: 'approve', summary: '批准卡片上的本次工具调用', usage: '/approve <请求编号>', mutating: true, requires: c => c.approval === true, unavailableReason: '当前机器人无法处理工具调用审批，/approve 已停用。' },
-  { name: 'reject', summary: '拒绝卡片上的本次工具调用', usage: '/reject <请求编号>', mutating: true, requires: c => c.approval === true, unavailableReason: '当前机器人无法处理工具调用审批，/reject 已停用。' },
+  { name: 'tasks', workflow: async (ctx, input) => (await import('./handlers/workflow-commands.js')).tasks(ctx, input), summary: '查看允许访问的待处理任务、运行进度和最近结果', usage: '/tasks [页码]', mutating: false, requires: c => c.tasks === true, unavailableReason: '当前机器人无法查询任务列表，/tasks 已停用。' },
+  { name: 'answer', workflow: async (ctx, input) => (await import('./handlers/workflow-commands.js')).answer(ctx, input), summary: '回答 Agent 的问题并继续原任务', usage: '/answer <问题编号> <回答>', mutating: true, requires: c => c.answer === true, unavailableReason: '当前机器人无法接收问题回答，/answer 已停用。' },
+  { name: 'approve', workflow: async (ctx, input) => (await import('./handlers/workflow-commands.js')).approve(ctx, input), summary: '批准卡片上的本次工具调用', usage: '/approve <请求编号>', mutating: true, requires: c => c.approval === true, unavailableReason: '当前机器人无法处理工具调用审批，/approve 已停用。' },
+  { name: 'reject', workflow: async (ctx, input) => (await import('./handlers/workflow-commands.js')).reject(ctx, input), summary: '拒绝卡片上的本次工具调用', usage: '/reject <请求编号>', mutating: true, requires: c => c.approval === true, unavailableReason: '当前机器人无法处理工具调用审批，/reject 已停用。' },
   // 会话记忆跨话题、跨 /new、跨重启生效：同一机器人的所有群共享一份，每个私聊各自一份。
   { name: 'remember', execute: async ctx => (await import('./handlers/memory.js')).handleRemember(ctx), summary: '把一条事实、偏好或约定保存为长期记忆（私聊各自独立；群聊的记忆范围按 bot 配置：各群共享或按群隔离），之后每轮任务都会带给 Agent', usage: '/remember <内容>', mutating: true, requires: c => c.memory === true, unavailableReason: '当前服务没有会话记忆存储，/remember 已停用。' },
   { name: 'memory', execute: async ctx => (await import('./handlers/memory.js')).handleRemember(ctx), summary: '查看当前可见的记忆及其编号、后台提取与整理状态', usage: '/memory；/memory consolidate；/memory ignore 描述；/memory ignore list；/memory ignore remove 编号', mutating: false, requires: c => c.memory === true, unavailableReason: '当前服务没有会话记忆存储，/memory 已停用。' },
   { name: 'forget', execute: async ctx => (await import('./handlers/memory.js')).handleRemember(ctx), summary: '删除当前可见记忆中指定编号的一条', usage: '/forget <记忆编号>', mutating: true, requires: c => c.memory === true, unavailableReason: '当前服务没有会话记忆存储，/forget 已停用。' },
   {
-    name: 'help',
+    name: 'help', reply: helpReply,
     summary: '列出当前可用的 Dutydeck 命令及其用法',
     usage: '/help [页码]',
     mutating: false
@@ -772,15 +775,7 @@ export function routeLarkCommand(text: unknown, context: LarkCommandContext): La
     case 'allowed': {
       const { parsed, definition } = evaluated;
       // /help 是纯函数，命令层自己渲染回执，不必绕一趟 coordinator。
-      if (definition.name === 'help') {
-        const page = Number.parseInt(parsed.args[0] ?? '', 10);
-        const help = renderLarkCommandHelp(context.capabilities, {
-          ...(Number.isFinite(page) ? { page } : {}),
-          ...(context.helpPageSize === undefined ? {} : { pageSize: context.helpPageSize }),
-          ...(context.pluginCommands?.length ? { pluginCommands: context.pluginCommands } : {})
-        });
-        return { kind: 'reply', command: 'help', parsed, elements: help.elements, text: help.text };
-      }
+      if (definition.reply) return definition.reply(parsed, context);
       return { kind: 'intent', command: definition.name, parsed, definition, args: parsed.args, argsText: parsed.argsText };
     }
   }

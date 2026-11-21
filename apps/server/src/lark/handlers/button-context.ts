@@ -20,6 +20,7 @@ export type TaskButtonHandler = (ctx: ButtonDependencies, input: {
   action: LarkCardActionName;
   actionTurn: number;
   actionStale(): boolean;
+  currentConfig: StoredLarkConfig;
   effectiveConfig: StoredLarkConfig;
   operatorOpenId?: string;
 }) => Promise<ButtonResult>;

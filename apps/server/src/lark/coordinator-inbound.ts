@@ -1,3 +1,4 @@
+import { answer as answerWorkflow } from './handlers/workflow-commands.js';
 import { storedButtons } from './handlers/stored-buttons.js';
 import { taskButtons } from './handlers/task-buttons.js';
 import { resolveCallback } from './handlers/callbacks.js';
@@ -78,7 +79,7 @@ import { AgentCommandParamError, agentCommandConfirmSummary, agentCommandPlan, l
 import type { LarkConfirmRecord } from './confirm-cards.js';
 
 /** 命令回执的去向：不传时照常发卡；capture 时只记下、不发卡（dutydeck agent 的查看类），否则发卡的同时记下。 */
-interface LarkCommandReceipts { capture: boolean; deliveryFailed?: boolean; notice?: string; cards: Array<{ title: string; markdown: string; failed: boolean; elements?: LarkCardElement[] }> }
+export interface LarkCommandReceipts { capture: boolean; deliveryFailed?: boolean; notice?: string; cards: Array<{ title: string; markdown: string; failed: boolean; elements?: LarkCardElement[] }> }
 const larkPlainText = (markdown: string) => markdown.replace(/\*\*/g, '').trim();
 
 // 飞书消息协调器 · 入站唤醒：入站消息与卡片回调的入口和路由、聊天命令与 /status、
@@ -471,6 +472,17 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
     return { entries, sessions };
   }
 
+  private workflowDependencies(workflows: NonNullable<typeof this.workflows>) {
+    return {
+      workflows,
+      chatModeResolver: this.chatModeResolver,
+      workflowReply: this.workflowReply.bind(this),
+      saveTaskDashboardOrigin: this.saveTaskDashboardOrigin.bind(this),
+      taskDashboard: this.taskDashboard.bind(this),
+      expiredAskPrompt
+    };
+  }
+
   private async routeWorkflow(event: LarkMessageEvent, config: StoredLarkConfig, prompt: string, scope: { id: string; prompt?: string }, receipts?: LarkCommandReceipts): Promise<boolean> {
     if (!this.workflows) return false;
     const parsed = parseSlashCommand(prompt);
@@ -481,13 +493,10 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
       await this.workflowReply(event, config, '任务操作需由人类成员发起。', { failed: true }); return true;
     }
     try {
-      if (parsed?.name === 'tasks') {
-        const elements = await this.taskDashboard(event, config, Number(parsed.args[0] ?? 1));
-        if (receipts?.capture) { receipts.cards.push({ title: '任务导航', markdown: '', failed: false, elements }); return true; }
-        const card = await this.workflowReply(event, config, '', { taskName: '任务导航', elements });
-        await this.saveTaskDashboardOrigin(config, card, event);
-        return true;
-      }
+      const command = parsed && resolveLarkCommand(parsed)?.workflow;
+      const input = { event, config, prompt, scope, quoted, parsed, receipts };
+      const deps = this.workflowDependencies(this.workflows);
+      if (parsed?.name === 'tasks' && command) return await command(deps, input);
       // 引用计划卡回复：「批准」「取消」按按钮处理，其余文字是修改意见。斜杠命令照常走命令路由。
       if (quoted?.kind === 'plan' && !parsed) {
         const result = await this.workflows.respond({ appId: config.appId, chatId: event.chatId, actorId: event.senderOpenId, requestId: quoted.id, action: planReplyAction(prompt), answer: prompt });
@@ -514,25 +523,7 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
         scope.id = saved.scope_id;
         return false;
       }
-      const action = parsed && ['answer', 'approve', 'reject'].includes(parsed.name) ? parsed.name as 'answer' | 'approve' | 'reject' : 'answer';
-      if (quoted && quoted.kind !== 'ask' && action === 'answer') throw new LarkServiceError('LARK_APPROVAL_EXPLICIT', '审批请使用按钮或明确的 /approve、/reject 命令。', 400);
-      // 显式编号优先，其次回落到被引用的那张卡。请求编号不再印在卡片正文里
-      // （审批卡下方就是按钮，编号对能点按钮的人是噪声），所以「引用那张卡 + /approve」
-      // 必须能走通——否则删掉编号就等于删掉了按钮失灵时的唯一备用路径。
-      const requestId = (parsed && names.includes(parsed.name) ? parsed.args[0] : undefined) ?? quoted?.id;
-      if (!requestId) throw new LarkServiceError('LARK_REQUEST_REQUIRED', '请回复要处理的那张卡片，或直接用卡片上的按钮。', 400);
-      const answer = parsed?.name === 'answer' ? parsed.argsText.slice(parsed.args[0]?.length ?? 0).trim() : prompt;
-      let result: string;
-      try { result = await this.workflows.respond({ appId: config.appId, chatId: event.chatId, actorId: event.senderOpenId, requestId, action, answer }); }
-      catch (error) {
-        const handover = expiredAskPrompt(error, answer);
-        if (!handover) throw error;
-        // 过期提问的回复回到原提问所在的会话，作为一条新消息交给 Agent。
-        scope.prompt = handover;
-        if (quoted) scope.id = await resolveLarkScopeId(quoted.event, config, this.chatModeResolver);
-        return false;
-      }
-      await this.workflowReply(event, config, result);
+      return await (command ?? answerWorkflow)(deps, input);
     } catch (error) {
       await this.workflowReply(event, config, error instanceof Error ? error.message : String(error), { failed: true });
     }
@@ -2407,7 +2398,7 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
     }
     const button = action === 'interrupt' && task.state === 'queued' ? 'cancel' : action;
     if (Object.hasOwn(taskButtons, button)) {
-      return taskButtons[button as keyof typeof taskButtons](deps, { task, taskId, action, actionTurn, actionStale, effectiveConfig, operatorOpenId });
+      return taskButtons[button as keyof typeof taskButtons](deps, { task, taskId, action, actionTurn, actionStale, currentConfig, effectiveConfig, operatorOpenId });
     }
     return { type: 'error', content: '不支持的卡片操作' };
   }
