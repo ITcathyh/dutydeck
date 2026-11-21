@@ -77,7 +77,7 @@ import type { CiWebhookService } from './ci-webhook.js';
 import type { PullRequestService } from './pull-requests.js';
 import { readTaskAttemptResult } from './task-results.js';
 import { workItemId } from './work-items.js';
-import { defaultHighRiskPattern } from './lark/config.js';
+import { defaultHighRiskPattern } from './policy/high-risk.js';
 import { z } from 'zod';
 
 const SCHEDULE_PREFIX = 'session_automation/schedule/';

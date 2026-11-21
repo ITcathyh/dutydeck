@@ -1,6 +1,7 @@
 import { installationOwnerTaskActor, parseLarkSourceId, type RepositoryBundle, type ToolRiskPolicy } from '@dutydeck/shared';
 import type { LarkGroupManager } from './lark/group-management.js';
-import { defaultHighRiskPattern, readLarkConfig } from './lark/config.js';
+import { allowedHighRiskActor, defaultHighRiskPattern } from './policy/high-risk.js';
+import { readLarkConfig } from './lark/config.js';
 import { createLarkCardService } from './lark/service.js';
 
 /** 发起任务时记下的风险策略（例如机器人发起的任务恒为未授权）；工作项和 Leader 运行都以它为上限。 */
@@ -24,16 +25,12 @@ async function currentWorkItemRiskPolicy(repos: RepositoryBundle, groups: LarkGr
   const parent = await repos.sessions.get(parentSessionId);
   if (parent?.source !== 'lark') return fallback;
   const { appId, chatId, chatType } = parseLarkSourceId(parent.sourceId);
-  let config = appId ? await readLarkConfig(repos.config, appId) : null;
-  if (!config || !chatId) return { enabled: true, authorized: false, pattern: '.*', reason: '原机器人配置已失效' };
-  if (chatType === 'group') config = await groups.resolved(config, chatId);
+  const bot = appId ? await readLarkConfig(repos.config, appId) : null;
+  if (!bot || !chatId) return { enabled: true, authorized: false, pattern: '.*', reason: '原机器人配置已失效' };
+  const config = chatType === 'group' ? await groups.resolved(bot, chatId) : bot;
   if (config.riskControlMode !== 'enforced') return fallback;
   const owner = actorId === installationOwnerTaskActor;
-  let authorized = owner || !config.highRiskAllowedUsers.length && !config.highRiskAllowedEmails.length || config.highRiskAllowedUsers.some(user => user.openId === actorId);
-  if (!authorized && !config.highRiskAllowedUsers.length && config.highRiskAllowedEmails.length) {
-    try { authorized = (await createLarkCardService(env, fetcher, config).getUserEmails(actorId)).some(email => config.highRiskAllowedEmails.includes(email)); }
-    catch { authorized = false; }
-  }
+  let authorized = await allowedHighRiskActor(config, actorId, id => createLarkCardService(env, fetcher, config).getUserEmails(id));
   if (chatType === 'group') {
     const decision = await groups.authorize(appId!, chatId, owner ? undefined : actorId, 'high_risk.execute', parentSessionId, { installationOwner: owner, taskRequesterOpenId: actorId });
     if (decision && !decision.allowed) authorized = false;

@@ -1,3 +1,4 @@
+import { allowedHighRiskActor } from '../policy/high-risk.js';
 import { sha256Hex as hash } from '../hash.js';
 import { access, stat } from 'node:fs/promises';
 import { constants } from 'node:fs';
@@ -618,11 +619,7 @@ export class LarkGroupManager {
     const talk = await this.authorizeSession(sessionId, 'turn.append');
     if (!config || talk && !talk.allowed) return { enabled: true, authorized: false, pattern: '.*', reason: '群访问权限已撤销。' };
     if (config.riskControlMode !== 'enforced') return undefined;
-    const openId = run.activeOpenId;
-    const owner = openId === installationOwnerTaskActor;
-    const emails = !owner && config.highRiskAllowedEmails.length ? await this.client(config).getUserEmails(openId) : [];
-    const allowedByBot = owner || !config.highRiskAllowedUsers.length && !config.highRiskAllowedEmails.length
-      || config.highRiskAllowedUsers.some(user => user.openId === openId) || emails.some(email => config.highRiskAllowedEmails.includes(email));
+    const allowedByBot = await allowedHighRiskActor(config, run.activeOpenId, id => this.client(config).getUserEmails(id));
     const decision = await this.authorizeSession(sessionId, 'high_risk.execute');
     return { enabled: true, authorized: allowedByBot && decision?.allowed === true, pattern: config.highRiskPattern, reason: '当前群成员没有高风险操作授权。' };
   }
