@@ -104,8 +104,8 @@ describe('GET /api/system/activity', () => {
       writable: true
     });
     const steeringSessions = new Map<string, string>();
-    Object.defineProperty(fakeRuntime, 'steeringSessions', {
-      value: steeringSessions,
+    Object.defineProperty(fakeRuntime, 'steering', {
+      value: { activeSessions: () => steeringSessions.keys() },
       writable: true
     });
 
