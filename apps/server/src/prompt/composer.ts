@@ -18,3 +18,7 @@ export async function composePromptParts(session: Session, contributors: readonl
   for (const entry of ordered) parts.push(...await entry.contribute(parts));
   return parts;
 }
+
+export function renderPromptParts(parts: readonly PromptPart[]): string {
+  return parts.map(part => (part.prefix ?? '') + part.content + (part.suffix ?? '')).join('');
+}
