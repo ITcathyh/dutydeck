@@ -17,10 +17,10 @@ import { readTurnDiffRecord } from '../turn-diff.js';
 import { redactTraceText } from './secret-redaction.js';
 import { OnlineProcessCard, type CardUpdateOutcome } from './online-process-card.js';
 import { completeExplicitFinal, explicitFinalContext, hasExplicitFinal, withExplicitFinalLock } from './explicit-final.js';
-import { mergeGroupTaskWatermark } from './group-task-context.js';
+import { createTurnContributors } from './turn-contributors/index.js';
 import { describeLarkTaskRecovery, larkAgentUnavailableText, larkQuietSettledNote, larkStallNote, larkSteeringUnknownNote, notifyLarkTaskRecovery, verifiedLarkRecoveryOutput } from './task-recovery.js';
 import { validateLarkLaunchOptions, type LarkLaunchOptions } from './new-session.js';
-import { collectLarkTaskContext, larkMaterialMessageIds } from './task-context.js';
+import { collectLarkTaskContext } from './task-context.js';
 import type { LarkScenarioRecallLine } from './scenario-recall.js';
 import type { ModelScenarioExecution } from './scenario-model.js';
 import { larkScenarioAdoptionOf } from './scenario-legacy.js';
@@ -1374,6 +1374,7 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
       : [];
     if (!resumeTask) task.startedAt = Date.now();
     task.interruptRequested = false;
+    const contributors = createTurnContributors({ task, config, event, session, materialPrompt, materialParts, options: this.workflowOptions, log: this.log });
     // 场景包的关联：这个 Bot 之前在本群别的话题处理过同一件事，上次的结论带给 Agent，过程卡顶部挂一行。读不到只少这一项。
     task.scenarioRecall = undefined;
     if (this.workflowOptions.participation) {
@@ -1791,60 +1792,20 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
       if (state === 'completed' || state === 'failed' || state === 'interrupted' || state === 'cancelled') return deliverTerminal(state, completed);
       await update(state);
     };
-    let groupContext: { text: string; promptParts?: PromptPart[] } | undefined;
     let memoryBlock: string | undefined;
     let scenarioExecution: ModelScenarioExecution | undefined;
-    let groupInstructions = '';
-    let groupInstructionsRevision: number | undefined;
-    // 群上下文按运行时会话增量注入，水位只在确认 prompt 已提交给 Agent 后推进。运行时对外只暴露任务状态：
-    // running 在领取时就发，此时可能还在准备、尚未提交；completed / interrupted 只能来自已提交轮次的驱动结果
-    // 或人工确认，failed 分不清是否提交过。所以只认这两种终态；其余终态、准备失败或重放旧任务都保留旧水位，
-    // 下一轮按旧水位重读，内容只会更多不会漏。
-    let groupContextCommit: (() => Promise<unknown>) | undefined;
-    const commitGroupContext = async (status: unknown) => {
-      const commit = groupContextCommit;
-      groupContextCommit = undefined;
-      if (status !== 'completed' && status !== 'interrupted') return;
-      await commit?.().catch(error => this.log.warn({ error, taskId: task.id, sessionId: session.id }, '群上下文水位推进失败，下一轮按旧水位注入'));
-    };
-    if (event.chatType === 'group' && this.workflowOptions.participation) {
-      try {
-        const store = this.workflowOptions.store;
-        const watermarkKey = `lark.group-context.${config.appId}.${session.id}`;
-        const watermark = await store.get(watermarkKey);
-        const materialMessageIds = larkMaterialMessageIds(materialParts, event.chatId);
-        const observedContext = await withLarkContextReadTimeout(this.workflowOptions.participation.taskContext({ appId: config.appId, chatId: event.chatId }, { triggerMessageId: larkMessageAnchor(event), watermark, groupTools: config.groupToolsEnabled, materialMessageIds }), '群上下文读取');
-        if (observedContext) {
-          groupContext = observedContext;
-          // 排队的几轮都基于同一个旧水位；后完成的一轮 CAS 失败时读出当前值合并再写，最多 3 次，仍冲突就留日志。
-          if (store.compareAndSet) groupContextCommit = async () => {
-            let expected = watermark;
-            let next = observedContext.watermark;
-            for (let attempt = 0; attempt < 3; attempt++) {
-              if (await store.compareAndSet!(watermarkKey, expected, next)) return;
-              expected = await store.get(watermarkKey);
-              next = mergeGroupTaskWatermark(expected, observedContext.watermark);
-              if (next === expected) return;
-            }
-            throw new Error('群上下文水位写回多次冲突');
-          };
-        }
-        if (this.workflowOptions.participation.instructionsSnapshot) {
-          const snapshot = await withLarkContextReadTimeout(this.workflowOptions.participation.instructionsSnapshot({ appId: config.appId, chatId: event.chatId }), '群长期指令读取');
-          groupInstructions = snapshot.instructions.trim();
-          if (groupInstructions) groupInstructionsRevision = snapshot.revision;
-        } else groupInstructions = (await withLarkContextReadTimeout(this.workflowOptions.participation.instructions({ appId: config.appId, chatId: event.chatId }), '群长期指令读取')).trim();
-      } catch (error) {
-        if (this.stopped || task.turn !== currentTurn || await closePreparedTurn()) return;
-        this.log.warn({ error, chatId: event.chatId, messageId: event.messageId }, '执行前读取群上下文失败');
-        if (!previous) {
-          this.pushTaskError(task, '上下文读取超时或失败，Agent 尚未执行。请稍后重新发送请求。');
-          task.state = 'failed'; task.retryable = false;
-          await this.failPendingInbox(task, '上下文读取超时或失败');
-          await deliverTerminal('failed', false);
-          await clearAcknowledgement();
-          return;
-        }
+    try {
+      await contributors.readContext();
+    } catch (error) {
+      if (this.stopped || task.turn !== currentTurn || await closePreparedTurn()) return;
+      this.log.warn({ error, chatId: event.chatId, messageId: event.messageId }, '执行前读取群上下文失败');
+      if (!previous) {
+        this.pushTaskError(task, '上下文读取超时或失败，Agent 尚未执行。请稍后重新发送请求。');
+        task.state = 'failed'; task.retryable = false;
+        await this.failPendingInbox(task, '上下文读取超时或失败');
+        await deliverTerminal('failed', false);
+        await clearAcknowledgement();
+        return;
       }
     }
     if (this.stopped || task.turn !== currentTurn || await closePreparedTurn()) return;
@@ -1879,6 +1840,7 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
       scenarioExecution = await this.workflowOptions.participation.scenarioExecution({ appId: config.appId, chatId: event.chatId }, scenarioAdoption, larkMessageAnchor(event))
         .catch(error => { this.log.warn({ error, taskId: task.id }, '读取场景执行内容失败，本轮不带场景指令'); return undefined; });
     }
+    const { groupInstructionsRevision } = contributors.prompt;
     let promptUsage: BotPromptUsage | undefined = {
       schemaVersion: 1, taskId: task.id, appId: config.appId, groupInstructionsRevision
     };
@@ -1889,7 +1851,7 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
     } catch (error) { this.log.warn({ error, taskId: task.id }, '读取提示词历史失败，继续派发'); }
     if (promptUsage?.botPromptVersion === undefined) this.log.warn({ taskId: task.id }, '本轮未记录版本，继续派发');
     const { agentPrompt, promptParts } = await composeLarkDispatchPrompt({
-      session, config, event, groupContext, memoryBlock, groupInstructions, scenarioRecall: task.scenarioRecall, scenarioExecution,
+      session, config, event, ...contributors.prompt, memoryBlock, scenarioRecall: task.scenarioRecall, scenarioExecution,
       silentProgress, highRiskPattern: riskControlEnabled && !highRiskAuthorized ? highRiskPattern : undefined,
       redispatch: task.redispatch, plan: planTask !== undefined, materialPrompt, materialParts, scenarioAdoption
     });
@@ -1937,7 +1899,7 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
       if (settling || settled) return;
       settling = true;
       active = false;
-      void commitGroupContext(state);
+      void contributors.settling(state);
       heartbeatActive = false;
       void (async () => {
         if (runtimeTaskId) {
@@ -2070,7 +2032,7 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
           .catch(error => this.log.warn({ error, taskId: runtimeTask.id }, '清理提示词准备快照失败'));
       }
       // 重连或按幂等键重放的是早先派发的那条 prompt，本轮新读的群上下文没有交给 Agent。
-      if (runtimeTask.replayed) groupContextCommit = undefined;
+      if (runtimeTask.replayed) contributors.onReplay();
       // S8：恢复接上的任务只置位一次；之后排队 PATCH 与每一帧非终态心跳都带重启注记。
       if (runtimeTask.replayed) task.replayedNote = true;
       // Evidence belongs to this accepted runtime task even if the visible turn has changed.
