@@ -1,3 +1,4 @@
+import { dutydeckPtySessionName } from '@dutydeck/shared/execution';
 import { assertConfigWrite } from './config-write.js';
 import type Database from 'better-sqlite3';
 import { createHash, randomUUID } from 'node:crypto';
@@ -204,9 +205,8 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
   };
   const receiptEvidenceValid = (receipt: LegacyRetirementReceipt, sessionId: string): boolean => {
     if (receipt.evidence.kind === 'pty_tmux_absent') {
-      const readable = sessionId.replace(/[^A-Za-z0-9_-]/g, '-').slice(0, 48) || 'session';
       return receipt.protocol === 'pty-cli' && receipt.evidence.owner === `dutydeck:${sessionId}`
-        && receipt.evidence.targetName === `dutydeck-${readable}-${hash(sessionId).slice(0, 16)}`
+        && receipt.evidence.targetName === dutydeckPtySessionName(sessionId)
         && !(receipt.evidence.outcome === 'stopped_owned' && !receipt.evidence.targetId)
         && !(receipt.evidence.outcome === 'already_missing' && (receipt.evidence.targetId || receipt.evidence.paneProcesses.length));
     }
