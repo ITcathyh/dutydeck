@@ -1,3 +1,4 @@
+import type { CliProfile } from '../profile.js';
 import type { AdapterSessionContext, CliAdapter, PtyLike } from '../types.js';
 import { writeRunnerInput } from '../runner-input.js';
 import { pushOpt } from '../runner-args.js';
@@ -37,3 +38,7 @@ export function createDshAdapter(): CliAdapter {
     readyPattern: /›/,
   };
 }
+
+export const dshProfile = {
+  createAdapter: createDshAdapter,
+} satisfies CliProfile;

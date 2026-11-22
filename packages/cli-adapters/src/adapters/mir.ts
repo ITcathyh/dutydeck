@@ -1,3 +1,4 @@
+import type { CliProfile } from '../profile.js';
 import type { AdapterSessionContext, CliAdapter, PtyLike } from '../types.js';
 import { writeRunnerInput } from '../runner-input.js';
 import { pushOpt } from '../runner-args.js';
@@ -42,3 +43,7 @@ export function createMirAdapter(): CliAdapter {
     readyPattern: /›/,
   };
 }
+
+export const mirProfile = {
+  createAdapter: createMirAdapter,
+} satisfies CliProfile;

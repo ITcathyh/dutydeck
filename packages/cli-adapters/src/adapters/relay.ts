@@ -1,3 +1,5 @@
+import type { CliProfile } from '../profile.js';
+import { claudeDataDir } from '../cli-paths.js';
 import type { CliAdapter } from '../types.js';
 import { createClaudeFamilyAdapter } from './claude-family.js';
 
@@ -10,3 +12,17 @@ import { createClaudeFamilyAdapter } from './claude-family.js';
 export function createRelayAdapter(): CliAdapter {
   return createClaudeFamilyAdapter('relay');
 }
+
+export const relayProfile = {
+  createAdapter: createRelayAdapter,
+  discoveryOrder: 20,
+  contributions: [
+    { id: 'relay', name: 'Relay', command: 'relay', adapterId: 'relay', capabilities: { pause: false, resume: true } },
+  ],
+  nativeOrder: 2,
+  sessionId: (context, readers) => readers.claude.resolve(context),
+  transcript: (options, readers) => new readers.claude(options),
+  dataRoot: claudeDataDir,
+  insightClient: 'claude',
+  automaticResume: true,
+} satisfies CliProfile;

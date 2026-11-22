@@ -1,3 +1,4 @@
+import type { CliProfile } from '../profile.js';
 import { execFile } from 'node:child_process';
 import type { AdapterSessionContext, CliAdapter, PtyLike } from '../types.js';
 import { nativeResumeCommand, usableResumeId } from '../resume-id.js';
@@ -69,3 +70,11 @@ export function createKimiAdapter(): CliAdapter {
     buildResumeCommand: nativeResumeCommand,
   };
 }
+
+export const kimiProfile = {
+  createAdapter: createKimiAdapter,
+  discoveryOrder: 7,
+  contributions: [
+    { id: 'kimi', name: 'Kimi', command: 'kimi', adapterId: 'kimi', capabilities: { pause: false, resume: true } },
+  ],
+} satisfies CliProfile;

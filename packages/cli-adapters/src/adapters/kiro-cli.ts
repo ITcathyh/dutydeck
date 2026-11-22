@@ -1,3 +1,4 @@
+import type { CliProfile } from '../profile.js';
 import type { AdapterSessionContext, CliAdapter, PtyLike } from '../types.js';
 import { isDutydeckSessionId, usableResumeId } from '../resume-id.js';
 import { delay } from './input-settle.js';
@@ -78,3 +79,11 @@ export function createKiroCliAdapter(): CliAdapter {
     // 无显式完成标记、也没有稳定的就绪提示符 —— 纯 quiescence 判定。
   };
 }
+
+export const kiroCliProfile = {
+  createAdapter: createKiroCliAdapter,
+  discoveryOrder: 16,
+  contributions: [
+    { id: 'kiro-cli', name: 'Kiro', command: 'kiro-cli', adapterId: 'kiro-cli', capabilities: { pause: false, resume: true } },
+  ],
+} satisfies CliProfile;

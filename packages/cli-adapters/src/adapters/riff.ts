@@ -1,3 +1,4 @@
+import type { CliProfile } from '../profile.js';
 import type { CliAdapter, PtyLike } from '../types.js';
 
 /**
@@ -28,3 +29,7 @@ export function createRiffAdapter(): CliAdapter {
     // --mention-back，与 riff 自己的禁用规则互相矛盾，再塞一份会打架。
   };
 }
+
+export const riffProfile = {
+  createAdapter: createRiffAdapter,
+} satisfies CliProfile;

@@ -1,3 +1,5 @@
+import type { CliProfile } from '../profile.js';
+import { opencodeDataRoot } from '../cli-paths.js';
 import type { AdapterSessionContext, CliAdapter, PtyLike } from '../types.js';
 import { submitPrompt } from './input-settle.js';
 
@@ -50,3 +52,14 @@ export function createOpenCode2Adapter(): CliAdapter {
     },
   };
 }
+
+export const openCode2Profile = {
+  createAdapter: createOpenCode2Adapter,
+  discoveryOrder: 11,
+  contributions: [
+    { id: 'opencode2', name: 'OpenCode 2', command: 'opencode2', adapterId: 'opencode2', capabilities: { pause: false, resume: true } },
+  ],
+  nativeOrder: 7,
+  sessionId: (context, readers) => readers.opencode2.resolve(context),
+  dataRoot: opencodeDataRoot,
+} satisfies CliProfile;

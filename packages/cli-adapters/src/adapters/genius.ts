@@ -1,3 +1,4 @@
+import type { CliProfile } from '../profile.js';
 import type { AdapterSessionContext, CliAdapter, PtyLike } from '../types.js';
 import { delay } from './input-settle.js';
 import { pushClaudeFamilyBypassArgs } from './claude-family.js';
@@ -41,3 +42,11 @@ export function createGeniusAdapter(): CliAdapter {
     readyPattern: /⏵⏵\s+accept edits on|(?:^|[\n\r])[❯›]\s*/,
   };
 }
+
+export const geniusProfile = {
+  createAdapter: createGeniusAdapter,
+  discoveryOrder: 22,
+  contributions: [
+    { id: 'genius', name: 'Genius', command: 'genius', adapterId: 'genius', capabilities: { pause: false, resume: true } },
+  ],
+} satisfies CliProfile;

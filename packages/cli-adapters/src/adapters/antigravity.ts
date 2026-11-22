@@ -1,3 +1,4 @@
+import type { CliProfile } from '../profile.js';
 import type { AdapterSessionContext, CliAdapter, PtyLike } from '../types.js';
 import { isDutydeckSessionId, usableResumeId } from '../resume-id.js';
 import { delay } from './input-settle.js';
@@ -63,3 +64,11 @@ export function createAntigravityAdapter(): CliAdapter {
     },
   };
 }
+
+export const antigravityProfile = {
+  createAdapter: createAntigravityAdapter,
+  discoveryOrder: 9,
+  contributions: [
+    { id: 'antigravity', name: 'Antigravity', command: 'agy', adapterId: 'antigravity', capabilities: { pause: false, resume: true } },
+  ],
+} satisfies CliProfile;

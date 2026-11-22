@@ -1,3 +1,4 @@
+import type { CliProfile } from '../profile.js';
 import type { AdapterSessionContext, CliAdapter, PtyLike } from '../types.js';
 import { submitPrompt } from './input-settle.js';
 
@@ -28,3 +29,11 @@ export function createAidenAdapter(): CliAdapter {
     // 无完成标记可依赖，idle 判定只靠静默（quiescence only）。
   };
 }
+
+export const aidenProfile = {
+  createAdapter: createAidenAdapter,
+  discoveryOrder: 21,
+  contributions: [
+    { id: 'aiden', name: 'Aiden', command: 'aiden', adapterId: 'aiden', capabilities: { pause: false, resume: true } },
+  ],
+} satisfies CliProfile;

@@ -1,3 +1,4 @@
+import type { CliProfile } from '../profile.js';
 import type { AdapterSessionContext, CliAdapter, PtyLike } from '../types.js';
 import { nativeResumeCommand, usableResumeId } from '../resume-id.js';
 import { submitPrompt } from './input-settle.js';
@@ -43,3 +44,11 @@ export function createReasonixAdapter(): CliAdapter {
     buildResumeCommand: nativeResumeCommand,
   };
 }
+
+export const reasonixProfile = {
+  createAdapter: createReasonixAdapter,
+  discoveryOrder: 17,
+  contributions: [
+    { id: 'reasonix', name: 'Reasonix', command: 'reasonix', adapterId: 'reasonix', capabilities: { pause: false, resume: true } },
+  ],
+} satisfies CliProfile;

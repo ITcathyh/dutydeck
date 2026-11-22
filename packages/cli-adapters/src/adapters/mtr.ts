@@ -1,3 +1,4 @@
+import type { CliProfile } from '../profile.js';
 import type { AdapterSessionContext, CliAdapter, PtyLike } from '../types.js';
 import { submitPrompt } from './input-settle.js';
 
@@ -52,3 +53,7 @@ export function createMtrAdapter(): CliAdapter {
     },
   };
 }
+
+export const mtrProfile = {
+  createAdapter: createMtrAdapter,
+} satisfies CliProfile;

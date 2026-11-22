@@ -1,3 +1,4 @@
+import type { CliProfile } from '../profile.js';
 import type { AdapterSessionContext, CliAdapter, PtyLike } from '../types.js';
 import { submitPrompt } from './input-settle.js';
 
@@ -33,3 +34,11 @@ export function createHermesAdapter(): CliAdapter {
     readyPattern: /❯/,
   };
 }
+
+export const hermesProfile = {
+  createAdapter: createHermesAdapter,
+  discoveryOrder: 12,
+  contributions: [
+    { id: 'hermes', name: 'Hermes', command: 'hermes', adapterId: 'hermes', capabilities: { pause: false, resume: true } },
+  ],
+} satisfies CliProfile;

@@ -1,3 +1,4 @@
+import type { CliProfile } from '../profile.js';
 import type { AdapterSessionContext, CliAdapter, PtyLike } from '../types.js';
 import { nativeResumeCommand, usableResumeId } from '../resume-id.js';
 import { delay } from './input-settle.js';
@@ -83,3 +84,11 @@ export function createCursorAdapter(): CliAdapter {
     readyPattern: /→\s+(?:Plan, search, build anything|Add a follow-up)/,
   };
 }
+
+export const cursorProfile = {
+  createAdapter: createCursorAdapter,
+  discoveryOrder: 6,
+  contributions: [
+    { id: 'cursor', name: 'Cursor', command: 'cursor-agent', adapterId: 'cursor', capabilities: { pause: false, resume: true } },
+  ],
+} satisfies CliProfile;

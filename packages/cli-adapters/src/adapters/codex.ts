@@ -1,3 +1,5 @@
+import type { CliProfile } from '../profile.js';
+import { codexHome } from '../cli-paths.js';
 import type { AdapterSessionContext, CliAdapter, PtyLike } from '../types.js';
 import { isDutydeckSessionId, usableResumeId } from '../resume-id.js';
 import { CODEX_BUSY_FOOTER, pollScreenReady } from './screen-ready-helper.js';
@@ -104,3 +106,19 @@ export function createCodexAdapter(): CliAdapter {
     readyPattern: /[›»](?!\s*\d+\.)|\d+% left/,
   };
 }
+
+export const codexProfile = {
+  createAdapter: createCodexAdapter,
+  discoveryOrder: 1,
+  contributions: [
+    { id: 'codex', name: 'Codex', command: 'codex', adapterId: 'codex', capabilities: { pause: false, resume: true } },
+    { id: 'codex-cli', name: 'Codex (terminal)', command: 'codex', adapterId: 'codex', capabilities: { pause: false, resume: true } },
+  ],
+  nativeOrder: 3,
+  sessionId: (context, readers) => readers.codex.resolve(context),
+  transcript: (options, readers) => new readers.codex(options),
+  dataRoot: codexHome,
+  insightClient: 'codex',
+  automaticResume: true,
+  flattenSubmissionScreen: true,
+} satisfies CliProfile;

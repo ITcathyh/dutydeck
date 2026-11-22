@@ -1,3 +1,4 @@
+import type { CliProfile } from '../profile.js';
 import type { AdapterSessionContext, CliAdapter, PtyLike } from '../types.js';
 import { nativeResumeCommand, usableResumeId } from '../resume-id.js';
 import { submitPrompt } from './input-settle.js';
@@ -52,3 +53,11 @@ export function createCopilotAdapter(): CliAdapter {
     // 无显式完成标记、Ink 输入框提示符太通用匹配不可靠 —— 纯 quiescence 判定。
   };
 }
+
+export const copilotProfile = {
+  createAdapter: createCopilotAdapter,
+  discoveryOrder: 15,
+  contributions: [
+    { id: 'copilot', name: 'Copilot', command: 'copilot', adapterId: 'copilot', capabilities: { pause: false, resume: true } },
+  ],
+} satisfies CliProfile;

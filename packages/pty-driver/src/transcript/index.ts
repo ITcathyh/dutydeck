@@ -20,13 +20,13 @@
  * unacceptable runtime dependency here), gemini/kimi (no on-disk
  * transcript). Those keep the raw_terminal fallback.
  */
-import { transcriptClientForAdapter, type NormalizedDriverEvent } from '@dutydeck/shared';
-import type { CliPathEnv } from '../cli-paths.js';
+import type { NormalizedDriverEvent } from '@dutydeck/shared';
+import { getCliProfile, type CreateTranscriptTailerOptions } from '@dutydeck/cli-adapters';
 import type { TranscriptEventSource } from './tail.js';
-import { ClaudeTranscriptTailer, type ClaudeTranscriptTailerOptions } from './claude.js';
-import { CodexTranscriptTailer, type CodexTranscriptTailerOptions } from './codex.js';
-import { TraexTranscriptTailer, type TraexTranscriptTailerOptions } from './traex.js';
-import { GrokTranscriptTailer, type GrokTranscriptTailerOptions } from './grok.js';
+import { ClaudeTranscriptTailer } from './claude.js';
+import { CodexTranscriptTailer } from './codex.js';
+import { TraexTranscriptTailer } from './traex.js';
+import { GrokTranscriptTailer } from './grok.js';
 
 export type { TranscriptCursor, TranscriptEventSource, TranscriptPosition } from './tail.js';
 export { JsonlTailer, type JsonlTailerOptions, type TranscriptEntry } from './tail.js';
@@ -57,43 +57,7 @@ export {
   type GrokTranscriptTailerOptions,
 } from './grok.js';
 
-export interface CreateTranscriptTailerOptions {
-  cwd: string;
-  /** Verified live Claude process source; never a recency selector. */
-  nativeSessionPath?: string;
-  nativeSession?: import('./claude.js').ClaudeTranscriptTailerOptions['nativeSession'];
-  onNativeSession?: import('./claude.js').ClaudeTranscriptTailerOptions['onNativeSession'];
-  onNativeSessionSwitch?: () => void;
-  /** Explicit transcript path (skips directory resolution + switching). */
-  transcriptPath?: string;
-  /**
-   * dutydeck's session id, used to identify WHICH transcript in a shared
-   * location belongs to this session.
-   *
-   * Several CLIs key their transcript location by cwd alone, so every dutydeck
-   * session started in one repo writes into the same directory. Resolving by
-   * recency there silently attaches a sibling's transcript: the timeline then
-   * shows another session's answer, or the turn is failed as "no final output"
-   * while the correct transcript sits on disk untouched. Sources that can be
-   * session-scoped use this; the rest fall back to recency and are documented
-   * as such at their resolver.
-   */
-  sessionId?: string;
-  /** Poll interval in ms (default 300). */
-  pollIntervalMs?: number;
-  /**
-   * The environment the CLI child process was actually spawned with
-   * (`PtyCliDriver.spawnEnv()`), NOT the daemon's `process.env`.
-   *
-   * The data-dir variables live in the child: the driver strips `CLAUDE_*`
-   * from it, and `agent.env` may point `CODEX_HOME` / `CLAUDE_CONFIG_DIR` /
-   * `HOME` elsewhere for multi-account or sandbox isolation. Reading the
-   * daemon's env instead makes the tailer watch a directory the CLI never
-   * writes to — the turn then reports no output at all. Defaults to
-   * `process.env` for callers with no child (tests, tooling).
-   */
-  env?: CliPathEnv;
-}
+export type { CreateTranscriptTailerOptions } from '@dutydeck/cli-adapters';
 
 /**
  * Adapter ids that have a structured transcript source.
@@ -117,21 +81,14 @@ export function createTranscriptTailer(
   adapterId: string,
   opts: CreateTranscriptTailerOptions,
 ): TranscriptEventSource | undefined {
-  // Grok has a tailer but no Session Insight client, so it sits outside the dialect map.
-  if (adapterId === 'grok') return new GrokTranscriptTailer(opts as GrokTranscriptTailerOptions);
-  switch (transcriptClientForAdapter(adapterId)) {
-    // Claude Code and its two forks: identical JSONL dialect and project-dir
-    // layout; the fork's data root arrives via opts.env (see above).
-    case 'claude':
-      return new ClaudeTranscriptTailer(opts as ClaudeTranscriptTailerOptions);
-    case 'codex':
-      return new CodexTranscriptTailer(opts as CodexTranscriptTailerOptions);
-    case 'traex':
-      return new TraexTranscriptTailer(opts as TraexTranscriptTailerOptions);
-    default:
-      return undefined;
-  }
+  return getCliProfile(adapterId)?.transcript?.(opts, transcriptReaders);
 }
 
-// Re-export the event type for convenience of consumers.
+const transcriptReaders = {
+  claude: ClaudeTranscriptTailer,
+  codex: CodexTranscriptTailer,
+  traex: TraexTranscriptTailer,
+  grok: GrokTranscriptTailer,
+};
+
 export type { NormalizedDriverEvent };

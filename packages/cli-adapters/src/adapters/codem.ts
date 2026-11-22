@@ -1,3 +1,4 @@
+import type { CliProfile } from '../profile.js';
 import type { AdapterSessionContext, CliAdapter, PtyLike } from '../types.js';
 import { isDutydeckSessionId, nativeResumeCommand, usableResumeId } from '../resume-id.js';
 import { pasteAndSubmit } from './input-settle.js';
@@ -28,3 +29,11 @@ export function createCodemAdapter(): CliAdapter {
     readyPattern: /Type a task|use \/ @ ! for commands/i,
   };
 }
+
+export const codemProfile = {
+  createAdapter: createCodemAdapter,
+  discoveryOrder: 2,
+  contributions: [
+    { id: 'codem', name: 'CodeM', command: 'codem', adapterId: 'codem', capabilities: { pause: false, resume: true } },
+  ],
+} satisfies CliProfile;

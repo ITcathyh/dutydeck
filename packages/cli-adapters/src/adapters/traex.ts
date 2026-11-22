@@ -1,3 +1,5 @@
+import type { CliProfile } from '../profile.js';
+import { traeHome } from '../cli-paths.js';
 import type { AdapterSessionContext, CliAdapter, PtyLike } from '../types.js';
 import { DriverRecoveryError, errorMessage, PromptNotWrittenError } from '@dutydeck/shared';
 import { isDutydeckSessionId, usableResumeId } from '../resume-id.js';
@@ -203,3 +205,16 @@ export function createTraexAdapter(): CliAdapter {
     readyPattern: /(?:^|[\n\r])\s*[›❯](?!\s*\d+\.)|\d+% left/,
   };
 }
+
+export const traexProfile = {
+  createAdapter: createTraexAdapter,
+  discoveryOrder: 8,
+  contributions: [
+    { id: 'traex', name: 'TRAE', command: 'traex', adapterId: 'traex', capabilities: { pause: false, resume: true } },
+  ],
+  nativeOrder: 4,
+  sessionId: (context, readers) => readers.traex.resolve(context),
+  transcript: (options, readers) => new readers.traex(options),
+  dataRoot: traeHome,
+  insightClient: 'traex',
+} satisfies CliProfile;

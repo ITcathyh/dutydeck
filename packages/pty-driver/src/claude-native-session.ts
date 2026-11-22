@@ -12,9 +12,8 @@ import { parseProcStat } from '@dutydeck/shared';
 const realpath = realpathSync.native;
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
 export const CLAUDE_PROCESS_PROOF = 'pty-claude-process-v1:';
-export interface ClaudeNativeSession {
-  nativeSessionId: string; path: string; dataRoot: string; cwd: string; resumable: boolean; identityProof: string;
-}
+import type { ClaudeNativeSession } from '@dutydeck/cli-adapters';
+export type { ClaudeNativeSession } from '@dutydeck/cli-adapters';
 function regular(path: string): ReturnType<typeof lstatSync> | undefined {
   try {
     const stat = lstatSync(path);
