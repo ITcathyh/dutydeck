@@ -424,6 +424,27 @@ export class TmuxBackend implements PersistentSessionBackend {
   getMetadata(key: TerminalMetadataKey) { return this.getDutydeckMetadata(key); }
   setMetadata(key: TerminalMetadataKey, value: string) { return this.setDutydeckMetadata(key, value); }
   reattach(size: { cols: number; rows: number }) { return this.attach(size); }
+  async canAttach(purpose: 'start' | 'resume' | 'view', check?: () => void) {
+    if (!this.sessionName) return false;
+    if (purpose === 'start') {
+      await TmuxBackend.reapDeadOwnedSession(this.sessionName, this.ownerId, this.options.log);
+      check?.();
+    }
+    const state = await TmuxBackend.probeSession(this.sessionName);
+    if (state !== 'unknown' || purpose === 'view') return state === 'exists';
+    const reason = `Cannot determine whether persistent tmux session ${this.sessionName} is alive; refusing to `;
+    if (purpose === 'resume') throw new Error(reason + 'replace it');
+    const orphan = await TmuxBackend.orphanedServerSocket(this.sessionName).catch(() => undefined);
+    throw new Error(reason + 'spawn a duplicate CLI' + (orphan === undefined ? '' : `. ${orphanedTmuxSocketMessage(orphan)}`));
+  }
+  async recoveryOwnerError() {
+    if (!this.sessionName || await TmuxBackend.probeSession(this.sessionName) !== 'exists') return 'Original tmux session is not alive';
+    if (await TmuxBackend.sessionOwner(this.sessionName) !== this.ownerId) return 'Original tmux session owner does not match';
+    return undefined;
+  }
+  attachmentTarget(log?: DiagnosticLog) { return this.replacement(this.sessionName, log); }
+  replacement(sessionId: string, log?: DiagnosticLog) { return new TmuxBackend(this.sessionName || sessionId, { ownerId: this.ownerId, log }); }
+  async exitedAfterDisconnect() { return await TmuxBackend.probeSession(this.sessionName) === 'missing'; }
   private liveIdentity?: OwnedTmuxIdentity;
   private exitProof?: OwnedTmuxExitProof;
   private absence?: OwnedTmuxAbsence;

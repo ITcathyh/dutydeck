@@ -298,7 +298,7 @@ describe('PTY Claude maintenance compaction', () => {
     expect(prompts).toEqual([]);
     if (action === 'detach') {
       await driver.prepareForDaemonShutdown();
-      vi.spyOn((driver as any), 'persistentBackend').mockReturnValue({ detach() {}, setDutydeckMetadata() {} });
+      vi.spyOn((driver as any), 'persistentBackend').mockReturnValue({ detach() {}, setMetadata() {} });
     }
     const stopping = driver.stop();
     held.gate.resolve();

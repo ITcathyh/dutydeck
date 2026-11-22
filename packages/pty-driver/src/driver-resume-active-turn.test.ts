@@ -29,10 +29,10 @@ function fixture(tmux: boolean, prepareInput?: CliAdapter['prepareInput']) {
   });
   const internals = driver as unknown as {
     started: boolean; turnActive: boolean; turnDeadlineTimer?: unknown;
-    reattachTmux(): Promise<boolean>; respawn(): Promise<void>;
+    reattach(): Promise<boolean>; respawn(): Promise<void>;
   };
   internals.started = true;
-  const attach = vi.spyOn(internals, 'reattachTmux').mockResolvedValue(true);
+  const attach = vi.spyOn(internals, 'reattach').mockResolvedValue(true);
   const spawn = vi.spyOn(internals, 'respawn').mockResolvedValue();
   cleanup.push(() => driver.stop().catch(() => {}));
   return { driver, internals, attach, spawn };

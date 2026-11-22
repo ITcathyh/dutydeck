@@ -26,7 +26,7 @@ import {
 } from '@dutydeck/shared';
 import type { AdapterSessionContext, CliAdapter, PtyLike } from '@dutydeck/cli-adapters';
 import { buildDutydeckRoutingBlock, ownedClaudeCompactMenu, ownedClaudeComposer } from '@dutydeck/cli-adapters';
-import { ProgramStatusFramingStream, processIdentityKey, PtyBackend, TmuxBackend, HerdrBackend, orphanedTmuxSocketMessage, type SessionBackend, type ProcessProbe } from '@dutydeck/session-backends';
+import { ProgramStatusFramingStream, processIdentityKey, terminalScreens, PtyBackend, type PersistentSessionBackend, type SessionBackend, type ProcessProbe } from '@dutydeck/session-backends';
 import { TerminalSnapshot } from '@dutydeck/terminal-renderer';
 import { IdleDetector, type IdleTimings } from './idle-detector.js';
 import { IdleCpuProcess } from './idle-cpu-process.js';
@@ -612,33 +612,12 @@ export class PtyCliDriver implements AgentDriver {
     // driver and calling start(), not resume(). A production-injected tmux
     // backend therefore has to attach here when its owned pane survived the
     // daemon, otherwise spawn() would collide with the live session.
-    if (this.backend instanceof HerdrBackend && this.backend.hasState() && !(await this.backend.isStopped())) {
-      await this.reattachHerdr();
-      (await this.markTmuxReattached());
+    const persistent = this.persistentBackend();
+    if (persistent && await persistent.canAttach('start', check)) {
+      await this.reattach(persistent, false);
+      await this.markReattached();
       return;
     }
-    const tmuxName = this.tmuxSessionName();
-    if (tmuxName !== undefined) {
-      // A dead session this owner left behind (user remain-on-exit) is not
-      // worth reattaching: free the name so the launch below resumes instead.
-      (await TmuxBackend.reapDeadOwnedSession(tmuxName, (this.backend as TmuxBackend).ownerId, this.log));
-      check();
-      const probe = (await TmuxBackend.probeSession(tmuxName));
-      if (probe === 'exists') {
-        (await this.reattachTmux(tmuxName, false));
-        (await this.markTmuxReattached());
-        return;
-      }
-      if (probe === 'unknown') {
-        const orphanedSocket = (await TmuxBackend.orphanedServerSocket(tmuxName).catch(() => undefined));
-        const reason = `Cannot determine whether persistent tmux session ${tmuxName} is alive; refusing to spawn a duplicate CLI`;
-        throw new Error(orphanedSocket === undefined ? reason : `${reason}. ${orphanedTmuxSocketMessage(orphanedSocket)}`);
-      }
-    }
-
-    // A retired tmux pane can still have durable native history. Only an
-    // actual resolver match authorizes automatic resume; never guess an id.
-    const persistent = tmuxName !== undefined || this.backend instanceof HerdrBackend;
     const nativeSessionId = persistent ? this.resumableNativeSession() : undefined;
     if (persistent && this.claudeResumeSource && !nativeSessionId) {
       throw new DriverRecoveryError('The current Claude session has no verified resumable conversation; refusing to resume an older context');
@@ -918,14 +897,14 @@ export class PtyCliDriver implements AgentDriver {
       }
       const persistent = this.persistentBackend();
       if (isFirstPrompt && persistent) {
-        this.submissionMetadata = this.submissionMetadata.then(() => persistent.setDutydeckMetadata('first_prompt_sent', 'true')).catch(error => this.warnCaught('submit.firstPromptMetadata', error));
+        this.submissionMetadata = this.submissionMetadata.then(() => persistent.setMetadata('first_prompt_sent', 'true')).catch(error => this.warnCaught('submit.firstPromptMetadata', error));
         await Promise.race([this.submissionMetadata, writeCancelled, completion]);
         check();
         if (!this.turnActive) { this.firstPromptSent = true; return completion!; }
       }
       if (this.preparedTurnId && persistent) {
         const turnId = this.preparedTurnId;
-        this.submissionMetadata = this.submissionMetadata.then(() => persistent.setDutydeckMetadata('turn_id', turnId)).catch(error => {
+        this.submissionMetadata = this.submissionMetadata.then(() => persistent.setMetadata('turn_id', turnId)).catch(error => {
           this.warnCaught('submit.turnMetadata', error);
           if (this.activeSubmission === submission) this.preparedTurnId = undefined;
         });
@@ -1348,16 +1327,14 @@ export class PtyCliDriver implements AgentDriver {
 
   async canRecoverTurn(state: DriverTurnRecovery): Promise<boolean> {
     const backend = this.backend, generation = this.wiringGeneration;
-    if (!(backend instanceof TmuxBackend) || !backend.ownerId || !this.started || this.stopped || !this.turnActive
+    if (!backend.persistent?.recoveryOwnerError || !backend.persistent.ownerId || !this.started || this.stopped || !this.turnActive
       || this.spawnPermissionMode !== 'full-trust' || this.planGuardActive || this.hookPermissions.size || this.activeSubmission || this.awaitingAnswer?.()
       || this.idleDetector?.programStatusBlock()?.kind === 'permission'
       || !state || state.kind !== 'pty-jsonl-v1' || !state.turnId || !state.transcript?.path
       || !Number.isSafeInteger(state.transcript.offset) || state.transcript.offset < 0) return false;
     try {
       if (this.transcript?.checkpoint().path !== state.transcript.path || statSync(state.transcript.path).size < state.transcript.offset) return false;
-      if (await TmuxBackend.probeSession(backend.sessionName) !== 'exists'
-        || await TmuxBackend.sessionOwner(backend.sessionName) !== backend.ownerId
-        || await backend.getDutydeckMetadata('turn_id') !== state.turnId) return false;
+      if (await backend.persistent.recoveryOwnerError() || await backend.persistent.getMetadata('turn_id') !== state.turnId) return false;
       return this.backend === backend && this.wiringGeneration === generation && !this.stopped && this.turnActive
         && !this.planGuardActive && !this.activeSubmission && !this.awaitingAnswer?.()
         && this.hookPermissions.size === 0 && this.idleDetector?.programStatusBlock()?.kind !== 'permission';
@@ -1372,18 +1349,14 @@ export class PtyCliDriver implements AgentDriver {
       || !state.transcript || !Number.isSafeInteger(state.transcript.offset) || state.transcript.offset < 0) {
       throw this.rejectRecovery('Invalid PTY turn recovery state');
     }
-    if (!this.persistentBackend() || !this.persistentBackend()!.ownerId) {
-      throw this.rejectRecovery('PTY turn recovery requires an owned persistent backend');
-    }
-    const sessionName = this.tmuxSessionName();
-    if (this.backend instanceof TmuxBackend) {
-      if (!sessionName || (await TmuxBackend.probeSession(sessionName)) !== 'exists') throw this.rejectRecovery('Original tmux session is not alive');
-      if ((await TmuxBackend.sessionOwner(sessionName)) !== this.backend.ownerId) throw this.rejectRecovery('Original tmux session owner does not match');
-    }
+    const persistent = this.persistentBackend();
+    if (!persistent?.ownerId) throw this.rejectRecovery('PTY turn recovery requires an owned persistent backend');
+    const ownerError = await persistent.recoveryOwnerError?.();
+    if (ownerError) throw this.rejectRecovery(ownerError);
     // The metadata belongs to the original backend and is checked before any
     // attach side effect. Missing, stale, or foreign turns are all unsafe.
     let turnId: string | undefined;
-    try { turnId = await this.persistentBackend()!.getDutydeckMetadata('turn_id'); }
+    try { turnId = await this.persistentBackend()!.getMetadata('turn_id'); }
     catch (error) { throw this.rejectRecovery(String(error)); }
     if (turnId !== state.turnId) {
       throw this.rejectRecovery('Original tmux turn id does not match');
@@ -1409,15 +1382,14 @@ export class PtyCliDriver implements AgentDriver {
     let generation = this.wiringGeneration;
     const rejectCompletion = this.turnReject;
     try {
-      if (this.backend instanceof HerdrBackend) await this.reattachHerdr(state.transcript);
-      else (await this.reattachTmux(sessionName!, false, state.transcript));
+      await this.reattach(persistent, false, state.transcript);
       attachedBackend = this.backend;
       generation = this.wiringGeneration;
       await this.transcript?.flush();
       if (this.superseded(attachedBackend, generation)) {
         throw new Error('PTY recovery cancelled by lifecycle change');
       }
-      (await this.markTmuxReattached());
+      (await this.markReattached());
       await onAttached?.();
       this.startTurnDeadline();
     } catch (err) {
@@ -1432,11 +1404,11 @@ export class PtyCliDriver implements AgentDriver {
       this.turnReject?.(err instanceof Error ? err : new Error(String(err)));
       this.turnResolve = null;
       this.turnReject = null;
-      // `reattachTmux` assigns the newly-created backend before attach/wire.
+      // `reattach` assigns the newly-created backend before attach/wire.
       // A transcript restore can therefore fail after pipe-pane, socket capture and the
       // exit watcher are live. Tear down that temporary attachment only; the
       // original tmux pane continues and is never killed by a bad cursor.
-      if (this.backend !== originalBackend || this.backend instanceof HerdrBackend) {
+      if (this.backend !== originalBackend || this.backend.persistent?.onDisconnect) {
         this.teardownWiring();
         try { await this.backend.detach?.(); } catch { /* best-effort: the failed recovery already reports the attachment error. */ }
       }
@@ -1511,7 +1483,7 @@ export class PtyCliDriver implements AgentDriver {
     await this.submissionMetadata;
     if (this.superseded(backend, generation) || (this.turnReject && this.turnReject !== turn)) return;
     if (this.persistentBackend()) {
-      try { await this.persistentBackend()!.setDutydeckMetadata('turn_id', 'interrupted'); } catch (error) { this.warnCaught('interrupt.turnMetadata', error); }
+      try { await this.persistentBackend()!.setMetadata('turn_id', 'interrupted'); } catch (error) { this.warnCaught('interrupt.turnMetadata', error); }
     }
     this.interruptPending = this.turnActive;
     if (this.superseded(backend, generation) || (this.turnReject && this.turnReject !== turn)) return;
@@ -1528,32 +1500,14 @@ export class PtyCliDriver implements AgentDriver {
     const generation = this.wiringGeneration;
     this.assertPermissionModeSupported();
     this.assertNoActiveTurn();
-    if (this.backend instanceof HerdrBackend && this.backend.hasState() && !(await this.backend.isStopped())) {
+    const persistent = this.persistentBackend();
+    if (persistent && await persistent.canAttach('resume')) {
       await this.transcript?.flush();
       if (this.superseded(backend, generation)) return;
       this.assertNoActiveTurn();
-      await this.reattachHerdr();
-      (await this.markTmuxReattached());
+      await this.reattach(persistent, this.started);
+      await this.markReattached();
       return;
-    }
-    // 路径 1：tmux 会话仍在 → reattach（后端内部重启 pipe-pane 捕获，driver 重建订阅）。
-    const tmuxName = this.tmuxSessionName();
-    const tmuxProbe = tmuxName === undefined ? 'missing' : (await TmuxBackend.probeSession(tmuxName));
-    if (tmuxName !== undefined && tmuxProbe === 'exists') {
-      await this.transcript?.flush();
-      if (this.superseded(backend, generation)) return;
-      this.assertNoActiveTurn();
-      (await this.reattachTmux(tmuxName, this.started));
-      // daemon 重启后的典型形态：新 driver 直接 resume()，从没调过 start()。
-      // 必须置 started，否则接下来的 send() 会走 start() 再 spawn 一次，
-      // 把刚 attach 上的后端二次 spawn（tmux 后端直接抛 "spawn() called twice"）。
-      // 同理 firstPromptSent：CLI 进程还活着，上一条 prompt 里的路由块/指纹
-      // 仍在它的上下文里，重发一遍只会污染会话。
-      (await this.markTmuxReattached());
-      return;
-    }
-    if (tmuxName !== undefined && tmuxProbe === 'unknown') {
-      throw new Error(`Cannot determine whether persistent tmux session ${tmuxName} is alive; refusing to replace it`);
     }
     // 路径 2：适配器支持 CLI 级 resume → kill 旧后端，带 resume 参数重 spawn。
     if (!this.adapter.buildResumeCommand) return;   // 无 resume 能力 → no-op
@@ -1667,17 +1621,17 @@ export class PtyCliDriver implements AgentDriver {
   private async markResumed(): Promise<void> {
     this.started = true;
     this.firstPromptSent = true;
-    if (this.persistentBackend()) await this.persistentBackend()!.setDutydeckMetadata('first_prompt_sent', 'true');
+    if (this.persistentBackend()) await this.persistentBackend()!.setMetadata('first_prompt_sent', 'true');
     this.inputPrepared = false;
   }
 
   /** tmux reattach restores the exact first-prompt state saved on the owned
    * session. This also handles a daemon restart between session start and the
    * first user prompt without silently losing the routing/session marker. */
-  private async markTmuxReattached(): Promise<void> {
+  private async markReattached(): Promise<void> {
     this.started = true;
     this.firstPromptSent = !!this.persistentBackend()
-      && await this.persistentBackend()!.getDutydeckMetadata('first_prompt_sent') === 'true';
+      && await this.persistentBackend()!.getMetadata('first_prompt_sent') === 'true';
     this.inputPrepared = this.firstPromptSent;
   }
 
@@ -1786,7 +1740,7 @@ export class PtyCliDriver implements AgentDriver {
     if (!preserveSession && !await this.prepareForIdleRetirement()) { this.detachOnStop = true; return; }
     // Runtime alone may authorize idle retirement. If native history cannot
     // be resumed with actual on-disk evidence, keep the persistent pane.
-    this.detachOnStop = this.backend instanceof HerdrBackend || preserveSession || !this.claudeSourceConfirmed || ((this.firstPromptSent || this.hasPinnedNativeSession()) && !this.resumableNativeSession());
+    this.detachOnStop = this.backend.persistent?.preserveOnShutdown === true || preserveSession || !this.claudeSourceConfirmed || ((this.firstPromptSent || this.hasPinnedNativeSession()) && !this.resumableNativeSession());
   }
 
   private hasPinnedNativeSession(): boolean {
@@ -1852,7 +1806,7 @@ export class PtyCliDriver implements AgentDriver {
     this.cancelActiveSubmission(stopReason);
     await this.submissionMetadata;
     if (!preservePersistentSession && !this.recoveryRejected && tmuxBackend) {
-      try { await tmuxBackend.setDutydeckMetadata('turn_id', 'stopped'); } catch (error) { this.warnCaught('stop.turnMetadata', error); }
+      try { await tmuxBackend.setMetadata('turn_id', 'stopped'); } catch (error) { this.warnCaught('stop.turnMetadata', error); }
     }
     if (this.turnActive) {
       this.failTurn(stopReason);
@@ -1861,7 +1815,7 @@ export class PtyCliDriver implements AgentDriver {
     // still awaits its write promise. stop() must release that send() too.
     this.cancelActiveSubmission(stopReason);
     this.turnWriteReject = null;
-    if (this.backend instanceof HerdrBackend || this.backend instanceof TmuxBackend) await this.backend.cancelPending();
+    await this.backend.persistent?.cancelPending();
     await this.transcript?.flush().catch(error => this.warnCaught('stop.flushTranscript', error));
     this.teardownWiring();
     this.terminalSubscribers.clear();
@@ -1990,41 +1944,31 @@ export class PtyCliDriver implements AgentDriver {
 
   async attachTerminal(identity?: unknown): Promise<boolean> {
     if (this.started) return !this.stopped;
-    if (this.backend instanceof HerdrBackend) {
-      this.recoveryRejected = true;
-      if (!this.backend.hasState()) return false;
-      if (identity !== undefined) (await this.backend.assertOwnedIdentity(identity));
-      return this.reattachHerdr().then(async () => {
-        if (identity !== undefined) await (this.backend as HerdrBackend).assertOwnedIdentity(identity);
-        (await this.markTmuxReattached());
-        this.recoveryRejected = false;
-        return true;
-      });
-    }
-    const name = this.tmuxSessionName();
-    // Failed viewing must never destroy a surviving pane during cleanup.
+    const original = this.persistentBackend();
     this.recoveryRejected = true;
-    if (!name || (await TmuxBackend.probeSession(name)) !== 'exists') return false;
+    if (!original || !await original.canAttach('view')) return false;
+    if (identity !== undefined) await original.assertOwnedIdentity?.(identity);
     try {
-      (await this.reattachTmux(name, false));
+      await this.reattach(original, false);
       if (identity !== undefined) {
-        await this.transcript?.flush();
+        if (!original.assertOwnedIdentity) await this.transcript?.flush();
         await this.backend.persistent!.verifyAdoption(identity, () => this.safeIdleTmuxReceipt(), this.processProbe, this.backendPid?.pid);
       }
-      (await this.markTmuxReattached());
+      (await this.markReattached());
       this.recoveryRejected = false;
       return true;
     } catch (error) {
-      this.teardownWiring();
-      // Ownership failures happen before attach installs a pipe.
-      if (this.backend instanceof TmuxBackend && this.backend.initialScreen) (await this.backend.detach());
+      if (!original.assertOwnedIdentity) {
+        this.teardownWiring();
+        if (this.backend.persistent?.initialScreen) await this.backend.persistent.detach();
+      }
       throw error;
     }
   }
 
   private get usesProgramStatus(): boolean {
     // Herdr's control API streams rendered screen updates, stripping OSC frames.
-    return this.adapter.capabilities.programStatus === true && this.backend.kind !== 'herdr';
+    return this.adapter.capabilities.programStatus === true && !terminalScreens[this.backend.kind].renderedFrames;
   }
 
   /** 把一个后端接线进事件流（start / reattach / respawn 共用）。 */
@@ -2046,7 +1990,7 @@ export class PtyCliDriver implements AgentDriver {
     this.idleCpuProcess = rootIdentity && new IdleCpuProcess(rootIdentity.pid, rootIdentity.start);
     try { await backend.persistent?.rememberIdentity?.(this.processProbe); } catch (error) { this.warnCaught('wire.captureTmuxIdentity', error); }
     check();
-    const initial = backend instanceof TmuxBackend || backend instanceof HerdrBackend ? backend.initialScreen : undefined;
+    const initial = backend.persistent?.initialScreen;
     this.snapshot = new TerminalSnapshot(initial?.cols ?? DEFAULT_COLS, initial?.rows ?? DEFAULT_ROWS);
     this.idleDetector = new IdleDetector({
       completionPattern: this.adapter.completionPattern,
@@ -2066,7 +2010,7 @@ export class PtyCliDriver implements AgentDriver {
         }
         console.info(`[dutydeck] session=${this.sessionId} detector=${mode} reason=${reason}`);
       });
-    } else console.info(`[dutydeck] session=${this.sessionId} detector=screen reason=${backend.kind === 'herdr' ? 'Herdr control stream renders screens and drops OSC status frames' : 'adapter does not advertise OSC 7501'}`);
+    } else console.info(`[dutydeck] session=${this.sessionId} detector=screen reason=${terminalScreens[backend.kind].renderedFrames ? 'Herdr control stream renders screens and drops OSC status frames' : 'adapter does not advertise OSC 7501'}`);
     this.idleDetector.onIdle(source => {
       if (completing) { idleAgain = true; return; }
       completing = true;
@@ -2334,7 +2278,7 @@ export class PtyCliDriver implements AgentDriver {
       const draining = this.handleExit(code, backend);
       if (!alreadyReported && backend === this.backend) this.exitDrain = draining;
     });
-    if (backend instanceof HerdrBackend) backend.onDisconnect(error => {
+    backend.persistent?.onDisconnect?.(error => {
       if (backend !== this.backend || this.stopped) return;
       this.cancelActiveSubmission(error);
       this.turnWriteReject = null;
@@ -2637,7 +2581,7 @@ export class PtyCliDriver implements AgentDriver {
     if (this.backend !== exitingBackend || this.snapshot !== exitingSnapshot) return;
     this.flushRawTerminal(exitingSnapshot);
     this.teardownWiring();
-    if (this.backend instanceof HerdrBackend ? (await this.backend.isStopped()) : !(this.backend instanceof TmuxBackend) || (await TmuxBackend.probeSession(this.backend.sessionName)) === 'missing') {
+    if (!this.backend.persistent || await this.backend.persistent.exitedAfterDisconnect()) {
       this.claudeSettings.cleanup();
     }
     this.exitCallback(code);
@@ -2780,52 +2724,15 @@ export class PtyCliDriver implements AgentDriver {
     };
   }
 
-  /**
-   * The tmux session name this driver is bound to, or undefined when the
-   * backend is not a tmux backend.
-   *
-   * `SessionBackend.sessionName` is the contract (TmuxBackend returns its
-   * session, PtyBackend returns undefined), so an injected backend and a
-   * driver-built one answer through the same door. This used to reflect into
-   * the backend's private `sessionName` field, which broke silently on any
-   * rename; that fallback is gone.
-   */
-  private persistentBackend(): TmuxBackend | HerdrBackend | undefined {
-    return this.backend instanceof TmuxBackend || this.backend instanceof HerdrBackend ? this.backend : undefined;
-  }
+  private persistentBackend(): PersistentSessionBackend | undefined { return this.backend.persistent; }
 
-  private async reattachHerdr(restoreTranscript?: DriverTurnRecovery['transcript']): Promise<void> {
-    if (!(this.backend instanceof HerdrBackend)) throw new Error('Herdr backend required');
-    const backend = this.backend;
+  private async reattach(original: PersistentSessionBackend, detachCurrent: boolean, restoreTranscript?: DriverTurnRecovery['transcript']) {
     this.teardownWiring();
-    const generation = this.wiringGeneration;
-    await backend.attach({ cols: DEFAULT_COLS, rows: DEFAULT_ROWS });
-    if (this.superseded(backend, generation)) {
-      throw new Error('PTY recovery cancelled by lifecycle change');
-    }
-    (await this.wire(backend, restoreTranscript));
-  }
-
-  private tmuxSessionName(): string | undefined {
-    if (!(this.backend instanceof TmuxBackend)) return undefined;
-    const name = this.backend.sessionName;
-    return name.length > 0 ? name : undefined;
-  }
-
-  private async reattachTmux(
-    sessionName: string,
-    detachCurrent: boolean,
-    restoreTranscript?: DriverTurnRecovery['transcript'],
-  ): Promise<void> {
-    this.teardownWiring();
-    // detach 只拆捕获，不杀 tmux 会话——CLI 进程继续存活。
-    const ownerId = this.backend instanceof TmuxBackend ? this.backend.ownerId : undefined;
-    if (detachCurrent) await this.backend.detach?.();
-    const backend = new TmuxBackend(sessionName, { ownerId, log: this.log });
+    const backend = original.attachmentTarget(this.log);
+    if (backend !== original && detachCurrent) await original.detach();
     this.backend = backend;
-    // attach 到既有会话：不重建 session、不重发 CLI 启动命令，只重建捕获。
     const generation = this.wiringGeneration;
-    await backend.attach({ cols: DEFAULT_COLS, rows: DEFAULT_ROWS });
+    await backend.reattach({ cols: DEFAULT_COLS, rows: DEFAULT_ROWS });
     if (this.superseded(backend, generation)) throw new Error('PTY recovery cancelled by lifecycle change');
     await this.wire(backend, restoreTranscript);
   }
@@ -2849,7 +2756,7 @@ export class PtyCliDriver implements AgentDriver {
       let captured = strictCursor
         ? await target.captureInputSubmissionScreen!()
         : await target.captureCurrentScreen(true);
-      if (strictCursor && captured === null && allowCompactHiddenCursor && target.kind === 'tmux') {
+      if (strictCursor && captured === null && allowCompactHiddenCursor && terminalScreens[target.kind].paneGeometry) {
         // Claude hides the hardware cursor on its exact slash menu. Only that
         // native command menu may use a plain fresh capture; an ordinary
         // composer still needs cursor evidence to preserve semantic padding.
@@ -2857,7 +2764,7 @@ export class PtyCliDriver implements AgentDriver {
         if (captured === null || !ownedClaudeCompactMenu(captured)) return '';
       }
       if (captured === undefined || captured === null) return '';
-      if (target.kind !== 'herdr') return captured;
+      if (!terminalScreens[target.kind].renderedFrames) return captured;
       const size = await target.getPaneSize?.() ?? { cols: this.snapshot?.xterm.cols ?? DEFAULT_COLS, rows: this.snapshot?.xterm.rows ?? DEFAULT_ROWS };
       const renderer = new TerminalSnapshot(size.cols, size.rows);
       try {
@@ -2965,7 +2872,7 @@ export class PtyCliDriver implements AgentDriver {
         owner === 'maintenance-cleanup' || Boolean(submission.terminalWriteAttempted || submission.composerWritten),
         owner === 'maintenance')),
     };
-    if (target.kind === 'tmux' && target.getPaneSize) {
+    if (terminalScreens[target.kind].paneGeometry && target.getPaneSize) {
       proxy.beginExpandedInput = () => guarded(() => this.beginExpandedSubmissionInput(target));
     }
     if (target.sendText) proxy.sendText = text => guarded(() => target.sendText!(text), owner === 'maintenance' ? 'text' : undefined, true);
@@ -3012,22 +2919,15 @@ export class PtyCliDriver implements AgentDriver {
     this.teardownWiring();
     this.inputPrepared = false;
     const generation = this.wiringGeneration;
-    // 会话名必须在 kill 之前取：kill 之后旧后端就不该再被问了。
-    const tmuxName = this.backend instanceof TmuxBackend
-      ? (this.tmuxSessionName() ?? this.sessionId)
-      : undefined;
-    // 旧后端的 exit 是我们自己造成的，不该当成 agent 崩溃——handleExit 按
-    // 「事件来自哪个后端实例」过滤掉它（见那里的说明）。
     const previousBackend = this.backend;
-    if (previousBackend instanceof HerdrBackend) await previousBackend.stopOwnedIdentity();
+    await previousBackend.persistent?.prepareReplacement?.();
     if (this.superseded(previousBackend, generation)) throw new Error('PTY respawn cancelled by lifecycle change');
     try {
       await previousBackend.kill();
     } catch (error) {
       this.warnCaught('respawn.killPreviousBackend', error);
     }
-    const ownerId = previousBackend instanceof TmuxBackend ? previousBackend.ownerId : undefined;
-    const backend = previousBackend instanceof HerdrBackend ? previousBackend.fork() : tmuxName !== undefined ? new TmuxBackend(tmuxName, { ownerId, log: this.log }) : new PtyBackend();
+    const backend: SessionBackend = previousBackend.persistent?.replacement(this.sessionId, this.log) ?? new PtyBackend();
     this.backend = backend;
     this.lastArgs = launchArgs;
     const respawnEnv = this.spawnEnv();
@@ -3042,9 +2942,9 @@ export class PtyCliDriver implements AgentDriver {
       this.claudeSettings.recordLaunch(this.lastArgs, this.cwd, this.adapter.guardFailureBlock?.() ?? false);
       if (this.superseded(backend, generation)) throw new Error('PTY respawn cancelled by lifecycle change');
     } catch (error) {
-      if (backend instanceof HerdrBackend && this.superseded(backend, generation)) {
-        await backend.cancelPending();
-        try { await backend.stopOwnedIdentity(); } catch (failure) { this.warnCaught('respawn.stopSupersededHerdr', failure); }
+      if (backend.persistent?.prepareReplacement && this.superseded(backend, generation)) {
+        await backend.persistent.cancelPending();
+        try { await backend.persistent.prepareReplacement(); } catch (failure) { this.warnCaught('respawn.stopSupersededHerdr', failure); }
       }
       throw error;
     }

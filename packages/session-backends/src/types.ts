@@ -1,3 +1,4 @@
+import type { DiagnosticLog } from '@dutydeck/shared';
 import type { ProcessProbe } from './owned-tmux.js';
 
 /**
@@ -69,6 +70,15 @@ export type TerminalMetadataKey = 'first_prompt_sent' | 'turn_id';
 export interface PersistentSessionBackend extends SessionBackend {
   readonly ownerId?: string;
   readonly initialScreen?: { data: string; cols: number; rows: number };
+  canAttach(purpose: 'start' | 'resume' | 'view', check?: () => void): Promise<boolean>;
+  attachmentTarget(log?: DiagnosticLog): PersistentSessionBackend;
+  replacement(sessionId: string, log?: DiagnosticLog): PersistentSessionBackend;
+  recoveryOwnerError?(): Promise<string | undefined>;
+  prepareReplacement?(): Promise<void>;
+  readonly preserveOnShutdown?: boolean;
+  assertOwnedIdentity?(snapshot: unknown): Promise<void>;
+  onDisconnect?(callback: (error: Error) => void): void;
+  exitedAfterDisconnect(): Promise<boolean>;
   rememberIdentity?(probe?: ProcessProbe): Promise<void>;
   stopAttached(probe?: ProcessProbe): Promise<void>;
   attachedExitVerified(probe: ProcessProbe | undefined, pid: number | undefined, preserve: boolean): Promise<boolean>;
@@ -85,3 +95,10 @@ export interface PersistentSessionBackend extends SessionBackend {
   detach(): Promise<void>;
   cancelPending(): Promise<void>;
 }
+
+/** Screen encoding and cursor semantics also apply to externally supplied SessionBackend implementations. */
+export const terminalScreens = {
+  pty: { renderedFrames: false, paneGeometry: false },
+  tmux: { renderedFrames: false, paneGeometry: true },
+  herdr: { renderedFrames: true, paneGeometry: false },
+} as const;

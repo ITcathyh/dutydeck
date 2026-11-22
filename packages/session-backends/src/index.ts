@@ -24,3 +24,4 @@ export { ProgramStatusFramingStream, type ProgramStatusEvent } from './program-s
 export { descendantPids } from './descendant-pids.js';
 export { spawnPty } from './spawn-pty.js';
 export { createPtyRetirementControl } from './pty-recovery.js';
+export { terminalScreens } from './types.js';
