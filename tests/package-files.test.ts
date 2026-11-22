@@ -1,6 +1,7 @@
 import { execFile } from 'node:child_process';
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
-import { join, posix } from 'node:path';
+import { cp, mkdtemp, rm } from 'node:fs/promises';
+import { dirname, join, posix } from 'node:path';
 import { promisify } from 'node:util';
 import { describe, expect, it } from 'vitest';
 
@@ -35,6 +36,26 @@ describe('工作区包发布清单', () => {
     expect([...packed].filter(path => path.endsWith('.tsbuildinfo'))).toEqual([]);
   }, 60_000);
 });
+
+it('restores a missing SDK entry during pack with an up-to-date TypeScript cache', async () => {
+  const scratch = await mkdtemp(join(dirname(packagesRoot), '.test-sdk-pack-'));
+  const sdk = join(scratch, 'plugin-sdk');
+  const entry = join(sdk, 'dist/index.js');
+  try {
+    for (const file of ['src', 'package.json', 'tsconfig.json']) {
+      await cp(join(packagesRoot, 'plugin-sdk', file), join(sdk, file), { recursive: true });
+    }
+    await execFileAsync('npm', ['run', 'build'], { cwd: sdk });
+    await rm(entry);
+    expect(existsSync(join(sdk, 'dist/tsconfig.tsbuildinfo'))).toBe(true);
+
+    const { stdout } = await execFileAsync('npm', ['pack', '--json', '--pack-destination', scratch], { cwd: sdk });
+    expect(existsSync(entry)).toBe(true);
+    expect(JSON.parse(stdout)[0].files).toContainEqual(expect.objectContaining({ path: 'dist/index.js' }));
+  } finally {
+    await rm(scratch, { recursive: true, force: true });
+  }
+}, 60_000);
 
 // 打包产物验证依赖构建产物，不在默认 vitest 范围内；新增的验证脚本必须挂到 verify:package，否则没人会跑。
 describe('发布产物验证入口', () => {

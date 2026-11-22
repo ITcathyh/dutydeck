@@ -25,7 +25,7 @@
   "scripts": {
     "postinstall": "node scripts/fix-node-pty.mjs",
     "build": "tsc -p tsconfig.json",
-    "prepack": "pnpm build",
+    "prepack": "tsc -b --force",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
