@@ -1,4 +1,6 @@
-import type { LarkInboxRecord } from './task-inbox.js';
+import type { ButtonResult, ButtonSource } from './handlers/button-context.js';
+import type { LarkAgentCommandRequest, LarkAgentViewRequest, LarkAgentSettingsRequest } from './agent-command.js';
+import type { LarkInboxRecord, LarkInboxAdoption } from './task-inbox.js';
 import type { LarkLaunchOptions } from './new-session.js';
 import type { AgentEvent, Session, TaskRecord } from '@dutydeck/shared';
 import type { StoredLarkConfig } from './config.js';
@@ -8,12 +10,11 @@ import type { LarkCardElement } from './card-renderer.js';
 import type { LarkRedispatchInfo } from './turn-redispatch.js';
 import type { LarkMessageEvent } from './listener.js';
 import type { LarkScenarioRecall } from './scenario-recall.js';
-import { LarkCoordinatorInbound } from './coordinator-inbound.js';
+import { createCoordinatorParts } from './coordinator-parts.js';
 
 // 飞书消息协调器（从 listener.ts 拆分）：按群/话题串行化任务轮次、驱动 Agent 会话、
 // 渲染并更新服务卡片。卡片终态对账见 reconciler.ts，会话路由见 session-resolver.ts。
-// 实现按层拆开、逐层继承：coordinator-core → -cards（卡片生命周期）→ -recovery（恢复与对账）
-// → -dispatch（派发）→ -inbound（入站唤醒）；本文件只放公开类型和入口类。
+// 部件由 coordinator-parts.ts 组装，按机器人实例共享 CoordinatorState。
 
 export type LarkGroup = {
   sessionId?: string;
@@ -133,4 +134,86 @@ export type LarkTask = {
 export type { PersistedLarkCardTask } from './turn-record.js';
 export { larkTaskTitle } from './coordinator-core.js';
 
-export class LarkMessageCoordinator extends LarkCoordinatorInbound {}
+export class LarkMessageCoordinator {
+  protected readonly components: ReturnType<typeof createCoordinatorParts>;
+
+  constructor(...args: Parameters<typeof createCoordinatorParts>) {
+    this.components = createCoordinatorParts(...args);
+  }
+
+  repairClosedCards(appId: string) {
+    return this.components.core.repairClosedCards(appId);
+  }
+
+  endDurableConfirmations(appId: string) {
+    return this.components.core.endDurableConfirmations(appId);
+  }
+
+  stop() {
+    return this.components.core.stop();
+  }
+
+  reconcile(config: StoredLarkConfig) {
+    return this.components.reconcile.reconcile(config);
+  }
+
+  startReconciliation(config: StoredLarkConfig, intervalMs = 5_000) {
+    return this.components.reconcile.startReconciliation(config, intervalMs);
+  }
+
+  initializeWorkflows(config: StoredLarkConfig) {
+    return this.components.intake.initializeWorkflows(config);
+  }
+
+  pollLarkTaskDispatches(config: StoredLarkConfig): Promise<number> {
+    return this.components.intake.pollLarkTaskDispatches(config);
+  }
+
+  handleTaskAssigneesUpdate(config: StoredLarkConfig): void {
+    return this.components.intake.handleTaskAssigneesUpdate(config);
+  }
+
+  canConfirmParticipation(scope: { appId: string; chatId: string }, actor: string): Promise<boolean> {
+    return this.components.intake.canConfirmParticipation(scope, actor);
+  }
+
+  trustsBotSender(config: StoredLarkConfig, chatId: string, senderOpenId: string): Promise<boolean> {
+    return this.components.intake.trustsBotSender(config, chatId, senderOpenId);
+  }
+
+  adopt(event: LarkMessageEvent, config: StoredLarkConfig) {
+    return this.components.intake.adopt(event, config);
+  }
+
+  receive(event: LarkMessageEvent, config: StoredLarkConfig, trustedReplyMessageId?: string) {
+    return this.components.intake.receive(event, config, trustedReplyMessageId);
+  }
+
+  handleEdited(event: LarkMessageEvent, config: StoredLarkConfig) {
+    return this.components.intake.handleEdited(event, config);
+  }
+
+  handleReaction(messageId: string, emoji: string, actor: string, config: StoredLarkConfig) {
+    return this.components.intake.handleReaction(messageId, emoji, actor, config);
+  }
+
+  handle(event: LarkMessageEvent, config: StoredLarkConfig, recovering = false, adopted = false, retrying?: LarkTask, captured?: LarkInboxRecord, adoption?: LarkInboxAdoption) {
+    return this.components.intake.handle(event, config, recovering, adopted, retrying, captured, adoption);
+  }
+
+  agentCommand(request: LarkAgentCommandRequest): Promise<Record<string, unknown>> {
+    return this.components.intake.agentCommand(request);
+  }
+
+  agentView(request: LarkAgentViewRequest): Promise<Record<string, unknown>> {
+    return this.components.intake.agentView(request);
+  }
+
+  agentSettings(request: LarkAgentSettingsRequest): Promise<Record<string, unknown>> {
+    return this.components.intake.agentSettings(request);
+  }
+
+  handleAction(value: unknown, operatorOpenId?: string, context?: ButtonSource): Promise<ButtonResult> {
+    return this.components.intake.handleAction(value, operatorOpenId, context);
+  }
+}

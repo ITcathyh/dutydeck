@@ -1,3 +1,4 @@
+import { TestLarkCoordinator } from './coordinator-test-fixture.js';
 import { TurnRecoveryDecisions, turnDecisionKey } from './recovery-decision.js';
 import { MattersService } from '../matters.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -8,7 +9,7 @@ import { createRepositories } from '@dutydeck/storage';
 import { DutydeckRuntime } from '@dutydeck/runtime';
 import type { AgentConfig, DriverFactory, NormalizedDriverEvent } from '@dutydeck/shared';
 import { larkBotsConfigKey, type StoredLarkConfig } from './config.js';
-import { LarkMessageCoordinator, type PersistedLarkCardTask } from './coordinator.js';
+import { type PersistedLarkCardTask } from './coordinator.js';
 import { explicitFinalContext, sendExplicitFinal } from './explicit-final.js';
 import { larkControlPhrase } from './coordinator-inbound.js';
 import { larkAgentAvailabilityLine } from './commands.js';
@@ -130,7 +131,7 @@ async function topic(options: { fallback?: boolean; agentStatusCheck?: () => Pro
     await runtime.initialize([agent, ...(options.fallback ? [{ ...agent, id: 'spare', name: 'Spare', model: 'spare-model' }] : [])]);
     age?.(runtime);
     const service = feishu();
-    const coordinator = new LarkMessageCoordinator(runtime, service as any, { info: vi.fn(), warn: vi.fn(), error: vi.fn() } as any, Math.random, 'ou_bot',
+    const coordinator = new TestLarkCoordinator(runtime, service as any, { info: vi.fn(), warn: vi.fn(), error: vi.fn() } as any, Math.random, 'ou_bot',
       undefined, repos.channelMappings, undefined, undefined, undefined, { store: repos.config });
     await coordinator.initializeWorkflows(config);
     await coordinator.reconcile(config);
@@ -727,7 +728,7 @@ describe('handoff of persisted legacy Lark source IDs', () => {
     const persisted = await h.repos.sessions.get(session.id);
     expect(persisted?.sourceId).toBe(sourceId);
     const tasks = await h.runtime.getTasks(session.id);
-    const text = await (h.coordinator as any).newSessionHandoff(h.config, { ...message('handoff', ''), chatId, chatType }, session.id, tasks, 'legacy note');
+    const text = await h.coordinator.parts.routing.newSessionHandoff(h.config, { ...message('handoff', ''), chatId, chatType }, session.id, tasks, 'legacy note');
     expect(text).toContain(`来源 session=${session.id}`);
     expect(text).toContain(`来源 task=${tasks[0]!.id} attempt=${tasks[0]!.currentAttemptId}`);
     expect(text).toContain('原目标：legacy goal');
@@ -798,7 +799,7 @@ describe('收尾操作与控制语的并发和失败', () => {
     // 模拟「重新执行」先一步把这一轮认领走（同一进程，对账不会接手）。
     const decisions = new TurnRecoveryDecisions(h.repos.config, h.repos.channelMappings, { warn: vi.fn() });
     expect(await decisions.compareAndSet(turnDecisionKey('redispatch', 'app', 'om_first', 1), JSON.stringify(held),
-      JSON.stringify({ ...held, phase: 'claimed', boot: (h.coordinator as any).relaunchBoot }))).toBe(true);
+      JSON.stringify({ ...held, phase: 'claimed', boot: h.coordinator.parts.state.relaunchBoot }))).toBe(true);
     expect(await h.coordinator.handleAction(callbackValueOf(card, 'continue_in_place'), 'ou_alice', { messageId: cardId, chatId: 'oc_group' }))
       .toMatchObject({ type: 'warning' });
     await new Promise(resolve => setTimeout(resolve, 100));
@@ -814,7 +815,7 @@ describe('收尾操作与控制语的并发和失败', () => {
     const cardId = saved.card_message_id!;
     await until(() => h.lastUpdate(cardId)?.statusLabel === '结果未知');
     const card = h.lastUpdate(cardId);
-    const settle = vi.spyOn(h.coordinator as any, 'settleInterruptedAttempt').mockRejectedValueOnce(new Error('执行资源未确认停止'));
+    const settle = vi.spyOn(h.coordinator.parts.reconcile, 'settleInterruptedAttempt').mockRejectedValueOnce(new Error('执行资源未确认停止'));
     expect(await h.coordinator.handleAction(callbackValueOf(card, 'continue_in_place'), 'ou_alice', { messageId: cardId, chatId: 'oc_group' }))
       .toMatchObject({ type: 'warning' });
     expect(JSON.parse((await h.repos.config.get('lark.redispatch.app.om_first.1'))!)).toMatchObject({ phase: 'held' });
@@ -827,12 +828,12 @@ describe('收尾操作与控制语的并发和失败', () => {
 
   it('Agent 已停下但自动结束失败：不留「已自动结束」的原因，之后的结果卡不会这样写', async () => {
     const h = await topic();
-    vi.spyOn(h.coordinator as any, 'settleInterruptedAttempt').mockRejectedValue(new Error('执行资源未确认停止'));
+    vi.spyOn(h.coordinator.parts.reconcile, 'settleInterruptedAttempt').mockRejectedValue(new Error('执行资源未确认停止'));
     await unconfirmedTurn(h);
     const { saved } = await h.mapping();
     expect((await h.tasks())[0]).toMatchObject({ status: 'reconcile_required' });
     const raw = await h.repos.config.get('lark.settled.app.om_first.1');
     expect(raw === undefined || JSON.parse(raw).revoked === true).toBe(true);
-    expect(await (h.coordinator as any).continueCause('app', 'om_first', saved.turn ?? 0, saved.scope_id, 'interrupted', [])).toBeUndefined();
+    expect(await h.coordinator.parts.reconcile.continueCause('app', 'om_first', saved.turn ?? 0, saved.scope_id, 'interrupted', [])).toBeUndefined();
   });
 });

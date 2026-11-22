@@ -6,6 +6,10 @@ import { LarkMessageCoordinator } from './coordinator.js';
 import { larkBotsConfigKey, type StoredLarkConfig } from './config.js';
 import type { LarkRuntime } from './runtime.js';
 
+export class TestLarkCoordinator extends LarkMessageCoordinator {
+  get parts() { return this.components; }
+}
+
 type Args = ConstructorParameters<typeof LarkMessageCoordinator>;
 
 // Simulated drivers in routing tests provide their own execution and events.
@@ -77,7 +81,7 @@ export function createTestLarkCoordinator(config: StoredLarkConfig, runtime: Arg
   random?: Args[3], bot?: Args[4], peer?: Args[5], mappings?: Args[6], resolve?: Args[7], policy?: Args[8],
   groups?: Args[9], options: Partial<Args[10]> = {}) {
   const memory = createTestLarkStorage(config);
-  const coordinator = new LarkMessageCoordinator(fixtureRuntime(runtime), service, log, random, bot, peer, mappings ?? memory.cardMappings,
+  const coordinator = new TestLarkCoordinator(fixtureRuntime(runtime), service, log, random, bot, peer, mappings ?? memory.cardMappings,
     resolve, policy, groups, { ...options, store: options.store ?? memory.workflowStore });
   onTestFinished(() => coordinator.stop());
   return Object.assign(coordinator, {

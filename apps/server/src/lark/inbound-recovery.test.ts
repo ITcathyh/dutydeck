@@ -1,3 +1,4 @@
+import { LarkCoordinatorDispatch } from './coordinator-dispatch.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createRepositories } from '@dutydeck/storage';
 import { larkBotsConfigKey, type StoredLarkConfig } from './config.js';
@@ -62,7 +63,7 @@ afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); });
 
 describe('启动恢复入站消息：单条失败不影响初始化和监听建连', () => {
   it('marks a record the platform explicitly rejects as failed and still recovers the others', async () => {
-    const runTurn = vi.spyOn(LarkMessageCoordinator.prototype as any, 'runTurn').mockResolvedValue(undefined);
+    const runTurn = vi.spyOn(LarkCoordinatorDispatch.prototype, 'runTurn').mockResolvedValue(undefined);
     const h = await harness([{ event: groupMessage('om_a_gone', 'oc_gone') }, { event: directMessage('om_b_ok') }],
       async chatId => { if (chatId === 'oc_gone') throw membersRejected(); return allowed; });
     try {
@@ -75,7 +76,7 @@ describe('启动恢复入站消息：单条失败不影响初始化和监听建�
 
   it('keeps a record that failed transiently and retries it later', async () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
-    const runTurn = vi.spyOn(LarkMessageCoordinator.prototype as any, 'runTurn').mockResolvedValue(undefined);
+    const runTurn = vi.spyOn(LarkCoordinatorDispatch.prototype, 'runTurn').mockResolvedValue(undefined);
     let outage = true;
     const h = await harness([{ event: groupMessage('om_flaky', 'oc_flaky') }], async () => { if (outage) throw membersUnavailable(); return allowed; });
     try {
@@ -90,7 +91,7 @@ describe('启动恢复入站消息：单条失败不影响初始化和监听建�
   });
 
   it('gives up on a record older than the recovery age limit and tells the sender to resend', async () => {
-    const runTurn = vi.spyOn(LarkMessageCoordinator.prototype as any, 'runTurn').mockResolvedValue(undefined);
+    const runTurn = vi.spyOn(LarkCoordinatorDispatch.prototype, 'runTurn').mockResolvedValue(undefined);
     const h = await harness([{ event: directMessage('om_stale', { createTime: String(Date.now() - 2 * 60 * 60_000) }) }], async () => allowed);
     try {
       await h.coordinator.initializeWorkflows(config);
@@ -101,7 +102,7 @@ describe('启动恢复入站消息：单条失败不影响初始化和监听建�
   });
 
   it('fails a record or orphaned command older than a day without replying in the chat', async () => {
-    const runTurn = vi.spyOn(LarkMessageCoordinator.prototype as any, 'runTurn').mockResolvedValue(undefined);
+    const runTurn = vi.spyOn(LarkCoordinatorDispatch.prototype, 'runTurn').mockResolvedValue(undefined);
     const dayAgo = String(Date.now() - 25 * 60 * 60_000);
     const h = await harness([{ event: groupMessage('om_old', 'oc_old', { createTime: dayAgo }) },
       { event: groupMessage('om_old_command', 'oc_old', { createTime: dayAgo, content: JSON.stringify({ text: '@_user_1 /status' }) }), state: 'command' }], async () => allowed);

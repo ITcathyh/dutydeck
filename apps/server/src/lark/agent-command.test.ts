@@ -1,3 +1,4 @@
+import { TestLarkCoordinator } from './coordinator-test-fixture.js';
 import { createAutomationIntegration } from '../automation-integration.js';
 import { SessionAutomationService } from '../session-automation.js';
 // Agent 代用户发飞书命令（dutydeck command）：查看类直接出结果卡，会改东西的先发确认卡，点「确认」后以点击人身份执行。
@@ -14,7 +15,7 @@ import { tmpdir } from 'node:os';
 import { createRepositories } from '@dutydeck/storage';
 import { DutydeckRuntime, type AgentDriver } from '@dutydeck/runtime';
 import type { AgentConfig } from '@dutydeck/shared';
-import { LarkMessageCoordinator, type PersistedLarkCardTask } from './coordinator.js';
+import { type PersistedLarkCardTask } from './coordinator.js';
 import { larkBotsConfigKey, readLarkConfig, type StoredLarkConfig } from './config.js';
 import type { LarkMessageEvent } from './listener.js';
 import { buildLarkCard } from './service.js';
@@ -82,7 +83,7 @@ async function harness(workflow: Record<string, unknown> = {}, holdFirst = false
   const participation = { confirmations, mode: async () => 'off', handle: async () => ({ handled: false, enabled: false }), guardBotTurn: async () => undefined, noteHumanMessage: () => undefined,
     taskContext: async () => undefined, instructions: async () => '', describe: async () => undefined } as any;
   const log = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
-  const coordinator = new LarkMessageCoordinator(runtime, service as any, log, Math.random, 'ou_bot',
+  const coordinator = new TestLarkCoordinator(runtime, service as any, log, Math.random, 'ou_bot',
     undefined, repos.channelMappings, async () => 'group', undefined, undefined, { store: repos.config, participation, ...workflow });
   await coordinator.initializeWorkflows(config);
   await coordinator.startReconciliation(config, 60_000);
@@ -195,13 +196,13 @@ describe('Agent 代发飞书命令', () => {
     const confirmCall = h.repliesTo('om_1').find(input => input.taskName === '待确认的操作')!;
     const confirmCardId = [...h.cards].find(([, input]) => input === confirmCall)![0];
     // 模拟命令执行到一半进程退出：执行永远不返回。
-    (h.coordinator as any).routeChatCommand = () => new Promise(() => {});
+    h.coordinator.parts.intake.routeChatCommand = () => new Promise(() => {});
     const value = findElement(buildLarkCard(confirmCall), 'confirm_confirm')!.behaviors[0].value;
     expect(await h.coordinator.handleAction(value, 'ou_alice', { messageId: confirmCardId, chatId: 'oc_group' })).toMatchObject({ type: 'success' });
     const inboxKey = `lark.inbox.${h.config.appId}.${confirmCardId}`;
     expect(JSON.parse((await h.repos.config.get(inboxKey))!)).toMatchObject({ state: 'command', event: { senderOpenId: 'ou_alice' } });
 
-    const restarted = new LarkMessageCoordinator(h.runtime, h.service as any, { info: vi.fn(), warn: vi.fn(), error: vi.fn() }, Math.random, 'ou_bot',
+    const restarted = new TestLarkCoordinator(h.runtime, h.service as any, { info: vi.fn(), warn: vi.fn(), error: vi.fn() }, Math.random, 'ou_bot',
       undefined, h.repos.channelMappings, async () => 'group', undefined, undefined, { store: h.repos.config, participation: h.participation });
     cleanups.push(() => restarted.stop());
     await restarted.initializeWorkflows(h.config);
@@ -450,7 +451,7 @@ describe('busy message triage through real runtime and confirmation cards', () =
       { client: () => h.service as any, log: { warn: vi.fn() } });
     const automation = new SessionAutomationService({ repositories: h.repos, runtime: h.runtime,
       authorize: integration.authorize, prepareDelivery: integration.prepareDelivery });
-    Object.assign((h.coordinator as any).workflowOptions, { saveBotConfig: vi.fn(), automation,
+    Object.assign(h.coordinator.parts.state.workflowOptions, { saveBotConfig: vi.fn(), automation,
       scheduleRequests: { prepareDelivery: integration.prepareMessageDelivery, sendConfirmation: integration.sendScheduleRequest } });
     Object.defineProperty(automation, 'pullRequests', { value: { prepare, attachCard, availability: () => ({ available: true }) } });
     const params = action === 'settings.set' ? { pairs: ['busyTriage=true'] } : action === 'schedule.create' ? { prompt: '看 CI', every: 60 } : {};
@@ -475,7 +476,7 @@ describe('busy message triage through real runtime and confirmation cards', () =
       proposals.push(proposal); return proposal;
     });
     const attachCard = vi.fn();
-    (h.coordinator as any).workflowOptions.automation = { pullRequests: { prepare, attachCard, availability: () => ({ available: true }), listBySession: async () => proposals } };
+    Object.assign(h.coordinator.parts.state.workflowOptions, { automation: { pullRequests: { prepare, attachCard, availability: () => ({ available: true }), listBySession: async () => proposals } } });
     h.triage.mockResolvedValue(parseBusyTriageResult('{"kind":"command","action":"pr.open","params":{}}'));
     const reply = h.service.reply.getMockImplementation()!;
     h.service.reply.mockImplementation(async input => { if (input.taskName === '/pr 需要确认') throw new Error('card delivery failed'); return reply(input); });
@@ -552,7 +553,7 @@ describe('busy message triage through real runtime and confirmation cards', () =
     h.triage.mockResolvedValue({ kind: 'progress' });
     const clock = vi.spyOn(Date, 'now').mockReturnValue(1_800_000_000_000);
     try {
-      (h.coordinator as any).tasks.get('om_busy_first').startedAt = Date.now() - seconds * 1000;
+      h.coordinator.parts.state.tasks.get('om_busy_first')!.startedAt = Date.now() - seconds * 1000;
       await h.receive('做到哪了');
       expect(h.repliesTo('om_busy_second')[0]?.markdown).toContain(`已用时间：${expected}`);
     } finally { clock.mockRestore(); }
@@ -566,7 +567,7 @@ describe('busy message triage through real runtime and confirmation cards', () =
       { client: () => h.service as any, log: { warn: vi.fn() } });
     const automation = new SessionAutomationService({ repositories: h.repos, runtime: h.runtime,
       authorize: integration.authorize, prepareDelivery: integration.prepareDelivery });
-    Object.assign((h.coordinator as any).workflowOptions, { automation,
+    Object.assign(h.coordinator.parts.state.workflowOptions, { automation,
       scheduleRequests: { prepareDelivery: integration.prepareMessageDelivery, sendConfirmation: integration.sendScheduleRequest } });
     h.triage.mockResolvedValue(parseBusyTriageResult('{"kind":"command","action":"schedule.create","params":{"prompt":"看下 CI","cron":"0 9 * * *"}}'));
     const dispatch = vi.spyOn(h.runtime, 'dispatchRequest');
@@ -592,7 +593,7 @@ describe('busy message triage through real runtime and confirmation cards', () =
     await h.repos.config.set(larkBotsConfigKey, JSON.stringify([h.config]));
     h.service.listChatMembers.mockResolvedValue({ items: [{ memberId: 'ou_alice' }, { memberId: 'ou_bob' }], hasMore: false });
     const save = vi.fn();
-    (h.coordinator as any).workflowOptions.saveBotConfig = save;
+    h.coordinator.parts.state.workflowOptions.saveBotConfig = save;
     h.triage.mockResolvedValue(parseBusyTriageResult('{"kind":"command","action":"settings.set","params":{"pairs":["defaultAgentId=mock","notifyQuietHours=22:00-08:00"]}}'));
     await h.receive('以后默认用 mock，晚上十点到早上八点别推送', { senderOpenId: 'ou_bob' });
     const actions = await h.repos.collaboration.listActions({ appId: h.config.appId, chatId: 'oc_group' });
@@ -614,7 +615,7 @@ describe('busy message triage through real runtime and confirmation cards', () =
   ])('queues invalid busy %s parameters without creating a card or writing', async (action, params) => {
     const h = await busyHarness();
     const save = vi.fn();
-    (h.coordinator as any).workflowOptions.saveBotConfig = save;
+    h.coordinator.parts.state.workflowOptions.saveBotConfig = save;
     h.triage.mockImplementation(async () => parseBusyTriageResult(JSON.stringify({ kind: 'command', action, params })));
     await h.receive('处理这个控制操作');
     await h.queued();
@@ -676,7 +677,7 @@ describe('busy message triage through real runtime and confirmation cards', () =
       patch.parentId = 'om_pending_card';
       await h.repos.config.set(`lark.interaction.${h.config.appId}.pending`, JSON.stringify({
         id: 'pending', appId: h.config.appId, sessionId: h.active.sessionId, taskId: h.active.task.id, turn: 1,
-        boot: (h.coordinator as any).workflows.boot, kind: kind === 'question' ? 'ask' : 'permission', nativeId: 'native_pending',
+        boot: h.coordinator.parts.core.workflows.boot, kind: kind === 'question' ? 'ask' : 'permission', nativeId: 'native_pending',
         question: '继续吗？', state: 'pending', cardId: patch.parentId, updatedAt: new Date().toISOString(), event: event('om_busy_first', '修改接口')
       }));
     }
@@ -734,7 +735,7 @@ describe('恢复和分身确认卡不跨会话执行', () => {
     await h.coordinator.handle(event('om_new', '/new'), h.config);
     const current = await h.current(event('om_next', '当前任务'));
     const authorize = vi.fn(async (_app: string, _chat: string, actor: string, action: string) => ({ allowed: action !== 'run.resume' || actor === 'ou_alice' }));
-    (h.coordinator as any).groupManager = { resolved: async (config: any) => ({ ...config, managedGroup: { bindingId: 'binding', revision: 1 } }), authorize };
+    Object.assign(h.coordinator.parts.state, { groupManager: { resolved: async (config: any) => ({ ...config, managedGroup: { bindingId: 'binding', revision: 1 } }), authorize } });
     await h.coordinator.agentCommand({ ...current, command: `/resume ${old.sessionId}` });
     const card = h.repliesTo('om_next').find(input => input.taskName === '待确认的操作')!;
     const cardId = [...h.cards].find(([, value]) => value === card)![0];
@@ -780,10 +781,10 @@ async function settingsHarness(managed = false) {
   });
   save = persist;
   const turn = await h.current();
-  if (managed) (h.coordinator as any).groupManager = {
+  if (managed) Object.assign(h.coordinator.parts.state, { groupManager: {
     resolved: async (config: any) => ({ ...config, defaultAgentId: 'group-agent', defaultModel: 'group-model', notifyMentionDone: false }),
     authorize: async (_app: string, _chat: string, operator: string, action: string) => ({ allowed: action !== 'channel_bot.update' || operator === 'ou_alice' })
-  };
+  } });
   const request = (pairs?: string[], extra: Record<string, unknown> = {}) => h.coordinator.agentSettings({ ...turn, action: pairs ? 'set' : 'show', ...(pairs ? { pairs } : {}), ...extra });
   const record = async () => (await h.repos.collaboration.listActions({ appId: h.config.appId, chatId: 'oc_group' })).find(action => action.kind === `confirm.agent_settings.${h.config.appId}`)!;
   const confirm = async (operator = 'ou_alice') => {
@@ -848,7 +849,7 @@ describe('Agent common bot settings', () => {
     ] });
     const binding = (await manager.groups()).groups[0]!.bots[0]!.binding!;
     await h.repos.roleAssignments.create({ id: 'alice_admin', channelBotId: binding.channelBotId, groupBindingId: binding.id, principalId: members.find(member => member.openId === 'ou_alice')!.principalId, role: 'admin', operateScope: 'none', actionGates: { terminalWrite: false, highRisk: false, groupToolsSend: false } });
-    (h.coordinator as any).groupManager = manager;
+    Object.assign(h.coordinator.parts.state, { groupManager: manager });
     expect(await manager.authorize(h.config.appId, 'oc_group', 'ou_bob', 'high_risk.execute')).toMatchObject({ allowed: true });
     expect(await manager.authorize(h.config.appId, 'oc_group', 'ou_bob', 'channel_bot.update')).toMatchObject({ allowed: false });
     await h.request(['busyTriage=true']);

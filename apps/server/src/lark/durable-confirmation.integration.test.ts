@@ -1,3 +1,4 @@
+import { TestLarkCoordinator } from './coordinator-test-fixture.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import '../../../../tests/support/fast-wait-for.js';
 import { mkdtemp, rm } from 'node:fs/promises';
@@ -7,7 +8,7 @@ import { createRepositories } from '@dutydeck/storage';
 import { DutydeckRuntime } from '@dutydeck/runtime';
 import { RelayAskBroker } from '@dutydeck/relay';
 import type { AgentConfig, AgentDriver } from '@dutydeck/shared';
-import { LarkMessageCoordinator, larkTaskTitle } from './coordinator.js';
+import { larkTaskTitle } from './coordinator.js';
 import { larkBotsConfigKey, type StoredLarkConfig } from './config.js';
 import { buildLarkCard, LarkServiceError } from './service.js';
 import type { LarkInteraction } from './workflow-interactions.js';
@@ -79,7 +80,7 @@ async function harness(options: { deliveryFailures?: number; threaded?: boolean;
     listChatMessages: vi.fn(async () => ({ items: [], hasMore: false })), getMessageItems: vi.fn(async (id: string) => { validMessageId(id); return []; }),
     getMessage: vi.fn(async (id: string) => { validMessageId(id); return { messageId: 'om_original', chatId: 'oc_group', messageType: 'text', rawContent: '{"text":"原任务 A"}', mentions: [] }; }) };
   const log = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
-  const create = () => new LarkMessageCoordinator(runtime, service as any, log, Math.random, 'ou_bot', undefined, repos.channelMappings,
+  const create = () => new TestLarkCoordinator(runtime, service as any, log, Math.random, 'ou_bot', undefined, repos.channelMappings,
     async () => 'group', undefined, undefined, { store: repos.config, broker });
   let coordinator = create();
   await coordinator.initializeWorkflows(config);
@@ -203,7 +204,7 @@ describe('ADHD durable confirmation — actual Runtime and SQLite', () => {
     await vi.waitFor(async () => expect(JSON.parse((await h.repos.channelMappings.get(`lark-card:${h.config.appId}`, key))!.extra!).runtime_task_id).toBeTruthy());
     const queued = (await h.runtime.getTasks(h.sessionId)).find(task => task.status === 'queued')!;
     const combined = { ...queued, prompt: `先前的排队请求\n\n${queued.prompt}` };
-    expect(await (h.coordinator as any).taskDisplayPrompt(h.config, 'oc_group', h.sessionId, combined)).toBe('把发布会事项记到待办 A');
+    expect(await h.coordinator.parts.core.taskDisplayPrompt(h.config, 'oc_group', h.sessionId, combined)).toBe('把发布会事项记到待办 A');
     expect(combined.prompt).toBe(`先前的排队请求\n\n${queued.prompt}`);
     for (const restarted of [false, true]) {
       if (restarted) await h.restart();
@@ -215,8 +216,8 @@ describe('ADHD durable confirmation — actual Runtime and SQLite', () => {
         expect(text).not.toContain('持久确认记录 ID');
         expect(text).not.toContain(h.record.id);
       }
-      await vi.waitFor(() => expect((h.coordinator as any).tasks.get('om_title_blocker').requestUpdate).toBeTypeOf('function'));
-      await (h.coordinator as any).tasks.get('om_title_blocker').requestUpdate('running');
+      await vi.waitFor(() => expect(h.coordinator.parts.state.tasks.get('om_title_blocker')!.requestUpdate).toBeTypeOf('function'));
+      await h.coordinator.parts.state.tasks.get('om_title_blocker')!.requestUpdate!('running');
       const queue = h.service.update.mock.calls.at(-1)![0].elements.find((item: any) => item.element_id === 'queue_summary');
       expect(queue.content).toContain('把发布会事项记到待办 A');
       expect(queue.content).not.toContain('持久确认记录 ID');
@@ -410,7 +411,7 @@ describe('ADHD durable confirmation — actual Runtime and SQLite', () => {
     expect(nested.cardId).toMatch(/^om_/);
     const saved = JSON.parse((await h.repos.channelMappings.get(`lark-card:${h.config.appId}`, syntheticId))!.extra!);
     expect(saved.reply_message_id).toBe(anchor);
-    const restored = (h.coordinator as any).restoredCardTask(h.config, { externalId: syntheticId, sessionId: h.sessionId }, saved);
+    const restored = h.coordinator.parts.cards.restoredCardTask(h.config, { externalId: syntheticId, sessionId: h.sessionId }, saved);
     expect(restored.event).toMatchObject({ messageId: syntheticId, replyMessageId: anchor });
     expect(h.rejectedIds).toEqual([]);
     expect(h.service.reply.mock.calls.every(([input]) => input.messageId.startsWith('om_'))).toBe(true);
@@ -463,7 +464,7 @@ describe('ADHD durable confirmation — actual Runtime and SQLite', () => {
     expect(closes()[0]).toMatchObject({ statusLabel: '已过期', readOnly: true, elements: [{ tag: 'markdown', content: '已过期，未执行' }] });
     await h.coordinator.reconcile(h.config);
     expect(closes()).toHaveLength(1);
-    expect(await (h.coordinator as any).workflows.reconcile(h.config.appId)).toBe(0);
+    expect(await h.coordinator.parts.core.workflows.reconcile(h.config.appId)).toBe(0);
     expect(await h.repos.config.list!(`lark.inbox.${h.config.appId}.confirmation_`)).toEqual([]);
     expect(h.sends).toHaveLength(1);
   });
@@ -508,7 +509,7 @@ describe('ADHD durable confirmation — actual Runtime and SQLite', () => {
     for (let round = 0; round < 3; round++) await h.coordinator.reconcile(h.config);
     await h.restart();
     expect(h.service.listChatMembers).not.toHaveBeenCalled();
-    expect(await (h.coordinator as any).workflows.reconcile(h.config.appId)).toBe(0);
+    expect(await h.coordinator.parts.core.workflows.reconcile(h.config.appId)).toBe(0);
     await h.save({ highRiskAllowedUsers: [{ openId: 'ou_mallory', name: 'Mallory' }] });
     expect(await h.click('ou_mallory')).toMatchObject({ type: 'error', content: '当前账号无权确认。' });
     expect(h.service.listChatMembers).toHaveBeenCalled();
@@ -551,7 +552,7 @@ describe('ADHD durable confirmation — actual Runtime and SQLite', () => {
   });
   it('does not register a confirmation when cancellation wins a storage-list await before create', async () => {
     const h = await harness();
-    const workflow = (h.coordinator as any).workflows;
+    const workflow = h.coordinator.parts.core.workflows;
     const list = h.repos.config.list!.bind(h.repos.config);
     let release!: () => void;
     let entered!: () => void;

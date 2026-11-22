@@ -1,14 +1,15 @@
 import { expect, it, vi } from 'vitest';
 import type { AgentEvent } from '@dutydeck/shared';
-import { LarkCoordinatorDispatch } from './coordinator-dispatch.js';
+import { createTestLarkCoordinator } from './coordinator-test-fixture.js';
+import type { LarkRuntime } from './runtime.js';
+import type { LarkCardService } from './service.js';
+import type { StoredLarkConfig } from './config.js';
 
 const at = '2026-11-16T00:00:00.000Z';
 const permission = (id: string, status: string, attemptId = 'attempt'): AgentEvent => ({ type: 'permission_request', attemptId, data: { id, status }, timestamp: at } as AgentEvent);
 const make = (runtime: Record<string, unknown>) => {
-  const coordinator = Object.create(LarkCoordinatorDispatch.prototype) as any;
-  coordinator.runtime = runtime;
-  coordinator.log = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
-  return coordinator;
+  return createTestLarkCoordinator({ appId: 'bot' } as StoredLarkConfig, runtime as unknown as LarkRuntime,
+    {} as LarkCardService, { info: vi.fn(), warn: vi.fn(), error: vi.fn() }).parts.runner;
 };
 
 it('索引诊断在首个 confirmed-pending 命中后立即停止', async () => {

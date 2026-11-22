@@ -1,3 +1,4 @@
+import { TestLarkCoordinator } from './coordinator-test-fixture.js';
 // 结果卡续问行的端到端回归：真实 DutydeckRuntime + SQLite，飞书接口用替身。
 //
 // 1) 一键续问：点击等同于在原话题回复一条固定文本，进入同一个会话的下一轮；权限与发消息一致，
@@ -11,7 +12,7 @@ import { tmpdir } from 'node:os';
 import { createRepositories } from '@dutydeck/storage';
 import { DutydeckRuntime, type AgentDriver } from '@dutydeck/runtime';
 import type { AgentConfig } from '@dutydeck/shared';
-import { LarkMessageCoordinator, type PersistedLarkCardTask } from './coordinator.js';
+import { type PersistedLarkCardTask } from './coordinator.js';
 import { larkBotsConfigKey, type StoredLarkConfig } from './config.js';
 import type { LarkMessageEvent } from './listener.js';
 import { buildLarkCard } from './service.js';
@@ -73,7 +74,7 @@ async function harness(options: { fail?: boolean; automation?: boolean; config?:
     ? new SessionAutomationService({ repositories: repos, runtime, authorize: async (_sessionId, actor) => actor === 'ou_alice' || actor === 'ou_bob' })
     : undefined;
   const log = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
-  const createCoordinator = () => new LarkMessageCoordinator(runtime, service as any, log, Math.random, 'ou_bot',
+  const createCoordinator = () => new TestLarkCoordinator(runtime, service as any, log, Math.random, 'ou_bot',
     undefined, repos.channelMappings, async () => 'group', undefined, undefined, { store: repos.config, ...(automation ? { automation } : {}) });
   let coordinator = createCoordinator();
   await coordinator.initializeWorkflows(config);
@@ -262,7 +263,7 @@ describe('结果卡一键续问', () => {
     const saved = await h.run(event('om_1', '查一下登录为什么慢'));
     const value = callbackOf(h.card(saved.final_message_id!), 'ask_reply');
     // 第一次点击认领之后卡在登记上，进程随即退出（dutydeck restart 只等运行中的任务，不等卡片回调）。
-    const seed = vi.spyOn((h.coordinator as any).inbox, 'seed').mockImplementationOnce(() => new Promise<never>(() => {}));
+    const seed = vi.spyOn(h.coordinator.parts.core.inbox, 'seed').mockImplementationOnce(() => new Promise<never>(() => {}));
     void h.click(value, 'ou_alice', saved);
     await vi.waitFor(() => expect(seed).toHaveBeenCalledTimes(1));
     await h.restart();
