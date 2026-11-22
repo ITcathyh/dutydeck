@@ -1,3 +1,4 @@
+import { LarkAgentCommands } from './agent-command.js';
 import { createTestLarkStorage } from './coordinator-test-fixture.js';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import type { ConfigRepository } from '@dutydeck/shared';
@@ -71,6 +72,7 @@ it('keeps reconnecting after a failed start with 30s doubling backoff capped at 
   const { values, store, pool } = await setup(['fail', 'fail', 'fail', 'fail', 'fail', 'fail', 'ready']);
   await expect(pool.sync(await readLarkConfigs(store))).rejects.toThrow('ws endpoint busy');
   expect(pool.activeAppIds).toEqual([]);
+  expect(pool.waitForReady('cli_retry')).toBe(false);
   const failed = status(values);
   expect(failed).toMatchObject({ pid: process.pid, active: [], retrying: [{ appId: 'cli_retry', nextRetryAt: new Date(sockets[0]!.at + 30_000).toISOString() }] });
   // 给 doctor 的错误已脱敏
@@ -145,11 +147,14 @@ it('never opens a second connection for the same bot while a manual sync races a
   await settle();
   // 重连的这条连接迟迟不就绪，期间用户手动同步
   expect(sockets).toHaveLength(2);
+  const waiting = pool.waitForReady('cli_retry');
+  expect(waiting).toBeInstanceOf(Promise);
   const manual = pool.sync(await readLarkConfigs(store));
   await vi.advanceTimersByTimeAsync(5_000);
   await settle();
   expect(sockets).toHaveLength(2);
   sockets[1]!.ready();
+  expect(await waiting).toBe(true);
   await manual;
   expect(pool.activeAppIds).toEqual(['cli_retry']);
   await vi.advanceTimersByTimeAsync(600_000);
@@ -198,7 +203,9 @@ it('closes a connecting socket immediately and settles startup without waiting f
   const starting = pool.sync(await readLarkConfigs(store)).catch(error => error).finally(() => { settled = true; });
   await settle();
   expect(sockets).toHaveLength(1);
+  const waiting = pool.waitForReady('cli_retry');
   pool.stop();
+  expect(await waiting).toBe(false);
   await settle();
   expect.soft(sockets[0]!.closed).toBe(true);
   expect.soft(settled).toBe(true);
@@ -239,4 +246,46 @@ it('does not create a socket when stopped during coordinator initialization', as
     expect(sockets).toHaveLength(0);
     expect(listener.listening).toBe(false);
   } finally { release(); await starting; listener.stop(); initialize.mockRestore(); stop.mockRestore(); }
+});
+
+it('keeps waiters through identity lookup, inbound recovery and handler registration for their own bot', async () => {
+  const { store } = await setup([]);
+  const [config] = await readLarkConfigs(store);
+  const storage = createTestLarkStorage();
+  let resolveIdentity!: () => void;
+  const identity = new Promise<void>(resolve => { resolveIdentity = resolve; });
+  let finishRecovery!: () => void;
+  const recovery = new Promise<void>(resolve => { finishRecovery = resolve; });
+  const initialize = vi.spyOn(LarkMessageCoordinator.prototype, 'initializeWorkflows').mockImplementation(() => recovery);
+  const commands = new LarkAgentCommands();
+  pool = new LarkLongConnectionListenerPool(log(), { ...storage, runtime: {} as any, agentCommands: commands, env: {},
+    fetcher: async (input, init) => { await identity; return fetcher(input, init); } });
+  transport.outcomes = ['hold'];
+  const ready = vi.fn();
+  const waiting = Promise.resolve(pool.waitForReady(config!.appId)).then(ready);
+  const off = pool.waitForReady('cli_disabled');
+  const synced = pool.sync([config!]);
+  try {
+    expect(await off).toBe(false);
+    await settle();
+    expect(initialize).not.toHaveBeenCalled();
+    expect(ready).not.toHaveBeenCalled();
+    resolveIdentity();
+    await settle();
+    expect(initialize).toHaveBeenCalledOnce();
+    expect(commands.has(config!.appId)).toBe(false);
+    expect(ready).not.toHaveBeenCalled();
+    finishRecovery();
+    await settle();
+    expect(commands.has(config!.appId)).toBe(true);
+    expect(ready).not.toHaveBeenCalled();
+    sockets[0]!.ready();
+    await Promise.all([synced, waiting]);
+    expect(ready.mock.calls).toEqual([[true]]);
+    pool.stop();
+    expect(commands.has(config!.appId)).toBe(false);
+    expect(await pool.waitForReady(config!.appId)).toBe(false);
+  } finally {
+    resolveIdentity(); finishRecovery(); pool.stop(); await synced.catch(() => {}); initialize.mockRestore();
+  }
 });

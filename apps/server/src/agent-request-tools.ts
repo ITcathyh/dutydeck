@@ -15,7 +15,7 @@ import { z } from 'zod';
 import { RuntimeError, resolveScheduleDeadline, type PublicSessionSchedule } from '@dutydeck/shared';
 import { resolveActorTurn } from './agent-host/turn-authority.js';
 import type { LarkAgentToolsService } from './lark/agent-tools.js';
-import { AgentCommandParamError, agentActionCommand, larkAgentViews, type LarkAgentViewName } from './lark/agent-command.js';
+import { AgentCommandParamError, agentCommandUnavailable, agentActionCommand, larkAgentViews, type LarkAgentViewName } from './lark/agent-command.js';
 import type { SessionAutomationService } from './session-automation.js';
 
 
@@ -29,6 +29,7 @@ export interface AgentRequestToolsOptions {
   runtime: { getActiveTaskContext(sessionId: string): { taskId: string; actorId?: string; attemptId?: string } | undefined };
   /** 定时或自动续作触发的一轮不能再代办，免得每次到点又建一个计划、又发一条命令。 */
   automatedTask(taskId: string): boolean;
+  waitForListener?(appId: string): boolean | Promise<boolean>;
   tools: Pick<LarkAgentToolsService, 'requestContext' | 'capabilities' | 'commands'>;
   automation: Pick<SessionAutomationService, 'requestSchedule'> & Partial<Pick<SessionAutomationService, 'requestScheduleStop' | 'listBySession' | 'updateSchedule'>>;
   /** 回报位置定为这一轮请求的那条消息，和用户在那里发 /schedule 一样。 */
@@ -43,6 +44,12 @@ export async function registerAgentRequestTools(app: FastifyInstance, options: A
       options.tools.capabilities, token => options.tools.requestContext(token), allowAutomated ? undefined : options.automatedTask);
     return { appId: binding.appId, sessionId, actorId, taskId };
   };
+  const requireListener = async (request: FastifyRequest, appId: string, settings = false) => {
+    const ready = options.waitForListener?.(appId) ?? true;
+    if (ready === true) return;
+    if (!await ready) throw agentCommandUnavailable(settings);
+    await turnContext(request);
+  };
   registerToolFamily<{ Params: { id: string; name: string }; Querystring: { page?: string }; Body: Record<string, unknown> | undefined }>(app, [toolNeeds.humanRequest, toolNeeds.scheduledRequest], {
     'schedule.stop-self': async request => {
       z.object({}).strict().parse(request.body ?? {});
@@ -53,13 +60,16 @@ export async function registerAgentRequestTools(app: FastifyInstance, options: A
     },
     'command': async request => {
       const { appId, ...turn } = await turnContext(request);
-      return await options.tools.commands.run(appId, { ...turn, command: commandSchema.parse(request.body).command });
+      const { command } = commandSchema.parse(request.body);
+      await requireListener(request, appId);
+      return await options.tools.commands.run(appId, { ...turn, command });
     },
     'action': async request => {
       const { appId, ...turn } = await turnContext(request);
       const { dryRun, ...params } = request.body ?? {};
       if (dryRun !== undefined && typeof dryRun !== 'boolean') throw new AgentCommandParamError('INVALID_ARGUMENT', '--dry-run 不带值。', [{ name: '--dry-run', reason: '不带值' }]);
       const { command, members } = agentActionCommand(request.params.name, params);
+      await requireListener(request, appId);
       return await options.tools.commands.run(appId, { ...turn, command, action: request.params.name, dryRun: dryRun === true, ...(members ? { members } : {}) });
     },
     'view': async request => {
@@ -68,15 +78,18 @@ export async function registerAgentRequestTools(app: FastifyInstance, options: A
       if (!larkAgentViews.includes(view)) throw new AgentCommandParamError('AGENT_ACTION_UNKNOWN', `没有 ${request.params.name} 这个查看命令。`, [{ name: '<命令>', reason: `可用：${larkAgentViews.join('、')}` }]);
       const page = request.query.page === undefined ? undefined : Number(request.query.page);
       if (page !== undefined && (!Number.isInteger(page) || page < 1)) throw new AgentCommandParamError('INVALID_ARGUMENT', '--page 要是从 1 开始的整数。', [{ name: '--page', reason: '要是从 1 开始的整数' }]);
+      await requireListener(request, appId);
       return await options.tools.commands.view(appId, { ...turn, view, ...(page !== undefined ? { page } : {}) });
     },
     'settings.show': async request => {
       const { appId, ...turn } = await turnContext(request);
+      await requireListener(request, appId, true);
       return options.tools.commands.settings(appId, { ...turn, action: 'show' });
     },
     'settings.set': async request => {
       const { appId, ...turn } = await turnContext(request);
       const body = agentSettingsRequestSchema.parse(request.body);
+      await requireListener(request, appId, true);
       return options.tools.commands.settings(appId, { ...turn, action: 'set', ...body });
     },
     'schedule.update': async request => {

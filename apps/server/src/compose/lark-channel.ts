@@ -42,8 +42,9 @@ export function composeLarkChannel(log: FastifyBaseLogger, options: LarkRoutesOp
   };
   let settled = options.listeningDisabled === true;
   const start = () => {
-    if (!options.listeningDisabled) void syncListeners().finally(() => { settled = true; });
+    if (!options.listeningDisabled) void syncListeners().finally(() => { listener.finishDiscovery?.(); settled = true; });
   };
-  return { listener, syncListeners, start, stop: () => listener.stop(),
+  const waitForListener = (appId: string) => !options.listeningDisabled && (listener.waitForReady?.(appId) ?? listener.activeAppIds.includes(appId));
+  return { listener, syncListeners, start, waitForListener, stop: () => listener.stop(),
     readiness: () => settled ? undefined : '飞书长连接还在建立' };
 }

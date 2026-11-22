@@ -220,7 +220,7 @@ export async function composeHttp({ config, env, repos, options, log, channel, l
       authorizeMany: (request, sessionIds, boundary, action, sessions) => authorizeSessionRequests(request, sessionIds, boundary, action, sessions),
     },
     turnDiffs: { store: repos.config,
-      requestLarkReview: review => requestLarkTurnDiffReview({ configs: repos.config, mappings: repos.channelMappings, confirmations: collaboration.participation.confirmations }, review) },
+      requestLarkReview: (review, waitForListener) => requestLarkTurnDiffReview({ waitForListener, configs: repos.config, mappings: repos.channelMappings, confirmations: collaboration.participation.confirmations }, review) },
   });
   lifecycle.register('http', () => app.close(), false);
   return app;
