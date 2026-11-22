@@ -15,6 +15,7 @@ export class ServerLifecycle {
   readonly phases = new ShutdownPhases(stopOrder.flat());
   private readonly stops = new Map<Phase, Operation>();
   private readonly rollback: Operation[] = [];
+  private readonly quiesce = new Map<Phase, Operation>();
   private assembled = false;
   private closing?: Promise<void>;
 
@@ -28,6 +29,8 @@ export class ServerLifecycle {
     this.stops.set(phase, stop);
     if (duringSetup) this.onSetupFailure(stop);
   }
+
+  beforeStop(phase: Phase, operation: Operation) { this.quiesce.set(phase, operation); }
 
   assembledCore() { this.assembled = true; }
 
@@ -44,6 +47,9 @@ export class ServerLifecycle {
       return;
     }
     for (const group of stopOrder) {
+      if (group[0] === 'historyRetention') {
+        for (const phase of ['http', 'automation', 'collaboration'] as const) this.quiesce.get(phase)?.();
+      }
       const results = await Promise.allSettled(group.map(name => this.phases.run(name, () => this.stops.get(name)?.())));
       for (const result of results) if (result.status === 'rejected') errors.push(result.reason);
     }

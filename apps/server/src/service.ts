@@ -1,3 +1,5 @@
+import { composeWork } from './compose/work.js';
+import { composeAutomation } from './compose/automation.js';
 import { composeDrivers,composeRuntime } from './compose/runtime.js';
 import { composePlugins,composePluginResults } from './compose/plugins.js';
 import { composeAgentTools,composeCapabilities } from './compose/agent-tools.js';
@@ -6,7 +8,7 @@ import { ServerLifecycle } from './compose/lifecycle.js';
 import { composeInsight } from './compose/insight.js';
 import { listenOptions,unauthenticatedListenRefusal } from './access-policy.js';
 import { LarkReplyPolisher,type ReplyPolish } from './lark/reply-polish.js';
-import { createRelayContinuationChecker,createRelayAskLifecycleWatcher } from './relay-routes.js';
+import { createRelayAskLifecycleWatcher } from './relay-routes.js';
 import { inheritedListenOptions,inheritedSocketMismatch,takeInheritedListenSocket } from './socket-activation.js';
 import { DutydeckWatch,startDutydeckWatch,watchDeliveryRejection,watchReceiverType } from './watch.js';
 import { collectWatchScopes,resolveWatchReceiver } from './watch-signals.js';
@@ -30,9 +32,6 @@ import { resolveExplicitFinalContext } from './lark/explicit-final.js';
 import { larkResultDeliveryIssues } from './lark/reconciler.js';
 import { createCollaborationIntegration } from './collaboration-integration.js';
 import { isAutomatedRequest } from './agent-request-tools.js';
-import { LeaderDelegationService } from './leader-delegation.js';
-import { LeaderModeService } from './leader-mode.js';
-import { sha256Hex } from './hash.js';
 import { renderMemoryIndex } from './lark/memory-view.js';
 import type { CollaborationExtensions } from './collaboration-extensions.js';
 import { LarkGroupManager } from './lark/group-management.js';
@@ -41,7 +40,7 @@ import { DutydeckRuntime } from '@dutydeck/runtime';
 import { loadConfigWithDiagnosticsAsync,resolveDatabaseUrl,type AppConfig } from '@dutydeck/config';
 import { logDroppedAgents } from './agent-config-log.js';
 import { assertBotProcessStartup,createRepositories } from '@dutydeck/storage';
-import { installationOwnerTaskActor,parseLarkSourceId,RuntimeError,timeLoop,workPlanConfirmationRequired } from '@dutydeck/shared';
+import { installationOwnerTaskActor,RuntimeError,timeLoop } from '@dutydeck/shared';
 import { tmpdir } from 'node:os';
 import { dirname,join,resolve } from 'node:path';
 import { larkResourceRoot,pruneLarkResourceDirectories,readLarkResourceReferences } from './resource-retention.js';
@@ -49,19 +48,10 @@ import { fileURLToPath } from 'node:url';
 import { buildApp,createAppLogger } from './app.js';
 import { parsePeerInstances } from './instance-proxy.js';
 import { localLoopbackUrl } from './local-api-url.js';
-import { WorkItemService,readWorkItemStatus } from './work-items.js';
-import { WorkItemInteractions } from './work-item-interactions.js';
 import { LarkWorkbench } from './lark/workbench.js';
 import { createLarkCardService,LarkServiceError } from './lark/service.js';
 import { deliverLarkSessionNotice } from './lark/session-notice.js';
 import { createWorkbenchFetch } from './workbench-fetch.js';
-import { authorizeWorkItemAgent,authorizeWorkItemInteraction } from './work-item-policy.js';
-import { SessionAutomationService } from './session-automation.js';
-import { createAutomationIntegration } from './automation-integration.js';
-import { CiWebhookService } from './ci-webhook.js';
-import { PullRequestService } from './pull-requests.js';
-import { CiProviderRegistry } from './ci-providers.js';
-import { createRelayAskStore } from './relay-ask-store.js';
 import { LarkAgentToolsService } from './lark/agent-tools.js';
 import { larkMemoryScope,LarkMemoryStore } from './lark/memory.js';
 import { LarkMemoryProjection } from './lark/memory-view.js';
@@ -72,12 +62,10 @@ import type { TerminalStreamProvider } from './terminal/terminal-ws.js';
 import {
 createDutydeckPersistentBackend,PTY_AGENT_CONTRIBUTIONS
 } from '@dutydeck/pty-driver';
-import { RelayAskBroker } from '@dutydeck/relay';
 import { LocalFileSecretProvider,localFileSecretProviderName,secretDirectoryForDatabase } from '@dutydeck/secret-provider';
 import { LarkIdentityPreflightProbe } from './lark/identity-preflight.js';
 import { WorkspaceOrganizationService } from './workspace-organization.js';
 import { loadDaemonPlugins } from './plugins/service-wiring.js';
-import { sessionHookContext } from './plugins/integration.js';
 import type { ShutdownPhases } from './shutdown-phases.js';
 import type { FastifyBaseLogger } from 'fastify';
 
@@ -199,6 +187,7 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
     command: options.groupToolsCommand ?? dutydeckGroupToolsCommand(fileURLToPath(new URL(import.meta.url.endsWith('.ts') ? './internal-agent-cli.ts' : './internal-agent-cli.js', import.meta.url)), process.execPath, import.meta.url.endsWith('.ts') ? createRequire(import.meta.url).resolve('tsx') : undefined) });
   const auth = await composeAuth(context, { setLarkSessionShareSigner, setLarkTurnDiffSigner });
   const { resolveInstallationPrincipal, authorizeInstallationManagement, foundationManagementAuthorizer, foundationExecution, legacyExecutionPolicy } = auth;
+  lifecycle.beforeStop('http', auth.stop);
   const workbenchHttp = createWorkbenchFetch();
   lifecycle.register('workbenchHttp', () => workbenchHttp.close());
   const groupManager: LarkGroupManager = new LarkGroupManager(repos, { env, fetcher: workbenchHttp.fetch, onPolicyChanged: (): Promise<void> => groupManager.refreshPolicies(runtime) });
@@ -222,7 +211,7 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
     agentTools, agentModelSettings, isAutomatedTask,
   }, {
     workItems: () => workItems, delegations: () => delegations, collaboration: () => collaboration!,
-    automation: () => ({ automation, ciWebhook, pullRequests }), awaitingAnswer: id => relayBroker.listPending(id).length > 0,
+    automation: () => schedules, awaitingAnswer: id => relayBroker.listPending(id).length > 0,
   });
   const replyPolisher = new LarkReplyPolisher({ runtime, repos, log: { warn: (details, message) => log.warn(details, message) } });
   lifecycle.register('runtime', () => runtime.shutdown());
@@ -238,58 +227,14 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
     pluginHost, pluginWiring, runtime, capabilities, relayCapabilities, groupManager, workbenchHttp, legacyExecutionPolicy,
   });
   const { businessToolGrants, businessTools, pluginResultIdentity, pluginResultRegistry, pluginResultAdapter, pluginResultService } = pluginResults;
-  const automationIntegration = createAutomationIntegration(repos, runtime, groupManager, { env, client: config => createLarkCardService(env, workbenchHttp.fetch, config), log: { warn: (...args: unknown[]) => log.warn(...args as [unknown, string]) } });
-  // CI 平台全部来自插件；没有 CI 插件时注册表为空，/ci 与 Web 提示「未安装 CI 插件」。
-  const ciProviders = pluginHost?.ciProviders ?? new CiProviderRegistry();
-  // 插件 notify hook 拒绝时不发这条 CI 通知。
-  const notifyCi: typeof automationIntegration.notify = pluginWiring?.hooks.has('notify')
-    ? async (sessionId, sourceId, notice) => {
-      const session = await runtime.getSession(sessionId);
-      if (session && !await pluginWiring.hooks.notify(sessionHookContext(session), 'ci_notice', { title: notice.title, text: notice.markdown, failed: notice.failed === true })) return undefined;
-      return automationIntegration.notify(sessionId, sourceId, notice);
-    }
-    : automationIntegration.notify;
-  const pullRequests = new PullRequestService({ repositories: repos, runtime, providers: ciProviders, prepareDelivery: automationIntegration.prepareDelivery, notify: notifyCi,
-    // 修复轮推送前的验证命令取会话所属机器人的 verificationCommand；非飞书会话、没配的机器人照旧直接推送。
-    verificationCommand: async sessionId => {
-      const session = await runtime.getSession(sessionId);
-      const { appId } = parseLarkSourceId(session?.source === 'lark' ? session.sourceId : undefined);
-      return appId ? (await readLarkConfig(repos.config, appId))?.verificationCommand?.trim() || undefined : undefined;
-    },
-    log: { warn: (...args: unknown[]) => log.warn(...args as [unknown, string]) } });
-  const ciWebhook = ciProviders.list().some(({ provider }) => provider.webhook) ? new CiWebhookService({ repositories: repos, runtime, providers: ciProviders, onEvent: (providerId, event) => pullRequests.onWebhookEvent(providerId, event),
-    prepareDelivery: automationIntegration.prepareDelivery, notify: notifyCi, log: { warn: (...args: unknown[]) => log.warn(...args as [unknown, string]) } }) : undefined;
-  const automation = new SessionAutomationService({ repositories: repos, runtime, ...automationIntegration, ciProviders, pullRequests, ...(ciWebhook ? { ciWebhook } : {}),
-    // 工作项服务与提问代理在下方创建；这里只在运行时调用。
-    awaitingHuman: sessionId => runtime.getPendingPermissions(sessionId).length > 0 || relayBroker.listPending(sessionId).length > 0,
-    workTemplates: {
-      list: (sessionId, actorId) => workItems.listTemplates(sessionId, actorId),
-      // 定时启动的工作项不归属父会话此刻正在跑的那一轮。
-      run: (sessionId, templateId, version, goal, key, actorId, admissionChecks) => workItems.runTemplate(sessionId, templateId, version, goal, key, actorId, undefined, true, admissionChecks),
-      // 失败但带待确认修订的工作项还没结束，上一次没结束时不启动新的。
-      progress: async id => await workItems.exists(id) ? readWorkItemStatus(repos.config, id) ?? 'unknown' : undefined
-    },
-    log: { warn: (details, message) => log.warn(details, message) } });
-  lifecycle.register('automation', () => automation.close());
-  if (ciWebhook) lifecycle.register('ciWebhook', () => ciWebhook.close());
-  lifecycle.register('pullRequests', () => pullRequests.close());
-  const authorizeWorkAgent = (sessionId: string, actorId: string, agentId: string) => authorizeWorkItemAgent(repos, groupManager, automationIntegration.authorize, sessionId, actorId, agentId);
-  const workbench = new LarkWorkbench(repos, runtime, () => workItems, () => workInteractions, automationIntegration.authorize, { env, authorizeAgent: authorizeWorkAgent,
-    leaderDecisions: workId => leaderMode.decisions(workId), log: { warn: (...args: any[]) => log.warn(...args as [unknown, string]) } });
-  lifecycle.register('workbench', () => workbench.close());
-  const workItems: WorkItemService = new WorkItemService({ repositories: repos, runtime, authorize: automationIntegration.authorize, authorizeAgent: authorizeWorkAgent,
-    requireConfirmation: workPlanConfirmationRequired, log: loopLog,
-    prepareDelivery: (sessionId, id, key) => workbench.prepareDelivery(sessionId, id, key), deliver: item => workbench.deliver(item),
-    // Leader 模式目标的新请求先排上代判，再按代判后的可见请求刷新卡片。
-    notify: (item, actorId) => { leaderMode.observe(item); return workbench.notify(item, actorId); },
-    stepContext: (item, definition) => leaderMode.reviewContext(item, definition), answered: (workId, entry) => leaderMode.answered(workId, entry) });
-  lifecycle.register('workItems', () => workItems.close());
-  const delegations = new LeaderDelegationService({ repositories: repos, runtime, work: workItems, authorizeAgent: authorizeWorkAgent,
-    prepareDelivery: (sessionId, id, key) => workbench.prepareDelivery(sessionId, id, key), notice: (workId, text, key) => workbench.notice(workId, text, key),
-    log: { warn: (details, message) => log.warn(details, message) } });
-  lifecycle.register('delegations', () => delegations.close());
+  const schedules = composeAutomation(context, runtime, groupManager, workbenchHttp, pluginHost, pluginWiring, {
+    workItems: () => workItems, awaitingAnswer: id => relayBroker.listPending(id).length > 0,
+    mandateCards: { callback: (...args) => collaboration!.mandateCards.callback(...args) },
+  });
+  const { automation, automationIntegration, ciWebhook } = schedules;
+  const work = composeWork(context, runtime, groupManager, workbenchHttp, automationIntegration);
+  const { workbench, workItems, delegations, workInteractions, relayBroker, relayContinuation } = work;
   const { authorizeSessionRequest, authorizeSessionRequests } = sessionAuthorization(runtime, workItems, groupManager, auth);
-  let automationTimer: NodeJS.Timeout | undefined;
   let collaborationTimer: NodeJS.Timeout | undefined;
   let resourceRetentionTimer: NodeJS.Timeout | undefined;
   const historyRetention = new AbortController();
@@ -318,27 +263,8 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
   };
   let app: Awaited<ReturnType<typeof buildApp>> | undefined;
   let closeWatch: (() => Promise<void>) | undefined;
-  const relayBroker = new RelayAskBroker({
-    async publish(sessionId, input) {
-      await runtime.publishSessionEvent(sessionId, 'text', {
-        text: input.text,
-        relay: input.kind,
-        ...(input.handledBy ? { handledBy: input.handledBy } : {}),
-        ...(input.askId ? { askId: input.askId } : {})
-      }, input.eventId);
-    }
-  }, createRelayAskStore(repos.config));
-  const relayContinuation = createRelayContinuationChecker(runtime, async sessionId => (await groupManager.authorizeSession(sessionId, 'turn.append', false, false, { propagateRefreshErrors: true }))?.allowed !== false);
-  const authorizeInteraction = (sessionId: string, actorId: string, action: 'high_risk.execute' | 'terminal.write' | 'terminal.read') => authorizeWorkItemInteraction(repos, groupManager, sessionId, actorId, action, env, workbenchHttp.fetch);
-  const workInteractions: WorkItemInteractions = new WorkItemInteractions(workItems, runtime, relayBroker, authorizeInteraction, () => leaderMode);
-  const leaderMode: LeaderModeService = new LeaderModeService({ repositories: repos, runtime, work: () => workItems, interactions: () => workInteractions, broker: relayBroker, authorizeAgent: authorizeWorkAgent, authorizeInteraction,
-    resolveGroupConfig: (bot, chatId) => groupManager.resolved(bot, chatId),
-    workspaceRoot: join(tmpdir(), 'dutydeck-leader', sha256Hex(resolve(config.databaseUrl)).slice(0, 16)), log: { warn: (details, message) => log.warn(details, message) } });
-  lifecycle.register('leaderMode', () => leaderMode.close());
+  lifecycle.beforeStop('collaboration', () => clearInterval(collaborationTimer));
   lifecycle.register('historyRetention', () => {
-    auth.stop();
-    if (automationTimer) clearInterval(automationTimer);
-    if (collaborationTimer) clearInterval(collaborationTimer);
     if (resourceRetentionTimer) clearInterval(resourceRetentionTimer);
     historyRetention.abort();
     return historyRetentionRun;
@@ -357,7 +283,6 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
       listeningDisabled: env.DUTYDECK_DISABLE_LARK_LISTENER === 'true', scenarios,
       log: { warn: (details, message) => log.warn(details, message) } });
     lifecycle.register('collaboration', () => collaboration?.close(), false);
-    automation.mandateCards = collaboration.mandateCards;
     startupPhase('integrations');
     await relayBroker.initialize();
     startupPhase('relay');
@@ -584,17 +509,9 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
     resourceRetentionTimer = setInterval(sweepResources, 60 * 60_000);
     resourceRetentionTimer.unref();
     sweepResources();
-    workItems.start();
-    void delegations.start().catch(error => log.warn({ error }, 'Leader 模式规划恢复失败'));
-    const tick = () => {
-      void timeLoop('automation.tick', loopLog, () => automation.tick()).catch(error => log.warn({ error }, '自动任务轮询失败'));
-      if (ciWebhook) void timeLoop('ci-webhook.tick', loopLog, () => ciWebhook.tick()).catch(error => log.warn({ error }, 'CI webhook 续作轮询失败'));
-      void timeLoop('pull-requests.tick', loopLog, () => pullRequests.tick()).catch(error => log.warn({ error }, 'PR 跟进轮询失败'));
-    };
-    // Only the acceptance test that drives a plan through this real timer shortens the interval.
-    automationTimer = setInterval(tick, Number(env.DUTYDECK_AUTOMATION_TICK_MS) || 60_000);
-    automationTimer.unref();
-    tick();
+    work.startWorkItems();
+    work.startDelegations();
+    schedules.start();
     let lastCollaborationPrune = 0;
     const tickCollaboration = () => {
       if (Date.now() - lastCollaborationPrune > 3_600_000) { lastCollaborationPrune = Date.now(); void timeLoop('collaboration.prune', loopLog, () => collaboration!.prune()).catch(error => log.warn({ error }, '群上下文保留期清理失败')); }

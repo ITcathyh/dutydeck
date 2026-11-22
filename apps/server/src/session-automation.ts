@@ -36,7 +36,8 @@ export { scheduleTaskPrompt } from './automation/occurrence-runner.js';
 export class SessionAutomationService {
   private readonly scheduler: AutomationScheduler;
 
-  constructor(private readonly options: SessionAutomationServiceOptions) {
+  constructor(private readonly options: SessionAutomationServiceOptions,
+    public mandateCards?: { callback(appId: string, value: Record<string, unknown>, operatorId: string | undefined, context: { messageId?: string; chatId?: string }): Promise<string> }) {
     this.scheduler = new AutomationScheduler(options, this);
   }
 
@@ -52,9 +53,6 @@ export class SessionAutomationService {
   listCiProviders(): PublicCiProvider[] {
     return this.scheduler.ci.listCiProviders();
   }
-
-  /** 群委托的确认卡与产出卡按钮处理；群协作集成装配好后挂上，飞书卡片回调经此进入。 */
-  mandateCards?: { callback(appId: string, value: Record<string, unknown>, operatorId: string | undefined, context: { messageId?: string; chatId?: string }): Promise<string> };
 
   listBySession(sessionId: string, actorId?: string): Promise<SessionAutomationList> {
     return this.scheduler.store.listBySession(sessionId, actorId);
