@@ -1,0 +1,15 @@
+import type { AppConfig } from '@dutydeck/config';
+import type { createRepositories } from '@dutydeck/storage';
+import type { FastifyBaseLogger } from 'fastify';
+import type { ChannelBindings, StartLocalServerOptions } from '../service.js';
+import type { ServerLifecycle } from './lifecycle.js';
+
+export interface ComposeContext {
+  channel: ChannelBindings;
+  repos: ReturnType<typeof createRepositories>;
+  config: AppConfig;
+  env: NodeJS.ProcessEnv;
+  options: StartLocalServerOptions;
+  log: FastifyBaseLogger;
+  lifecycle: ServerLifecycle;
+}

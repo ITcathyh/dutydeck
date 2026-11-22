@@ -2,7 +2,7 @@ import Fastify from 'fastify';
 import { createRepositories } from '@dutydeck/storage';
 import { afterEach, expect, it, vi } from 'vitest';
 import { readLarkConfig, saveLarkConfig } from './config.js';
-import { registerLarkRoutes } from './routes.js';
+import { mountLarkRoutes } from './routes.js';
 import { installLarkHook } from './security-hooks.js';
 
 vi.mock('./security-hooks.js', async importOriginal => ({
@@ -20,7 +20,7 @@ async function fixture() {
   const hook = { agentId: 'codex', supported: true, installed: true, writable: true, trustRequired: false };
   vi.mocked(installLarkHook).mockResolvedValue(hook);
   const app = Fastify(); cleanup.push(() => app.close());
-  await registerLarkRoutes(app, { config: repos.config, listeningDisabled: true,
+  await mountLarkRoutes(app, { config: repos.config, listeningDisabled: true,
     listener: { listening: false, activeAppIds: [], sync: async () => {}, stop() {} },
   });
   const install = (expectedRevision: number) => app.inject({ method: 'POST', url: '/api/lark/hooks/install', payload: { appId: 'cli_test', highRiskPattern: 'rm\\b', expectedRevision } });

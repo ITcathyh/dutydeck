@@ -7,7 +7,7 @@ import { createLarkCardService, larkConfigurationStatus } from './service.js';
 import { LarkAgentToolCapabilityRegistry, LarkAgentToolsService } from './agent-tools.js';
 import { LarkLongConnectionListener } from './listener.js';
 import { clearLarkChatModeCache, getChatMode } from './chat-mode.js';
-import { registerLarkRoutes } from './routes.js';
+import { mountLarkRoutes } from './routes.js';
 
 const sdk = vi.hoisted(() => ({ domains: [] as string[], wsDomains: [] as string[], close: vi.fn() }));
 vi.mock('@larksuiteoapi/node-sdk', () => ({
@@ -116,7 +116,7 @@ describe('Lark brand routing', () => {
     const app = Fastify();
     const fetch = fetcher();
     try {
-      await registerLarkRoutes(app, { config: repos.config, env: {}, fetcher: fetch, listeningDisabled: true,
+      await mountLarkRoutes(app, { config: repos.config, env: {}, fetcher: fetch, listeningDisabled: true,
         listener: { listening: false, activeAppIds: [], sync: async () => {}, stop() {} }
       });
       const inspected = await app.inject({ method: 'POST', url: '/api/lark/bot/inspect', payload: { appId: config.appId, appSecret: config.appSecret } });

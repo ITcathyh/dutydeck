@@ -5,7 +5,7 @@ import { SessionAutomationService } from '../session-automation.js';
 // Agent 代用户发飞书命令（dutydeck command）：查看类直接出结果卡，会改东西的先发确认卡，点「确认」后以点击人身份执行。
 // 真实 DutydeckRuntime + SQLite + 真实确认卡，飞书接口用替身。
 import Fastify from 'fastify';
-import { registerLarkRoutes } from './routes.js';
+import { mountLarkRoutes } from './routes.js';
 import { agentSettingsKeys } from './agent-settings.js';
 import { LarkServiceError } from './service.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -772,7 +772,7 @@ async function settingsHarness(managed = false) {
   const app = Fastify();
   const sync = vi.fn(async () => {});
   const refreshPolicies = vi.fn(async () => {});
-  await registerLarkRoutes(app, { config: h.repos.config, agents: h.repos.agents, runtime: h.runtime, env: {},
+  await mountLarkRoutes(app, { config: h.repos.config, agents: h.repos.agents, runtime: h.runtime, env: {},
     listener: { listening: true, activeAppIds: [h.config.appId], sync, stop() {} },
     groupManager: { refreshPolicies } as any, fetcher: vi.fn(async () => { throw new Error('Unexpected network'); }) });
   cleanups.push(() => app.close());
@@ -819,6 +819,8 @@ describe('Agent common bot settings', () => {
 
   it('previews writes and saves only after an admin confirms through the Web save path', async () => {
     const h = await settingsHarness(true);
+    await h.app.listen({ host: '127.0.0.1', port: 0 });
+    await vi.waitFor(() => expect(h.sync).toHaveBeenCalledTimes(1));
     const pairs = ['defaultAgentId=mock', 'defaultModel=custom', 'defaultReasoningEffort=custom-effort', 'notifyQuietHours=22:00-08:00', 'busyTriage=true'];
     expect(await h.request(pairs, { dryRun: true })).toMatchObject({ dryRun: true, needsConfirmation: true, settings: { busyTriage: true } });
     expect(await h.record()).toBeUndefined();
