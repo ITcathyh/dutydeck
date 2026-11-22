@@ -72,7 +72,7 @@ it('installs packed fake-ticket without its source and executes real external HT
   const transport = { sendText: vi.fn(async (input: any) => { await input.beforeSend?.(); return { messageId: 'out' }; }), send: vi.fn(async () => ({ messageId: 'notice' })), reply: vi.fn(async () => ({ messageId: 'notice' })), listChatMembers: async () => ({ items: [{ memberId: 'alice' }], hasMore: false }), getUserEmails: async () => [] };
   cleanup.push(setLarkPluginCommands(host.commands, query));
   const incoming = { messageId: 'om_packed_query', chatId: 'oc_a', chatType: 'group', senderOpenId: 'alice', senderType: 'user', messageType: 'text', content: JSON.stringify({ text: '/fake-ticket:ticket-status T-1' }), mentions: [{ key: '@bot', name: 'Bot', openId: 'ou_bot' }] };
-  const createCoordinator = () => new LarkMessageCoordinator(runtime, transport as any, { info() {}, warn() {}, error() {} }, Math.random, 'ou_bot', undefined, undefined, async () => 'group', undefined, undefined, { store: repos!.config });
+  const createCoordinator = () => new LarkMessageCoordinator(runtime, transport as any, { info() {}, warn() {}, error() {} }, Math.random, 'ou_bot', undefined, repos!.channelMappings, async () => 'group', undefined, undefined, { store: repos!.config });
   const coordinator = createCoordinator(); cleanup.push(() => coordinator.stop());
   const before = seen.length;
   await coordinator.handle(incoming as any, config);

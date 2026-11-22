@@ -1,3 +1,4 @@
+import { readTestAcceptanceByKey } from './runtime-test-fixture.js';
 import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
@@ -26,7 +27,7 @@ async function harness() {
   const session = { id: 'ses_edited', agentId: 'codex', state: 'idle', cwd: directory, protocol: 'acp', permissionMode: 'ask', createdAt: '', updatedAt: '' };
   const runtime = {
     start: vi.fn(async () => session), getSession: vi.fn(async () => session), subscribe: vi.fn(() => vi.fn()),
-    getAcceptedTask: vi.fn(), dispatchRequest: vi.fn(async (_request: import('@dutydeck/shared').TaskRequestV1, _material: import('@dutydeck/runtime').TaskRequestMaterial) => ({ id: 'task_edited', sessionId: session.id, status: 'queued', queuedAhead: 0 })),
+    getAcceptedTaskByKey: readTestAcceptanceByKey, getAcceptedTask: vi.fn(), dispatchRequest: vi.fn(async (_request: import('@dutydeck/shared').TaskRequestV1, _material: import('@dutydeck/runtime').TaskRequestMaterial) => ({ id: 'task_edited', sessionId: session.id, status: 'queued', queuedAhead: 0 })),
     send: vi.fn(), interrupt: vi.fn()
   };
   const createCard = vi.fn(async () => ({ messageId: `om_card_${randomUUID()}` }));
@@ -45,7 +46,7 @@ async function harness() {
   };
   const log = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
   const createCoordinator = () => new LarkMessageCoordinator(runtime as any, service as any, log, Math.random, 'ou_bot',
-    undefined, undefined, async () => 'topic', undefined, undefined, { store: repositories.config, resourceRoot: join(directory, 'attachments') });
+    undefined, repositories.channelMappings, async () => 'topic', undefined, undefined, { store: repositories.config, resourceRoot: join(directory, 'attachments') });
   let coordinator = createCoordinator();
   cleanups.push(async () => { coordinator.stop(); repositories.close(); await rm(directory, { recursive: true, force: true }); });
   return {

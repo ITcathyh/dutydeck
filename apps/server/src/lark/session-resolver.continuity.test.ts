@@ -1,3 +1,4 @@
+import { createTestLarkStorage } from './coordinator-test-fixture.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { execFileSync } from 'node:child_process';
 import { mkdir, mkdtemp, realpath, rm, symlink } from 'node:fs/promises';
@@ -49,7 +50,7 @@ describe('resolveLarkSession 意外新建会话的首卡注记', () => {
   ] as const)('%s', async (_name, sessions, bound, note) => {
     const { runtime, fresh } = runtimeWith(sessions());
     const group: LarkGroup = { tail: Promise.resolve(), ...(bound ? { sessionId: 'ses_old', sessionConfigKey: larkSessionConfigKey(config) } : {}) };
-    await expect(resolveLarkSession(runtime as any, log, group, config, 'oc_group', 'group', 'user:ou_alice')).resolves.toBe(fresh);
+    await expect(resolveLarkSession(runtime as any, log, group, config, 'oc_group', 'group', 'user:ou_alice', createTestLarkStorage().cardMappings)).resolves.toBe(fresh);
     expect(takeLarkNewSessionNote(fresh)).toBe(note);
     // 取走即清：同一个 Session 对象不会让后续轮次再带一次。
     expect(takeLarkNewSessionNote(fresh)).toBeUndefined();
@@ -58,7 +59,7 @@ describe('resolveLarkSession 意外新建会话的首卡注记', () => {
   it('进程内绑定的会话因配置变更被停掉时写配置原因', async () => {
     const { runtime, fresh } = runtimeWith([session()]);
     const group: LarkGroup = { tail: Promise.resolve(), sessionId: 'ses_old', sessionConfigKey: larkSessionConfigKey({ ...config, defaultModel: 'old-model' }) };
-    await expect(resolveLarkSession(runtime as any, log, group, config, 'oc_group', 'group', 'user:ou_alice')).resolves.toBe(fresh);
+    await expect(resolveLarkSession(runtime as any, log, group, config, 'oc_group', 'group', 'user:ou_alice', createTestLarkStorage().cardMappings)).resolves.toBe(fresh);
     expect(runtime.stop).toHaveBeenCalledWith('ses_old');
     expect(takeLarkNewSessionNote(fresh)).toBe('已开新会话（机器人配置已变更）。');
   });

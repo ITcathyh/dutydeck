@@ -59,7 +59,7 @@ type LarkResultActionTarget = {
 export abstract class LarkCoordinatorCards extends LarkCoordinatorCore {
   protected async observeLiveWaiters(task: LarkTask) {
     const context = this.interactionContext(task);
-    if (!context || !this.workflows) return;
+    if (!context) return;
     await this.workflows.reconcile(context.appId, context.taskId);
     for (const permission of await this.runtime.getPendingPermissions?.(context.sessionId) ?? []) {
       await this.workflows.observe(context, { id: permission.id, sessionId: context.sessionId, sequence: 0,
@@ -86,7 +86,7 @@ export abstract class LarkCoordinatorCards extends LarkCoordinatorCore {
     // 静默进展下没有过程卡，映射仍然要落库：没有它，重启后这条任务就彻底失联。
     const mappings = this.cardMappings;
     const { sessionId, turn, runtimeTaskId } = task;
-    if (!mappings || !sessionId || !task.startedAt) return { saved: false, reason: 'missing_mapping_context' };
+    if (!sessionId || !task.startedAt) return { saved: false, reason: 'missing_mapping_context' };
     const channel = larkCardChannel(task.config.appId);
     const row = { id: `${channel}:${task.id}`, channel, externalId: task.id, sessionId,
       createdAt: new Date(task.startedAt).toISOString() };
@@ -95,7 +95,7 @@ export abstract class LarkCoordinatorCards extends LarkCoordinatorCore {
     return result.saved ? { saved: true } : result;
   }
 
-  private async writeCardMapping(task: LarkTask, mappings: NonNullable<typeof this.cardMappings>,
+  private async writeCardMapping(task: LarkTask, mappings: typeof this.cardMappings,
     row: Omit<ChannelMapping, 'extra'>, turn: number, runtimeTaskId: string | undefined, extra: PersistedLarkCardTask): Promise<TurnRecordWrite> {
     const { sessionId, channel } = row;
     // 合并必须和写入基于同一次读：对账（reconciler.ts）用 compareAndSetExtra 写同一条
@@ -183,9 +183,9 @@ export abstract class LarkCoordinatorCards extends LarkCoordinatorCore {
   }
 
   protected async refreshResultFeedback(config: StoredLarkConfig, requestId: string, textReceiptReader?: ExplicitFinalTextReceiptReader) {
-    const record = await this.workflows?.get(config.appId, requestId);
+    const record = await this.workflows.get(config.appId, requestId);
     if (!record?.cardId || record.kind !== 'result') return;
-    const mapping = await this.cardMappings?.get(larkCardChannel(config.appId), record.event.messageId);
+    const mapping = await this.cardMappings.get(larkCardChannel(config.appId), record.event.messageId);
     if (!mapping) return;
     const saved = parseCardTask(mapping.extra ?? '{}');
     if (saved.state !== 'completed' || saved.final_delivery_state !== 'delivered'
@@ -199,7 +199,7 @@ export abstract class LarkCoordinatorCards extends LarkCoordinatorCore {
     if (!resultElements) {
       // File results cannot be PATCHed; the reply receipt and task dashboard
       // show acceptance while the original file and process stay unchanged.
-      await this.cardMappings!.save({ ...mapping, extra: JSON.stringify({ ...saved, result_feedback_state: record.state }) });
+      await this.cardMappings.save({ ...mapping, extra: JSON.stringify({ ...saved, result_feedback_state: record.state }) });
       return;
     }
     // 验证状态行与「运行验证」按钮必须同源。这里若不重算，就会用回落的默认能力表
@@ -210,14 +210,14 @@ export abstract class LarkCoordinatorCards extends LarkCoordinatorCore {
     const elements = [
       ...resultElements.filter(item => !isLarkTurnMemoryElement(item) && !['workflow_accept', 'workflow_changes', 'workflow_result_status', LARK_VERIFICATION_ELEMENT_ID].includes(String(item.element_id))),
       ...(verification.element ? [verification.element] : []),
-      ...await this.workflows!.result(record, record.cardId, saved.final_attachment_message_id ? [saved.final_attachment_message_id] : undefined)];
+      ...await this.workflows.result(record, record.cardId, saved.final_attachment_message_id ? [saved.final_attachment_message_id] : undefined)];
     await this.service.update({ cardLinks: config.cardLinks, sessionId: mapping.sessionId, cardKind: 'result', ...(config.adhdMode === true ? { adhdMode: true } : {}), messageId: record.cardId, taskId: mapping.externalId, taskName: saved.task_name, state: 'completed', readOnly: true, elements,
       capabilities: { ...this.capabilitiesForTask(restored), ...verification.capabilities, ...await this.resultActionCapabilities(restored, config, saved.state) },
       agentName: await this.resolveSessionAgentName(config, mapping.sessionId), showAgentName: config.showAgentName === true, turn: saved.turn });
-    const latest = await this.cardMappings!.get(larkCardChannel(config.appId), mapping.externalId);
+    const latest = await this.cardMappings.get(larkCardChannel(config.appId), mapping.externalId);
     const current = latest?.id === mapping.id ? latest : undefined;
     if (current?.extra !== mapping.extra) return;
-    await this.cardMappings!.save({ ...mapping, extra: JSON.stringify({ ...saved, result_feedback_state: record.state, final_elements: elements }) });
+    await this.cardMappings.save({ ...mapping, extra: JSON.stringify({ ...saved, result_feedback_state: record.state, final_elements: elements }) });
   }
 
   /**
@@ -230,7 +230,6 @@ export abstract class LarkCoordinatorCards extends LarkCoordinatorCore {
     saved: PersistedLarkCardTask,
     record: { cardId?: string; state: string }
   ) {
-    if (!this.workflowOptions.store) return;
     if (record.state !== 'accepted' && record.state !== 'needs_changes') return;
     // 新结果给附件加 reaction；旧的纯文件结果仍通过无内联元素识别。
     if (!saved.final_attachment_message_id && !isFileResultDelivery({ elements: saved.final_elements })) return;
@@ -291,14 +290,14 @@ export abstract class LarkCoordinatorCards extends LarkCoordinatorCore {
    * 置顶与撤销都由 LarkPinManager 兜底，失败只记日志，绝不影响任务本身。
    */
   protected async pinLongRunningCard(task: LarkTask) {
-    if (!this.pins || task.config.pinLongTasks !== true || !task.cardMessageId || !task.startedAt) return;
+    if (task.config.pinLongTasks !== true || !task.cardMessageId || !task.startedAt) return;
     if (Date.now() - task.startedAt < (task.config.pinAfterMs ?? 10 * 60 * 1000)) return;
     await this.pins.pin(task.cardMessageId, { appId: task.config.appId, taskId: task.id, chatId: task.event.chatId });
   }
 
   /** 终态撤销置顶：与开关无关，开关关掉之后仍然要把已经置顶的卡撤下来。 */
   protected async unpinTaskCard(task: LarkTask) {
-    if (!this.pins || !task.cardMessageId || !this.pins.isPinned(task.cardMessageId)) return;
+    if (!task.cardMessageId || !this.pins.isPinned(task.cardMessageId)) return;
     await this.pins.unpin(task.cardMessageId, { appId: task.config.appId });
   }
 
@@ -311,7 +310,7 @@ export abstract class LarkCoordinatorCards extends LarkCoordinatorCore {
     const webBaseUrl = task.config.webBaseUrl?.trim().replace(/\/$/, '');
     return {
       // 与 handleAction 的 cancel 分支前置条件逐项对齐。
-      canCancelQueued: Boolean(this.runtime.cancelQueued && task.sessionId && task.runtimeTaskId),
+      canCancelQueued: Boolean(task.sessionId && task.runtimeTaskId),
       canInterrupt: typeof this.runtime.interrupt === 'function' && Boolean(task.sessionId),
       canRetry: task.retryable !== false,
       // requestUpdate 在轮次结束时被清空，因此已结束的轮次不会出现「刷新」。
@@ -340,7 +339,7 @@ export abstract class LarkCoordinatorCards extends LarkCoordinatorCore {
     });
     return {
       // 续问要先落去重键、再由机器人在原位置代发这句话，缺持久化存储或回复接口就不给按钮。
-      ...(this.inbox && typeof this.service.replyText === 'function' ? { canFollowUp: true } : {}),
+      ...(typeof this.service.replyText === 'function' ? { canFollowUp: true } : {}),
       ...(dailySchedule ? { dailySchedule } : {})
     };
   }
@@ -373,7 +372,7 @@ export abstract class LarkCoordinatorCards extends LarkCoordinatorCore {
     const store = this.workflowOptions.store;
     const requester = task.event.senderOpenId;
     const startedAt = task.startedAt;
-    if (!automation || !store?.compareAndSet || !this.cardMappings || !task.sessionId || !startedAt || !requester) return undefined;
+    if (!automation || !store.compareAndSet || !task.sessionId || !startedAt || !requester) return undefined;
     const request = larkRequestText(task.prompt, config.name);
     if (!request || isLarkCardFollowUpPrompt(task.prompt)) return undefined;
     const raw = await store.get(dailyScheduleKey(config.appId, resultActionDigest(task.id, task.turn)));
@@ -407,7 +406,7 @@ export abstract class LarkCoordinatorCards extends LarkCoordinatorCore {
    */
   private async resultActionTarget(parsed: LarkCardActionValue, operatorOpenId?: string, context?: { messageId?: string; chatId?: string }): Promise<LarkResultActionTarget | { toast: { type: string; content: string } }> {
     const store = this.workflowOptions.store;
-    if (!this.reconcileConfig || !this.cardMappings || !store?.compareAndSet || !operatorOpenId || !context?.messageId || !context.chatId) {
+    if (!this.reconcileConfig || !store.compareAndSet || !operatorOpenId || !context?.messageId || !context.chatId) {
       return { toast: { type: 'error', content: '卡片身份不完整或已失效。' } };
     }
     const current = await readLarkConfig(store, this.reconcileConfig.appId);
@@ -465,10 +464,10 @@ export abstract class LarkCoordinatorCards extends LarkCoordinatorCore {
       const denied = await this.resultActionDenied(target, 'follow_up');
       if (denied) return { type: 'warning', content: denied };
       const capabilities = { ...this.capabilitiesForTask(task), ...await this.resultActionCapabilities(task, config, 'completed') };
-      if (!this.inbox || !isLarkCardActionAvailable(parsed.action, { state: 'completed', taskId: task.id, turn: task.turn, readOnly: true, capabilities })) {
+      if (!isLarkCardActionAvailable(parsed.action, { state: 'completed', taskId: task.id, turn: task.turn, readOnly: true, capabilities })) {
         return { type: 'warning', content: '这个会话已结束或已换成新会话，无法接着问；请直接 @我 提问。' };
       }
-      const store = this.workflowOptions.store!;
+      const store = this.workflowOptions.store;
       const label = larkCardActionLabel(parsed.action, capabilities)!;
       const prompt = larkCardFollowUpPrompt(parsed.action)!;
       // 一张结果卡只能续问一次（不分哪个按钮）：新一轮挂在这张卡下面，卡的消息 ID 就是它的锚点。
@@ -538,7 +537,7 @@ export abstract class LarkCoordinatorCards extends LarkCoordinatorCore {
         const target = await this.turnDiffReviewTarget(record);
         if (typeof target === 'string') throw new RuntimeError('TURN_DIFF_REVIEW_UNAVAILABLE', target, 409);
         const { current, config, saved } = target;
-        if (!this.inbox || !record.cardMessageId || !saved.scope_id) throw new RuntimeError('TURN_DIFF_REVIEW_UNAVAILABLE', '这张卡缺少派发所需的信息，请直接 @我 处理。', 409);
+        if (!record.cardMessageId || !saved.scope_id) throw new RuntimeError('TURN_DIFF_REVIEW_UNAVAILABLE', '这张卡缺少派发所需的信息，请直接 @我 处理。', 409);
         const prompt = String(record.payload.prompt ?? '');
         const event: LarkMessageEvent = {
           authorization: { strength: 'explicit', via: 'answer_reply' },
@@ -558,7 +557,6 @@ export abstract class LarkCoordinatorCards extends LarkCoordinatorCore {
 
   private async turnDiffReviewTarget(record: LarkConfirmRecord) {
     const store = this.workflowOptions.store;
-    if (!store || !this.cardMappings) return '这张卡已失效。';
     const current = await readLarkConfig(store, record.scope.appId);
     if (!current?.listening) return '机器人已停用，无法执行此操作';
     const mapping = await this.cardMappings.get(larkCardChannel(current.appId), String(record.payload.lark_task_id ?? ''));
@@ -573,7 +571,7 @@ export abstract class LarkCoordinatorCards extends LarkCoordinatorCore {
    * 入站记录按计划卡的消息 ID 去重，重启后补调不会重复执行。
    */
   protected async submitConfirmation(record: LarkInteraction) {
-    if (!record.durable || !record.cardId || !record.actorId || !this.inbox) throw new LarkServiceError('LARK_CONFIRMATION_UNAVAILABLE', '确认暂不可用，请稍后重试。', 409);
+    if (!record.durable || !record.cardId || !record.actorId) throw new LarkServiceError('LARK_CONFIRMATION_UNAVAILABLE', '确认暂不可用，请稍后重试。', 409);
     const config = await readLarkConfig(this.workflowOptions.store, record.appId);
     if (!config || !await this.confirmationAvailable(record)
       || !await this.authorizeInteraction(record, record.actorId, 'run.interrupt')) throw new LarkServiceError('LARK_CONFIRMATION_ENDED', '已结束，未执行', 409);
@@ -597,8 +595,8 @@ export abstract class LarkCoordinatorCards extends LarkCoordinatorCore {
 
   protected async submitPlanDecision(record: LarkInteraction) {
     const config = await readLarkConfig(this.workflowOptions.store, record.appId);
-    if (!config?.listening || !this.inbox || !record.cardId || !record.actorId) throw new LarkServiceError('LARK_PLAN_UNAVAILABLE', '机器人当前不在监听，计划没有提交。', 409);
-    const mapping = await this.cardMappings?.get(larkCardChannel(record.appId), record.event.messageId);
+    if (!config?.listening || !record.cardId || !record.actorId) throw new LarkServiceError('LARK_PLAN_UNAVAILABLE', '机器人当前不在监听，计划没有提交。', 409);
+    const mapping = await this.cardMappings.get(larkCardChannel(record.appId), record.event.messageId);
     const saved = mapping?.extra ? parseCardTask(mapping.extra) : undefined;
     if (!saved?.scope_id) throw new LarkServiceError('LARK_CONTEXT_MISSING', '原任务上下文不可恢复，请重新发送 /plan。', 409);
     const { event, prompt } = planFollowUpEvent(record, { chatId: saved.chat_id, chatType: saved.chat_type ?? 'group', threadId: saved.thread_id },
@@ -630,7 +628,7 @@ export abstract class LarkCoordinatorCards extends LarkCoordinatorCore {
         capabilities: { ...this.capabilitiesForTask(task), ...actions } })) {
         return { type: 'warning', content: '这个话题已有同样内容的计划，或会话已结束，无法再设置。' };
       }
-      const store = this.workflowOptions.store!;
+      const store = this.workflowOptions.store;
       const digest = resultActionDigest(task.id, task.turn);
       const key = dailyScheduleKey(config.appId, digest);
       const busy = { type: 'warning', content: '定时任务正在设置，请勿重复点击。' };
@@ -698,7 +696,6 @@ export abstract class LarkCoordinatorCards extends LarkCoordinatorCore {
 
   /** 改写这个机器人待收尾的自动验证（见 mutateLarkPendingVerifications）；超出上限丢掉的最旧条目记日志。 */
   protected async mutatePendingVerifications(appId: string, mutation: (entries: LarkPendingVerification[]) => LarkPendingVerification[] | undefined) {
-    if (!this.workflowOptions.store) return;
     const dropped = await mutateLarkPendingVerifications(this.workflowOptions.store, appId, mutation);
     if (dropped.length) this.log.warn({ appId, dropped: dropped.map(item => item.task_id) }, `待收尾的自动验证超过 ${maxLarkPendingVerifications} 条，丢掉最旧的`);
   }
@@ -733,7 +730,7 @@ export abstract class LarkCoordinatorCards extends LarkCoordinatorCore {
     // 只有「现有记录不能证明当前代码」时才给按钮：已验证且未失效的卡再跑一次没有意义，
     // 正在跑的也不能再起一个（runtime 会直接回 VERIFICATION_IN_PROGRESS；自动验证还没落记录时看 auto），
     // 已发回返修的也不给：返修那一轮正占着会话，修完会自己重新验证。
-    const capable = Boolean(this.runtime.runVerification && task.sessionId && auto?.phase !== 'running' && auto?.phase !== 'repairing'
+    const capable = Boolean(task.sessionId && auto?.phase !== 'running' && auto?.phase !== 'repairing'
       && latest?.status !== 'running' && (!latest || latest.stale || latest.status !== 'passed'));
     // 最终仍由 card-actions 的能力表拍板（例如 cancelled 的卡不给验证入口）。
     // 文案里的「可点运行验证」必须与按钮同生同灭，否则就是在指一条不存在的路。
@@ -794,7 +791,7 @@ export abstract class LarkCoordinatorCards extends LarkCoordinatorCore {
     // 只有本轮改了代码才提议保存验证命令：问答、排查类的轮次出现这个按钮是噪声。
     if (!changedCode) return undefined;
     const store = this.workflowOptions.store;
-    if (!store?.compareAndSet || !task.sessionId || !this.runtime.runVerification) return undefined;
+    if (!store.compareAndSet || !task.sessionId || !this.runtime.runVerification) return undefined;
     const session = await this.runtime.getSession(task.sessionId);
     if (!session?.cwd || !larkInsideGitRepository(session.cwd)) return undefined;
     const workspace = await this.runtime.getWorkspace?.(task.sessionId);
@@ -828,7 +825,7 @@ export abstract class LarkCoordinatorCards extends LarkCoordinatorCore {
    */
   protected async planAutoVerification(task: LarkTask, codeBefore: string | undefined): Promise<{ command: string; turn: number; recordId?: string } | undefined> {
     const command = task.config.verificationCommand?.trim();
-    if (!command || !task.sessionId || !this.workflowOptions.store || !this.runtime.runVerification || !this.runtime.getVerifications || this.verifyInFlight.has(task.id)) return undefined;
+    if (!command || !task.sessionId || !this.runtime.runVerification || !this.runtime.getVerifications || this.verifyInFlight.has(task.id)) return undefined;
     try {
       const session = await this.runtime.getSession(task.sessionId);
       if (!session?.cwd) return undefined;
@@ -927,7 +924,7 @@ export abstract class LarkCoordinatorCards extends LarkCoordinatorCore {
 
   /** 这一轮是第几轮返修：代发返修消息时登记过就是那一轮，否则是用户的原始请求，还没返修过。 */
   private async verificationRepairRounds(task: LarkTask) {
-    const raw = await this.workflowOptions.store?.get(larkPendingVerificationKey(task.config.appId));
+    const raw = await this.workflowOptions.store.get(larkPendingVerificationKey(task.config.appId));
     return Number(parseLarkPendingVerifications(raw).find(item => item.task_id === task.id)?.repair_round) || 0;
   }
 
@@ -939,7 +936,7 @@ export abstract class LarkCoordinatorCards extends LarkCoordinatorCore {
   private async submitVerificationRepair(task: LarkTask, record: VerificationResponse, round: number): Promise<boolean> {
     const store = this.workflowOptions.store;
     const requester = task.event.senderOpenId;
-    if (!this.inbox || !store || typeof this.service.replyText !== 'function' || !requester || !larkScopeContinuesFor(task.scopeId, requester)) return false;
+    if (typeof this.service.replyText !== 'function' || !requester || !larkScopeContinuesFor(task.scopeId, requester)) return false;
     const notice = larkVerificationRepairNotice(round);
     const echo = await this.service.replyText({ messageId: task.finalMessageId ?? larkMessageAnchor(task.event), ...(task.event.threadId ? { replyInThread: true } : {}),
       text: notice, idempotencyKey: `verify_fix_${resultActionDigest(task.id, task.turn, record.id)}` });

@@ -1,14 +1,11 @@
+import { helpReply } from './handlers/help.js';
+import type { ChatCommandHandler } from './handlers/command-context.js';
 /**
  * 飞书聊天内命令层：形状校验（唯一校验器）+ 命令注册表 + 能力/权限判定 + /help 渲染。
  *
  * 设计约束（与 docs/interaction-design-2026-08-30.md 2.1 与第 3 节一致）：
  *
- * 1. **纯模块，零依赖**：本文件不 import 任何东西——不碰 runtime、不发网络请求、不触碰
- *    卡片生命周期。它只返回一个「被描述的意图」（intent），由 coordinator 执行。
- *    这样命令层可以单测，而权限判定与卡片生命周期仍留在 coordinator 里（那里已经有
- *    白名单解析与进度卡/收据的全套机制，不应该被复制一份）。
- *    需要 LarkCardElement 时在本文件本地声明，不从 card-renderer.ts 引入（card-renderer
- *    依赖 service.ts，会把网络层拖进这个纯模块）。
+ * 1. 解析和权限判定只读注册表。协调器完成授权后才调用对应处理器，按需加载各领域的执行依赖。
  *
  * 2. **只有一个命令形状校验器**：{@link parseSlashCommand}。路由（{@link routeLarkCommand}）
  *    与权限门（{@link authorizeLarkCommandText}）都通过同一个 {@link evaluateLarkCommand}
@@ -167,6 +164,9 @@ export type LarkCommandName = 'work' | 'schedule' | 'ci' | 'pr' | 'help' | 'repa
 
 export interface LarkCommandDefinition {
   name: LarkCommandName;
+  execute?: ChatCommandHandler;
+  workflow?: import('./handlers/workflow-commands.js').WorkflowCommandHandler;
+  reply?: (parsed: ParsedSlashCommand, context: LarkCommandContext) => Extract<LarkCommandRoute, { kind: 'reply' }>;
   aliases?: string[];
   /** 简体中文摘要，「动作 + 对象 + 预期结果」，不用「处理」「继续」这类空动词。 */
   summary: string;
@@ -199,34 +199,34 @@ export interface LarkCommandDefinition {
  *             私聊为自己的池），注入由 runTurn 完成。
  */
 export const larkCommandRegistry: readonly LarkCommandDefinition[] = [
-  { name: 'work', summary: '查看目标、分配 Agent、回答步骤问题并复用工作流', usage: '/work；/work consult [--agents A,B] -- <问题>；/work research 目标；/work templates', mutating: true, requires: c => c.work === true, unavailableReason: '当前服务未接入目标工作台。' },
-  { name: 'schedule', summary: '查看、创建、启用或停用此话题的定时任务', usage: '/schedule；/schedule every 分钟 指令；/schedule enable 编号；/schedule disable 编号', mutating: true, requires: c => c.schedule === true, unavailableReason: '当前服务未接入定时任务。' },
-  { name: 'ci', summary: '等待当前提交的 CI（由已安装的 CI 插件提供）、按规则交给 Agent 修复失败、查看等待或取消续作', usage: '/ci；/ci wait [工作流]；/ci fix；/ci cancel <等待编号>', mutating: true, requires: c => c.ci === true,
+  { name: 'work', execute: async ctx => (await import('./handlers/automation.js')).handleWork(ctx), summary: '查看目标、分配 Agent、回答步骤问题并复用工作流', usage: '/work；/work consult [--agents A,B] -- <问题>；/work research 目标；/work templates', mutating: true, requires: c => c.work === true, unavailableReason: '当前服务未接入目标工作台。' },
+  { name: 'schedule', execute: async ctx => (await import('./handlers/automation.js')).handleSchedule(ctx), summary: '查看、创建、启用或停用此话题的定时任务', usage: '/schedule；/schedule every 分钟 指令；/schedule enable 编号；/schedule disable 编号', mutating: true, requires: c => c.schedule === true, unavailableReason: '当前服务未接入定时任务。' },
+  { name: 'ci', execute: async ctx => (await import('./handlers/automation.js')).handleCi(ctx), summary: '等待当前提交的 CI（由已安装的 CI 插件提供）、按规则交给 Agent 修复失败、查看等待或取消续作', usage: '/ci；/ci wait [工作流]；/ci fix；/ci cancel <等待编号>', mutating: true, requires: c => c.ci === true,
     unavailableReason: 'CI 续作未配置：还没有安装 CI 插件。安装方法：dutydeck plugin install <CI 插件目录或包> --yes，按插件说明用 dutydeck plugin config 填好令牌或 webhook 密钥，再执行 dutydeck restart 生效。用 webhook 的插件，把平台的 webhook 指向本服务的 /api/hooks/<插件提供方>。' },
-  { name: 'pr', summary: '把本会话的改动推到 dutydeck/ 分支并开 PR（先发确认卡，确认后才推送），或认领已有的 PR；之后跟进 CI 和评审意见', usage: '/pr [标题]；/pr follow <PR 链接或编号>', mutating: true, requires: c => c.pr === true,
+  { name: 'pr', execute: async ctx => (await import('./handlers/automation.js')).handlePr(ctx), summary: '把本会话的改动推到 dutydeck/ 分支并开 PR（先发确认卡，确认后才推送），或认领已有的 PR；之后跟进 CI 和评审意见', usage: '/pr [标题]；/pr follow <PR 链接或编号>', mutating: true, requires: c => c.pr === true,
     unavailableReason: '开 PR 未配置：没有安装支持开 PR 的 CI 插件。安装方法：dutydeck plugin install <插件目录> --yes（仓库自带的 plugins/github 支持），再用 dutydeck plugin config 填好访问令牌，执行 dutydeck restart 生效。' },
-  { name: 'tasks', summary: '查看允许访问的待处理任务、运行进度和最近结果', usage: '/tasks [页码]', mutating: false, requires: c => c.tasks === true, unavailableReason: '当前机器人无法查询任务列表，/tasks 已停用。' },
-  { name: 'answer', summary: '回答 Agent 的问题并继续原任务', usage: '/answer <问题编号> <回答>', mutating: true, requires: c => c.answer === true, unavailableReason: '当前机器人无法接收问题回答，/answer 已停用。' },
-  { name: 'approve', summary: '批准卡片上的本次工具调用', usage: '/approve <请求编号>', mutating: true, requires: c => c.approval === true, unavailableReason: '当前机器人无法处理工具调用审批，/approve 已停用。' },
-  { name: 'reject', summary: '拒绝卡片上的本次工具调用', usage: '/reject <请求编号>', mutating: true, requires: c => c.approval === true, unavailableReason: '当前机器人无法处理工具调用审批，/reject 已停用。' },
+  { name: 'tasks', workflow: async (ctx, input) => (await import('./handlers/workflow-commands.js')).tasks(ctx, input), summary: '查看允许访问的待处理任务、运行进度和最近结果', usage: '/tasks [页码]', mutating: false, requires: c => c.tasks === true, unavailableReason: '当前机器人无法查询任务列表，/tasks 已停用。' },
+  { name: 'answer', workflow: async (ctx, input) => (await import('./handlers/workflow-commands.js')).answer(ctx, input), summary: '回答 Agent 的问题并继续原任务', usage: '/answer <问题编号> <回答>', mutating: true, requires: c => c.answer === true, unavailableReason: '当前机器人无法接收问题回答，/answer 已停用。' },
+  { name: 'approve', workflow: async (ctx, input) => (await import('./handlers/workflow-commands.js')).approve(ctx, input), summary: '批准卡片上的本次工具调用', usage: '/approve <请求编号>', mutating: true, requires: c => c.approval === true, unavailableReason: '当前机器人无法处理工具调用审批，/approve 已停用。' },
+  { name: 'reject', workflow: async (ctx, input) => (await import('./handlers/workflow-commands.js')).reject(ctx, input), summary: '拒绝卡片上的本次工具调用', usage: '/reject <请求编号>', mutating: true, requires: c => c.approval === true, unavailableReason: '当前机器人无法处理工具调用审批，/reject 已停用。' },
   // 会话记忆跨话题、跨 /new、跨重启生效：同一机器人的所有群共享一份，每个私聊各自一份。
-  { name: 'remember', summary: '把一条事实、偏好或约定保存为长期记忆（私聊各自独立；群聊的记忆范围按 bot 配置：各群共享或按群隔离），之后每轮任务都会带给 Agent', usage: '/remember <内容>', mutating: true, requires: c => c.memory === true, unavailableReason: '当前服务没有会话记忆存储，/remember 已停用。' },
-  { name: 'memory', summary: '查看当前可见的记忆及其编号、后台提取与整理状态', usage: '/memory；/memory consolidate；/memory ignore 描述；/memory ignore list；/memory ignore remove 编号', mutating: false, requires: c => c.memory === true, unavailableReason: '当前服务没有会话记忆存储，/memory 已停用。' },
-  { name: 'forget', summary: '删除当前可见记忆中指定编号的一条', usage: '/forget <记忆编号>', mutating: true, requires: c => c.memory === true, unavailableReason: '当前服务没有会话记忆存储，/forget 已停用。' },
+  { name: 'remember', execute: async ctx => (await import('./handlers/memory.js')).handleRemember(ctx), summary: '把一条事实、偏好或约定保存为长期记忆（私聊各自独立；群聊的记忆范围按 bot 配置：各群共享或按群隔离），之后每轮任务都会带给 Agent', usage: '/remember <内容>', mutating: true, requires: c => c.memory === true, unavailableReason: '当前服务没有会话记忆存储，/remember 已停用。' },
+  { name: 'memory', execute: async ctx => (await import('./handlers/memory.js')).handleMemory(ctx), summary: '查看当前可见的记忆及其编号、后台提取与整理状态', usage: '/memory；/memory consolidate；/memory ignore 描述；/memory ignore list；/memory ignore remove 编号', mutating: false, requires: c => c.memory === true, unavailableReason: '当前服务没有会话记忆存储，/memory 已停用。' },
+  { name: 'forget', execute: async ctx => (await import('./handlers/memory.js')).handleForget(ctx), summary: '删除当前可见记忆中指定编号的一条', usage: '/forget <记忆编号>', mutating: true, requires: c => c.memory === true, unavailableReason: '当前服务没有会话记忆存储，/forget 已停用。' },
   {
-    name: 'help',
+    name: 'help', reply: helpReply,
     summary: '列出当前可用的 Dutydeck 命令及其用法',
     usage: '/help [页码]',
     mutating: false
   },
   {
-    name: 'repair',
+    name: 'repair', execute: async ctx => (await import('./handlers/access.js')).handleRepair(ctx),
     summary: '诊断并一键补齐飞书应用权限、事件订阅与卡片回调（执行前二次确认，不会自动发布）',
     usage: '/repair',
     mutating: true
   },
   {
-    name: 'status',
+    name: 'status', execute: async ctx => (await import('./handlers/status.js')).handleStatus(ctx),
     summary: '查看本会话绑定的 Agent、工作区、运行状态、待执行指令数与本月用量',
     usage: '/status',
     mutating: false,
@@ -234,7 +234,7 @@ export const larkCommandRegistry: readonly LarkCommandDefinition[] = [
     unavailableReason: '当前 Dutydeck 运行时无法读取会话状态（缺少 getSession），/status 给不出真实状态，已停用。'
   },
   {
-    name: 'cancel',
+    name: 'cancel', execute: async ctx => (await import('./handlers/task-commands.js')).handleCancel(ctx),
     aliases: ['stop'],
     summary: '取消本会话正在执行或排队中的这一轮任务，并把进度卡收敛为取消收据',
     usage: '/cancel',
@@ -245,7 +245,7 @@ export const larkCommandRegistry: readonly LarkCommandDefinition[] = [
     unavailableReason: '当前 Dutydeck 运行时没有可用的停止手段（缺少 interrupt 与 cancelQueued），/cancel 无法真正取消任务，已停用。'
   },
   {
-    name: 'retry',
+    name: 'retry', execute: async ctx => (await import('./handlers/task-commands.js')).handleRetry(ctx),
     summary: '重新执行本会话最近一次失败或已取消的任务，并新建一张进度卡',
     usage: '/retry',
     mutating: true,
@@ -253,20 +253,20 @@ export const larkCommandRegistry: readonly LarkCommandDefinition[] = [
     unavailableReason: '当前 Dutydeck 运行时无法重新下发任务（缺少 dispatch 与 send），/retry 无法重新执行，已停用。'
   },
   {
-    name: 'new',
+    name: 'new', execute: async ctx => (await import('./handlers/sessions.js')).handleNew(ctx),
     summary: '结束当前会话上下文；带上任务内容可以同时开启新会话并立刻派发这个任务；加 --handoff 把最近结果、git 状态和备注交接给新会话',
     usage: '/new 或 /new <任务内容>；指定首轮配置：/new [--agent Agent编号] [--cwd 绝对路径] [--workspace shared|worktree] [--model 模型] [--effort 强度] -- 任务内容；带交接开新会话：/new [首轮配置] --handoff [备注] [-- 任务内容]',
     mutating: true,
     requires: capabilities => capabilities.stop,
     unavailableReason: '当前 Dutydeck 运行时无法结束旧会话（缺少 stop），/new 不能保证下一条消息真的开启新会话，已停用。'
   },
-  { name: 'resume', summary: '恢复本话题最近关闭的会话；用 list 查看最近几个，再按编号选择', usage: '/resume [会话编号]；/resume list', mutating: true, requires: c => c.resume === true && c.stop && c.listSessions && c.getTasks && c.getSession && c.listAgents, unavailableReason: '当前运行时不支持恢复会话。可以用 /new --handoff 交接上下文。' },
-  { name: 'fork', summary: '带上下文在新话题开分身，与原会话并行；git 仓库默认用独立 worktree；list 列出这个会话的所有分身及其状态、话题链接', usage: '/fork [任务]；/fork [--agent Agent编号] [--cwd 目录] [--workspace shared|worktree] [--model 模型] [--effort 强度] -- 任务；/fork list', mutating: true, requires: c => c.getSession && c.listAgents && c.getTasks && c.dispatch, unavailableReason: '当前运行时无法读取源会话或 Agent，不能开分身。' },
-  { name: 'model', summary: '查看本会话当前模型与可选项；带模型名则在空闲时切换，下一轮起生效', usage: '/model [模型]', mutating: true, requires: c => c.getSession && c.setModel === true, unavailableReason: '当前运行时不支持切换会话模型，/model 已停用。可以用 /new --model 模型 -- 任务 开新会话时指定。' },
-  { name: 'effort', summary: '查看本会话当前思考强度与可选项；带档位则在空闲时切换，下一轮起生效', usage: '/effort [档位]', mutating: true, requires: c => c.getSession && c.setReasoningEffort === true, unavailableReason: '当前运行时不支持切换会话思考强度，/effort 已停用。可以用 /new --effort 档位 -- 任务 开新会话时指定。' },
-  { name: 'rename', summary: '给本会话改名（Web、/tasks、/resume list 都显示新名称）；--clear 恢复默认标题。需要安装管理员权限', usage: '/rename <名称>；/rename --clear', mutating: true, requires: c => c.getSession && c.setSessionName === true, unavailableReason: '当前运行时不支持会话改名，/rename 已停用。' },
+  { name: 'resume', execute: async ctx => (await import('./handlers/sessions.js')).handleResume(ctx), summary: '恢复本话题最近关闭的会话；用 list 查看最近几个，再按编号选择', usage: '/resume [会话编号]；/resume list', mutating: true, requires: c => c.resume === true && c.stop && c.listSessions && c.getTasks && c.getSession && c.listAgents, unavailableReason: '当前运行时不支持恢复会话。可以用 /new --handoff 交接上下文。' },
+  { name: 'fork', execute: async ctx => (await import('./handlers/sessions.js')).handleFork(ctx), summary: '带上下文在新话题开分身，与原会话并行；git 仓库默认用独立 worktree；list 列出这个会话的所有分身及其状态、话题链接', usage: '/fork [任务]；/fork [--agent Agent编号] [--cwd 目录] [--workspace shared|worktree] [--model 模型] [--effort 强度] -- 任务；/fork list', mutating: true, requires: c => c.getSession && c.listAgents && c.getTasks && c.dispatch, unavailableReason: '当前运行时无法读取源会话或 Agent，不能开分身。' },
+  { name: 'model', execute: async ctx => (await import('./handlers/sessions.js')).handleModel(ctx), summary: '查看本会话当前模型与可选项；带模型名则在空闲时切换，下一轮起生效', usage: '/model [模型]', mutating: true, requires: c => c.getSession && c.setModel === true, unavailableReason: '当前运行时不支持切换会话模型，/model 已停用。可以用 /new --model 模型 -- 任务 开新会话时指定。' },
+  { name: 'effort', execute: async ctx => (await import('./handlers/sessions.js')).handleModel(ctx), summary: '查看本会话当前思考强度与可选项；带档位则在空闲时切换，下一轮起生效', usage: '/effort [档位]', mutating: true, requires: c => c.getSession && c.setReasoningEffort === true, unavailableReason: '当前运行时不支持切换会话思考强度，/effort 已停用。可以用 /new --effort 档位 -- 任务 开新会话时指定。' },
+  { name: 'rename', execute: async ctx => (await import('./handlers/sessions.js')).handleRename(ctx), summary: '给本会话改名（Web、/tasks、/resume list 都显示新名称）；--clear 恢复默认标题。需要安装管理员权限', usage: '/rename <名称>；/rename --clear', mutating: true, requires: c => c.getSession && c.setSessionName === true, unavailableReason: '当前运行时不支持会话改名，/rename 已停用。' },
   {
-    name: 'agents',
+    name: 'agents', execute: async ctx => (await import('./handlers/status.js')).handleAgents(ctx),
     summary: '列出本机可用的 Agent、版本与本机器人当前默认使用的那个',
     usage: '/agents',
     mutating: false,
@@ -274,7 +274,7 @@ export const larkCommandRegistry: readonly LarkCommandDefinition[] = [
     unavailableReason: '当前 Dutydeck 运行时无法列出本机 Agent（缺少 listAgents），/agents 只能给出空承诺，已停用。'
   },
   {
-    name: 'queue',
+    name: 'queue', execute: async ctx => (await import('./handlers/task-commands.js')).handleQueue(ctx),
     // 列出队列本身只读，但取消与提到队首会改变待执行的内容：整条命令按改状态处理，
     // 与 /cancel 同一道白名单门，避免「只读入口带着写操作」两套口径。
     summary: '查看本会话待执行的指令，并取消其中一条、把它提到队首或立即插话',
@@ -284,7 +284,7 @@ export const larkCommandRegistry: readonly LarkCommandDefinition[] = [
     unavailableReason: '当前 Dutydeck 运行时读不到队列或无法操作队列（缺少 getTasks，且 cancelQueued 与 steerQueued 都不可用），/queue 已停用。'
   },
   {
-    name: 'steer',
+    name: 'steer', execute: async ctx => (await import('./handlers/task-commands.js')).handleSteer(ctx),
     // 诚实边界：只有支持插话的 ACP Agent 才能把内容送进正在执行的这一轮（injectQueued）；
     // 明确未投递时可把排队中的一轮提到队首（steerQueued）；投递未知时保留恢复状态，回执按实际结果写。
     summary: '把一条内容插进正在执行的这一轮；Agent 不支持插话时排到队首并中断这一轮',
@@ -294,7 +294,7 @@ export const larkCommandRegistry: readonly LarkCommandDefinition[] = [
     unavailableReason: '当前 Dutydeck 运行时无法把一条指令提到队首（缺少 dispatch 或 steerQueued），/steer 做不到任何插话效果，已停用。'
   },
   {
-    name: 'plan',
+    name: 'plan', execute: async ctx => (await import('./handlers/task-commands.js')).handlePlan(ctx),
     summary: '先让 Agent 只调研、出执行计划（不改文件），在计划卡上批准后再按计划执行；也可以提修改意见让它重出计划',
     usage: '/plan <任务>',
     mutating: true,
@@ -302,7 +302,7 @@ export const larkCommandRegistry: readonly LarkCommandDefinition[] = [
     unavailableReason: '当前服务没有计划卡所需的存储或无法派发任务，/plan 已停用。'
   },
   {
-    name: 'grant',
+    name: 'grant', execute: async ctx => (await import('./handlers/access.js')).handleGrant(ctx),
     summary: '把本群的对话权限放开给全部群成员，或把被 @ 的成员加进名单',
     usage: '/grant；/grant @成员',
     mutating: true,
@@ -310,7 +310,7 @@ export const larkCommandRegistry: readonly LarkCommandDefinition[] = [
     unavailableReason: '当前机器人没有接入群策略（缺少群绑定管理），/grant 无法修改任何授权，已停用。'
   },
   {
-    name: 'revoke',
+    name: 'revoke', execute: async ctx => (await import('./handlers/access.js')).handleGrant(ctx),
     summary: '收回本群的对话权限，或把被 @ 的成员移出名单',
     usage: '/revoke；/revoke @成员',
     mutating: true,
@@ -770,15 +770,7 @@ export function routeLarkCommand(text: unknown, context: LarkCommandContext): La
     case 'allowed': {
       const { parsed, definition } = evaluated;
       // /help 是纯函数，命令层自己渲染回执，不必绕一趟 coordinator。
-      if (definition.name === 'help') {
-        const page = Number.parseInt(parsed.args[0] ?? '', 10);
-        const help = renderLarkCommandHelp(context.capabilities, {
-          ...(Number.isFinite(page) ? { page } : {}),
-          ...(context.helpPageSize === undefined ? {} : { pageSize: context.helpPageSize }),
-          ...(context.pluginCommands?.length ? { pluginCommands: context.pluginCommands } : {})
-        });
-        return { kind: 'reply', command: 'help', parsed, elements: help.elements, text: help.text };
-      }
+      if (definition.reply) return definition.reply(parsed, context);
       return { kind: 'intent', command: definition.name, parsed, definition, args: parsed.args, argsText: parsed.argsText };
     }
   }

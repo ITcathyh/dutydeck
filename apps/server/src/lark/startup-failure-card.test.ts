@@ -1,10 +1,10 @@
+import { createTestLarkCoordinator } from './coordinator-test-fixture.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createRepositories } from '@dutydeck/storage';
 import { RuntimeError, type Session } from '@dutydeck/shared';
-import { LarkMessageCoordinator } from './coordinator.js';
 import { larkBotsConfigKey, type StoredLarkConfig } from './config.js';
 import { buildLarkCard } from './service.js';
 import type { LarkMessageEvent } from './listener.js';
@@ -64,7 +64,7 @@ async function harness(options: {
   cleanups.push(() => rm(directory, { recursive: true, force: true }));
 
   const config: StoredLarkConfig = {
-    appId: 'cli_test',
+    appId: 'cli_test', listening: true, groupCardMention: false,
     appSecret: 'secret_test',
     name: 'TestBot',
     defaultAgentId: 'codex',
@@ -109,8 +109,7 @@ async function harness(options: {
   };
 
   const service = cardService();
-  const coordinator = new LarkMessageCoordinator(
-    runtime as any,
+  const coordinator = createTestLarkCoordinator(config, runtime as any,
     service as any,
     silentLog(),
     Math.random,

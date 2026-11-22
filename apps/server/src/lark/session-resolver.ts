@@ -1,6 +1,5 @@
 import { redactTraceText } from './secret-redaction.js';
 import { larkAgentUnavailableReason } from './agent-fallback.js';
-import { larkReliability } from './task-recovery.js';
 import { larkMessageAnchor } from './message-anchor.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { realpathSync } from 'node:fs';
@@ -380,7 +379,7 @@ export async function findPersistedLarkSession(
   chatId: string,
   chatType: LarkMessageEvent['chatType'],
   scopeId: string,
-  mappings?: ChannelMappingRepository
+  mappings: ChannelMappingRepository
 ): Promise<Session | undefined> {
   const sessions = await listPersistedLarkSessions(runtime, config, chatId, chatType, scopeId, mappings);
   return sessions[sessions.length - 1];
@@ -398,11 +397,11 @@ export async function listPersistedLarkSessions(
   chatId: string,
   chatType: LarkMessageEvent['chatType'],
   scopeId: string,
-  mappings?: ChannelMappingRepository
+  mappings: ChannelMappingRepository
 ): Promise<Session[]> {
   if (!runtime.listSessions || !config.defaultAgentId) return [];
   const sourceId = larkSourceId(config, chatId, chatType, scopeId);
-  const binding = await mappings?.get(`lark-launch:${config.appId}`, sourceId);
+  const binding = await mappings.get(`lark-launch:${config.appId}`, sourceId);
   const launch = binding?.channel === `lark-launch:${config.appId}` && binding.externalId === sourceId ? binding : undefined;
   const sessions = await runtime.listSessions();
   return sessions.filter(session => larkSessionMatchesScope(session, launch ? config : routingRecoveryConfig(config, session), sourceId, launch?.sessionId));
@@ -428,7 +427,7 @@ export async function resolveLarkSession(
   chatId: string,
   chatType: LarkMessageEvent['chatType'],
   scopeId: string,
-  mappings?: ChannelMappingRepository,
+  mappings: ChannelMappingRepository,
   launchOptions?: LarkLaunchOptions,
   beforeStart?: () => Promise<LarkLaunchOptions>
 ): Promise<Session> {
@@ -446,7 +445,7 @@ export async function resolveLarkSession(
     && (larkPermissionMode(config) === 'full-trust' || await larkApprovalSupported(runtime, session));
   const configKey = larkSessionConfigKey(config);
   const sourceId = larkSourceId(config, chatId, chatType, scopeId);
-  const binding = await mappings?.get(`lark-launch:${config.appId}`, sourceId);
+  const binding = await mappings.get(`lark-launch:${config.appId}`, sourceId);
   const launch = binding?.channel === `lark-launch:${config.appId}` && binding.externalId === sourceId ? binding : undefined;
   const launchConfigKey = launch?.extra ? (JSON.parse(launch.extra) as { baseConfigKey?: string }).baseConfigKey : undefined;
   const matterBoundary = launch?.extra ? Boolean((JSON.parse(launch.extra) as { matterBoundary?: boolean }).matterBoundary) : false;
@@ -455,7 +454,6 @@ export async function resolveLarkSession(
     if (!launchOptions && !launch && !config.defaultAgentWeights?.length && (!config.fallbackAgentId || session.agentId !== config.fallbackAgentId)) return;
     if (launch?.sessionId === session.id && launchConfigKey === configKey) return;
     try {
-      if (!mappings) throw new Error('当前运行时不支持保存首轮会话配置。');
       await mappings.save({ id: `lark-launch:${sourceId}`, channel: `lark-launch:${config.appId}`, externalId: sourceId,
         sessionId: session.id, extra: JSON.stringify({ baseConfigKey: configKey, explicitAgent: Boolean(explicitAgentId && !launchOptions?.automaticFallback) }), createdAt: new Date().toISOString() });
     } catch (error) {
@@ -543,7 +541,7 @@ export async function resolveLarkSession(
   let automaticFallback = false;
   const canFallback = !explicitAgentId && !launchOptions?.useAgentDefaults && config.fallbackAgentId && config.fallbackAgentId !== agentId;
   const start = async (): Promise<Session> => {
-    const reliability = larkReliability(runtime);
+    const reliability = runtime;
     const known = reliability.getAgentAvailability?.(agentId!)
       ? await reliability.checkAgentAvailability?.(agentId!).catch(() => reliability.getAgentAvailability?.(agentId!)) : undefined;
     if (known) throw new LarkServiceError('AGENT_UNAVAILABLE', known.reason, 503);
@@ -632,10 +630,10 @@ export async function findLarkThreadContinuation(
   config: StoredLarkConfig,
   event: LarkMessageEvent,
   scopeId: string,
-  mappings?: ChannelMappingRepository
+  mappings: ChannelMappingRepository
 ): Promise<Session | undefined> {
   const rootId = trimmed(event.rootId);
-  if (event.chatType !== 'group' || config.managedGroup || !mappings || !runtime.listSessions
+  if (event.chatType !== 'group' || config.managedGroup || !runtime.listSessions
     || !rootId || !trimmed(event.threadId) || scopeId !== `thread:${rootId}`) return undefined;
   const channel = `lark-card:${config.appId}`;
   const root = await mappings.get(channel, rootId);

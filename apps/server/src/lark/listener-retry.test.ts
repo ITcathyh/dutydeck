@@ -1,3 +1,4 @@
+import { createTestLarkStorage } from './coordinator-test-fixture.js';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import type { ConfigRepository } from '@dutydeck/shared';
 import { readLarkConfigs, saveLarkConfig } from './config.js';
@@ -212,7 +213,7 @@ it('cleans up coordinator resources when initialization fails before creating th
   const { store } = await setup([]);
   const initialize = vi.spyOn(LarkMessageCoordinator.prototype, 'initializeWorkflows').mockRejectedValue(new Error('initialization failed'));
   const stop = vi.spyOn(LarkMessageCoordinator.prototype, 'stop');
-  const listener = new LarkLongConnectionListener(log(), { runtime: {} as any, fetcher, env: {} });
+  const listener = new LarkLongConnectionListener(log(), { ...createTestLarkStorage(), runtime: {} as any, fetcher, env: {} });
   try {
     await expect(listener.start((await readLarkConfigs(store))[0]!)).rejects.toThrow('initialization failed');
     expect(stop).toHaveBeenCalledOnce();
@@ -226,7 +227,7 @@ it('does not create a socket when stopped during coordinator initialization', as
   let release!: () => void;
   const initialize = vi.spyOn(LarkMessageCoordinator.prototype, 'initializeWorkflows').mockImplementation(() => new Promise(resolve => { release = resolve; }));
   const stop = vi.spyOn(LarkMessageCoordinator.prototype, 'stop');
-  const listener = new LarkLongConnectionListener(log(), { runtime: {} as any, fetcher, env: {} });
+  const listener = new LarkLongConnectionListener(log(), { ...createTestLarkStorage(), runtime: {} as any, fetcher, env: {} });
   const starting = listener.start((await readLarkConfigs(store))[0]!).catch(error => error);
   try {
     await settle();

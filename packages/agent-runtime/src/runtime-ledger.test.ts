@@ -208,7 +208,10 @@ describe('Runtime uses the execution ledger', () => {
       actor: { kind: 'installation_owner', id: 'installation_owner' },
       sourcePayload: { agentPrompt: 'untrusted prompt', actorId: 'other', permissionMode: 'full-trust', riskPolicy: { enabled: true, authorized: true, pattern: '.*' } } };
     const material = { agentPrompt: 'downloaded material', riskPolicy: { enabled: true, authorized: false, pattern: 'write' }, idleCompactHours: 12, promptParts: [{ kind: 'reference' as const, trustScope: 'source', content: 'downloaded material' }] };
+    expect(h.runtime.getAcceptedTaskByKey(envelope.namespace, h.session.id, envelope.key)).toBeUndefined();
     const first = await h.runtime.dispatchRequest(envelope, material);
+    expect(h.runtime.getAcceptedTaskByKey(envelope.namespace, h.session.id, envelope.key)).toEqual(h.runtime.getAcceptedTask(first.id));
+    expect(h.runtime.getAcceptedTaskByKey(envelope.namespace, h.session.id, envelope.key + '-other')).toBeUndefined();
     await vi.waitFor(() => expect(h.repos.execution.getTaskExecution(first.id)?.task.status).toBe('completed'));
     expect(h.sent).toEqual(['session:prepared:downloaded material']);
     expect(h.runtime.lookupAcceptedTask(envelope)?.input).toMatchObject({ prompt: 'material', executionOptions: { permissionMode: 'ask', model: 'request-model' }, executionContext: { agentPrompt: 'prepared:downloaded material', actorId: 'installation_owner' } });

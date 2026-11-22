@@ -238,7 +238,7 @@ describe('persistent Lark task inbox', () => {
         Math.random,
         undefined,
         undefined,
-        undefined,
+        repositories.channelMappings,
         undefined,
         undefined,
         undefined,

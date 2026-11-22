@@ -302,7 +302,7 @@ export async function performLarkCardReconcile(input: {
             ...(config.webBaseUrl ? { webBaseUrl: config.webBaseUrl } : {}) }) : undefined;
         const state = runtimeTask.status === 'reconcile_required' || runtimeTask.status === 'legacy_unresolved'
           ? runtimeTask.status : runtimeTask.status === 'queued' ? 'queued' : 'running';
-        const canCancel = state === 'queued' && Boolean(runtime.cancelQueued && persisted.sender_open_id);
+        const canCancel = state === 'queued' && Boolean(persisted.sender_open_id);
         const canRelaunch = recovery?.relaunch === true;
         const canReplay = Boolean(hold) && recovery?.label === '结果未知' && !cardless;
         // 停下等人选的一轮，入站记录与话题都在（同 canReplay），就能在原对话继续。

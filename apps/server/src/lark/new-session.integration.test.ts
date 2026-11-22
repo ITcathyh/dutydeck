@@ -1,3 +1,5 @@
+import { fixtureRuntime } from './coordinator-test-fixture.js';
+import { readTestAcceptanceByKey } from './runtime-test-fixture.js';
 import { executionTaskId } from '@dutydeck/storage/helpers';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { execFileSync } from 'node:child_process';
@@ -130,7 +132,7 @@ async function harness(options: {
   const service = cardService();
   const mappings = options.mappings ?? repos.channelMappings;
   const createCoordinator = () => new LarkMessageCoordinator(
-    runtime as any, service as any, silentLog(), Math.random, 'ou_bot', undefined,
+    fixtureRuntime(runtime as any), service as any, silentLog(), Math.random, 'ou_bot', undefined,
     mappings, async () => 'group', options.executionPolicy as any, options.groupManager as any, { store: repos.config }
   );
   cleanups.push(async () => { repos.close(); await rm(directory, { recursive: true, force: true }); });
@@ -572,9 +574,9 @@ describe('managed first-turn recovery authorization', () => {
       accepted.set(task.id, { task, request });
       return task;
     });
-    Object.assign(h.runtime, { dispatchRequest: dispatch, getAcceptedTask: (id: string) => accepted.get(id) });
+    Object.assign(h.runtime, { dispatchRequest: dispatch, getAcceptedTaskByKey: readTestAcceptanceByKey, getAcceptedTask: (id: string) => accepted.get(id) });
     const coordinate = () => {
-      const coordinator = new LarkMessageCoordinator(h.runtime as any, h.service as any, silentLog(), Math.random, 'ou_bot', undefined,
+      const coordinator = new LarkMessageCoordinator(fixtureRuntime(h.runtime as any), h.service as any, silentLog(), Math.random, 'ou_bot', undefined,
         h.repos.channelMappings, async () => 'group', undefined, manager, { store: h.repos.config });
       cleanups.push(async () => coordinator.stop());
       return coordinator;
@@ -668,7 +670,7 @@ describe('durable pre-dispatch rejection', () => {
 
   it('does not dispatch after /new during the auto-verification fingerprint read', async () => {
     const state = persistentRuntime();
-    const runtime = Object.assign(state.runtime, { getAcceptedTask: vi.fn(), dispatchRequest: vi.fn(async () => ({ id: 'task_a', status: 'queued' })) });
+    const runtime = Object.assign(state.runtime, { getAcceptedTaskByKey: readTestAcceptanceByKey, getAcceptedTask: vi.fn(), dispatchRequest: vi.fn(async () => ({ id: 'task_a', status: 'queued' })) });
     const h = await harness({ runtime });
     const coordinator = h.createCoordinator();
     let release!: () => void;
@@ -725,7 +727,7 @@ describe('dispatch terminal event isolation', () => {
     const task = { id: 'task_a', sessionId: 'ses_1', prompt: 'A', status: 'running', queuedAhead: 0,
       createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
     const runtime = Object.assign(state.runtime, {
-      getAcceptedTask: vi.fn(), dispatchRequest: vi.fn(async () => task),
+      getAcceptedTaskByKey: readTestAcceptanceByKey, getAcceptedTask: vi.fn(), dispatchRequest: vi.fn(async () => task),
       getTaskRecovery: vi.fn(async () => { await gate; return undefined; })
     });
     runtime.subscribe.mockImplementation((_sessionId: string, callback: (event: AgentEvent) => void) => { receive = callback; return vi.fn(); });

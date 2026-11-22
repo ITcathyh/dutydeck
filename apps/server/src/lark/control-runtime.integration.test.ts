@@ -50,10 +50,13 @@ async function fixture(options: { physical?: boolean } = {}) {
       config: { appId: 'app', listening: true }, event: { chatId: 'oc', chatType: 'group', senderOpenId: 'ou_alice' },
       sessionId: session.id, runtimeTaskId: kind === 'cancel' ? queued.id : first.id,
       requestUpdate: async (state: string) => { updates.push(state); } };
-    const context: any = { tasks: new Map([['om_task', task]]), workflowOptions: {}, runtime,
-      isOperatorAllowed: async () => true, isInterruptOperatorAllowed: async () => true,
-      foreignActionConfirmations: new Map(), log: { info() {}, warn() {} }, pushTaskError() {} };
-    const result = await LarkMessageCoordinator.prototype.handleAction.call(context, { action: kind, task_id: 'om_task', turn: '1' }, 'ou_alice');
+    const log = { info() {}, warn() {}, error() {} };
+    const coordinator = new LarkMessageCoordinator(runtime, {} as any, log, Math.random, undefined, undefined, repos.channelMappings,
+      undefined, undefined, undefined, { store: repos.config });
+    await repos.config.set('lark.bots', JSON.stringify([{ ...task.config, appSecret: 'fixture', allowedUsers: [{ openId: 'ou_alice' }] }]));
+    (coordinator as any).tasks.set(task.id, task);
+    const result = await coordinator.handleAction({ action: kind, task_id: task.id, turn: '1' }, 'ou_alice');
+    coordinator.stop();
     return { task, updates, result };
   };
   return { runtime, repos, path, agent, session, first, queued, action, close: async () => { await runtime.shutdown(); repos.close(); closed = true; }, feed: (data: string) => feed(data), submissions: () => submissions, interrupts: () => interrupts, stopped: () => stopped };
@@ -111,8 +114,9 @@ describe('Feishu controls with real Runtime, SQLite and PTY driver', () => {
         started_at: Date.now() - 60_000, turn: 1, recovery_read_only: true }) });
     const service = { update: vi.fn(async (_input: any) => ({ messageId: 'om_card' })), send: vi.fn(async () => ({ messageId: 'om_result' })),
       reply: vi.fn(async () => ({ messageId: 'om_result' })) };
+    await repos.config.set('lark.bots', JSON.stringify([config]));
     const coordinator = new LarkMessageCoordinator(runtime, service as any, { info() {}, warn() {}, error() {} }, Math.random,
-      'ou_bot', undefined, repos.channelMappings);
+      'ou_bot', undefined, repos.channelMappings, undefined, undefined, undefined, { store: repos.config });
     cleanups.push(async () => { coordinator.stop(); });
     await coordinator.reconcile(config);
     const card = service.update.mock.calls.at(-1)![0] as any;

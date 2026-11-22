@@ -63,7 +63,7 @@ async function harness(eventHandlers: LarkEventHandler[]) {
     return fetch(input, init);
   };
   const log = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
-  const connection = new LarkLongConnectionListener(log, { fetcher, welcomeStore: repos.config,
+  const connection = new LarkLongConnectionListener(log, { fetcher, welcomeStore: repos.config, workflowStore: repos.config, cardMappings: repos.channelMappings,
     runtime: { listSessions: async () => [], subscribe: () => () => {} } as any });
   await connection.start(config); cleanups.push(() => connection.stop());
   return { connection, config, handleAction, receive, remoteWrites, log, invoke: (event = click()) => sdk.dispatcher!.invoke(event, { needCheck: false }),

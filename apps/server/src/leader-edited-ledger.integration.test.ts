@@ -8,6 +8,7 @@ import { canonicalExecutionJson, type AcceptedTaskInputV2, type TaskRequestV1 } 
 import { leaderLedger } from './leader-mode.js';
 import { LarkMessageCoordinator } from './lark/coordinator.js';
 import { larkTurnRequest } from './lark/coordinator-dispatch.js';
+import { readTestAcceptanceByKey } from './lark/runtime-test-fixture.js';
 import { LarkTaskInbox } from './lark/task-inbox.js';
 import { buildEditedMessageEvent } from './lark/edited-message.js';
 import type { LarkMessageEvent } from './lark/listener.js';
@@ -51,12 +52,12 @@ async function harness() {
     return { ...task, queuedAhead: 0 };
   });
   const runtime = { start: vi.fn(async () => session), getSession: vi.fn(async () => session), subscribe: vi.fn(() => () => {}),
-    getAcceptedTask: (id: string) => repos.execution.getAcceptedTask(id), dispatchRequest: dispatch };
+    getAcceptedTaskByKey: readTestAcceptanceByKey, getAcceptedTask: (id: string) => repos.execution.getAcceptedTask(id), dispatchRequest: dispatch };
   const service = { send: vi.fn(async () => ({ messageId: 'om_card' })), reply: vi.fn(async () => ({ messageId: 'om_card' })),
     update: vi.fn(async () => ({ messageId: 'om_card' })), addReaction: vi.fn(async () => ({ reactionId: 'reaction' })), deleteReaction: vi.fn(async () => {}),
     listChatMessages: vi.fn(async () => ({ items: [], hasMore: false })), getMessageItems: vi.fn(async () => []) };
   const log = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
-  const coordinator = new LarkMessageCoordinator(runtime as any, service as any, log, Math.random, 'ou_bot', undefined, undefined,
+  const coordinator = new LarkMessageCoordinator(runtime as any, service as any, log, Math.random, 'ou_bot', undefined, repos.channelMappings,
     async () => 'group', undefined, undefined, { store: repos.config });
   cleanups.push(() => coordinator.stop());
   return { get repos() { return repos; }, session, dispatch, coordinator,

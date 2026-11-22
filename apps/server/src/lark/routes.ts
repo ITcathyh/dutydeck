@@ -93,16 +93,16 @@ export async function registerLarkRoutes(app: FastifyInstance, options: LarkRout
   let serviceKey: string | undefined;
   const listeningDisabled = options.listeningDisabled === true;
   const listener: LarkListenerPool = options.listener ?? new LarkLongConnectionListenerPool(app.log, {
-    runtime: options.runtime,
+    ...(options.runtime && options.config && options.cardMappings
+      ? { runtime: options.runtime, workflowStore: options.config, cardMappings: options.cardMappings }
+      : { workflowStore: options.config }),
     participation: options.participation,
     polishReply: options.polishReply,
     usage: options.usage,
     automation: options.automation,
     workbench: options.workbench,
-    workflowStore: options.config,
     resourceRoot: options.resourceRoot,
     relayBroker: options.relayBroker,
-    cardMappings: options.cardMappings,
     env,
     fetcher,
     executionPolicy: options.executionPolicy,

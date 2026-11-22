@@ -1,10 +1,10 @@
+import { createTestLarkCoordinator } from './coordinator-test-fixture.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createRepositories } from '@dutydeck/storage';
 import { BACKGROUND_FOLLOWUP, type AgentEvent, type Session } from '@dutydeck/shared';
-import { LarkMessageCoordinator } from './coordinator.js';
 import { larkBotsConfigKey, type StoredLarkConfig } from './config.js';
 import type { LarkMessageEvent } from './listener.js';
 
@@ -28,7 +28,7 @@ const message = (id: string): LarkMessageEvent => ({
 async function harness(mode: 'dispatch' | 'send') {
   const directory = await mkdtemp(join(tmpdir(), 'dutydeck-background-followup-'));
   cleanups.push(() => rm(directory, { recursive: true, force: true }));
-  const config: StoredLarkConfig = { appId: 'cli_test', appSecret: 'secret_test', name: 'TestBot', defaultAgentId: 'claude', workspace: directory, fullTrustConfirmed: true, riskControlMode: 'off' };
+  const config: StoredLarkConfig = { appId: 'cli_test', listening: true, appSecret: 'secret_test', name: 'TestBot', defaultAgentId: 'claude', workspace: directory, fullTrustConfirmed: true, riskControlMode: 'off' };
   const repos = createRepositories(join(directory, 'state.db'));
   cleanups.push(() => repos.close());
   await repos.config.set(larkBotsConfigKey, JSON.stringify([config]));
@@ -78,7 +78,7 @@ async function harness(mode: 'dispatch' | 'send') {
     getMessage: vi.fn(async (id: string) => ({ messageId: id, chatId: 'oc_test_group', messageType: 'text', rawContent: JSON.stringify({ text: 'quoted' }), sender: { type: 'user' }, mentions: [] })),
     getMessageItems: vi.fn(async () => [])
   };
-  const coordinator = new LarkMessageCoordinator(runtime as any, service as any, { info: vi.fn(), warn: vi.fn(), error: vi.fn() }, Math.random, 'ou_bot');
+  const coordinator = createTestLarkCoordinator(config, runtime as any, service as any, { info: vi.fn(), warn: vi.fn(), error: vi.fn() }, Math.random, 'ou_bot');
   cleanups.push(() => coordinator.stop());
   const calls = () => [...create.mock.calls, ...service.update.mock.calls].map(([input]) => input as { state?: string });
   return { config, coordinator, calls, cards: () => JSON.stringify(calls()) };

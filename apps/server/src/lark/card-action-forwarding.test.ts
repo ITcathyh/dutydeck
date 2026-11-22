@@ -1,3 +1,4 @@
+import { createTestLarkStorage } from './coordinator-test-fixture.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { mkdtemp, rm } from 'node:fs/promises';
@@ -58,7 +59,7 @@ async function listener(url: string) {
     if (target.includes('/bot/v3/info')) return new Response(JSON.stringify({ code: 0, bot: { open_id: 'ou_bot' } }));
     return fetch(input, init);
   };
-  const connection = new LarkLongConnectionListener({ info: vi.fn(), warn: vi.fn(), error: vi.fn() }, { fetcher, runtime: runtime as any });
+  const connection = new LarkLongConnectionListener({ info: vi.fn(), warn: vi.fn(), error: vi.fn() }, { ...createTestLarkStorage(config), fetcher, runtime: runtime as any });
   await connection.start(config);
   cleanups.push(() => connection.stop());
   return { connection, config, handleAction, runtime, invoke: (event = click()) => sdk.dispatcher!.invoke(event, { needCheck: false }) };
