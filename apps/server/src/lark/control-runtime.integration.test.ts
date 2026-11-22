@@ -1,3 +1,5 @@
+import { TestLarkCoordinator } from './coordinator-test-fixture.js';
+import { LarkCoordinatorDispatch } from './coordinator-dispatch.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -7,7 +9,6 @@ import { DutydeckRuntime } from '@dutydeck/runtime';
 import { PtyCliDriver } from '@dutydeck/pty-driver';
 import { PtyBackend } from '@dutydeck/session-backends';
 import type { AgentConfig } from '@dutydeck/shared';
-import { LarkMessageCoordinator } from './coordinator.js';
 import type { StoredLarkConfig } from './config.js';
 import { buildLarkCard } from './service.js';
 
@@ -51,10 +52,10 @@ async function fixture(options: { physical?: boolean } = {}) {
       sessionId: session.id, runtimeTaskId: kind === 'cancel' ? queued.id : first.id,
       requestUpdate: async (state: string) => { updates.push(state); } };
     const log = { info() {}, warn() {}, error() {} };
-    const coordinator = new LarkMessageCoordinator(runtime, {} as any, log, Math.random, undefined, undefined, repos.channelMappings,
+    const coordinator = new TestLarkCoordinator(runtime, {} as any, log, Math.random, undefined, undefined, repos.channelMappings,
       undefined, undefined, undefined, { store: repos.config });
     await repos.config.set('lark.bots', JSON.stringify([{ ...task.config, appSecret: 'fixture', allowedUsers: [{ openId: 'ou_alice' }] }]));
-    (coordinator as any).tasks.set(task.id, task);
+    coordinator.parts.state.tasks.set(task.id, task);
     const result = await coordinator.handleAction({ action: kind, task_id: task.id, turn: '1' }, 'ou_alice');
     coordinator.stop();
     return { task, updates, result };
@@ -68,7 +69,7 @@ describe('Feishu controls with real Runtime, SQLite and PTY driver', () => {
     await h.action('cancel');
     await until(async () => (await h.runtime.getTasks(h.session.id)).at(-1)?.status === 'cancelled');
     const tasks = await h.runtime.getTasks(h.session.id);
-    expect((LarkMessageCoordinator.prototype as any).pickRetryableRuntimeTask(tasks)?.id).toBe(h.queued.id);
+    expect(LarkCoordinatorDispatch.prototype.pickRetryableRuntimeTask(tasks)?.id).toBe(h.queued.id);
     expect(h.interrupts()).toBe(0);
     expect(h.submissions()).toBe(1);
   });
@@ -115,7 +116,7 @@ describe('Feishu controls with real Runtime, SQLite and PTY driver', () => {
     const service = { update: vi.fn(async (_input: any) => ({ messageId: 'om_card' })), send: vi.fn(async () => ({ messageId: 'om_result' })),
       reply: vi.fn(async () => ({ messageId: 'om_result' })) };
     await repos.config.set('lark.bots', JSON.stringify([config]));
-    const coordinator = new LarkMessageCoordinator(runtime, service as any, { info() {}, warn() {}, error() {} }, Math.random,
+    const coordinator = new TestLarkCoordinator(runtime, service as any, { info() {}, warn() {}, error() {} }, Math.random,
       'ou_bot', undefined, repos.channelMappings, undefined, undefined, undefined, { store: repos.config });
     cleanups.push(async () => { coordinator.stop(); });
     await coordinator.reconcile(config);
@@ -131,7 +132,7 @@ describe('Feishu controls with real Runtime, SQLite and PTY driver', () => {
     const blocked = buildLarkCard(card) as any;
     expect(blocked.header.text_tag_list[0].text.content).toBe('已中断');
     expect(JSON.stringify(blocked)).not.toContain('排队等待');
-    const status = await (coordinator as any).describeChatStatus(config, h.session.id);
+    const status = await coordinator.parts.intake.describeChatStatus(config, h.session.id);
     expect(status).toContain('需要核对');
     expect(status).toContain('排队受阻');
     const click = { action: 'cancel', task_id: 'om_queued', turn: '1' };

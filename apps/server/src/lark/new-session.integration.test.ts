@@ -1,4 +1,4 @@
-import { fixtureRuntime } from './coordinator-test-fixture.js';
+import { TestLarkCoordinator, fixtureRuntime } from './coordinator-test-fixture.js';
 import { readTestAcceptanceByKey } from './runtime-test-fixture.js';
 import { executionTaskId } from '@dutydeck/storage/helpers';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -10,7 +10,7 @@ import { createRepositories } from '@dutydeck/storage';
 import { RuntimeError } from '@dutydeck/shared';
 import type { AgentConfig, AgentEvent, ChannelMappingRepository, PolicyAction, Session, TaskRecord } from '@dutydeck/shared';
 import { larkBotsConfigKey, type StoredLarkConfig } from './config.js';
-import { LarkMessageCoordinator, type PersistedLarkCardTask } from './coordinator.js';
+import { type PersistedLarkCardTask } from './coordinator.js';
 import { LarkTaskInbox } from './task-inbox.js';
 import { LarkGroupManager } from './group-management.js';
 import { explicitFinalContext, sendExplicitFinal } from './explicit-final.js';
@@ -131,7 +131,7 @@ async function harness(options: {
   const runtime = options.runtime ?? ownedRuntime!.runtime;
   const service = cardService();
   const mappings = options.mappings ?? repos.channelMappings;
-  const createCoordinator = () => new LarkMessageCoordinator(
+  const createCoordinator = () => new TestLarkCoordinator(
     fixtureRuntime(runtime as any), service as any, silentLog(), Math.random, 'ou_bot', undefined,
     mappings, async () => 'group', options.executionPolicy as any, options.groupManager as any, { store: repos.config }
   );
@@ -247,7 +247,7 @@ describe('Lark /new first-turn launch options', () => {
     h.runtime.getTasks.mockImplementation(async (id: string) => id === 'ses_1' ? tasks.map(task => ({ ...task })) : []);
     Object.assign(h.runtime, { getRecentEvents: vi.fn(async () => events) });
 
-    const native = await (coordinator as any).newSessionHandoff(h.config, dm('native', ''), 'ses_1', tasks, '', true);
+    const native = await coordinator.parts.intake.newSessionHandoff(h.config, dm('native', ''), 'ses_1', tasks, '', true);
     expect(native).toContain(`分支 main · HEAD ${head}\n   M app.ts`);
     expect(native).not.toContain('第 2 轮结论');
     expect((h.runtime as any).getRecentEvents).not.toHaveBeenCalled();
@@ -544,8 +544,8 @@ describe('managed first-turn recovery authorization', () => {
     { name: 'model', action: 'run.change_model', flags: () => '--model gpt-5.5', options: () => ({ model: 'gpt-5.5' }) },
     { name: 'effort', action: 'run.change_model', flags: () => '--effort high', options: () => ({ reasoningEffort: 'high' }) }
   ] as const;
-  const settled = async (coordinator: LarkMessageCoordinator) => {
-    await Promise.all([...(coordinator as any).groups.values()].map((group: any) => group.tail));
+  const settled = async (coordinator: TestLarkCoordinator) => {
+    await Promise.all([...coordinator.parts.state.groups.values()].map((group: any) => group.tail));
   };
   const managedHarness = async () => {
     const h = await harness();
@@ -576,7 +576,7 @@ describe('managed first-turn recovery authorization', () => {
     });
     Object.assign(h.runtime, { dispatchRequest: dispatch, getAcceptedTaskByKey: readTestAcceptanceByKey, getAcceptedTask: (id: string) => accepted.get(id) });
     const coordinate = () => {
-      const coordinator = new LarkMessageCoordinator(fixtureRuntime(h.runtime as any), h.service as any, silentLog(), Math.random, 'ou_bot', undefined,
+      const coordinator = new TestLarkCoordinator(fixtureRuntime(h.runtime as any), h.service as any, silentLog(), Math.random, 'ou_bot', undefined,
         h.repos.channelMappings, async () => 'group', undefined, manager, { store: h.repos.config });
       cleanups.push(async () => coordinator.stop());
       return coordinator;
@@ -675,7 +675,7 @@ describe('durable pre-dispatch rejection', () => {
     const coordinator = h.createCoordinator();
     let release!: () => void;
     const gate = new Promise<undefined>(resolve => { release = () => resolve(undefined); });
-    const fingerprint = vi.spyOn(coordinator as any, 'sharedWorkspaceFingerprint').mockImplementation(() => gate);
+    const fingerprint = vi.spyOn(coordinator.parts.cards, 'sharedWorkspaceFingerprint').mockImplementation(() => gate);
     try {
       await coordinator.handle(dm('om_fingerprint', 'must not dispatch'), h.config);
       await vi.waitFor(() => expect(fingerprint).toHaveBeenCalledOnce());
@@ -774,7 +774,7 @@ describe('handoff evidence boundaries', () => {
     const getRecentEvents = vi.fn(async () => []);
     Object.assign(h.runtime, { getRecentEvents });
     const coordinator = h.createCoordinator();
-    await expect((coordinator as any).newSessionHandoff(h.config, dm('command', ''), 'foreign', [], ''))
+    await expect(coordinator.parts.intake.newSessionHandoff(h.config, dm('command', ''), 'foreign', [], ''))
       .rejects.toThrow('无法核实交接来源');
     expect(getRecentEvents).not.toHaveBeenCalled();
   });
@@ -785,8 +785,8 @@ describe('handoff evidence boundaries', () => {
     await coordinator.handle(dm('old', 'old task'), h.config);
     await vi.waitFor(() => expect(h.runtime.send).toHaveBeenCalledOnce());
     const tasks = [{ id: 'private_task', sessionId: 'ses_1', prompt: 'private task text', status: 'failed', createdAt: '2026-01-01', updatedAt: '2026-01-01' }];
-    const allowed = vi.spyOn(coordinator as any, 'isTaskOperatorAllowed').mockResolvedValue(false);
-    const text = await (coordinator as any).newSessionHandoff(h.config, dm('command', ''), 'ses_1', tasks, '');
+    const allowed = vi.spyOn(coordinator.parts.core, 'isTaskOperatorAllowed').mockResolvedValue(false);
+    const text = await coordinator.parts.intake.newSessionHandoff(h.config, dm('command', ''), 'ses_1', tasks, '');
     expect(allowed).toHaveBeenCalledWith(h.config, expect.anything(), tasks[0], 'task.view_result');
     expect(text).not.toContain('private_task');
     expect(text).not.toContain('private task text');
@@ -798,7 +798,7 @@ describe('handoff evidence boundaries', () => {
     await first.handle(dm('old', 'old task'), h.config);
     await vi.waitFor(() => expect(h.runtime.send).toHaveBeenCalledOnce());
     const task = { id: 'retry_task', sessionId: 'ses_1', prompt: 'continue', status: 'failed', currentAttemptId: 'attempt_frozen', createdAt: '2026-01-01', updatedAt: '2026-01-01' };
-    const frozen = await (first as any).newSessionHandoff(h.config, dm('command', ''), 'ses_1', [task], 'frozen note');
+    const frozen = await first.parts.intake.newSessionHandoff(h.config, dm('command', ''), 'ses_1', [task], 'frozen note');
     const material = `${frozen}\n\ncontinue`;
     const saved: PersistedLarkCardTask = { app_id: h.config.appId, chat_id: 'ou_alice', chat_type: 'p2p', runtime_task_id: task.id,
       task_name: 'continue', prompt: 'continue', retry_material_prompt: material, state: 'failed', started_at: 1, turn: 1, card_message_id: 'old_card' };
@@ -807,7 +807,7 @@ describe('handoff evidence boundaries', () => {
     const getRecentEvents = vi.fn(async () => [{ id: 'changed', sessionId: 'ses_1', sequence: 999, timestamp: '2026-10-28', type: 'text', data: { role: 'assistant', text: 'changed result' } }]);
     Object.assign(h.runtime, { getRecentEvents });
     const rebuilt = h.createCoordinator();
-    const regenerate = vi.spyOn(rebuilt as any, 'newSessionHandoff');
+    const regenerate = vi.spyOn(rebuilt.parts.intake, 'newSessionHandoff');
     await rebuilt.handle(dm('retry', '/retry'), h.config);
     await vi.waitFor(() => expect(h.runtime.send).toHaveBeenCalledTimes(2));
     expect(sentPrompt(h.runtime, 1)).toBe('continue');
@@ -831,14 +831,14 @@ it('does not attribute an earlier attempt to the current one, including when the
   append('attempt_old', 'text', { role: 'assistant', text: 'old successful claim' });
   append('attempt_old', 'task', { task: { ...task, status: 'failed', currentAttemptId: 'attempt_old' } });
   Object.assign(h.runtime, { getRecentEvents: vi.fn(async () => events) });
-  const missing = await (coordinator as any).newSessionHandoff(h.config, dm('handoff', ''), 'ses_1', [task], '');
+  const missing = await coordinator.parts.intake.newSessionHandoff(h.config, dm('handoff', ''), 'ses_1', [task], '');
   expect(missing).not.toContain('old successful claim');
   expect(missing).toContain('来源 task=retried_task attempt=attempt_new');
   expect(missing).toContain('事件窗口不完整或读取失败');
   append('attempt_new', 'text', { role: 'user', taskId: task.id, text: 'current input' });
   append('attempt_new', 'text', { role: 'assistant', text: 'current result' });
   append('attempt_new', 'task', { task });
-  const current = await (coordinator as any).newSessionHandoff(h.config, dm('handoff', ''), 'ses_1', [task], '');
+  const current = await coordinator.parts.intake.newSessionHandoff(h.config, dm('handoff', ''), 'ses_1', [task], '');
   expect(current).toContain('current result');
   expect(current).not.toContain('old successful claim');
 });

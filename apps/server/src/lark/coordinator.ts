@@ -8,12 +8,11 @@ import type { LarkCardElement } from './card-renderer.js';
 import type { LarkRedispatchInfo } from './turn-redispatch.js';
 import type { LarkMessageEvent } from './listener.js';
 import type { LarkScenarioRecall } from './scenario-recall.js';
-import { LarkCoordinatorInbound } from './coordinator-inbound.js';
+import { createCoordinatorParts } from './coordinator-parts.js';
 
 // 飞书消息协调器（从 listener.ts 拆分）：按群/话题串行化任务轮次、驱动 Agent 会话、
 // 渲染并更新服务卡片。卡片终态对账见 reconciler.ts，会话路由见 session-resolver.ts。
-// 实现按层拆开、逐层继承：coordinator-core → -cards（卡片生命周期）→ -recovery（恢复与对账）
-// → -dispatch（派发）→ -inbound（入站唤醒）；本文件只放公开类型和入口类。
+// 部件由 coordinator-parts.ts 组装，按机器人实例共享 CoordinatorState。
 
 export type LarkGroup = {
   sessionId?: string;
@@ -133,4 +132,86 @@ export type LarkTask = {
 export type { PersistedLarkCardTask } from './turn-record.js';
 export { larkTaskTitle } from './coordinator-core.js';
 
-export class LarkMessageCoordinator extends LarkCoordinatorInbound {}
+export class LarkMessageCoordinator {
+  protected readonly components: ReturnType<typeof createCoordinatorParts>;
+
+  constructor(...args: Parameters<typeof createCoordinatorParts>) {
+    this.components = createCoordinatorParts(...args);
+  }
+
+  repairClosedCards(...args: Parameters<typeof this.components.core.repairClosedCards>) {
+    return this.components.core.repairClosedCards(...args);
+  }
+
+  endDurableConfirmations(...args: Parameters<typeof this.components.core.endDurableConfirmations>) {
+    return this.components.core.endDurableConfirmations(...args);
+  }
+
+  stop(...args: Parameters<typeof this.components.core.stop>) {
+    return this.components.core.stop(...args);
+  }
+
+  reconcile(...args: Parameters<typeof this.components.reconcile.reconcile>) {
+    return this.components.reconcile.reconcile(...args);
+  }
+
+  startReconciliation(...args: Parameters<typeof this.components.reconcile.startReconciliation>) {
+    return this.components.reconcile.startReconciliation(...args);
+  }
+
+  initializeWorkflows(...args: Parameters<typeof this.components.intake.initializeWorkflows>) {
+    return this.components.intake.initializeWorkflows(...args);
+  }
+
+  pollLarkTaskDispatches(...args: Parameters<typeof this.components.intake.pollLarkTaskDispatches>) {
+    return this.components.intake.pollLarkTaskDispatches(...args);
+  }
+
+  handleTaskAssigneesUpdate(...args: Parameters<typeof this.components.intake.handleTaskAssigneesUpdate>) {
+    return this.components.intake.handleTaskAssigneesUpdate(...args);
+  }
+
+  canConfirmParticipation(...args: Parameters<typeof this.components.intake.canConfirmParticipation>) {
+    return this.components.intake.canConfirmParticipation(...args);
+  }
+
+  trustsBotSender(...args: Parameters<typeof this.components.intake.trustsBotSender>) {
+    return this.components.intake.trustsBotSender(...args);
+  }
+
+  adopt(...args: Parameters<typeof this.components.intake.adopt>) {
+    return this.components.intake.adopt(...args);
+  }
+
+  receive(...args: Parameters<typeof this.components.intake.receive>) {
+    return this.components.intake.receive(...args);
+  }
+
+  handleEdited(...args: Parameters<typeof this.components.intake.handleEdited>) {
+    return this.components.intake.handleEdited(...args);
+  }
+
+  handleReaction(...args: Parameters<typeof this.components.intake.handleReaction>) {
+    return this.components.intake.handleReaction(...args);
+  }
+
+  handle(...args: Parameters<typeof this.components.intake.handle>) {
+    return this.components.intake.handle(...args);
+  }
+
+  agentCommand(...args: Parameters<typeof this.components.intake.agentCommand>) {
+    return this.components.intake.agentCommand(...args);
+  }
+
+  agentView(...args: Parameters<typeof this.components.intake.agentView>) {
+    return this.components.intake.agentView(...args);
+  }
+
+  agentSettings(...args: Parameters<typeof this.components.intake.agentSettings>) {
+    return this.components.intake.agentSettings(...args);
+  }
+
+  handleAction(...args: Parameters<typeof this.components.intake.handleAction>) {
+    return this.components.intake.handleAction(...args);
+  }
+}

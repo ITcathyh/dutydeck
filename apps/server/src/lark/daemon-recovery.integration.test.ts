@@ -1,3 +1,4 @@
+import { TestLarkCoordinator } from './coordinator-test-fixture.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -15,7 +16,6 @@ import {
   type NormalizedDriverEvent,
 } from '@dutydeck/shared';
 import { larkBotsConfigKey, type StoredLarkConfig } from './config.js';
-import { LarkMessageCoordinator } from './coordinator.js';
 import type { LarkMessageEvent } from './listener.js';
 
 const directories: string[] = [];
@@ -142,7 +142,7 @@ function cardService() {
 }
 
 function coordinator(handle: ReturnType<typeof open>, service: ReturnType<typeof cardService>) {
-  return new LarkMessageCoordinator(
+  return new TestLarkCoordinator(
     handle.runtime, service as any, { info: vi.fn(), warn: vi.fn(), error: vi.fn() }, Math.random, 'ou_bot',
     undefined, handle.repos.channelMappings, undefined, undefined, undefined, { store: handle.repos.config },
   );
@@ -231,7 +231,7 @@ describe('daemon restart recovery through Runtime and Lark workflow coordinator'
     await original.handle(message, config);
     await vi.waitFor(() => expect(operation).toHaveBeenCalledOnce());
     // handle queues runTurn, so await that turn before inspecting its receipt.
-    await (original as any).groups.values().next().value.tail;
+    await original.parts.state.groups.values().next().value!.tail;
     const inbox = JSON.parse((await first.repos.config.get(`lark.inbox.${config.appId}.${message.messageId}`))!);
     expect(inbox.state).toBe('received');
     expect([...service.send.mock.calls, ...service.update.mock.calls].some(([input]) => ['failed', 'interrupted', 'completed'].includes(input?.state))).toBe(false);

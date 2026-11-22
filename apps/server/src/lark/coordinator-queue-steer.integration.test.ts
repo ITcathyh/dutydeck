@@ -1,3 +1,4 @@
+import { TestLarkCoordinator } from './coordinator-test-fixture.js';
 // 排队、插话与中断的协调器级回归：排队卡上的插队按钮与审批提示、同一人连发的合并、
 // /new /cancel /stop /steer /queue 与卡片按钮统一的中断口径、升级排空期间的排队说明。
 //
@@ -103,7 +104,7 @@ async function harness(options: { configPatch?: Partial<StoredLarkConfig>; steer
     readDocument: vi.fn(async (url: string) => ({ url, title: '', text: '' }))
   };
   const log = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
-  const createCoordinator = () => new LarkMessageCoordinator(runtime, service as any, log, Math.random, 'ou_bot', undefined, repos.channelMappings, async () => 'group', undefined, undefined,
+  const createCoordinator = () => new TestLarkCoordinator(runtime, service as any, log, Math.random, 'ou_bot', undefined, repos.channelMappings, async () => 'group', undefined, undefined,
     { store: repos.config, ...(options.automation ? { automation: options.automation as any } : {}) });
   const coordinator = createCoordinator();
   await coordinator.initializeWorkflows(config);
@@ -153,7 +154,7 @@ async function harness(options: { configPatch?: Partial<StoredLarkConfig>; steer
   const sessionId = async () => (await runtime.listSessions())[0]!.id;
   const runtimeTask = async (text: string) => (await runtime.getTasks(await sessionId())).find(task => task.prompt.includes(text));
   const interactions = async () => (await repos.config.list!(`lark.interaction.${config.appId}.`)).map(row => JSON.parse(row.value) as LarkInteraction);
-  const task = (id: string) => (coordinator as any).tasks.get(id);
+  const task = (id: string) => coordinator.parts.state.tasks.get(id)!;
   const inboxRecord = async (id: string) => {
     const raw = await repos.config.get(`lark.inbox.${config.appId}.${id}`);
     return raw ? JSON.parse(raw) as LarkInboxRecord : undefined;
@@ -381,7 +382,7 @@ describe('排队卡：当前这一轮被审批挡住', () => {
     expect(stale.type).not.toBe('success');
     expect((await h.runtimeTask('可以'))?.status).toBe('queued');
     // 把 Bob 当成能批准的管理员（直接放行审批授权）：批准照常生效，但 Alice 的确认消息不由他替她取消。
-    vi.spyOn(h.coordinator as any, 'authorizeInteraction').mockResolvedValue(true);
+    vi.spyOn(h.coordinator.parts.core, 'authorizeInteraction').mockResolvedValue(true);
     expect((await h.coordinator.handleAction(approvalValue(queued, 'approve'), 'ou_bob', context)).type).toBe('success');
     await vi.waitFor(() => expect(h.resolvePermission).toHaveBeenCalledWith('native_permission', true));
     await vi.waitFor(() => expect(h.markdownOf(h.latestCard('om_2'))).not.toContain('文字回复不算批准'));
@@ -412,7 +413,7 @@ describe('排队卡：当前这一轮被审批挡住', () => {
     await h.dispatch('om_2', '顺便看下日志');
     await mockPendingFor(h, '第一件事');
     const target = (await h.runtimeTask('顺便看下日志'))!;
-    const steering = await (h.coordinator as any).steerQueuedTurn(h.config, event('om_steer', '/steer 顺便看下日志'), await h.sessionId(), target, 'inject');
+    const steering = await h.coordinator.parts.runner.steerQueuedTurn(h.config, event('om_steer', '/steer 顺便看下日志'), await h.sessionId(), target, 'inject');
     expect(steering).toEqual({ steered: 'injected', note: pendingInjectedNote });
   });
 
@@ -519,7 +520,7 @@ describe('排队卡：当前这一轮被审批挡住', () => {
         await h.coordinator.handle(event('om_queue_steer', '/queue steer 2'), h.config);
         return { taskId: target.id, note: h.markdownOf(h.receiptNamed('已插话')) };
       }
-      const steering = await (h.coordinator as any).steerQueuedTurn(h.config, event('om_steer', '/steer task-C'), await h.sessionId(), target, 'inject');
+      const steering = await h.coordinator.parts.runner.steerQueuedTurn(h.config, event('om_steer', '/steer task-C'), await h.sessionId(), target, 'inject');
       return { taskId: target.id, note: String(steering.note) };
     } finally {
       postInjectionTasks.mockRestore();
@@ -527,7 +528,7 @@ describe('排队卡：当前这一轮被审批挡住', () => {
   };
 
   const flipFromAToB = async (h: Awaited<ReturnType<typeof harness>>, releaseA: () => void, waitForApproval: boolean) => {
-    vi.spyOn(h.coordinator as any, 'currentTurnInterruptDenial').mockImplementation(async () => {
+    vi.spyOn(h.coordinator.parts.runner, 'currentTurnInterruptDenial').mockImplementation(async () => {
       releaseA();
       await vi.waitFor(async () => expect((await h.runtimeTask('task-B'))?.status).toBe('running'));
       await vi.waitFor(() => expect(h.prompts.some(prompt => prompt.includes('task-B'))).toBe(true));
@@ -778,7 +779,7 @@ describe('合并恢复时读不到前一条的状态', () => {
     expect(await h.inboxRecord('om_3')).toMatchObject({ state: 'received', mergeFrom: { messageId: 'om_2', ownPrompt: '日志在 /tmp/x.log' } });
 
     failRead = false;
-    await (recovered as any).recoverInbound(await h.inboxRecord('om_3'), h.config);
+    await recovered.parts.intake.recoverInbound((await h.inboxRecord('om_3'))!, h.config);
     h.release();
     await vi.waitFor(() => expect(h.prompts.some(prompt => prompt.includes('日志在 /tmp/x.log'))).toBe(true), { timeout: 6_000 });
     expect(h.prompts.filter(prompt => prompt.includes('是 staging 环境'))).toEqual([expect.stringContaining('是 staging 环境\n\n日志在 /tmp/x.log')]);
@@ -808,7 +809,7 @@ describe('合并恢复时读不到前一条的状态', () => {
     expect(h.prompts.filter(prompt => prompt.includes('perform first write'))).toHaveLength(1);
     expect(await h.inboxRecord('om_3')).toMatchObject({ state: 'received', mergeFrom: { messageId: 'om_2', ownPrompt: 'perform second write' } });
 
-    await (recovered as any).recoverInbound(await h.inboxRecord('om_3'), h.config);
+    await recovered.parts.intake.recoverInbound((await h.inboxRecord('om_3'))!, h.config);
     await vi.waitFor(() => expect(h.prompts.some(prompt => prompt.includes('perform second write'))).toBe(true), { timeout: 6_000 });
     expect(h.prompts.filter(prompt => prompt.includes('perform first write'))).toHaveLength(1);
     expect(h.prompts.find(prompt => prompt.includes('perform second write'))).not.toContain('perform first write');

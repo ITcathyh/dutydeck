@@ -216,7 +216,7 @@ it('bounds actual coordinator terminal PATCH retries while persisting the indepe
       allowedUsers: [], allowedEmails: [], highRiskAllowedUsers: [], highRiskAllowedEmails: [], highRiskPattern: '', riskControlMode: 'off'
     } as StoredLarkConfig;
   const coordinator = createTestLarkCoordinator(botConfig, runtime as any, client, { info: vi.fn(), warn: vi.fn(), error: vi.fn() }, Math.random, 'ou_bot', undefined, mappings as any);
-  const reconcile = vi.spyOn(coordinator as any, 'scheduleReconcile').mockImplementation(() => {});
+  const reconcile = vi.spyOn(coordinator.parts.reconcile, 'scheduleReconcile').mockImplementation(() => {});
   try {
     await coordinator.handle({ messageId: 'om_input', chatId: 'oc_test', chatType: 'p2p', messageType: 'text', content: '{"text":"run"}', mentions: [] }, botConfig);
     await vi.waitFor(() => expect(saved.some(entry => entry.final_delivery_state === 'delivered' && entry.final_message_id === 'om_result'), JSON.stringify({ paths, saved })).toBe(true));

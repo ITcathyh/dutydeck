@@ -1,3 +1,4 @@
+import { TestLarkCoordinator } from './coordinator-test-fixture.js';
 // 本轮记忆的协调器级回归：真实 DutydeckRuntime + SQLite + 真实 LarkMessageCoordinator，service 为内存 mock。
 // 锁定「派发时记下注入了哪些记忆 → 结果卡不展示记忆 → 旧卡按钮仍走 /forget 同一道门」，
 // 以及 /memory ignore 的增删查。
@@ -8,7 +9,6 @@ import { join } from 'node:path';
 import { createRepositories } from '@dutydeck/storage';
 import { DutydeckRuntime, type AgentDriver } from '@dutydeck/runtime';
 import type { AgentConfig } from '@dutydeck/shared';
-import { LarkMessageCoordinator } from './coordinator.js';
 import { larkBotsConfigKey, type StoredLarkConfig } from './config.js';
 import type { LarkMessageEvent } from './listener.js';
 import { larkMemoryScope, LarkMemoryStore } from './memory.js';
@@ -68,7 +68,7 @@ async function harness(patch: Partial<StoredLarkConfig> = {}) {
   let projection!: LarkMemoryProjection;
   const memoryStore = new LarkMemoryStore(repos.config, { onChange: scope => projection.write(scope) });
   projection = new LarkMemoryProjection(memoryStore, join(cwd, 'memory'), log);
-  const coordinator = new LarkMessageCoordinator(runtime, service as any, log, Math.random, 'ou_bot', undefined, repos.channelMappings,
+  const coordinator = new TestLarkCoordinator(runtime, service as any, log, Math.random, 'ou_bot', undefined, repos.channelMappings,
     async () => 'group', undefined, undefined, { store: repos.config, memory: { store: memoryStore } });
   await coordinator.initializeWorkflows(config);
   cleanups.push(async () => {
@@ -117,8 +117,8 @@ describe('memory of each turn', () => {
     const value = { dutydeck_memory_forget: first, task_id: result.runtimeTaskId, session_id: result.sessionId };
     expect(value).toEqual({ dutydeck_memory_forget: first, task_id: result.runtimeTaskId, session_id: result.sessionId });
     // Simulate an older delivered card still carrying a memory row. Its callback must clear that row.
-    const liveTask = [...(h.coordinator as any).tasks.values()].find((task: any) => task.runtimeTaskId === result.runtimeTaskId);
-    liveTask.finalElements.push({ tag: 'markdown', element_id: 'memory_turn', content: '**本轮记忆**' });
+    const liveTask = [...h.coordinator.parts.state.tasks.values()].find(task => task.runtimeTaskId === result.runtimeTaskId)!;
+    liveTask.finalElements!.push({ tag: 'markdown', element_id: 'memory_turn', content: '**本轮记忆**' });
 
     const context = { messageId: result.messageId, chatId: 'oc_group' };
     // 与 /forget 同一道门：不在白名单里的人点了不生效。

@@ -1,3 +1,4 @@
+import { TestLarkCoordinator } from './coordinator-test-fixture.js';
 import type { ReplyPolish } from './reply-polish.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import '../../../../tests/support/fast-wait-for.js';
@@ -8,7 +9,7 @@ import { tmpdir } from 'node:os';
 import { createRepositories } from '@dutydeck/storage';
 import { DutydeckRuntime, type AgentDriver } from '@dutydeck/runtime';
 import type { AgentConfig, VerificationResponse } from '@dutydeck/shared';
-import { LarkMessageCoordinator, type PersistedLarkCardTask } from './coordinator.js';
+import { type PersistedLarkCardTask } from './coordinator.js';
 import { larkBotsConfigKey, type StoredLarkConfig } from './config.js';
 import type { LarkMessageEvent } from './listener.js';
 import type { LarkInteraction } from './workflow-interactions.js';
@@ -97,7 +98,7 @@ async function harness(options: { polish?: ReplyPolish; verificationCommand?: st
     callOpenApi: vi.fn(async () => ({ code: 0, data: {} }))
   };
   const log = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
-  const createCoordinator = () => new LarkMessageCoordinator(runtime, service as any, log, Math.random, 'ou_bot',
+  const createCoordinator = () => new TestLarkCoordinator(runtime, service as any, log, Math.random, 'ou_bot',
     undefined, repos.channelMappings, async () => 'group', undefined, undefined, { store: repos.config, polishReply: options.polish });
   const coordinator = createCoordinator();
   await coordinator.initializeWorkflows(config);
@@ -944,7 +945,7 @@ describe('reported task results', () => {
       const result = h.cards.get(saved.final_message_id!);
       expect(buildLarkCard(result).body.elements[0]).toMatchObject({ element_id: 'task_report', content: status === 'waiting' ? '等你决定：今天发布吗？' : '受阻：缺少测试账号' });
       expect(result.elements[0]).toMatchObject({ element_id: 'task_report', content: status === 'waiting' ? '等你决定：今天发布吗？' : '受阻：缺少测试账号' });
-      const entries = await (h.coordinator as any).taskDashboardEntries(event('om_tasks'), h.config);
+      const entries = await h.coordinator.parts.intake.taskDashboardEntries(event('om_tasks'), h.config);
       expect(entries.find((row: any) => row.taskId === h.active.taskId)?.taskReport?.status).toBe(status);
     }
   });

@@ -1,4 +1,4 @@
-import { createTestLarkCoordinator, createTestLarkStorage, expectFirstLarkTurnCard } from './coordinator-test-fixture.js';
+import { TestLarkCoordinator, createTestLarkCoordinator, createTestLarkStorage, expectFirstLarkTurnCard } from './coordinator-test-fixture.js';
 import { readTestAcceptanceByKey } from './runtime-test-fixture.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { installLarkHook } from './security-hooks.js';
@@ -46,8 +46,8 @@ it('checks durable confirmation ownership without reading the historical task wi
     getRecentEvents: vi.fn(async () => { throw new Error('historical events must not be read'); })
   };
   const coordinator = createTestLarkCoordinator(config, runtime as any, {} as any, { warn: vi.fn(), info: vi.fn(), error: vi.fn() });
-  expect(await (coordinator as any).isDeferredTask('session', 'deferred')).toBe(true);
-  expect(await (coordinator as any).isDeferredTask('session', 'queued')).toBe(false);
+  expect(await coordinator.parts.core.isDeferredTask('session', 'deferred')).toBe(true);
+  expect(await coordinator.parts.core.isDeferredTask('session', 'queued')).toBe(false);
   expect(runtime.getDeferredConfirmationId.mock.calls).toEqual([['session', 'deferred'], ['session', 'queued']]);
   expect(runtime.getEvents).not.toHaveBeenCalled();
   expect(runtime.getRecentEvents).not.toHaveBeenCalled();
@@ -226,7 +226,7 @@ describe('飞书命令在 coordinator 重建后的会话定位', () => {
       get: vi.fn(async (id: string) => id === 'ciw_1' ? { id: 'ciw_1', sessionId: 'ses_ci' } : undefined),
       requestFix: vi.fn(async () => '已交给 Agent 修复（第 1/3 轮）。')
     };
-    const coordinator = new LarkMessageCoordinator(runtime as any, cardService() as any, silentLog(), Math.random, 'ou_bot', undefined, repos.channelMappings, undefined, undefined, undefined, { store: repos.config, automation: { ciWebhook } as any });
+    const coordinator = new TestLarkCoordinator(runtime as any, cardService() as any, silentLog(), Math.random, 'ou_bot', undefined, repos.channelMappings, undefined, undefined, undefined, { store: repos.config, automation: { ciWebhook } as any });
     try {
       await coordinator.initializeWorkflows(config);
       const value = { dutydeck_ci_fix: 'ciw_1', failure: 'failure_key' };
@@ -322,7 +322,7 @@ describe('飞书命令在 coordinator 重建后的会话定位', () => {
       answer: vi.fn(async () => '已记下：按评论修改。'),
       forcePush: vi.fn(async () => '已确认，仍然推送这一轮的改动，推送前的其余核对照做，完成后会通知。')
     };
-    const coordinator = new LarkMessageCoordinator(runtime as any, cardService() as any, silentLog(), Math.random, 'ou_bot', undefined, repos.channelMappings, undefined, undefined, undefined, { store: repos.config, automation: { pullRequests } as any });
+    const coordinator = new TestLarkCoordinator(runtime as any, cardService() as any, silentLog(), Math.random, 'ou_bot', undefined, repos.channelMappings, undefined, undefined, undefined, { store: repos.config, automation: { pullRequests } as any });
     try {
       await coordinator.initializeWorkflows(config);
       const context = { messageId: 'om_pr_card', chatId: 'oc_group' };
@@ -1199,7 +1199,7 @@ describe('SQLite + DutydeckRuntime 的命令恢复集成', () => {
       await repos.config.set(larkBotsConfigKey, JSON.stringify([integrationConfig]));
 
       const service = trackedCardService('om_first');
-      const first = new LarkMessageCoordinator(
+      const first = new TestLarkCoordinator(
         runtime as any, service as any, silentLog(), Math.random, 'ou_bot',
         undefined, repos.channelMappings, undefined, undefined, undefined, { store: repos.config }
       );
@@ -1226,7 +1226,7 @@ describe('SQLite + DutydeckRuntime 的命令恢复集成', () => {
 
       // daemon 重启：全新 coordinator，只有库里的 session / task / mapping。
       const cancelService = trackedCardService('om_cancel');
-      const restarted = new LarkMessageCoordinator(
+      const restarted = new TestLarkCoordinator(
         runtime as any, cancelService as any, silentLog(), Math.random, 'ou_bot',
         undefined, repos.channelMappings, undefined, undefined, undefined, { store: repos.config }
       );
@@ -1246,7 +1246,7 @@ describe('SQLite + DutydeckRuntime 的命令恢复集成', () => {
       // 再重建一次，验证 /retry 能从落盘 mapping 里恢复原 prompt 并派发一个新任务。
       const before = (await repos.tasks.listBySession(sessionId)).length;
       const retryService = trackedCardService('om_retry');
-      const retrying = new LarkMessageCoordinator(
+      const retrying = new TestLarkCoordinator(
         runtime as any, retryService as any, silentLog(), Math.random, 'ou_bot',
         undefined, repos.channelMappings, undefined, undefined, undefined, { store: repos.config }
       );
@@ -1324,7 +1324,7 @@ describe('SQLite + DutydeckRuntime 的命令恢复集成', () => {
       const integrationConfig = { ...config, workspace };
       await repos.config.set(larkBotsConfigKey, JSON.stringify([integrationConfig]));
       const service = trackedCardService('om_legacy');
-      const coordinator = new LarkMessageCoordinator(runtime as any, service as any, silentLog(), Math.random, 'ou_bot',
+      const coordinator = new TestLarkCoordinator(runtime as any, service as any, silentLog(), Math.random, 'ou_bot',
         undefined, repos.channelMappings, undefined, undefined, undefined, { store: repos.config });
       await coordinator.initializeWorkflows(integrationConfig);
       await coordinator.handle(dm('om_new_legacy_real', '/new'), integrationConfig);
@@ -1384,7 +1384,7 @@ describe('实时静默轮次仍交付恢复异常', () => {
       }
       return { messageId: 'om_result' };
     });
-    const coordinator = new LarkMessageCoordinator(runtime as any, service as any, silentLog(), Math.random, 'ou_bot',
+    const coordinator = new TestLarkCoordinator(runtime as any, service as any, silentLog(), Math.random, 'ou_bot',
       undefined, repos.channelMappings, undefined, undefined, undefined, { store: repos.config });
     try {
       const silentConfig = { ...config, silentProgress: true };
@@ -1422,7 +1422,7 @@ describe('实时静默轮次仍交付恢复异常', () => {
     };
     const service = cardService();
     const log = silentLog();
-    const coordinator = new LarkMessageCoordinator(runtime as any, service as any, log, Math.random, 'ou_bot',
+    const coordinator = new TestLarkCoordinator(runtime as any, service as any, log, Math.random, 'ou_bot',
       undefined, repos.channelMappings, undefined, undefined, undefined, { store: repos.config });
     try {
       await repos.config.set(larkBotsConfigKey, JSON.stringify([{ ...config, silentProgress: true }]));
@@ -1462,7 +1462,7 @@ describe('卡片对账的收敛、退避与事件唤醒', () => {
     const readConfig = vi.spyOn(workflowStore, 'get');
     const coordinator = createTestLarkCoordinator(config, runtime as any, cardService() as any, silentLog(), Math.random, 'ou_bot',
       undefined, mappings, undefined, undefined, undefined, { store: workflowStore });
-    const rounds = vi.spyOn(coordinator as any, 'performReconcile');
+    const rounds = vi.spyOn(coordinator.parts.reconcile, 'performReconcile');
     return { task, coordinator, rounds, mappings, runtime, readConfig };
   }
 
@@ -1505,7 +1505,7 @@ describe('卡片对账的收敛、退避与事件唤醒', () => {
       h.mappings.list.mockClear();
       h.readConfig.mockClear();
       h.task.status = 'completed';
-      (h.coordinator as any).scheduleReconcile();
+      h.coordinator.parts.reconcile.scheduleReconcile();
       await vi.advanceTimersByTimeAsync(5_000);
       expect(h.rounds).toHaveBeenCalledTimes(before + 1);
       expect(h.mappings.list.mock.calls).toEqual([['lark-card:cli_test'], ['lark-card:cli_test']]);
@@ -1553,7 +1553,7 @@ it('新卡唤醒的全量对账读映射失败时，退避后的下一轮仍全�
         extra: JSON.stringify(persistedCard({ runtime_task_id: task.id, state: 'queued', progress_frozen: true })) });
       mappings.list.mockClear();
       mappings.list.mockRejectedValueOnce(new Error('database busy'));
-      (coordinator as any).scheduleReconcile();
+      coordinator.parts.reconcile.scheduleReconcile();
       await vi.advanceTimersByTimeAsync(5_000);
       expect(mappings.list).toHaveBeenCalledTimes(1);
       expect(runtime.getTasks).not.toHaveBeenCalled();

@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { createRepositories } from '@dutydeck/storage';
-import { LarkMessageCoordinator } from './coordinator.js';
+import { TestLarkCoordinator } from './coordinator-test-fixture.js';
 import { larkBotsConfigKey, type StoredLarkConfig } from './config.js';
 import type { LarkInteraction } from './workflow-interactions.js';
 
@@ -15,9 +15,9 @@ describe('coordinator authorizeWorkspaceRule', () => {
     const authorize = vi.fn(async (_appId: string, _chatId: string, actor: string, action: string) => managed ? { allowed: managed.groupAdmin?.(actor) ?? false, action } : undefined);
     const botAdmin = vi.fn(async (_appId: string, actor: string) => managed ? managed.botAdmin(actor) : undefined);
     const service = { getUserEmails: vi.fn(async () => [] as string[]) };
-    const instance = new LarkMessageCoordinator({} as any, service as any, { info: vi.fn(), warn: vi.fn(), error: vi.fn() } as any, Math.random, 'ou_bot', undefined, repos.channelMappings,
+    const instance = new TestLarkCoordinator({} as any, service as any, { info: vi.fn(), warn: vi.fn(), error: vi.fn() } as any, Math.random, 'ou_bot', undefined, repos.channelMappings,
       async () => 'group', undefined, { authorize, botAdmin, highRiskOpenIds: async () => [] } as any, { store: repos.config });
-    return { check: (actor: string) => (instance as any).authorizeWorkspaceRule(record, actor) as Promise<boolean>, authorize, botAdmin, close: () => { instance.stop(); repos.close(); } };
+    return { check: (actor: string) => instance.parts.core.authorizeWorkspaceRule(record, actor), authorize, botAdmin, close: () => { instance.stop(); repos.close(); } };
   };
 
   it('on a managed bot accepts only bot-level admins, never group-level admins (finding 6)', async () => {
@@ -49,11 +49,11 @@ describe('coordinator authorizeWorkspaceRule', () => {
 describe('coordinator auto-approval annotations', () => {
   it('records which mechanism approved the request without sharing the session-allow flag', () => {
     const repos = createRepositories(':memory:');
-    const instance = new LarkMessageCoordinator({} as any, {} as any, { info: vi.fn(), warn: vi.fn(), error: vi.fn() } as any, Math.random, 'ou_bot', undefined, repos.channelMappings,
+    const instance = new TestLarkCoordinator({} as any, {} as any, { info: vi.fn(), warn: vi.fn(), error: vi.fn() } as any, Math.random, 'ou_bot', undefined, repos.channelMappings,
       async () => 'group', undefined, undefined, { store: repos.config });
     try {
-      const task = { sessionId: 'ses_one', events: [] as any[], config: bot(), event: record.event };
-      const options = (instance as any).workflowObserveOptions(task);
+      const task = { id: 'task_one', group: { tail: Promise.resolve() }, turn: 1, epoch: 0, scopeId: 'group', prompt: '', resources: [], state: 'running' as const, sessionId: 'ses_one', events: [] as any[], config: bot() as StoredLarkConfig, event: record.event };
+      const options = instance.parts.core.workflowObserveOptions(task);
       options.onAutoApproved('perm_rule', { by: 'workspace_rule', rule: 'pnpm test' });
       options.onAutoApproved('perm_session', { by: 'session_allow' });
       expect(task.events.map(event => [event.id, event.data])).toEqual([
