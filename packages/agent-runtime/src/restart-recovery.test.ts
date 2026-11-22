@@ -129,7 +129,8 @@ describe('persistent task recovery across a reopened database', () => {
   it.each([false, true])('settles the same native capacity result with the original retry policy (recovered: %s)', async recovered => {
     const file = database(), backend = persistentTurn(true), onTaskSettled = vi.fn();
     const observeTurn = vi.fn<NonNullable<import('./index.js').RuntimeOptions['observeTurn']>>(async () => {});
-    let handle = open(file, backend.factory, { onTaskSettled, observeTurn });
+    const usage = vi.fn<NonNullable<import('./index.js').RuntimeOptions['recordUsage']>>(async () => {});
+    let handle = open(file, backend.factory, { onTaskSettled, observeTurn, recordUsage: usage });
     await handle.runtime.initialize([agent]);
     const session = await handle.runtime.start({ agentId: agent.id });
     const task = await handle.runtime.dispatch(session.id, 'original', 'queue', 'original', undefined, 'installation_owner');
@@ -138,7 +139,7 @@ describe('persistent task recovery across a reopened database', () => {
     if (recovered) {
       await close(handle);
       observeTurn.mockClear();
-      handle = open(file, backend.factory, { onTaskSettled, observeTurn });
+      handle = open(file, backend.factory, { onTaskSettled, observeTurn, recordUsage: usage });
       await handle.runtime.initialize([agent]);
       expect(backend.recoveredAfter(1)).toBe(1);
     }
@@ -151,6 +152,13 @@ describe('persistent task recovery across a reopened database', () => {
         kind: 'driver_result', submissionId: original.submission!.submissionId, complete: true, stopReason: 'end_turn',
       },
     });
+    expect(usage).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ id: session.id }), { taskId: task.id, attemptId: original.attemptId }, undefined);
+    if (recovered) expect(usage.mock.invocationCallOrder[0]).toBeLessThan(onTaskSettled.mock.invocationCallOrder[0]!);
+    else {
+      expect(observeTurn.mock.calls.map(([s, id, phase]) => [s.id, id, phase])).toEqual([[session.id, task.id, 'start'], [session.id, task.id, 'end']]);
+      expect(usage.mock.invocationCallOrder[0]).toBeGreaterThan(observeTurn.mock.invocationCallOrder[0]!);
+      expect(usage.mock.invocationCallOrder[0]).toBeLessThan(observeTurn.mock.invocationCallOrder[1]!);
+    }
     if (recovered) {
       expect(projection().attempts).toHaveLength(1);
       expect(projection().task.status).toBe('failed');
