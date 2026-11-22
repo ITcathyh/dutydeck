@@ -1,10 +1,12 @@
-import { accessMode, listenOptions, unauthenticatedListenRefusal } from './access-policy.js';
-import { LarkReplyPolisher, type ReplyPolish } from './lark/reply-polish.js';
-import { createRelayContinuationChecker, createRelayAskLifecycleWatcher } from './relay-routes.js';
-import { inheritedListenOptions, inheritedSocketMismatch, takeInheritedListenSocket } from './socket-activation.js';
+import { ServerLifecycle } from './compose/lifecycle.js';
+import { composeInsight } from './compose/insight.js';
+import { accessMode,listenOptions,unauthenticatedListenRefusal } from './access-policy.js';
+import { LarkReplyPolisher,type ReplyPolish } from './lark/reply-polish.js';
+import { createRelayContinuationChecker,createRelayAskLifecycleWatcher } from './relay-routes.js';
+import { inheritedListenOptions,inheritedSocketMismatch,takeInheritedListenSocket } from './socket-activation.js';
 import { MattersService } from './matters.js';
-import { DutydeckWatch, startDutydeckWatch, watchDeliveryRejection, watchReceiverType } from './watch.js';
-import { collectWatchScopes, resolveWatchReceiver } from './watch-signals.js';
+import { DutydeckWatch,startDutydeckWatch,watchDeliveryRejection,watchReceiverType } from './watch.js';
+import { collectWatchScopes,resolveWatchReceiver } from './watch-signals.js';
 import { assertDatabaseNotQuarantined } from '@dutydeck/storage';
 import { ProjectMemoryService } from './project-memory.js';
 import { larkAgentSessionBinding } from './lark/agent-tools.js';
@@ -17,15 +19,15 @@ import { PluginToolGrants } from './plugins/tool-grants.js';
 import { TaskPluginToolIdentity } from './plugins/tool-identity.js';
 import { prepareBoundTaskPrompt } from './plugins/bound-skills.js';
 import { PluginHost } from './plugins/host.js';
-import { PluginResultService, PluginResultError } from './plugins/result-service.js';
+import { PluginResultService,PluginResultError } from './plugins/result-service.js';
 import { PluginResultToolRegistry } from './plugins/result-tools.js';
 import { LarkPluginResultAdapter } from './lark/plugin-result-delivery.js';
-import { LarkPluginResultIdentity, type PluginResultIdentityOptions } from './lark/plugin-result-identity.js';
+import { LarkPluginResultIdentity,type PluginResultIdentityOptions } from './lark/plugin-result-identity.js';
 import { AgentModelSettings } from './agent-model-settings.js';
 import { createSessionContexts } from './session-context.js';
 import { sessionUsageSnapshot } from './session-usage.js';
 import { HerdrBackend } from '@dutydeck/session-backends';
-import { TerminalSettings, primaryHerdrBinary } from './terminal-settings.js';
+import { TerminalSettings,primaryHerdrBinary } from './terminal-settings.js';
 import { createRequire } from 'node:module';
 import { HerdrSessions } from './herdr.js';
 import { rememberSecretValues } from './platform/secret-redaction.js';
@@ -41,74 +43,68 @@ import { sha256Hex } from './hash.js';
 import { renderMemoryIndex } from './lark/memory-view.js';
 import type { CollaborationExtensions } from './collaboration-extensions.js';
 import { LarkGroupManager } from './lark/group-management.js';
-import { backfillBotPromptVersions, larkMemoryEnabled, readLarkConfig, readLarkConfigs } from './lark/config.js';
-import { createAcceptPrompt, DutydeckRuntime, RuntimeEventBus } from '@dutydeck/runtime';
-import { loadConfigWithDiagnosticsAsync, resolveDatabaseUrl, type AppConfig } from '@dutydeck/config';
+import { backfillBotPromptVersions,larkMemoryEnabled,readLarkConfig,readLarkConfigs } from './lark/config.js';
+import { createAcceptPrompt,DutydeckRuntime,RuntimeEventBus } from '@dutydeck/runtime';
+import { loadConfigWithDiagnosticsAsync,resolveDatabaseUrl,type AppConfig } from '@dutydeck/config';
 import { logDroppedAgents } from './agent-config-log.js';
-import { assertBotProcessStartup, childProcessIdentity, createRepositories, observeProcess } from '@dutydeck/storage';
+import { assertBotProcessStartup,childProcessIdentity,createRepositories,observeProcess } from '@dutydeck/storage';
 import { defaultDriverProviders } from './driver-providers.js';
-import { channelExecutionAppId, dutydeckSessionKinds, renderSessionNotice, backgroundKindFor, COLLABORATION_LIST_LIMIT, installationOwnerTaskActor, makeId, parseLarkSourceId, RuntimeError, timeLoop, workPlanConfirmationRequired, type PolicyAction, type PolicyDecision, type Session } from '@dutydeck/shared';
+import { channelExecutionAppId,dutydeckSessionKinds,renderSessionNotice,backgroundKindFor,COLLABORATION_LIST_LIMIT,installationOwnerTaskActor,parseLarkSourceId,RuntimeError,timeLoop,workPlanConfirmationRequired,type PolicyAction,type PolicyDecision,type Session } from '@dutydeck/shared';
 import { tmpdir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
-import { larkResourceRoot, pruneLarkResourceDirectories, readLarkResourceReferences } from './resource-retention.js';
+import { dirname,join,resolve } from 'node:path';
+import { larkResourceRoot,pruneLarkResourceDirectories,readLarkResourceReferences } from './resource-retention.js';
 import { fileURLToPath } from 'node:url';
-import { buildApp, createAppLogger } from './app.js';
+import { buildApp,createAppLogger } from './app.js';
 import { parsePeerInstances } from './instance-proxy.js';
 import { localLoopbackUrl } from './local-api-url.js';
-import { WorkItemService, readWorkItemStatus } from './work-items.js';
+import { WorkItemService,readWorkItemStatus } from './work-items.js';
 import { WorkItemInteractions } from './work-item-interactions.js';
 import { LarkWorkbench } from './lark/workbench.js';
-import { createLarkCardService, LarkServiceError } from './lark/service.js';
+import { createLarkCardService,LarkServiceError } from './lark/service.js';
 import { deliverLarkSessionNotice } from './lark/session-notice.js';
 import { createWorkbenchFetch } from './workbench-fetch.js';
-import { authorizeWorkItemAgent, authorizeWorkItemInteraction, capturedRiskPolicy, workItemRiskPolicy } from './work-item-policy.js';
+import { authorizeWorkItemAgent,authorizeWorkItemInteraction,capturedRiskPolicy,workItemRiskPolicy } from './work-item-policy.js';
 import { SessionAutomationService } from './session-automation.js';
 import { createAutomationIntegration } from './automation-integration.js';
 import { CiWebhookService } from './ci-webhook.js';
 import { PullRequestService } from './pull-requests.js';
 import { CiProviderRegistry } from './ci-providers.js';
-import { prepareSkillPrompt, type PrepareSkillPromptResult } from './skill-delivery.js';
+import { prepareSkillPrompt,type PrepareSkillPromptResult } from './skill-delivery.js';
 import { readTokenEfficiencyPolicy } from './token-efficiency.js';
 import { createSessionPrompt } from './prompt/session.js';
-import { isFrozenCollaborationSession, promptTemplateVersion } from './prompt-context.js';
+import { isFrozenCollaborationSession,promptTemplateVersion } from './prompt-context.js';
 import { createRelayAskStore } from './relay-ask-store.js';
 import { LarkAgentToolsService } from './lark/agent-tools.js';
 import { TurnAuthority } from './agent-host/turn-authority.js';
 import { loadOrCreateGroupToolsSigningSecret } from './agent-host/turn-token.js';
-import { larkMemoryScope, LarkMemoryStore } from './lark/memory.js';
+import { larkMemoryScope,LarkMemoryStore } from './lark/memory.js';
 import { LarkMemoryProjection } from './lark/memory-view.js';
 import { LarkMemoryPipeline } from './lark/memory-pipeline.js';
-import { getAuthToken, getPasswordHash, getShareLinkSecret, loadOrCreateAuthToken, loadOrCreateShareLinkSecret, SHARE_TOKEN_QUERY_KEY, signSessionShareToken, signTurnDiffToken, tokensEqual, verifyBrowserSession } from './auth/auth.js';
-import { setLarkSessionShareSigner, setLarkTurnDiffSigner } from './lark/detail-link.js';
-import { createTurnDiffObserver, TURN_DIFF_LINK_TTL_MS } from './turn-diff.js';
+import { getAuthToken,getPasswordHash,getShareLinkSecret,loadOrCreateAuthToken,loadOrCreateShareLinkSecret,SHARE_TOKEN_QUERY_KEY,signSessionShareToken,signTurnDiffToken,tokensEqual,verifyBrowserSession } from './auth/auth.js';
+import { setLarkSessionShareSigner,setLarkTurnDiffSigner } from './lark/detail-link.js';
+import { createTurnDiffObserver,TURN_DIFF_LINK_TTL_MS } from './turn-diff.js';
 import { requestLarkTurnDiffReview } from './lark/turn-diff.js';
 import type { TerminalStreamProvider } from './terminal/terminal-ws.js';
 import {
-  createDutydeckPersistentBackend,
-  createPtyCliProvider,
-  PTY_AGENT_CONTRIBUTIONS,
+createDutydeckPersistentBackend,
+createPtyCliProvider,
+PTY_AGENT_CONTRIBUTIONS,
 } from '@dutydeck/pty-driver';
-import { claudeDataDir, codexHome, traeHome } from '@dutydeck/pty-driver/support';
-import { childEnvironment } from '@dutydeck/shared/child-environment';
-import { RelayAskBroker, RelayCapabilityRegistry, RelayService, loadOrCreateRelaySigningSecret } from '@dutydeck/relay';
-import { LocalFileSecretProvider, localFileSecretProviderName, secretDirectoryForDatabase } from '@dutydeck/secret-provider';
+import { RelayAskBroker,RelayCapabilityRegistry,loadOrCreateRelaySigningSecret } from '@dutydeck/relay';
+import { LocalFileSecretProvider,localFileSecretProviderName,secretDirectoryForDatabase } from '@dutydeck/secret-provider';
 import { LarkIdentityPreflightProbe } from './lark/identity-preflight.js';
 import {
-  createFoundationExecutionAuthorizer,
-  createFoundationManagementAuthorizer,
-  createInstallationPrincipalResolver,
+createFoundationExecutionAuthorizer,
+createFoundationManagementAuthorizer,
+createInstallationPrincipalResolver,
 } from './foundation-policy.js';
 import { WorkspaceOrganizationService } from './workspace-organization.js';
-import { parseUsageBackgroundLimits, parseUsagePricing, UsageLedger, withExtraPricing } from './usage-ledger.js';
-import { SessionInsightService } from './session-insight-service.js';
-import type { SessionInsightResolver } from './session-insight-service.js';
-import { SessionInsightResolver as SessionInsightResolverImpl } from './session-insight-resolver.js';
-import { createTranscriptSourceKeys } from '@dutydeck/runtime';
-import { loadDaemonPlugins, wirePlugins } from './plugins/service-wiring.js';
+import { parseUsageBackgroundLimits,parseUsagePricing,UsageLedger,withExtraPricing } from './usage-ledger.js';
+import { loadDaemonPlugins,wirePlugins } from './plugins/service-wiring.js';
 import { createPluginManagementAuthorizer } from './plugins/management-auth.js';
 import { sessionHookContext } from './plugins/integration.js';
 import type { StoredLarkConfig } from './lark/config.js';
-import { ShutdownPhases } from './shutdown-phases.js';
+import type { ShutdownPhases } from './shutdown-phases.js';
 import type { FastifyBaseLogger } from 'fastify';
 
 export interface StartLocalServerOptions {
@@ -137,77 +133,11 @@ export interface LocalServer {
 
 export { accessMode, listenOptions, unauthenticatedListenRefusal, UNSAFE_NO_AUTH_ENV } from './access-policy.js';
 
-/** 停服步骤，按执行顺序；强制退出时据此列出还没开始的步骤。 */
-const SHUTDOWN_PHASES = ['insight', 'historyRetention', 'watch', 'pluginResults', 'workbench', 'workbenchHttp', 'workItems', 'delegations', 'leaderMode', 'automation', 'ciWebhook', 'pullRequests',
-  'relayClose', 'collaboration', 'relayFlush', 'http', 'runtime', 'capabilities', 'database', 'pluginDispose'] as const;
-type ShutdownPhase = typeof SHUTDOWN_PHASES[number];
-
 function localApiBaseUrl(config: Pick<AppConfig, 'host' | 'port'>) {
   return localLoopbackUrl(config.host, config.port);
 }
 
-/**
- * 按当前 session 对应 agent 的子进程环境计算弱候选数据根（每次 resolve 实时算，
- * 不缓存 agent env，不持久化密钥，不扫描 HOME）。候选仅用于有界历史发现，
- * resolver 仍须内容 native id + ledger 身份证明才成 historical_verified。
- *
- * - PTY 驱动：childEnvironment(serverEnv, agent.env, { stripClaude: true })，
- *   剥离 daemon 的 ANTHROPIC_/CLAUDE_ 桥接身份；
- * - ACP/其它：childEnvironment(serverEnv, agent.env) 不 strip；
- * - 无 agent 配置：回退 serverEnv 自身（daemon 直跑场景）。
- */
-function configuredRootsForSession(
-  serverEnv: NodeJS.ProcessEnv,
-  session: import('@dutydeck/shared').Session | undefined,
-  agent: import('@dutydeck/shared').AgentConfig | undefined
-): Array<{ client: 'claude' | 'codex' | 'traex'; path: string }> {
-  const isPtyCli = session?.protocol === 'pty-cli';
-  const childEnv = childEnvironment(
-    serverEnv as Record<string, string | undefined>,
-    agent?.env ?? {},
-    ...(isPtyCli ? [{ stripClaude: true }] : [])
-  ) as Record<string, string | undefined>;
-  return [
-    { client: 'claude' as const, path: claudeDataDir(childEnv) },
-    { client: 'codex' as const, path: codexHome(childEnv) },
-    { client: 'traex' as const, path: traeHome(childEnv) }
-  ];
-}
-
-/**
- * 构造生产会话分析 resolver（静态接线，esbuild bundle 必须能静态解析）。
- * 返回 SessionInsightResolver interface 的轻量 wrapper：每次 resolve(sessionId)
- * 实时读取该 session 的 agent 配置，用 childEnvironment 合并当前 server env
- * （startLocalServer options.env 生效，不固定 process.env）与 agent.env，
- * 再调 cli-paths 三函数生成 weak candidate roots，最后 new 真实 resolver 委托。
- * 持久 observations 的历史 dataRoot 仍由 resolver 自行并入。
- */
-function createInsightResolver(
-  repos: ReturnType<typeof createRepositories>,
-  serverEnv: NodeJS.ProcessEnv
-): SessionInsightResolver {
-  return {
-    async resolveSessionInsightSources(sessionId, options) {
-      const session = await repos.sessions.get(sessionId);
-      const agent = session ? await repos.agents.get(session.agentId) : undefined;
-      const configuredRoots = configuredRootsForSession(serverEnv, session ?? undefined, agent ?? undefined);
-      return new SessionInsightResolverImpl({
-        repositories: {
-          insight: repos.insight,
-          sessions: repos.sessions,
-          execution: repos.execution,
-          config: repos.config,
-          agents: repos.agents
-        },
-        configuredRoots,
-        // 统一 source key hash 算法来自 T3c runtime helper（包根具名导出），接线方不另复制。
-        createTranscriptSourceKeys
-      }).resolveSessionInsightSources(sessionId, options);
-    }
-  };
-}
-
-export { configuredRootsForSession, createInsightResolver };
+export { configuredRootsForSession, createInsightResolver } from './compose/insight.js';
 
 /** Production PTY-CLI policy: persistent tmux or a hard failure, never an
  * implicit downgrade to the in-process PtyBackend. */
@@ -226,7 +156,7 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
   // systemd socket 激活传入的监听 socket：启动一开始就取走并清掉 LISTEN_* 变量，启动恢复期间派生的子进程看不到它们。
   const inherited = takeInheritedListenSocket();
   if (inherited && 'error' in inherited) throw new Error(inherited.error);
-  const shutdownPhases = new ShutdownPhases(SHUTDOWN_PHASES);
+  const lifecycle = new ServerLifecycle(log);
   let startupMark = performance.now();
   const startupPhase = (name: string) => { const now = performance.now(); startupMs[name] = Math.round(now - startupMark); startupMark = now; };
   const startupEnvironment = options.env ?? process.env;
@@ -250,27 +180,8 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
       return { config, droppedAgents, repos };
     } catch (error) { await pluginHost?.dispose(); throw error; }
   })();
-  // 声明在 try 外：setup 失败路径与正常关闭路径都要先显式 await 分析服务关闭。
-  let insightService: SessionInsightService | undefined;
-  const insightCloseErrors: unknown[] = [];
-  const closeInsightService = async (): Promise<void> => {
-    if (!insightService) return;
-    try { await insightService.close(); }
-    catch (error) { insightCloseErrors.push(error); }
-  };
-  const setupCleanup: Array<() => unknown> = [() => pluginHost?.dispose()];
-  let closeResources = async () => {
-    // 初始化失败路径同样先显式关闭分析服务（拒新刷新/取消作业/清临时目录），
-    // 再跑 setupCleanup 并行组与 repos.close。
-    await closeInsightService();
-    const results = await Promise.allSettled(setupCleanup.reverse().map(close => Promise.resolve().then(close)));
-    repos.close();
-    const errors = [
-      ...insightCloseErrors,
-      ...results.filter((result): result is PromiseRejectedResult => result.status === 'rejected').map(result => result.reason)
-    ];
-    if (errors.length) throw new AggregateError(errors, 'Dutydeck setup cleanup failed');
-  };
+  lifecycle.onSetupFailure(() => pluginHost?.dispose());
+  lifecycle.register('database', () => repos.close(), false);
   try {
   // Recheck under the runtime claim in case an offline split completed between inspection and open.
   assertBotProcessStartup(config.databaseUrl, (options.env ?? process.env).DUTYDECK_BOT_APP_ID);
@@ -305,7 +216,7 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
   try { relaySigningSecret = await loadOrCreateRelaySigningSecret(repos.config); }
   catch (error) { throw error; }
   const capabilities = new TurnAuthority(repos.sessions, localApiBaseUrl(config), groupToolsSigningSecret, options.groupToolsCommand ?? 'dutydeck');
-  setupCleanup.push(() => capabilities.close());
+  lifecycle.register('capabilities', () => capabilities.close());
   // 通用回传通道：与飞书无关，任何来源的会话（含 Web 工作台创建的 pty-cli）都注入凭证。
   // command 前缀复用 groupToolsCommand 算出的运行期绝对路径——静态文案拿不到它，
   // 经 env 下发后由 @dutydeck/relay 的 relayHintLines() 在提示块里读回。
@@ -338,7 +249,7 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
       getPasswordHash(repos.config).then(current => { activePasswordHash = current; }).catch(() => {});
     }, 5_000);
     tokenRefresh.unref();
-    setupCleanup.push(() => { if (tokenRefresh) clearInterval(tokenRefresh); });
+    lifecycle.onSetupFailure(() => { if (tokenRefresh) clearInterval(tokenRefresh); });
   } else {
     process.stderr.write('[dutydeck] WARNING: authentication is disabled. Everyone who can reach this address can view tasks, control Agents, and access terminals. Use only on a trusted network or behind upstream authentication.\n');
   }
@@ -351,7 +262,7 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
   shareSecretRefresh.unref();
   const disposeShareSigner = setLarkSessionShareSigner(sessionId => signSessionShareToken(activeShareSecret, sessionId));
   const disposeTurnDiffSigner = setLarkTurnDiffSigner((sessionId, taskId) => signTurnDiffToken(activeShareSecret, sessionId, taskId, Date.now() + TURN_DIFF_LINK_TTL_MS));
-  setupCleanup.push(() => { clearInterval(shareSecretRefresh); disposeShareSigner(); disposeTurnDiffSigner(); });
+  lifecycle.onSetupFailure(() => { clearInterval(shareSecretRefresh); disposeShareSigner(); disposeTurnDiffSigner(); });
   const resolveInstallationPrincipal = createInstallationPrincipalResolver({
     authEnabled: config.authEnabled,
     mode,
@@ -374,7 +285,7 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
     }),
   };
   const workbenchHttp = createWorkbenchFetch();
-  setupCleanup.push(() => workbenchHttp.close());
+  lifecycle.register('workbenchHttp', () => workbenchHttp.close());
   const groupManager: LarkGroupManager = new LarkGroupManager(repos, { env, fetcher: workbenchHttp.fetch, onPolicyChanged: (): Promise<void> => groupManager.refreshPolicies(runtime) });
   let readCollaborationMemory: (scope: import('@dutydeck/shared').CollaborationScope) => Promise<string> = async () => '';
   let collaboration: ReturnType<typeof createCollaborationIntegration> | undefined;
@@ -417,7 +328,7 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
     workItems: () => workItems,
     log: { warn: (details, message) => log.warn(details, message) }
   }) : undefined;
-  if (pluginWiring) setupCleanup.push(() => pluginWiring.dispose());
+  if (pluginWiring) lifecycle.register('pluginDispose', () => pluginWiring.dispose());
   // 用量账本：runtime 每轮交来读数、派发新任务前查月度上限。子步骤的根任务取自下方的工作项与 Leader 委托。
   const usageLedger = new UsageLedger({
     repositories: repos,
@@ -548,38 +459,13 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
     log: { warn: (...args: unknown[]) => log.warn(...args as [unknown, string]), info: (data, message) => log.info(data, message) }
   });
   const replyPolisher = new LarkReplyPolisher({ runtime, repos, log: { warn: (details, message) => log.warn(details, message) } });
-  setupCleanup.push(() => runtime.shutdown());
+  lifecycle.register('runtime', () => runtime.shutdown());
   const workspaceOrganizationService = new WorkspaceOrganizationService({
     config: repos.config,
     listSessions: () => runtime.listSessions(),
   });
-  // 会话分析服务（T4c）：1 running/16 queued，按需 Go 分析，失败不影响 Agent 运行。
-  // resolver 每次 resolve 按 session agent 当前 env 实时计算候选根；静态接线，无动态 import。
-  try {
-    insightService = new SessionInsightService({
-      insightRepository: repos.insight,
-      resolver: createInsightResolver(repos, options.env ?? process.env),
-      dataDir: config.databaseUrl === ':memory:'
-        ? join(tmpdir(), 'dutydeck-insight')
-        : dirname(resolve(config.databaseUrl)),
-      processRunId: makeId('insight-run'),
-      hostEvidence: {
-        readHostEvidenceRaw: (sessionId) => repos.insight.readHostEvidenceRaw(sessionId),
-        getSessionExecutions: (sessionId) => repos.execution.getSessionExecutions(sessionId),
-        getAcceptedTask: (taskId) => repos.execution.getAcceptedTask(taskId),
-        readTransaction: (work) => repos.insight.readTransaction(work)
-      },
-      loadWorkspaceOrganization: async () => (await workspaceOrganizationService.getSnapshot()).organization,
-      getCurrentFingerprint: async (sessionId) => runtime.getCodeFingerprint(sessionId),
-      log: (details, message) => log.warn(details, message)
-    });
-    startupPhase('wiring');
-    await insightService.initialize();
-  } catch {
-    // 只记录固定 code，绝不回显 error.message（可能携带私有路径/token）。
-    process.stderr.write('[dutydeck] Session insight service disabled: INSIGHT_STARTUP_FAILED\n');
-    insightService = undefined;
-  }
+  const insightService = await composeInsight(repos, config, env, workspaceOrganizationService, runtime, log, startupPhase);
+  lifecycle.register('insight', () => insightService?.close(), false);
   startupPhase('insight');
   const businessToolGrants = new PluginToolGrants(repos.config);
   const businessTools = pluginHost ? new PluginBusinessToolService(pluginHost, businessToolGrants, new PluginToolLedger(repos.config), new TaskPluginToolIdentity(repos, relayCapabilities, capabilities, runtime), 30_000, pluginWiring?.hooks) : undefined;
@@ -598,7 +484,7 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
     finally { pluginResultSweep = undefined; }
   });
   const closePluginResults = async () => { if (pluginResultTimer) clearInterval(pluginResultTimer); await pluginResultSweep; };
-  setupCleanup.push(closePluginResults);
+  lifecycle.register('pluginResults', closePluginResults);
   const automationIntegration = createAutomationIntegration(repos, runtime, groupManager, { env, client: config => createLarkCardService(env, workbenchHttp.fetch, config), log: { warn: (...args: unknown[]) => log.warn(...args as [unknown, string]) } });
   // CI 平台全部来自插件；没有 CI 插件时注册表为空，/ci 与 Web 提示「未安装 CI 插件」。
   const ciProviders = pluginHost?.ciProviders ?? new CiProviderRegistry();
@@ -631,24 +517,24 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
       progress: async id => await workItems.exists(id) ? readWorkItemStatus(repos.config, id) ?? 'unknown' : undefined
     },
     log: { warn: (details, message) => log.warn(details, message) } });
-  setupCleanup.push(() => automation.close());
-  if (ciWebhook) setupCleanup.push(() => ciWebhook.close());
-  setupCleanup.push(() => pullRequests.close());
+  lifecycle.register('automation', () => automation.close());
+  if (ciWebhook) lifecycle.register('ciWebhook', () => ciWebhook.close());
+  lifecycle.register('pullRequests', () => pullRequests.close());
   const authorizeWorkAgent = (sessionId: string, actorId: string, agentId: string) => authorizeWorkItemAgent(repos, groupManager, automationIntegration.authorize, sessionId, actorId, agentId);
   const workbench = new LarkWorkbench(repos, runtime, () => workItems, () => workInteractions, automationIntegration.authorize, { env, authorizeAgent: authorizeWorkAgent,
     leaderDecisions: workId => leaderMode.decisions(workId), log: { warn: (...args: any[]) => log.warn(...args as [unknown, string]) } });
-  setupCleanup.push(() => workbench.close());
+  lifecycle.register('workbench', () => workbench.close());
   const workItems: WorkItemService = new WorkItemService({ repositories: repos, runtime, authorize: automationIntegration.authorize, authorizeAgent: authorizeWorkAgent,
     requireConfirmation: workPlanConfirmationRequired, log: loopLog,
     prepareDelivery: (sessionId, id, key) => workbench.prepareDelivery(sessionId, id, key), deliver: item => workbench.deliver(item),
     // Leader 模式目标的新请求先排上代判，再按代判后的可见请求刷新卡片。
     notify: (item, actorId) => { leaderMode.observe(item); return workbench.notify(item, actorId); },
     stepContext: (item, definition) => leaderMode.reviewContext(item, definition), answered: (workId, entry) => leaderMode.answered(workId, entry) });
-  setupCleanup.push(() => workItems.close());
+  lifecycle.register('workItems', () => workItems.close());
   const delegations = new LeaderDelegationService({ repositories: repos, runtime, work: workItems, authorizeAgent: authorizeWorkAgent,
     prepareDelivery: (sessionId, id, key) => workbench.prepareDelivery(sessionId, id, key), notice: (workId, text, key) => workbench.notice(workId, text, key),
     log: { warn: (details, message) => log.warn(details, message) } });
-  setupCleanup.push(() => delegations.close());
+  lifecycle.register('delegations', () => delegations.close());
   const authorizeSessionRequest = async (request: import('fastify').FastifyRequest | import('node:http').IncomingMessage, sessionId: string, boundary: 'session' | 'high_risk' | 'terminal', action: PolicyAction): Promise<PolicyDecision> =>
     authorizeLoadedSession(request, sessionId, await runtime.getSession(sessionId), boundary, action);
   /** List routes check every session per poll; one listSessions replaces a getSession per id. */
@@ -698,7 +584,6 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
     }
   };
   let app: Awaited<ReturnType<typeof buildApp>> | undefined;
-  let closeRun: Promise<void> | undefined;
   let closeWatch: (() => Promise<void>) | undefined;
   const relayBroker = new RelayAskBroker({
     async publish(sessionId, input) {
@@ -716,42 +601,23 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
   const leaderMode: LeaderModeService = new LeaderModeService({ repositories: repos, runtime, work: () => workItems, interactions: () => workInteractions, broker: relayBroker, authorizeAgent: authorizeWorkAgent, authorizeInteraction,
     resolveGroupConfig: (bot, chatId) => groupManager.resolved(bot, chatId),
     workspaceRoot: join(tmpdir(), 'dutydeck-leader', sha256Hex(resolve(config.databaseUrl)).slice(0, 16)), log: { warn: (details, message) => log.warn(details, message) } });
-  setupCleanup.push(() => leaderMode.close());
-  closeResources = () => {
-    if (!closeRun) closeRun = (async () => {
-      // 名字限定在 SHUTDOWN_PHASES 里，增删步骤时两边对不上会在编译期报错。
-      const phase = (name: ShutdownPhase, operation: () => unknown) => shutdownPhases.run(name, operation);
-      // 分析服务必须在任何并行关闭组之前显式 await：先拒新刷新、取消 queued/running
-      // 作业并等待 runner 退出与临时目录清理，再关闭 HTTP/runtime/repos。
-      await phase('insight', closeInsightService);
-      if (tokenRefresh) clearInterval(tokenRefresh);
-      clearInterval(shareSecretRefresh);
-      disposeShareSigner();
-      disposeTurnDiffSigner();
-      if (automationTimer) clearInterval(automationTimer);
-      if (collaborationTimer) clearInterval(collaborationTimer);
-      if (resourceRetentionTimer) clearInterval(resourceRetentionTimer);
-      historyRetention.abort();
-      await phase('historyRetention', () => historyRetentionRun);
-      const errors: unknown[] = [...insightCloseErrors];
-      const settle = async (operations: Array<[ShutdownPhase, () => unknown]>) => {
-        const results = await Promise.allSettled(operations.map(([name, operation]) => phase(name, operation)));
-        errors.push(...results.filter((result): result is PromiseRejectedResult => result.status === 'rejected').map(result => result.reason));
-      };
-      await settle([['watch', () => closeWatch?.()]]);
-      await settle([['pluginResults', closePluginResults]]);
-      await settle([['workbench', () => workbench.close()], ['workbenchHttp', () => workbenchHttp.close()], ['workItems', () => workItems.close()], ['delegations', () => delegations.close()], ['leaderMode', () => leaderMode.close()], ['automation', () => automation.close()], ['ciWebhook', () => ciWebhook?.close()], ['pullRequests', () => pullRequests.close()]]);
-      // Wake blocked asks before waiting for HTTP shutdown.
-      await settle([['relayClose', () => relayBroker.close()]]);
-      await settle([['collaboration', () => collaboration?.close()], ['relayFlush', () => relayBroker.flush()], ['http', () => app?.close()], ['runtime', () => runtime.shutdown()]]);
-      await settle([['capabilities', () => capabilities.close()]]);
-      await settle([['database', () => repos.close()]]);
-      await settle([['pluginDispose', () => pluginWiring?.dispose()]]);
-      log.info({ shutdownMs: shutdownPhases.durationsMs() }, '停服各阶段耗时');
-      if (errors.length) throw new AggregateError(errors, 'Dutydeck did not shut down cleanly');
-    })();
-    return closeRun;
-  };
+  lifecycle.register('leaderMode', () => leaderMode.close());
+  lifecycle.register('historyRetention', () => {
+    if (tokenRefresh) clearInterval(tokenRefresh);
+    clearInterval(shareSecretRefresh);
+    disposeShareSigner();
+    disposeTurnDiffSigner();
+    if (automationTimer) clearInterval(automationTimer);
+    if (collaborationTimer) clearInterval(collaborationTimer);
+    if (resourceRetentionTimer) clearInterval(resourceRetentionTimer);
+    historyRetention.abort();
+    return historyRetentionRun;
+  }, false);
+  lifecycle.register('relayClose', () => relayBroker.close(), false);
+  lifecycle.register('relayFlush', () => relayBroker.flush(), false);
+  lifecycle.register('watch', () => closeWatch?.(), false);
+  lifecycle.register('http', () => app?.close(), false);
+  lifecycle.assembledCore();
     collaboration = createCollaborationIntegration({ polishReply, repositories: repos, runtime, groups: groupManager,
       workspaceRoot: config.databaseUrl === ':memory:' ? join(tmpdir(), 'dutydeck-decisions') : join(dirname(resolve(config.databaseUrl)), 'decisions'),
       client: bot => createLarkCardService(env, workbenchHttp.fetch, bot), configureExtensions: options.configureCollaborationExtensions,
@@ -760,7 +626,7 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
         ?? await usageLedger.automaticRefusal(scope.appId),
       listeningDisabled: env.DUTYDECK_DISABLE_LARK_LISTENER === 'true', scenarios,
       log: { warn: (details, message) => log.warn(details, message) } });
-    setupCleanup.push(() => collaboration?.close());
+    lifecycle.register('collaboration', () => collaboration?.close(), false);
     automation.mandateCards = collaboration.mandateCards;
     startupPhase('integrations');
     await relayBroker.initialize();
@@ -1013,9 +879,9 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
       void timeLoop('collaboration.tick', loopLog, () => collaboration!.scheduler.tick()).catch(error => log.warn({ error }, '群委托轮询失败')); };
     collaborationTimer = setInterval(tickCollaboration, 5_000);
     collaborationTimer.unref(); tickCollaboration();
-  return { config, runtime, close: closeResources, shutdownPhases };
+  return { config, runtime, close: lifecycle.close, shutdownPhases: lifecycle.phases };
   } catch (error) {
-    try { await closeResources(); } catch (cleanupError) { throw new AggregateError([error, cleanupError], 'Dutydeck startup and cleanup failed'); }
+    try { await lifecycle.close(); } catch (cleanupError) { throw new AggregateError([error, cleanupError], 'Dutydeck startup and cleanup failed'); }
     throw error;
   }
 }
