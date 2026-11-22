@@ -689,6 +689,8 @@ export class LarkLongConnectionListener implements LarkListener {
 export interface LarkListenerPool {
   readonly listening: boolean;
   readonly activeAppIds: string[];
+  waitForReady?(appId: string): boolean | Promise<boolean>;
+  finishDiscovery?(): void;
   sync(configs: StoredLarkConfig[]): Promise<void>;
   stop(): void;
 }
@@ -706,6 +708,46 @@ export class LarkLongConnectionListenerPool implements LarkListenerPool {
   private readonly retries = new Map<string, LarkListenerRetry>();
   private syncTail: Promise<void> = Promise.resolve();
   private closed = false;
+
+  // A confirmation handler can be registered before inbound recovery finishes.
+  // Keep the admission state separate from the handler registry and the WebSocket status report.
+  private discovering = true;
+  private readonly readiness = new Map<string, 'starting' | 'ready'>();
+  private readonly waiters = new Set<() => void>();
+
+  finishDiscovery() {
+    this.discovering = false;
+    this.notifyWaiters();
+  }
+
+  private notifyWaiters() {
+    for (const check of this.waiters) check();
+  }
+
+  waitForReady(appId: string): boolean | Promise<boolean> {
+    const status = () => {
+      if (this.closed) return false;
+      const state = this.readiness.get(appId);
+      if (this.discovering || state === 'starting') return undefined;
+      return state === 'ready';
+    };
+    const immediate = status();
+    if (immediate !== undefined) return immediate;
+    return new Promise(resolve => {
+      const finish = (ready: boolean) => {
+        clearTimeout(timer);
+        this.waiters.delete(check);
+        resolve(ready);
+      };
+      const check = () => {
+        const ready = status();
+        if (ready !== undefined) finish(ready);
+      };
+      const timer = setTimeout(() => finish(false), 30_000);
+      timer.unref?.();
+      this.waiters.add(check);
+    });
+  }
 
   constructor(private readonly log: ListenerLog, private readonly options: LarkLongConnectionListenerOptions = {}) {}
 
@@ -729,6 +771,9 @@ export class LarkLongConnectionListenerPool implements LarkListenerPool {
     for (const retry of this.retries.values()) clearTimeout(retry.timer);
     this.retries.clear();
     const enabled = new Map(configs.filter(config => config.listening && larkExecutionConfirmed(config)).map(config => [config.appId, config]));
+    for (const appId of this.readiness.keys()) if (!enabled.has(appId)) this.readiness.delete(appId);
+    for (const appId of enabled.keys()) if (!this.readiness.has(appId)) this.readiness.set(appId, 'starting');
+    this.finishDiscovery();
     for (const [appId, listener] of this.listeners) {
       if (enabled.has(appId)) continue;
       await listener.disable();
@@ -755,15 +800,20 @@ export class LarkLongConnectionListenerPool implements LarkListenerPool {
     if (this.closed) return;
     const listener = this.listeners.get(appId) ?? this.createListener(appId);
     this.starting.add(listener);
+    this.readiness.set(appId, 'starting');
     try {
       await listener.start(config);
       if (this.closed) listener.stop();
-      else this.listeners.set(appId, listener);
+      else {
+        this.listeners.set(appId, listener);
+        this.readiness.set(appId, 'ready');
+      }
     } catch (error) {
       listener.stop();
       this.listeners.delete(appId);
+      this.readiness.delete(appId);
       throw error;
-    } finally { this.starting.delete(listener); }
+    } finally { this.starting.delete(listener); this.notifyWaiters(); }
   }
 
   private createListener(appId: string): LarkLongConnectionListener {
@@ -771,6 +821,7 @@ export class LarkLongConnectionListenerPool implements LarkListenerPool {
       if (this.listeners.get(appId) !== listener) return;
       listener.stop();
       this.listeners.delete(appId);
+      this.readiness.delete(appId);
       this.scheduleRetry(appId, 1, error);
       await this.publishStatus();
     }), () => void this.enqueue(() => this.publishStatus()));
@@ -827,6 +878,8 @@ export class LarkLongConnectionListenerPool implements LarkListenerPool {
 
   stop() {
     this.closed = true;
+    this.readiness.clear();
+    this.notifyWaiters();
     for (const listener of this.repairing) listener.stop();
     this.repairing.clear();
     for (const retry of this.retries.values()) clearTimeout(retry.timer);

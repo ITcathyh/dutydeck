@@ -311,7 +311,7 @@ export async function buildApp(runtime: DutydeckRuntime, options: BuildAppOption
     });
   }
   if (options.workItemTools) await registerWorkItemTools(app, options.workItemTools);
-  if (options.agentRequests) await registerAgentRequestTools(app, options.agentRequests);
+  if (options.agentRequests) await registerAgentRequestTools(app, { ...options.agentRequests, waitForListener: lark.waitForListener });
   if (options.memoryTools) await registerLarkMemoryTools(app, options.memoryTools);
   if (options.memoryTools) await registerLarkMemoryTurnRoutes(app, { store: options.memoryTools.store,
     authorize: (request, sessionId) => requireSessionExecution(request, sessionId, 'session', 'task.view_result') });
@@ -323,7 +323,7 @@ export async function buildApp(runtime: DutydeckRuntime, options: BuildAppOption
   // 无论是否提供 insight 选项都注册：缺 authorize/service 时由路由层 fail-closed，
   // 不依赖 service.ts 是否已接线，share 白名单也不包含分析路径。
   registerSessionInsightRoutes(app, options.insight);
-  if (options.turnDiffs) registerTurnDiffRoutes(app, runtime, { ...options.turnDiffs, getShareSecret: options.auth?.getShareSecret,
+  if (options.turnDiffs) registerTurnDiffRoutes(app, runtime, { ...options.turnDiffs, waitForListener: lark.waitForListener, getShareSecret: options.auth?.getShareSecret,
     authorize: (request, sessionId, action) => requireSessionExecution(request, sessionId, 'session', action) });
   await registerSystemRoutes(app, options.system);
   await mountLarkRoutes(app, larkOptions, lark);

@@ -13,7 +13,7 @@ export interface TurnDiffRouteOptions {
    * 只持有分享链接的人提交的行评论：在这一轮所在的飞书话题里发一张确认卡，有权限的人点了才交给 Agent。
    * no_origin：这一轮没有对应的飞书话题；unavailable：机器人没在监听或发卡失败。
    */
-  requestLarkReview?(review: TurnDiffReviewRequest): Promise<'sent' | 'no_origin' | 'unavailable'>;
+  requestLarkReview?(review: TurnDiffReviewRequest, waitForListener: (appId: string) => Promise<boolean>): Promise<'sent' | 'no_origin' | 'unavailable'>;
 }
 
 /** 分享链接上提交评论的频率：同一轮 10 分钟 3 次，整个服务 10 分钟 30 次。只记在内存里。 */
@@ -30,6 +30,7 @@ const titleOf = (prompt: string | undefined) => prompt?.trim().split('\n')[0]?.s
 export function registerTurnDiffRoutes(app: FastifyInstance, runtime: DutydeckRuntime, options: TurnDiffRouteOptions & {
   getShareSecret?(): Promise<string | null>;
   authorize(request: FastifyRequest, sessionId: string, action: PolicyAction): Promise<PolicyDecision | undefined>;
+  waitForListener?(appId: string): boolean | Promise<boolean>;
   now?: () => number;
 }) {
   const now = options.now ?? Date.now;
@@ -80,14 +81,14 @@ export function registerTurnDiffRoutes(app: FastifyInstance, runtime: DutydeckRu
   app.post<{ Params: { id: string; taskId: string } }>('/api/sessions/:id/tasks/:taskId/diff/comments', async (request, reply) => {
     const { id, taskId } = request.params;
     const { shared, decision } = await access(request, id, taskId, 'turn.append');
+    const reservation = { key: `${id}\0${taskId}`, at: now() };
     if (shared) {
-      const at = now();
+      const { key, at } = reservation;
       while (submissions.length && submissions[0]!.at <= at - REVIEW_WINDOW_MS) submissions.shift();
-      const key = `${id}\0${taskId}`;
       if (submissions.length >= REVIEW_TOTAL || submissions.filter(item => item.key === key).length >= REVIEW_PER_TURN) {
         throw new RuntimeError('TURN_DIFF_REVIEW_RATE_LIMITED', '提交太频繁了，请过几分钟再试', 429);
       }
-      submissions.push({ key, at });
+      submissions.push(reservation);
     }
     const body = turnDiffCommentsRequestSchema.parse(request.body ?? {});
     const { diff } = await load(id, taskId);
@@ -101,10 +102,19 @@ export function registerTurnDiffRoutes(app: FastifyInstance, runtime: DutydeckRu
       const task = await runtime.dispatch(id, prompt, 'queue', prompt, undefined, decision?.source === 'owner' ? installationOwnerTaskActor : undefined);
       return reply.code(202).send({ delivery: 'dispatched', task });
     }
-    if (!options.requestLarkReview) throw new RuntimeError('TURN_DIFF_REVIEW_UNAVAILABLE', '暂时不能转交评论，请登录 Web 后提交', 503);
-    const outcome = await options.requestLarkReview({ sessionId: id, taskId, comments, prompt });
+    const outcome = await options.requestLarkReview?.({ sessionId: id, taskId, comments, prompt }, async appId => {
+      const ready = options.waitForListener?.(appId) ?? true;
+      if (ready === true) return true;
+      if (!await ready) return false;
+      await access(request, id, taskId, 'turn.append');
+      return true;
+    });
     if (outcome === 'no_origin') throw new RuntimeError('TURN_DIFF_REVIEW_NO_TOPIC', '这一轮不是从飞书话题发起的，分享链接上的评论没有地方确认；请登录 Web 后提交', 409);
-    if (outcome !== 'sent') throw new RuntimeError('TURN_DIFF_REVIEW_UNAVAILABLE', '机器人暂时发不出确认卡，请稍后再试', 503);
+    if (outcome !== 'sent') {
+      const index = submissions.indexOf(reservation);
+      if (index >= 0) submissions.splice(index, 1);
+      throw new RuntimeError('TURN_DIFF_REVIEW_UNAVAILABLE', options.requestLarkReview ? '机器人暂时发不出确认卡，请稍后再试' : '暂时不能转交评论，请登录 Web 后提交', 503);
+    }
     return reply.code(202).send({ delivery: 'lark_confirmation' });
   });
 }

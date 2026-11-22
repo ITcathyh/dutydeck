@@ -1,3 +1,4 @@
+import { pendingListener } from './lark/listener-startup.test-helpers.js';
 import Fastify from 'fastify';
 import { ZodError } from 'zod';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -17,7 +18,7 @@ afterEach(async () => {
 
 const session = (id: string, sourceId: string): Session => ({ id, agentId: 'codex', state: 'idle', cwd: '/tmp', source: 'lark', sourceId, runId: 'run_1', createdAt: '', updatedAt: '' });
 
-async function setup() {
+async function setup(waitForListener?: (appId: string) => boolean | Promise<boolean>) {
   const repos = createRepositories(':memory:'); repositories.push(repos);
   const group = session('ses_group', 'cli_bot:oc_group:group');
   const p2p = session('ses_p2p', 'cli_bot:oc_p2p:p2p');
@@ -41,7 +42,7 @@ async function setup() {
     return { schedule: saved.get(id)! };
   });
   const prepareDelivery = vi.fn(async () => {});
-  const sendConfirmation = vi.fn(async () => {});
+  const sendConfirmation = vi.fn<AgentRequestToolsOptions['sendConfirmation']>(async () => {});
   const app = Fastify(); apps.push(app);
   // 与 app.ts 相同的错误映射。
   app.setErrorHandler((error, _request, reply) => {
@@ -59,7 +60,7 @@ async function setup() {
     const next = { ...old, ...fields, revision: old.revision + 1 };
     saved.set(id, next); return next;
   });
-  await registerAgentRequestTools(app, { runtime: { getActiveTaskContext: () => active }, automatedTask: taskId => automated.has(taskId), tools, automation: { requestSchedule, requestScheduleStop, listBySession, updateSchedule }, prepareDelivery, sendConfirmation });
+  await registerAgentRequestTools(app, { waitForListener, runtime: { getActiveTaskContext: () => active }, automatedTask: taskId => automated.has(taskId), tools, automation: { requestSchedule, requestScheduleStop, listBySession, updateSchedule }, prepareDelivery, sendConfirmation });
   const request = (target: Session, payload: object, turn = capabilities.workbenchTurnToken(target.id, active?.taskId ?? '', active?.attemptId ?? ''), path = 'schedules') => app.inject({
     method: 'POST', url: `/api/lark/agent-tools/${path}`, payload,
     headers: { authorization: `Bearer ${capabilities.environmentFor(target).dutydeck_group_tools_token}`, 'x-dutydeck-work-turn': turn }
@@ -393,4 +394,50 @@ it('rejects a dry-run create against an enabled recurring plan without mutating 
   const preview = await f.agent('POST', 'schedules', { prompt: '不能自动改动', name: '巡检', every: 30, dryRun: true });
   expect(preview.statusCode).toBe(409); expect(preview.json().error.code).toBe('MATTER_SCHEDULE_EXISTS');
   expect(f.saved.get(id)).toEqual(original); expect(f.requestSchedule).toHaveBeenCalledTimes(1);
+});
+
+
+describe('agent commands during listener startup', () => {
+  const paths = [
+    ['POST', 'commands', { command: '/status' }], ['POST', 'actions/retry', {}],
+    ['GET', 'views/status'], ['GET', 'settings'], ['POST', 'settings', { pairs: ['busyTriage=true'] }]
+  ] as const;
+  it.each(['ready', 'disabled', 'failed', 'timeout', 'expired turn'] as const)('%s', async outcome => {
+    const listener = await pendingListener(outcome === 'disabled');
+    try {
+      let allWaiting!: () => void;
+      const entered = new Promise<void>(resolve => { allWaiting = resolve; });
+      const wait = vi.fn((id: string) => {
+        if (wait.mock.calls.length === paths.length) allWaiting();
+        return listener.pool.waitForReady(id);
+      });
+      const f = await setup(wait);
+      const run = vi.fn(async () => ({ ok: true }));
+      // Handlers may already exist while recovery is pending, including a previous registration.
+      if (outcome !== 'ready') f.tools.commands.set('cli_bot', run, run, run);
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+      const responded = vi.fn();
+      const results = Promise.all(paths.map(([method, path, body]) => f.agent(method, path, body).then(r => { responded(); return r; })));
+      await Promise.race([entered, results]);
+      if (outcome !== 'disabled') {
+        expect(run).not.toHaveBeenCalled();
+        await vi.advanceTimersByTimeAsync(29_999);
+        expect(responded).not.toHaveBeenCalled();
+        expect(run).not.toHaveBeenCalled();
+      }
+      if (outcome === 'expired turn') f.setActive({ taskId: 'task_1', actorId: 'ou_alice', attemptId: 'attempt_2' });
+      if (outcome === 'ready') f.tools.commands.set('cli_bot', run, run, run);
+      if (outcome === 'failed') listener.fail();
+      if (outcome === 'ready' || outcome === 'expired turn') listener.finish();
+      if (outcome === 'timeout') await vi.advanceTimersByTimeAsync(1);
+      for (const result of await results) {
+        expect(result.statusCode).toBe(outcome === 'ready' ? 200 : outcome === 'expired turn' ? 403 : 503);
+        if (result.statusCode === 503) expect(result.json().error.code).toBe('AGENT_COMMAND_UNAVAILABLE');
+      }
+      listener.finish();
+      await new Promise<void>(resolve => setImmediate(resolve));
+      expect(run).toHaveBeenCalledTimes(outcome === 'ready' ? paths.length : 0);
+      expect(wait.mock.calls).toEqual(paths.map(() => ['cli_bot']));
+    } finally { vi.useRealTimers(); await listener.close(); }
+  });
 });

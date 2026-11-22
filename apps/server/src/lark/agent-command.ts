@@ -41,6 +41,9 @@ export type LarkAgentViewHandler = (request: LarkAgentViewRequest) => Promise<Re
 export interface LarkAgentSettingsRequest { sessionId: string; taskId: string; actorId: string; action: 'show' | 'set'; pairs?: string[]; dryRun?: boolean }
 export type LarkAgentSettingsHandler = (request: LarkAgentSettingsRequest) => Promise<Record<string, unknown>>;
 
+export const agentCommandUnavailable = (settings = false) => new RuntimeError('AGENT_COMMAND_UNAVAILABLE',
+  settings ? '这个机器人的飞书监听没有在运行，现在不能代办设置。' : '这个机器人的飞书监听没有在运行，现在不能代办命令。', 503);
+
 /** 各机器人的消息处理器在监听启动时登记；Agent 工具按会话所属的机器人转过去。 */
 export class LarkAgentCommands {
   private readonly handlers = new Map<string, { run: LarkAgentCommandHandler; view?: LarkAgentViewHandler; settings?: LarkAgentSettingsHandler }>();
@@ -49,17 +52,17 @@ export class LarkAgentCommands {
   has(appId: string) { return this.handlers.has(appId); }
   run(appId: string, request: LarkAgentCommandRequest) {
     const handler = this.handlers.get(appId)?.run;
-    if (!handler) throw new RuntimeError('AGENT_COMMAND_UNAVAILABLE', '这个机器人的飞书监听没有在运行，现在不能代办命令。', 503);
+    if (!handler) throw agentCommandUnavailable();
     return handler(request);
   }
   settings(appId: string, request: LarkAgentSettingsRequest) {
     const handler = this.handlers.get(appId)?.settings;
-    if (!handler) throw new RuntimeError('AGENT_COMMAND_UNAVAILABLE', '这个机器人的飞书监听没有在运行，现在不能代办设置。', 503);
+    if (!handler) throw agentCommandUnavailable(true);
     return handler(request);
   }
   view(appId: string, request: LarkAgentViewRequest) {
     const handler = this.handlers.get(appId)?.view;
-    if (!handler) throw new RuntimeError('AGENT_COMMAND_UNAVAILABLE', '这个机器人的飞书监听没有在运行，现在不能代办命令。', 503);
+    if (!handler) throw agentCommandUnavailable();
     return handler(request);
   }
 }

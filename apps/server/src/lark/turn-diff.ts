@@ -34,7 +34,7 @@ export function larkTurnDiffReviewBody(comments: TurnDiffReviewComment[]): strin
  * 在这一轮所在的飞书话题里发确认卡。话题按卡片映射找：先找就是这一轮的任务，找不到就用同一会话最近的一条；
  * 卡回复在结果卡下面（没有结果卡时回复过程卡或原消息）。
  */
-export async function requestLarkTurnDiffReview(deps: { configs: ConfigRepository; mappings: ChannelMappingRepository; confirmations?: Pick<LarkConfirmCards, 'request'> },
+export async function requestLarkTurnDiffReview(deps: { configs: ConfigRepository; mappings: ChannelMappingRepository; confirmations?: Pick<LarkConfirmCards, 'request'>; waitForListener?(appId: string): Promise<boolean> },
   review: TurnDiffReviewRequest): Promise<'sent' | 'no_origin' | 'unavailable'> {
   const candidates: Array<{ appId: string; externalId: string; saved: NonNullable<ReturnType<typeof parseOptionalCardTask>> }> = [];
   for (const bot of await readLarkConfigs(deps.configs)) {
@@ -45,7 +45,7 @@ export async function requestLarkTurnDiffReview(deps: { configs: ConfigRepositor
   }
   const origin = candidates.find(item => item.saved.runtime_task_id === review.taskId) ?? candidates.sort((left, right) => right.saved.started_at - left.saved.started_at)[0];
   if (!origin) return 'no_origin';
-  if (!deps.confirmations) return 'unavailable';
+  if (!deps.confirmations || deps.waitForListener && !await deps.waitForListener(origin.appId)) return 'unavailable';
   const { saved } = origin;
   try {
     const record = await deps.confirmations.request({
