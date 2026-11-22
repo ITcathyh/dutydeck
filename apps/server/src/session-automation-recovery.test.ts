@@ -335,7 +335,7 @@ describe('SessionAutomation independent-review regression fixes', () => {
     const task = h.dispatches[0]!;
     const actualKey = (await h.repositories.config.list!('session_automation/')).find(r => r.key.includes(task.id))!.key;
     const binding = JSON.parse((await h.repositories.config.get(actualKey))!);
-    await expect((h.service as unknown as {
+    await expect((h.service['scheduler'].store as unknown as {
       ensureTaskBinding(taskId: string, binding: unknown): Promise<void>;
     }).ensureTaskBinding(task.id, {
       ...binding,
