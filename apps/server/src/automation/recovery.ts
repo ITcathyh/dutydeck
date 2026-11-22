@@ -1,4 +1,4 @@
-import type { SessionAutomationService } from '../session-automation.js';
+import type { AutomationScheduler } from './scheduler.js';
 import {
   ciSubscriptionSchema,
   ciSubscriptionV2Schema,
@@ -44,7 +44,7 @@ interface ReconcileOutcome {
   message?: string;
 }
 
-type Dependencies = Pick<SessionAutomationService['scheduler'],
+type Dependencies = Pick<AutomationScheduler,
   'ci' | 'clock' | 'closed' | 'delivery' | 'isolate' | 'occurrences' | 'options' | 'store'>;
 
 export class AutomationRecovery {

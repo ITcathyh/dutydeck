@@ -1,4 +1,4 @@
-import type { SessionAutomationService } from '../session-automation.js';
+import type { AutomationScheduler } from './scheduler.js';
 import {
   cancelCiInputSchema,
   canonicalExecutionJson,
@@ -62,7 +62,7 @@ function normalizeRuns(runs: unknown, headSha: string, completedOnly = false): C
 export const sameHead = (resolved: CiHead, provider: string, repository: CiRepository, headSha: string) =>
   resolved.provider.id === provider && resolved.repository.slug.toLowerCase() === repository.slug.toLowerCase() && resolved.headSha === headSha;
 
-type Dependencies = Pick<SessionAutomationService['scheduler'],
+type Dependencies = Pick<AutomationScheduler,
   'clock' | 'delivery' | 'occurrences' | 'options' | 'ownerId' | 'store'>;
 
 export class AutomationCiPoll {

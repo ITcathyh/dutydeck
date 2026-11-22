@@ -1,4 +1,4 @@
-import type { SessionAutomationService } from '../session-automation.js';
+import type { AutomationScheduler } from './scheduler.js';
 import { z } from 'zod';
 import {
   canonicalExecutionJson,
@@ -125,7 +125,7 @@ export function acceptedActorId(label: AutomationTaskLabel, accepted: AcceptedTa
     : actualActor.kind === 'channel' ? actualActor.id : undefined;
 }
 
-type Dependencies = Pick<SessionAutomationService['scheduler'],
+type Dependencies = Pick<AutomationScheduler,
   'advanceSchedule' | 'ci' | 'clock' | 'closed' | 'delivery' | 'disableSchedule' | 'freshReservation'
   | 'hasPendingOccurrence' | 'materializeOccurrence' | 'options' | 'ownerId' | 'preconditions' | 'recovery'
   | 'store' | 'warn' | 'watchSession'>;

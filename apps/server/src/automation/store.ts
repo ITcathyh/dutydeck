@@ -1,4 +1,4 @@
-import type { SessionAutomationService } from '../session-automation.js';
+import type { AutomationScheduler } from './scheduler.js';
 import { z } from 'zod';
 import {
   canonicalExecutionJson,
@@ -339,7 +339,7 @@ function sameV2Binding(a: TaskBindingV2, b: TaskBindingV2) {
   return false;
 }
 
-type Dependencies = Pick<SessionAutomationService['scheduler'],
+type Dependencies = Pick<AutomationScheduler,
   'ci' | 'clock' | 'hasPendingOccurrence' | 'occurrences' | 'options' | 'preconditions'
   | 'retireFreshSessions' | 'service' | 'watchSession'>;
 

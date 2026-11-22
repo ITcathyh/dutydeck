@@ -1,4 +1,4 @@
-import type { SessionAutomationService } from '../session-automation.js';
+import type { AutomationScheduler } from './scheduler.js';
 import { z } from 'zod';
 import { defaultHighRiskPattern } from '../policy/high-risk.js';
 import {
@@ -62,7 +62,7 @@ function preconditionSummary(status: Pick<PreconditionStatus, 'outcome' | 'exitC
   return tail ? `${head}；输出：${tail}` : head;
 }
 
-type Dependencies = Pick<SessionAutomationService['scheduler'],
+type Dependencies = Pick<AutomationScheduler,
   'advanceSchedule' | 'clock' | 'closed' | 'disableSchedule' | 'occurrences' | 'options' | 'ownerId' | 'store'
   | 'warn'>;
 

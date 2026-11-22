@@ -1,4 +1,4 @@
-import type { SessionAutomationService } from '../session-automation.js';
+import type { AutomationScheduler } from './scheduler.js';
 import { z } from 'zod';
 import {
   canonicalExecutionJson,
@@ -74,7 +74,7 @@ function sameResult(a?: AttemptResultV1, b?: AttemptResultV1): boolean {
     && a.output.digest === b.output.digest;
 }
 
-type Dependencies = Pick<SessionAutomationService['scheduler'],
+type Dependencies = Pick<AutomationScheduler,
   'applyScheduleStops' | 'clock' | 'closed' | 'options' | 'store' | 'warn'>;
 
 export class AutomationDelivery {
