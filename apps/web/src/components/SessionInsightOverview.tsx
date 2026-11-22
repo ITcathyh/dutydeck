@@ -1,7 +1,8 @@
+import { insightQueryKeys, insightSummaryQuery } from '../queries';
 import { useMemo, useState } from 'react';
 import { useInfiniteQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import type { SessionInsightSummaryResponse, SummarySessionRow } from '@dutydeck/shared';
-import { insightApi, insightQueryKeys, type InsightSummaryFilters } from '../api';
+import { insightApi, type InsightSummaryFilters } from '../api';
 import { currentInstance } from '../instance';
 import { Badge, Banner, Button, EmptyState, Select, Spinner } from './primitives';
 import { formatDuration, freshnessLabels, refreshStateLabels } from './SessionInsightShared';
@@ -90,13 +91,7 @@ export function SessionInsightOverview({ onOpenSession, onCompare }: {
   }), [groupBy, usage, agentId, workspace, from, to, includeArchived]);
 
   const invalidDateRange = Boolean(from && to && from >= to);
-  const summary = useInfiniteQuery({
-    queryKey: insightQueryKeys.summary(instance, filters),
-    initialPageParam: undefined as string | undefined,
-    queryFn: ({ signal, pageParam }) => insightApi.summary({ ...filters, limit: 100, cursor: pageParam }, signal),
-    getNextPageParam: lastPage => lastPage.nextCursor ?? undefined,
-    enabled: !invalidDateRange
-  });
+  const summary = useInfiniteQuery({ ...insightSummaryQuery(instance, filters), enabled: !invalidDateRange });
 
   // 覆盖统计与分组覆盖完整候选集合（与行分页无关），取首页；会话行跨页拼接。
   const data: SessionInsightSummaryResponse | undefined = summary.data?.pages[0];
@@ -119,7 +114,7 @@ export function SessionInsightOverview({ onOpenSession, onCompare }: {
     return next;
   });
 
-  const invalidateSummary = () => void qc.invalidateQueries({ queryKey: ['insight', instance ?? null, 'summary'] });
+  const invalidateSummary = () => void qc.invalidateQueries({ queryKey: insightQueryKeys.summaries(instance) });
 
   // 有界逐行提交：所选会话逐个请求，服务端 429 时该行标队列满，其余继续，不做批处理任务。
   const batchAnalyze = useMutation({

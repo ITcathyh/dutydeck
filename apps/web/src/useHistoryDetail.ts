@@ -1,29 +1,20 @@
+import { historyDetailQuery, queryKeys } from './queries';
 import { useEffect } from 'react';
 import { onlineManager, useQuery, useQueryClient } from '@tanstack/react-query';
 import type { HistoryTurnSummary } from './api';
-import { loadTurnHistory } from './event-history';
 
 /** Only completed, server-backed turn details use this cache; live events keep their own lifetime. */
 export function useHistoryDetail(sessionId: string, summary: HistoryTurnSummary | undefined, enabled: boolean) {
   const client = useQueryClient();
   const reading = enabled && Boolean(summary);
   const first = summary?.firstSequence, last = summary?.lastSequence;
-  const query = useQuery({
-    queryKey: reading ? ['history-detail', sessionId, first, last] : ['history-detail-closed'],
-    queryFn: ({ signal }) => loadTurnHistory(sessionId, summary!, signal),
-    enabled: reading,
-    // A defined empty state also releases QueryObserver.lastQueryWithDefinedData.
-    initialData: reading ? undefined : [],
-    staleTime: Infinity,
-    // Offline details may be the only available copy. Explicitly release online cold details below.
-    gcTime: reading ? Infinity : 0
-  });
+  const query = useQuery(historyDetailQuery(sessionId, summary, reading));
 
   useEffect(() => {
     let disposed = false;
     const release = () => {
       if (!onlineManager.isOnline()) return;
-      for (const detail of client.getQueryCache().findAll({ queryKey: ['history-detail'] })) {
+      for (const detail of client.getQueryCache().findAll({ queryKey: queryKeys.allHistoryDetails() })) {
         if (detail.getObserversCount() === 0) client.removeQueries({ queryKey: detail.queryKey, exact: true });
       }
     };

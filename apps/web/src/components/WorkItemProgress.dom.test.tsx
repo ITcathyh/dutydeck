@@ -383,3 +383,15 @@ describe('WorkItemProgress 步骤耗时', () => {
     expect(stepItem('summary').textContent).not.toMatch(/已运行|用时/);
   });
 });
+
+it('refreshes cached child tasks when goal progress is reopened', async () => {
+  const item = goal();
+  item.steps[0].attempts[0].taskId = 'child-task';
+  const { qc } = mount([item]);
+  await waitFor(() => expect(api.tasks).toHaveBeenCalledWith('child/2'));
+  await waitFor(() => expect(qc.getQueryState(['tasks', 'child/2'])?.status).toBe('success'));
+  vi.mocked(api.tasks).mockClear();
+  await userEvent.click(screen.getByRole('button', { name: '收起目标：调查目标' }));
+  await userEvent.click(screen.getByRole('button', { name: '展开目标：调查目标' }));
+  await waitFor(() => expect(api.tasks).toHaveBeenCalledWith('child/2'));
+});

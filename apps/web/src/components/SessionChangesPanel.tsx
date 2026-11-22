@@ -1,13 +1,14 @@
+import { turnDiffsQuery } from '../queries';
 import { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { FileDiff } from 'lucide-react';
-import { api, type Session } from '../api';
+import { type Session } from '../api';
 import { Banner, Button, EmptyState, Spinner } from './primitives';
 import { TurnDiffContent } from './TurnDiffPage';
 import { isSessionActionDisabled } from './ui';
 
 export function SessionChangesPanel({ session, onBack }: { session: Session; onBack?(): void }) {
-  const turns = useQuery({ queryKey: ['turnDiffs', session.id], queryFn: () => api.turnDiffs(session.id), refetchInterval: 10_000 });
+  const turns = useQuery(turnDiffsQuery(session.id));
   const [selected, setSelected] = useState('');
   const items = [...turns.data ?? []].reverse();
   const taskId = items.some(item => item.taskId === selected) ? selected : items[0]?.taskId;

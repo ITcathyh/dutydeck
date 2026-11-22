@@ -1,3 +1,4 @@
+import { botPromptDiffQuery, botPromptHistoryQuery, botPromptShowQuery } from '../queries';
 import { useId, useState } from 'react';
 import { useMutation, useQuery } from '@tanstack/react-query';
 import { api, type LarkConfig } from '../api';
@@ -11,9 +12,9 @@ export function BotPromptHistory({ appId, revision, disabled, onRollback }: {
   const [open, setOpen] = useState(false);
   const [a, setA] = useState(0), [b, setB] = useState(0);
   const [confirm, setConfirm] = useState<number>();
-  const history = useQuery({ queryKey: ['bot-prompt-history', appId], queryFn: () => api.botPromptHistory(appId), enabled: open });
-  const diff = useQuery({ queryKey: ['bot-prompt-diff', appId, a, b], queryFn: () => api.botPromptDiff(appId, a, b), enabled: open && a > 0 && b > 0 });
-  const show = useQuery({ queryKey: ['bot-prompt-show', appId, b], queryFn: () => api.botPromptShow(appId, b), enabled: open && b > 0 });
+  const history = useQuery({ ...botPromptHistoryQuery(appId), enabled: open });
+  const diff = useQuery({ ...botPromptDiffQuery(appId, a, b), enabled: open && a > 0 && b > 0 });
+  const show = useQuery({ ...botPromptShowQuery(appId, b), enabled: open && b > 0 });
   const rollback = useMutation({ mutationFn: (version: number) => api.botPromptRollback(appId, version, revision), onSuccess: data => {
     onRollback(data); setConfirm(undefined); setOpen(false); void history.refetch();
   } });

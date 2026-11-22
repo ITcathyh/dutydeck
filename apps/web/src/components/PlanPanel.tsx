@@ -1,3 +1,4 @@
+import { planQuery, queryKeys } from '../queries';
 import { useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { ClipboardList } from 'lucide-react';
@@ -14,18 +15,18 @@ export function PlanPanel({ session, tasks }: { session: Session; tasks: Task[] 
   const [feedback, setFeedback] = useState('');
   const latest = tasks.reduce<Task | undefined>((last, task) => !last || Date.parse(task.createdAt) >= Date.parse(last.createdAt) ? task : last, undefined);
   const planning = Boolean(latest && /^\/plan(\s|$)/.test(latest.prompt.trim()));
-  const plan = useQuery({ queryKey: ['plan', session.id, latest?.id, latest?.status], queryFn: () => api.planState(session.id), enabled: planning && !session.archivedAt, retry: false });
+  const plan = useQuery({ ...planQuery(session.id, latest?.id, latest?.status), enabled: planning && !session.archivedAt });
   const decide = useMutation({
     mutationFn: ({ taskId, action }: { taskId: string; action: PlanAction }) => api.decidePlan(session.id, taskId, action, action === 'revise' ? feedback.trim() : undefined),
     onSuccess: (_result, { action }) => {
       setFeedback('');
       toastStore.push({ kind: 'success', key: `plan-${session.id}`, title: done[action] });
-      void qc.invalidateQueries({ queryKey: ['tasks', session.id] });
-      void qc.invalidateQueries({ queryKey: ['plan', session.id] });
+      void qc.invalidateQueries({ queryKey: queryKeys.tasks(session.id) });
+      void qc.invalidateQueries({ queryKey: queryKeys.sessionPlan(session.id) });
     },
     onError: error => {
       toastStore.push({ kind: 'error', key: `plan-${session.id}`, title: '计划没有处理成功', description: error.message });
-      void qc.invalidateQueries({ queryKey: ['plan', session.id] });
+      void qc.invalidateQueries({ queryKey: queryKeys.sessionPlan(session.id) });
     }
   });
   if (!planning || session.archivedAt || !plan.data) return plan.isError && !(plan.error instanceof ApiError && plan.error.status === 403) ? <p className="my-3 text-caption text-subtle">计划状态读取失败：{plan.error.message}</p> : null;

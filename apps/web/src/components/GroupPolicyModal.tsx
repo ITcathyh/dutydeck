@@ -1,3 +1,4 @@
+import { foundationCapabilitiesQuery, groupMatrixQuery, queryKeys, secretRefsQuery } from '../queries';
 import { useEffect, useState, type FormEvent, type ReactNode } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Bot, MessageSquare, Users, X } from 'lucide-react';
@@ -131,9 +132,9 @@ function SecretRefSelector({ bot, refs, writesEnabled, pending, error, conflict,
 
 export function GroupPolicyModal({ open, onClose }: { open: boolean; onClose(): void }) {
   const queryClient = useQueryClient();
-  const capabilities = useQuery({ queryKey: ['foundation-capabilities'], queryFn: foundationApi.capabilities, enabled: open, retry: false });
-  const matrix = useQuery({ queryKey: ['foundation-group-matrix'], queryFn: foundationApi.groupMatrix, enabled: open && capabilities.data?.repositoriesWired === true, retry: false });
-  const secretRefs = useQuery({ queryKey: ['foundation-secret-refs'], queryFn: foundationApi.secretRefs, enabled: open && capabilities.data?.repositoriesWired === true, retry: false });
+  const capabilities = useQuery({ ...foundationCapabilitiesQuery(), enabled: open });
+  const matrix = useQuery({ ...groupMatrixQuery(), enabled: open && capabilities.data?.repositoriesWired === true });
+  const secretRefs = useQuery({ ...secretRefsQuery(), enabled: open && capabilities.data?.repositoriesWired === true });
   const [draft, setDraft] = useState<Draft>();
   const [conflict, setConflict] = useState<GroupBinding>();
   const [botConflicts, setBotConflicts] = useState<Record<string, PublicChannelBotFoundation>>({});
@@ -148,7 +149,7 @@ export function GroupPolicyModal({ open, onClose }: { open: boolean; onClose(): 
         return { ...current, expectedRevision: result.revision };
       });
       setConflict(undefined);
-      await queryClient.invalidateQueries({ queryKey: ['foundation-group-matrix'] });
+      await queryClient.invalidateQueries({ queryKey: queryKeys.groupMatrix() });
     },
     onError: error => {
       if (error instanceof ApiError && error.code === 'FOUNDATION_REVISION_CONFLICT' && error.current) setConflict(error.current as GroupBinding);
@@ -156,7 +157,7 @@ export function GroupPolicyModal({ open, onClose }: { open: boolean; onClose(): 
   });
   const saveBotSecret = useMutation({
     mutationFn: ({ botId, expectedRevision, secretRefId }: { botId: string; expectedRevision: number; secretRefId?: string }) => foundationApi.updateChannelBot(botId, { expectedRevision, credentialRef: secretRefId ?? null }),
-    onSuccess: async (_value, variables) => { setBotConflicts(current => { const next = { ...current }; delete next[variables.botId]; return next; }); await Promise.all([queryClient.invalidateQueries({ queryKey: ['foundation-group-matrix'] }), queryClient.invalidateQueries({ queryKey: ['foundation-secret-refs'] })]); },
+    onSuccess: async (_value, variables) => { setBotConflicts(current => { const next = { ...current }; delete next[variables.botId]; return next; }); await Promise.all([queryClient.invalidateQueries({ queryKey: queryKeys.groupMatrix() }), queryClient.invalidateQueries({ queryKey: queryKeys.secretRefs() })]); },
     onError: (error, variables) => {
       if (error instanceof ApiError && error.code === 'FOUNDATION_REVISION_CONFLICT' && error.current) setBotConflicts(current => ({ ...current, [variables.botId]: error.current as PublicChannelBotFoundation }));
     }
@@ -167,7 +168,7 @@ export function GroupPolicyModal({ open, onClose }: { open: boolean; onClose(): 
       channelBotId,
       externalChatId
     }),
-    onSuccess: async () => { await queryClient.invalidateQueries({ queryKey: ['foundation-group-matrix'] }); }
+    onSuccess: async () => { await queryClient.invalidateQueries({ queryKey: queryKeys.groupMatrix() }); }
   });
   useEffect(() => { if (!open) { setDraft(undefined); setConflict(undefined); setBotConflicts({}); setCollaborationTarget(undefined); save.reset(); } }, [open]);
   const capability = capabilities.data;

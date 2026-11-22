@@ -1,3 +1,4 @@
+import { queryKeys } from './query-keys';
 import type { QueryClient } from '@tanstack/react-query';
 import { api, type DockEvent, type Session } from './api';
 import { applyStatusEvent } from './sse';
@@ -28,7 +29,7 @@ export function recordSessionStatusUpdates(client: QueryClient, session: Session
 // values. GET still owns list membership, run changes and unrelated metadata.
 export async function loadSessions(client: QueryClient, signal: AbortSignal): Promise<Session[]> {
   signal.throwIfAborted();
-  const before = new Map(client.getQueryData<Session[]>(['sessions'])?.map(session => [session.id, session]));
+  const before = new Map(client.getQueryData<Session[]>(queryKeys.sessions())?.map(session => [session.id, session]));
   let previous = before;
   const changes = new Map<string, Set<StatusField>>();
   const observe: StatusObserver = (session, fields) => {
@@ -42,7 +43,7 @@ export async function loadSessions(client: QueryClient, signal: AbortSignal): Pr
   inFlight.set(client, observers);
   // Model/effort mutation responses also write full sessions outside the stream.
   const unsubscribe = client.getQueryCache().subscribe(event => {
-    if (event.type !== 'updated' || event.action.type !== 'success' || !event.action.manual || event.query.queryKey.length !== 1 || event.query.queryKey[0] !== 'sessions') return;
+    if (event.type !== 'updated' || event.action.type !== 'success' || !event.action.manual || event.query.queryKey.length !== 1 || event.query.queryKey[0] !== queryKeys.sessions()[0]) return;
     const rows = event.query.state.data as Session[] | undefined;
     const next = new Map(rows?.map(session => [session.id, session]));
     for (const session of rows ?? []) {
@@ -66,7 +67,7 @@ export async function loadSessions(client: QueryClient, signal: AbortSignal): Pr
   try {
     const snapshot = await api.sessions(signal);
     signal.throwIfAborted();
-    const current = new Map(client.getQueryData<Session[]>(['sessions'])?.map(session => [session.id, session]));
+    const current = new Map(client.getQueryData<Session[]>(queryKeys.sessions())?.map(session => [session.id, session]));
     return snapshot.map(session => {
       const live = current.get(session.id);
       const fields = changes.get(session.id);

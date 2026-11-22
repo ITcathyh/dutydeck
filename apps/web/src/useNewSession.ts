@@ -1,3 +1,4 @@
+import { queryKeys } from './queries';
 import { useCallback, useRef, useState } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { api, type Agent, type PermissionMode, type Session, type Task } from './api';
@@ -68,8 +69,8 @@ export function useNewSession({ agents, initialAgentId, mode = 'task', onCreated
       return { session, task: result.task };
     },
     onSuccess: ({ session, task }, submitted) => {
-      void qc.invalidateQueries({ queryKey: ['sessions'] });
-      if (task) qc.setQueryData<Task[]>(['tasks', session.id], [task]);
+      void qc.invalidateQueries({ queryKey: queryKeys.sessions() });
+      if (task) qc.setQueryData<Task[]>(queryKeys.tasks(session.id), [task]);
       newSessionDrafts.delete(draftKey);
       setSaved({ ...submitted, goal: '', createdSession: undefined, sendOperation: undefined });
       if (task) onCreated?.(session, task);

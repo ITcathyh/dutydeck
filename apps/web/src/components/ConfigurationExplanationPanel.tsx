@@ -1,7 +1,7 @@
+import { configurationQuery } from '../queries';
 import { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import type { ConfigurationExplanation, ConfigurationField } from '@dutydeck/shared';
-import { configurationApi } from '../api';
 import { Button } from './primitives';
 
 const sourceLabels: Record<string, string> = { bot_default: '继承机器人默认', group_override: '群显式覆盖', group_clear: '群显式清空', unconfigured: '未配置', bot_ceiling: '机器人能力上限' };
@@ -19,7 +19,7 @@ export function ConfigurationExplanationPanel({ sessionId }: { sessionId: string
   const [open, setOpen] = useState(false);
   const [taskId, setTaskId] = useState('');
   const [attemptId, setAttemptId] = useState('');
-  const query = useQuery({ queryKey: ['configuration', sessionId, taskId, attemptId], queryFn: () => configurationApi.explain(sessionId, taskId || undefined, attemptId || undefined), enabled: open });
+  const query = useQuery({ ...configurationQuery(sessionId, taskId, attemptId), enabled: open });
   const task = query.data?.tasks.find(item => item.id === taskId);
   return <aside className="my-2 max-h-[60vh] overflow-auto rounded-lg bg-muted px-4 py-2" aria-label="配置来源">
     <Button variant="ghost" size="sm" aria-expanded={open} onClick={() => setOpen(value => !value)}>配置来源</Button>

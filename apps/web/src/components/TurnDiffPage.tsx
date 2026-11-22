@@ -1,3 +1,4 @@
+import { turnDiffQuery } from '../queries';
 import { Fragment, useEffect, useMemo, useState } from 'react';
 import { useMutation, useQuery } from '@tanstack/react-query';
 import { FileDiff, Link2Off, MessageSquarePlus } from 'lucide-react';
@@ -39,7 +40,7 @@ export function TurnDiffPage(props: { sessionId: string; taskId: string; shared:
 /** 和独立分享页复用同一份记录、鉴权与提交路径。草稿只存于当前浏览器。 */
 export function TurnDiffContent({ sessionId, taskId, shared, embedded = false, readOnly = false }: { sessionId: string; taskId: string; shared: boolean; embedded?: boolean; readOnly?: boolean }) {
   const Main = embedded ? 'div' : 'main';
-  const diff = useQuery({ queryKey: ['turnDiff', sessionId, taskId], queryFn: () => api.turnDiff(sessionId, taskId), retry: false });
+  const diff = useQuery(turnDiffQuery(sessionId, taskId));
   const draftKey = `dutydeck:diff-review:${currentInstance() ?? '@local'}:${sessionId}:${taskId}`;
   const viewedKey = `dutydeck:diff-viewed:${currentInstance() ?? '@local'}:${sessionId}:${taskId}`;
   const [drafts, setDrafts] = useState<Draft[]>(() => {

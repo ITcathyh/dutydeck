@@ -1,3 +1,4 @@
+import { queryKeys, sessionMemoryQuery } from '../queries';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api, type LarkTurnMemoryEntry, type Session } from '../api';
 import { toastStore } from '../useToasts';
@@ -10,11 +11,11 @@ const formatTurnTime = (iso: string) => new Date(iso).toLocaleString('zh-CN', { 
 /** 飞书任务每一轮注入了哪些记忆、新写入了哪些记忆；每条可一键删除，权限与服务端 /forget 同一道门。 */
 export function TurnMemoryPanel({ session }: { session: Session }) {
   const qc = useQueryClient();
-  const memory = useQuery({ queryKey: ['sessionMemory', session.id], queryFn: () => api.sessionMemory(session.id), refetchInterval: 5_000 });
+  const memory = useQuery(sessionMemoryQuery(session.id));
   const forget = useMutation({
     mutationFn: ({ taskId, memoryId }: { taskId: string; memoryId: string }) => api.forgetSessionMemory(session.id, taskId, memoryId),
     onSuccess: (_result, variables) => {
-      void qc.invalidateQueries({ queryKey: ['sessionMemory', session.id] });
+      void qc.invalidateQueries({ queryKey: queryKeys.sessionMemory(session.id) });
       toastStore.push({ kind: 'success', key: `forget-memory-${variables.memoryId}`, title: `已删除记忆 ${variables.memoryId}`, description: '之后的任务不再带上这条记忆。' });
     },
     onError: error => toastStore.push({ kind: 'error', key: 'forget-memory', title: '删除记忆失败', description: error.message })

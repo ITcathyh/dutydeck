@@ -1,5 +1,6 @@
+import { taskAuthorizationsQuery } from '../queries';
 import { useQuery } from '@tanstack/react-query';
-import { api, type Task, type TaskAuthorization } from '../api';
+import { type Task, type TaskAuthorization } from '../api';
 
 export function authorizationLabel(record: TaskAuthorization): string {
   if (record.via === 'participation_confirmed') return `确认人 ${record.actorOpenId ?? '未记录'}${record.decisionId ? `（判断记录 ${record.decisionId}）` : ''}`;
@@ -11,7 +12,7 @@ export function authorizationLabel(record: TaskAuthorization): string {
 }
 
 export function TaskAuthorizationPanel({ sessionId, tasks }: { sessionId: string; tasks: Task[] }) {
-  const records = useQuery({ queryKey: ['taskAuthorizations', sessionId, tasks.map(task => task.id).join(',')], queryFn: () => api.taskAuthorizations(sessionId), refetchInterval: 5_000 });
+  const records = useQuery(taskAuthorizationsQuery(sessionId, tasks.map(task => task.id).join(',')));
   if (records.isError) return <p className="text-caption text-secondary">依据：暂时无法读取。</p>;
   if (!records.data?.length) return null;
   const latestTask = tasks.at(-1);

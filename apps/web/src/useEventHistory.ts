@@ -1,25 +1,11 @@
+import { eventsQuery } from './queries';
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { api, type DockEvent, type HistoryTurnPlace } from './api';
-import { HISTORY_TURN_PAGE_SIZE, loadHistoryRange, loadProjectedHistory, mergeReconciledEvents, type EventWindow } from './event-history';
-
-/** The outline query shared by the timeline read and a session link that starts it early. */
-export const historyOutlineQuery = (sessionId: string | undefined, tail?: number) => ({
-  queryKey: tail ? ['history-outline', sessionId, { tail }] : ['history-outline', sessionId],
-  queryFn: ({ signal }: { signal: AbortSignal }) => api.sessionHistory(sessionId!, signal, tail ? { tail } : undefined),
-  staleTime: 30_000
-});
-
-/** One page of earlier turn summaries, aligned to HISTORY_TURN_PAGE_SIZE so every reader shares the cached read. */
-export const historyPageQuery = (sessionId: string, places: HistoryTurnPlace[], page: number) => {
-  const start = page * HISTORY_TURN_PAGE_SIZE, end = Math.min(places.length, start + HISTORY_TURN_PAGE_SIZE) - 1;
-  const from = places[start]![1], through = places[end]![2];
-  return { queryKey: ['history-page', sessionId, from, through], queryFn: ({ signal }: { signal: AbortSignal }) => api.sessionHistoryTurns(sessionId, from, through, signal), staleTime: Infinity };
-};
+import { useQuery } from '@tanstack/react-query';
+import { api, type DockEvent } from './api';
+import { loadHistoryRange } from './event-history';
 
 /** `tail` reads summaries of only the newest completed turns plus every turn's place; earlier summaries load per page. */
 export function useEventHistory(sessionId: string | undefined, enabled: boolean, tail?: number) {
-  const qc = useQueryClient();
   const rawRequest = useRef<AbortController | undefined>(undefined);
   const [rawEvents, setRawEvents] = useState<DockEvent[]>();
   const [loadingRaw, setLoadingRaw] = useState(false);
@@ -28,13 +14,7 @@ export function useEventHistory(sessionId: string | undefined, enabled: boolean,
     setRawEvents(undefined); setRawError(undefined); setLoadingRaw(false);
     return () => { rawRequest.current?.abort(); rawRequest.current = undefined; };
   }, [sessionId]);
-  const query = useQuery({ queryKey: ['events', sessionId], queryFn: async ({ signal }) => {
-    const outline = await qc.fetchQuery(historyOutlineQuery(sessionId, tail));
-    signal.throwIfAborted();
-    const next = await loadProjectedHistory(sessionId!, outline, signal);
-    const cached = qc.getQueryData<EventWindow>(['events', sessionId]);
-    return cached ? { ...mergeReconciledEvents({ ...cached, events: cached.events.filter(event => event.sequence > outline.liveAfter) }, next.events), outline, highWaterMark: next.highWaterMark } : next;
-  }, enabled: enabled && Boolean(sessionId), staleTime: Infinity, structuralSharing: false });
+  const query = useQuery({ ...eventsQuery(sessionId, tail), enabled: enabled && Boolean(sessionId) });
   const loadAll = useCallback(async () => {
     if (!sessionId || rawRequest.current) return;
     const controller = new AbortController(); rawRequest.current = controller;

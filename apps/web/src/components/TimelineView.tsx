@@ -1,3 +1,4 @@
+import { historyPageQuery, tasksQuery } from '../queries';
 import { ArrowDown, MessageSquare } from 'lucide-react';
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState, useContext, type ReactNode } from 'react';
 import { flushSync } from 'react-dom';
@@ -9,13 +10,12 @@ import { TimelineDisclosureContext } from '../timeline-disclosure';
 import { getTimelineReadingState, saveTimelineReadingState, type TimelineReadingAnchor } from '../timeline-reading-state';
 import { TimelineItem, TimelineTimestamp } from './TimelineItem';
 import { useQuery } from '@tanstack/react-query';
-import { api, type DockEvent, type HistoryTurnPlace, type HistoryTurnSummary } from '../api';
+import { type DockEvent, type HistoryTurnPlace, type HistoryTurnSummary } from '../api';
 import { HISTORY_TURN_PAGE_SIZE } from '../event-history';
 import { useHistoryDetail } from '../useHistoryDetail';
 import { buildTimelineSections, createTimelineProjector } from '../timeline';
 import { useTimelineDisclosure } from '../timeline-disclosure';
 import { MarkdownContent } from '../MarkdownContent';
-import { historyPageQuery } from '../useEventHistory';
 import { ShareTurn, type EarlierPlace } from './ShareTurn';
 import { liveTurnFacts, turnMomentWidth } from '../share-view';
 
@@ -410,7 +410,7 @@ function HistoryTurn({ sessionId, summary, activeOutputLabel, requestedSource }:
   useEffect(() => { if (requested) setOpen(true); }, [requestedSource]);
   const detail = useHistoryDetail(sessionId, summary, open);
   const projector = useMemo(() => createTimelineProjector(), [summary.id, open]);
-  const tasks = useQuery({ queryKey: ['tasks', sessionId], queryFn: () => api.tasks(sessionId), enabled: open, staleTime: Infinity });
+  const tasks = useQuery({ ...tasksQuery(sessionId), enabled: open });
   const { timeline } = useMemo(() => projector(detail.data ?? [], []), [projector, detail.data]);
   const timelineSections = useMemo(() => buildTimelineSections(timeline, tasks.data ?? [], false), [timeline, tasks.data]);
   const disclosures = useContext(TimelineDisclosureContext);

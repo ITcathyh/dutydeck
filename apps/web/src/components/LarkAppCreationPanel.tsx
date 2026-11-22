@@ -1,3 +1,4 @@
+import { appCreationFinished, appCreationQuery, queryKeys } from '../queries';
 import { useEffect, useRef, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { ExternalLink, QrCode } from 'lucide-react';
@@ -13,7 +14,6 @@ const legacyKey = 'dutydeck:lark-app-creation';
 const pendingKey = () => `${legacyKey}:${instanceHomePath(currentInstance())}`;
 type CreationRequest = { requestId: string; name: string; forceLogin?: boolean };
 type PendingRequest = CreationRequest & { legacy?: boolean };
-const terminal = (job?: LarkAppCreationJob) => Boolean(job && ['completed', 'pending_review', 'failed', 'cancelled'].includes(job.status));
 
 function readPending(key: string): CreationRequest | undefined {
   try {
@@ -47,17 +47,11 @@ export function LarkAppCreationPanel({ onCreated, onBusyChange }: {
   const [forceLogin, setForceLogin] = useState(false);
   const completedId = useRef('');
   const update = async (job: LarkAppCreationJob) => {
-    await qc.cancelQueries({ queryKey: ['lark-app-creation', job.id] });
-    qc.setQueryData(['lark-app-creation', job.id], job);
+    await qc.cancelQueries({ queryKey: queryKeys.appCreation(job.id) });
+    qc.setQueryData(queryKeys.appCreation(job.id), job);
   };
   const start = useMutation({ mutationFn: api.createLarkApp, onSuccess: update });
-  const job = useQuery({
-    queryKey: ['lark-app-creation', request?.requestId],
-    queryFn: () => api.larkAppCreationJob(request!.requestId),
-    enabled: Boolean(request) && !start.isPending,
-    retry: false,
-    refetchInterval: query => terminal(query.state.data) ? false : 1_000,
-  });
+  const job = useQuery({ ...appCreationQuery(request?.requestId), enabled: Boolean(request) && !start.isPending });
   const action = useMutation({
     mutationFn: (kind: 'cancel' | 'retry' | 'retry-login') => kind === 'cancel'
       ? api.cancelLarkAppCreation(request!.requestId)
@@ -74,7 +68,7 @@ export function LarkAppCreationPanel({ onCreated, onBusyChange }: {
   const state = job.data;
   const missing = job.error instanceof ApiError && job.error.status === 404;
   // An old shared record is not this instance's until this instance reports the job.
-  const busy = start.isPending || action.isPending || finish.isPending || Boolean(request && (!request.legacy || state) && !terminal(state));
+  const busy = start.isPending || action.isPending || finish.isPending || Boolean(request && (!request.legacy || state) && !appCreationFinished(state));
   useEffect(() => { onBusyChange(busy); }, [busy, onBusyChange]);
   useEffect(() => {
     if (!request?.legacy || !state) return;
@@ -129,7 +123,7 @@ export function LarkAppCreationPanel({ onCreated, onBusyChange }: {
         : request.legacy
           ? <Banner tone="warning">这条未完成的创建记录来自旧版页面，当前实例查不到它，可能是在其他实例发起的，请到发起它的实例查看进度。放弃只清除本页记录，不会取消或重新发起创建。<Button variant="ghost" onClick={reset}>放弃此记录</Button></Banner>
           : <Banner tone="warning">当前实例没有这次创建的记录，请求可能没有送达。可以用同一请求重新提交，或放弃此记录后重新创建。<Button variant="ghost" loading={start.isPending} onClick={() => submit(request)}>重新提交本次创建</Button><Button variant="ghost" onClick={reset}>放弃此记录</Button></Banner>)}
-      {job.error && state && !terminal(state) && <Banner tone="warning">读取进度失败，正在重新连接；创建任务可能仍在进行。</Banner>}
+      {job.error && state && !appCreationFinished(state) && <Banner tone="warning">读取进度失败，正在重新连接；创建任务可能仍在进行。</Banner>}
       {error && <Banner tone="danger">{error.message}</Banner>}
       <div className="flex flex-wrap gap-2">
         {state && ['preparing', 'waiting_for_scan'].includes(state.status) && <Button loading={action.isPending} onClick={() => action.mutate('cancel')}>取消创建</Button>}

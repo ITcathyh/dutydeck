@@ -1,3 +1,4 @@
+import { queryKeys } from '../queries';
 import { useEffect, useMemo, useState } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { sessionWorkspaceDirectory, workspaceName, WORKSPACE_GROUP_NAME_MAX_LENGTH } from '@dutydeck/shared';
@@ -18,7 +19,7 @@ export type WorkspaceGroupsModalProps = {
   onRetry(): void;
 };
 
-const QUERY_KEY = ['workspace-groups'];
+const QUERY_KEY = queryKeys.workspaceGroups();
 
 /** 改名草稿独立存放：snapshot 每 15s 刷新，不能把用户正在输入的名字冲掉。 */
 function GroupRenameRow({ groupId, name, busy, onRename, onDelete }: {

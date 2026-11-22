@@ -1,10 +1,10 @@
+import { insightCompareQuery } from '../queries';
 import { useQuery } from '@tanstack/react-query';
 import type {
   Metric,
   SessionInsightCompareResponse,
   SessionInsightSummary
 } from '@dutydeck/shared';
-import { insightApi, insightQueryKeys } from '../api';
 import { currentInstance } from '../instance';
 import { Banner, Button, Spinner } from './primitives';
 import {
@@ -164,10 +164,7 @@ function CoverageComparison({ data }: { data: SessionInsightCompareResponse }) {
  */
 export function SessionInsightCompare({ left, right, onClose, onExport, exporting }: SessionInsightCompareProps) {
   const instance = currentInstance();
-  const compare = useQuery({
-    queryKey: insightQueryKeys.compare(instance, { left, right }),
-    queryFn: ({ signal }) => insightApi.compare({ left, right }, signal)
-  });
+  const compare = useQuery(insightCompareQuery(instance, { left, right }));
 
   if (compare.isPending) return <div className="space-y-3"><Spinner label="正在读取固定快照对比…"/><Button variant="secondary" onClick={onClose}>关闭</Button></div>;
   if (compare.isError) return <div className="space-y-3">

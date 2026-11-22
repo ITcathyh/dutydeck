@@ -1,7 +1,6 @@
+import { automationHistoryQuery } from '../queries';
 import { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
-import { currentInstance } from '../instance';
-import { api } from '../api';
 import { automationRunPath } from '../app-route';
 import { Button, Spinner, Banner } from './primitives';
 import { automationTime, occurrenceRunLabel } from './automation-display';
@@ -11,7 +10,7 @@ export { automationTime } from './automation-display';
 
 export function AutomationHistory({ sessionId, scheduleId, timezone }: { sessionId: string; scheduleId: string; timezone: string }) {
   const [offset, setOffset] = useState(0);
-  const history = useQuery({ queryKey: ['automation-history', currentInstance() ?? null, sessionId, scheduleId, offset], queryFn: () => api.automationHistory(sessionId, scheduleId, offset), retry: false });
+  const history = useQuery(automationHistoryQuery(sessionId, scheduleId, offset));
   return <div className="mt-3 space-y-2">
     {history.isPending && <Spinner label="读取此计划的历史"/>}
     {history.isError && <Banner tone="danger" action={{ label: '重试', onClick: () => void history.refetch() }}>此计划历史读取失败，不能确认是否有记录：{history.error.message}</Banner>}

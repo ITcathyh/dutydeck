@@ -23,17 +23,7 @@ import { instanceApiUrl } from '../instance';
 export type InsightEventFilters = Pick<SessionInsightEventsQuery, 'kind' | 'tool' | 'result'> & { cursor?: string; limit?: number };
 export type InsightSummaryFilters = Partial<Omit<SessionInsightSummaryQuery, 'cursor'>> & { cursor?: string };
 
-/** React Query key 统一工厂：实例、session、snapshot、筛选项全部进 key，实例切换不串缓存。 */
-export const insightQueryKeys = {
-  details: (instance: string | undefined, sessionId: string, snapshotId?: string | null) =>
-    ['insight', instance ?? null, 'details', sessionId, snapshotId ?? null] as const,
-  events: (instance: string | undefined, sessionId: string, snapshotId: string, filters: InsightEventFilters) =>
-    ['insight', instance ?? null, 'events', sessionId, snapshotId, filters] as const,
-  summary: (instance: string | undefined, filters: InsightSummaryFilters) =>
-    ['insight', instance ?? null, 'summary', filters] as const,
-  compare: (instance: string | undefined, request: SessionInsightCompareRequest | null) =>
-    ['insight', instance ?? null, 'compare', request] as const
-};
+export { insightQueryKeys } from '../query-keys';
 
 const insightEventsUrl = (sessionId: string, query: { snapshotId: string } & InsightEventFilters) => {
   const params = new URLSearchParams();

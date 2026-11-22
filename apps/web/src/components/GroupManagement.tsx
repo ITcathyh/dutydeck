@@ -1,3 +1,4 @@
+import { agentModelsQuery, collaborationQuery, groupMembersQuery, larkConfigQuery, managementGroupsQuery, queryKeys, systemCapabilitiesQuery } from '../queries';
 import { useState, useMemo, useEffect, useRef } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
@@ -16,7 +17,6 @@ import {
   ApiError,
   collaborationApi,
   type Agent,
-  type CollaborationOverview,
   type CollaborationSettings,
   type LarkBotConfig,
   type ManagedGroupBot,
@@ -35,7 +35,6 @@ import { DirectoryPicker } from './DirectoryPicker';
 import { CollaborationPanel } from './CollaborationPanel';
 import { useDraftStore, type GroupAccessMode, type GroupBotDraft, type PresentationToggle } from '../draft-store';
 import { toastStore } from '../useToasts';
-import { agentModelsQueryKey, loadAgentModels, readCachedAgentModels } from '../model-cache';
 
 export type GroupManagementProps = {
   selectedChatId?: string;
@@ -298,25 +297,13 @@ export function GroupManagement({
   }, [selectedAppId]);
 
   // 拉取全部 Managed Groups
-  const groupsQuery = useQuery({
-    queryKey: ['lark-management-groups'],
-    queryFn: api.managementGroups,
-    staleTime: 15_000
-  });
+  const groupsQuery = useQuery(managementGroupsQuery());
 
   // 拉取全部 Bot 配置，用于获得 Bot 默认值与 Label
-  const larkConfig = useQuery({
-    queryKey: ['lark-config'],
-    queryFn: api.larkConfig,
-    staleTime: 30_000
-  });
+  const larkConfig = useQuery(larkConfigQuery());
 
   // 原生目录对话框只在 macOS 可用；Linux 上按真实能力隐藏。
-  const systemCapabilities = useQuery({
-    queryKey: ['system-capabilities'],
-    queryFn: api.systemCapabilities,
-    staleTime: Infinity
-  });
+  const systemCapabilities = useQuery(systemCapabilitiesQuery());
 
   const botsMap = useMemo(() => {
     const map = new Map<string, LarkBotConfig>();
@@ -422,23 +409,7 @@ export function GroupManagement({
     否则用户切到「仅指定成员」会面对一个空下拉，只能手打 principal_ 开头的不透明 ID。
   */
   const needsMembers = rolesOpen || currentDraft?.accessMode === 'allowlist';
-  const membersQuery = useQuery({
-    queryKey: ['lark-group-members', editingAppId, activeChatId],
-    queryFn: async () => {
-      const members = [];
-      let pageToken: string | undefined;
-      const seen = new Set<string>();
-      do {
-        const page = await api.groupMembers(editingAppId!, activeChatId!, pageToken);
-        members.push(...page.members);
-        if (!page.hasMore) return { members };
-        if (!page.pageToken || seen.has(page.pageToken)) throw new Error('群成员列表未完整返回，请重试。');
-        pageToken = page.pageToken; seen.add(pageToken);
-      } while (true);
-    },
-    enabled: Boolean(editingAppId && activeChatId && needsMembers),
-    staleTime: 60_000
-  });
+  const membersQuery = useQuery({ ...groupMembersQuery(editingAppId, activeChatId), enabled: Boolean(editingAppId && activeChatId && needsMembers) });
   const members = membersQuery.data?.members ?? [];
   const memberName = (principalId: string) => members.find(m => m.principalId === principalId)?.name ?? principalId;
 
@@ -447,13 +418,7 @@ export function GroupManagement({
     ? currentDraft.agentValue
     : (editingAppId ? botsMap.get(editingAppId)?.defaultAgentId : '');
 
-  const agentOptions = useQuery({
-    queryKey: agentModelsQueryKey(effectiveAgentId, currentDraft?.modelMode === 'set' ? currentDraft.modelValue : undefined),
-    queryFn: () => loadAgentModels(effectiveAgentId!, currentDraft?.modelMode === 'set' ? currentDraft.modelValue : undefined),
-    enabled: Boolean(effectiveAgentId),
-    initialData: () => effectiveAgentId ? readCachedAgentModels(effectiveAgentId, currentDraft?.modelMode === 'set' ? currentDraft.modelValue : undefined) : undefined,
-    staleTime: 5 * 60_000
-  });
+  const agentOptions = useQuery({ ...agentModelsQuery(effectiveAgentId, currentDraft?.modelMode === 'set' ? currentDraft.modelValue : undefined), enabled: Boolean(effectiveAgentId) });
 
   /*
     保存群内某个 Bot 的设置。
@@ -542,7 +507,7 @@ export function GroupManagement({
         });
         setGroupBotConflict(key, undefined);
       }
-      void qc.invalidateQueries({ queryKey: ['lark-management-groups'] });
+      void qc.invalidateQueries({ queryKey: queryKeys.managementGroups() });
       if (!result) return;
       toastStore.push({
         kind: result.applied ? 'success' : 'info',
@@ -606,8 +571,8 @@ export function GroupManagement({
     },
     onSuccess: async ({ total, failures }, { appIds, automatic }) => {
       // 无论成败都刷新一次：成功的那几个 Bot 的群必须立刻可见。
-      await qc.cancelQueries({ queryKey: ['lark-management-groups'] });
-      await qc.invalidateQueries({ queryKey: ['lark-management-groups'] });
+      await qc.cancelQueries({ queryKey: queryKeys.managementGroups() });
+      await qc.invalidateQueries({ queryKey: queryKeys.managementGroups() });
       setSyncFailures(previous => [...previous.filter(failure => !appIds.includes(failure.appId)), ...failures]);
       if (failures.length === 0) {
         if (automatic) return;
@@ -687,12 +652,7 @@ export function GroupManagement({
     本群参与强度：一个选项同时写群级唤醒方式覆盖和本群参与模式，选后立即生效。
     两个底层字段仍可在「提及唤醒规则」和下方协作设置里分别调整。与协作面板共用同一份概览查询。
   */
-  const levelOverviewQuery = useQuery<CollaborationOverview>({
-    queryKey: ['collaboration-overview', editingAppId, activeChatId],
-    queryFn: () => collaborationApi.getOverview(editingAppId!, activeChatId!),
-    enabled: Boolean(editingAppId && activeChatId),
-    retry: false
-  });
+  const levelOverviewQuery = useQuery({ ...collaborationQuery(editingAppId, activeChatId), enabled: Boolean(editingAppId && activeChatId) });
   const groupSettings = levelOverviewQuery.data?.snapshot.settings;
   const botDefaultLevel = resolveParticipation({ mentionPolicy: botConfig?.mentionPolicy, participation: botConfig?.defaultGroupParticipation }).level;
   const groupLevelValue: ParticipationLevel | 'inherit' | '' = !groupSettings || !activeBotEntry ? ''
@@ -721,16 +681,16 @@ export function GroupManagement({
       }
     },
     onSuccess: (_result, variables) => {
-      void qc.invalidateQueries({ queryKey: ['lark-management-groups'] });
-      void qc.invalidateQueries({ queryKey: ['collaboration-overview', variables.appId, variables.chatId] });
+      void qc.invalidateQueries({ queryKey: queryKeys.managementGroups() });
+      void qc.invalidateQueries({ queryKey: queryKeys.collaboration(variables.appId, variables.chatId) });
       showLevelSuccess(variables);
     },
     onError: async (failure: unknown, variables) => {
       const { cause, routingSaved } = failure as { cause: unknown; routingSaved: boolean };
       const message = cause instanceof Error ? cause.message : String(cause);
       if (!routingSaved) {
-        void qc.invalidateQueries({ queryKey: ['lark-management-groups'] });
-        void qc.invalidateQueries({ queryKey: ['collaboration-overview', variables.appId, variables.chatId] });
+        void qc.invalidateQueries({ queryKey: queryKeys.managementGroups() });
+        void qc.invalidateQueries({ queryKey: queryKeys.collaboration(variables.appId, variables.chatId) });
         toastStore.push({ kind: 'error', key: `level-${variables.appId}-${variables.chatId}`, title: '接话方式没有改成', description: message });
         return;
       }
@@ -739,8 +699,8 @@ export function GroupManagement({
           api.managementGroups(),
           collaborationApi.getOverview(variables.appId, variables.chatId)
         ]);
-        qc.setQueryData(['lark-management-groups'], latestGroups);
-        qc.setQueryData(['collaboration-overview', variables.appId, variables.chatId], latestOverview);
+        qc.setQueryData(queryKeys.managementGroups(), latestGroups);
+        qc.setQueryData(queryKeys.collaboration(variables.appId, variables.chatId), latestOverview);
         const group = latestGroups.groups.find(item => variables.groupKey ? item.key === variables.groupKey : item.chatId === variables.chatId && item.bots.some(bot => bot.appId === variables.appId));
         const entry = group?.bots.find(bot => bot.appId === variables.appId);
         const settings = latestOverview.snapshot.settings;

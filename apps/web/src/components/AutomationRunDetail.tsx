@@ -1,7 +1,8 @@
+import { automationRunQuery, sessionQuery, tasksQuery } from '../queries';
 import { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { currentInstance } from '../instance';
-import { api, ApiError } from '../api';
+import { ApiError } from '../api';
 import { sessionPath } from '../app-route';
 import { MarkdownContent } from '../MarkdownContent';
 import { copyToClipboard } from '../clipboard';
@@ -15,11 +16,11 @@ const blockLabels: Record<string, string> = { reconcile_required: '原始执行�
 const deliveryLabels: Record<string, string> = { not_requested: '无需对外投递', pending: '等待投递', sending: '正在投递', delivered: '已确认投递', error: '投递失败，等待安全重试', unknown: '投递结果未知，需核对', suppressed: '未投递' };
 
 export function AutomationRunDetail({ sessionId, scheduleId, occurrenceId }: { sessionId: string; scheduleId: string; occurrenceId: string }) {
-  const detail = useQuery({ queryKey: ['automation-run', currentInstance() ?? null, sessionId, scheduleId, occurrenceId], queryFn: () => api.automationRun(sessionId, scheduleId, occurrenceId), retry: false, refetchInterval: query => query.state.error ? false : 10_000 });
+  const detail = useQuery(automationRunQuery(sessionId, scheduleId, occurrenceId));
   const executionId = detail.data?.executionSessionId;
   const needsRecovery = detail.data?.occurrence.runStatus === 'blocked';
-  const session = useQuery({ queryKey: ['session', currentInstance() ?? null, executionId], queryFn: () => api.session(executionId!), enabled: Boolean(executionId) && needsRecovery, retry: false });
-  const tasks = useQuery({ queryKey: ['tasks', currentInstance() ?? null, executionId], queryFn: () => api.tasks(executionId!), enabled: Boolean(executionId) && needsRecovery, retry: false });
+  const session = useQuery({ ...sessionQuery(currentInstance() ?? null, executionId), enabled: Boolean(executionId) && needsRecovery });
+  const tasks = useQuery({ ...tasksQuery(executionId, { instance: currentInstance() ?? null }), enabled: Boolean(executionId) && needsRecovery });
   const [copied, setCopied] = useState('');
   if (detail.isPending) return <Spinner label="读取本次运行"/>;
   if (detail.isError) return <Banner tone="danger" action={{ label: '重新读取', onClick: () => void detail.refetch() }}>{detail.error instanceof ApiError && detail.error.status === 404 ? '这次运行不存在或已无法定位，未跳转到最新聊天。' : `本次运行读取失败：${detail.error.message}`}</Banner>;

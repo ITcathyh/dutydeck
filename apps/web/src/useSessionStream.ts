@@ -1,3 +1,4 @@
+import { queryKeys } from './queries';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import { api, type Session } from './api';
@@ -23,7 +24,7 @@ export function useSessionStream(sessionId: string | undefined, runId: string | 
     const controller = new AbortController();
     let frame: number | undefined;
     let pending: import('./api').DockEvent[] = [];
-    let received = newestSequence(qc.getQueryData<EventWindow>(['events', sessionId]));
+    let received = newestSequence(qc.getQueryData<EventWindow>(queryKeys.events(sessionId)));
     let refreshingTasks: Promise<void> | undefined;
     let tasksRefreshPending = false;
     let tasksInvalidated = false;
@@ -33,7 +34,7 @@ export function useSessionStream(sessionId: string | undefined, runId: string | 
       if (refreshingTasks) return refreshingTasks;
       refreshingTasks = (async () => {
         try {
-          const filters = { queryKey: ['tasks', sessionId], exact: true };
+          const filters = { queryKey: queryKeys.tasks(sessionId), exact: true };
           // Query deduplicates a cold GET even when invalidated. Wait for that
           // snapshot before consuming the demand for a newer authoritative read.
           if (qc.getQueryState(filters.queryKey)?.fetchStatus === 'fetching') {
@@ -54,7 +55,7 @@ export function useSessionStream(sessionId: string | undefined, runId: string | 
     };
     const applyEvents = (batch: import('./api').DockEvent[]) => {
       if (!batch.length) return;
-      const cached = qc.getQueryData<EventWindow>(['events', sessionId]);
+      const cached = qc.getQueryData<EventWindow>(queryKeys.events(sessionId));
       let statuses = batch.filter(event => event.type === 'status');
       if (statuses.length) {
         const firstStatus = Math.min(...statuses.map(event => event.sequence));
@@ -68,8 +69,8 @@ export function useSessionStream(sessionId: string | undefined, runId: string | 
         statuses = [...statuses, ...later.reverse()].sort((a, b) => a.sequence - b.sequence);
       }
       const newTask = batch.some(event => event.type === 'task' && !cached?.events.some(item => item.sequence === event.sequence));
-      qc.setQueryData<EventWindow>(['events', sessionId], current => mergeReconciledEvents(current, batch));
-      if (statuses.length) qc.setQueryData<Session[]>(['sessions'], current => current?.map(session => {
+      qc.setQueryData<EventWindow>(queryKeys.events(sessionId), current => mergeReconciledEvents(current, batch));
+      if (statuses.length) qc.setQueryData<Session[]>(queryKeys.sessions(), current => current?.map(session => {
         if (session.id !== sessionId) return session;
         const updated = statuses.reduce(applyStatusEvent, session);
         recordSessionStatusUpdates(qc, updated, statuses);
@@ -117,7 +118,7 @@ export function useSessionStream(sessionId: string | undefined, runId: string | 
       setStatus(current => ({ ...current, content: 'catching_up' }));
       // The cursor describes a contiguous required suffix. Collapsed historical
       // ranges precede it and are intentionally absent from the canonical cache.
-      let cursor = recoveryCursors.current.get(sessionId) ?? newestSequence(qc.getQueryData<EventWindow>(['events', sessionId]));
+      let cursor = recoveryCursors.current.get(sessionId) ?? newestSequence(qc.getQueryData<EventWindow>(queryKeys.events(sessionId)));
       recoveryCursors.current.set(sessionId, cursor);
       void (async () => {
         while (alive(generation)) {
@@ -125,7 +126,7 @@ export function useSessionStream(sessionId: string | undefined, runId: string | 
           const takeSnapshots = snapshotsRequired; snapshotsRequired = false;
           const snapshots = takeSnapshots ? Promise.all([
             refreshTasks(),
-            qc.refetchQueries({ queryKey: ['sessions'], exact: true }, { throwOnError: true })
+            qc.refetchQueries({ queryKey: queryKeys.sessions(), exact: true }, { throwOnError: true })
           ]) : Promise.resolve();
           // Attach a handler immediately while pages are being read.
           void snapshots.catch(() => {});
@@ -154,7 +155,7 @@ export function useSessionStream(sessionId: string | undefined, runId: string | 
           await snapshots;
           await refreshingTasks;
           if (!alive(generation)) return;
-          for (const key of [['tasks', sessionId], ['sessions']]) {
+          for (const key of [queryKeys.tasks(sessionId), queryKeys.sessions()]) {
             if (qc.getQueryState(key)?.status === 'error') throw new Error('Snapshot refresh failed');
           }
           if (requestVersion !== recoveryVersion) continue;
@@ -184,9 +185,9 @@ export function useSessionStream(sessionId: string | undefined, runId: string | 
     const stream = new SessionStream({
       onReconnect: () => { backoff.reset(); calibrate(); },
       sessionId,
-      getAfter: () => recoveryCursors.current.get(sessionId) ?? newestSequence(qc.getQueryData<EventWindow>(['events', sessionId])),
+      getAfter: () => recoveryCursors.current.get(sessionId) ?? newestSequence(qc.getQueryData<EventWindow>(queryKeys.events(sessionId))),
       onEvent: event => {
-        const current = qc.getQueryData<EventWindow>(['events', sessionId]);
+        const current = qc.getQueryData<EventWindow>(queryKeys.events(sessionId));
         const newest = Math.max(received, newestSequence(current));
         received = Math.max(received, event.sequence);
         if (event.sequence > newest + 1) reconcileEvents(newest, event.sequence);

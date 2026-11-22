@@ -1,27 +1,27 @@
+import { agentModelSettingsQuery, queryKeys } from '../queries';
 import { modelSettingFields, modelSettingAnchor } from '../settings-search';
 import { useEffect, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { agentModelSettingsApi, type AgentModelSettingsPatch } from '../api';
-import { currentInstance } from '../instance';
 import { clearCachedAgentModels } from '../model-cache';
 import { Banner, Button, Field, Input, Select, Spinner } from './primitives';
 
 export function AgentModelSettings({ agentId, botAppId, onDirtyChange }: { agentId: string; botAppId?: string; onDirtyChange?: (dirty: boolean, saving?: boolean) => void }) {
   const client = useQueryClient();
   const anchor = (key: keyof typeof modelSettingFields) => botAppId ? `bot-setting-${modelSettingFields[key].botKey}` : modelSettingAnchor(agentId, key);
-  const key = ['agent-model-settings', currentInstance(), agentId, botAppId ?? ''];
-  const query = useQuery({ queryKey: key, queryFn: () => botAppId ? agentModelSettingsApi.get(agentId, botAppId) : agentModelSettingsApi.get(agentId), retry: false });
+  const key = queryKeys.agentModelSettings(agentId, botAppId);
+  const query = useQuery(agentModelSettingsQuery(agentId, botAppId));
   const [draft, setDraft] = useState<AgentModelSettingsPatch>({});
   const save = useMutation({
     mutationFn: (patch: AgentModelSettingsPatch) => botAppId ? agentModelSettingsApi.set(agentId, patch, botAppId) : agentModelSettingsApi.set(agentId, patch),
     onSuccess: async data => {
       setDraft({});
       client.setQueryData(key, data);
-      if (botAppId) await client.invalidateQueries({ queryKey: ['bot-agent-models', botAppId, agentId] });
+      if (botAppId) await client.invalidateQueries({ queryKey: queryKeys.botModelVariants(botAppId, agentId) });
       else {
         clearCachedAgentModels(agentId);
-        client.removeQueries({ queryKey: ['agent-models', agentId] });
-        await client.invalidateQueries({ queryKey: ['agents'] });
+        client.removeQueries({ queryKey: queryKeys.modelVariants(agentId) });
+        await client.invalidateQueries({ queryKey: queryKeys.agents() });
       }
     }
   });

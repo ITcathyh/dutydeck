@@ -1,3 +1,4 @@
+import { systemDirectoriesQuery } from '../queries';
 import { useState, useId } from 'react';
 import { useQuery, useMutation } from '@tanstack/react-query';
 import { Folder, FolderOpen, ArrowUp, RefreshCw, X, Check, Laptop } from 'lucide-react';
@@ -47,12 +48,7 @@ export function DirectoryPicker({
     }
   });
 
-  const directoriesQuery = useQuery({
-    queryKey: ['system-directories', browsingPath],
-    queryFn: () => api.systemDirectories(browsingPath || undefined),
-    enabled: modalOpen,
-    staleTime: 10_000
-  });
+  const directoriesQuery = useQuery({ ...systemDirectoriesQuery(browsingPath), enabled: modalOpen });
 
   const openBrowser = () => {
     setBrowsingPath(value.trim());
