@@ -10,8 +10,6 @@ import { recordTaskAuthorization } from '../task-authorization.js';
 import { larkMessageAnchor } from './message-anchor.js';
 import { canonicalExecutionJson, type TaskRequestV1, type PromptPart } from '@dutydeck/shared';
 import { composeLarkDispatchPrompt } from './prompt-contributors.js';
-import { larkTurnDiffElement } from './turn-diff.js';
-import { readTurnDiffRecord } from '../turn-diff.js';
 import { redactTraceText } from './secret-redaction.js';
 import { OnlineProcessCard, type CardUpdateOutcome } from './online-process-card.js';
 import { completeExplicitFinal, explicitFinalContext, hasExplicitFinal, withExplicitFinalLock } from './explicit-final.js';
@@ -1337,7 +1335,10 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
       : [];
     if (!resumeTask) task.startedAt = Date.now();
     task.interruptRequested = false;
-    const contributors = createTurnContributors({ task, config, event, session, botSender, currentTurn, reattaching: Boolean(previous), materialPrompt, materialParts, verification: this.turnVerification, cardMappings: this.cardMappings, options: this.workflowOptions, log: this.log });
+    const contributors = createTurnContributors({
+      task, config, event, session, botSender, currentTurn, reattaching: Boolean(previous), materialPrompt, materialParts,
+      verification: this.turnVerification, cardMappings: this.cardMappings, options: this.workflowOptions, log: this.log,
+    });
     await contributors.beforeCard(cardContext);
     // An accepted task keeps its original card and mapping while reattaching.
     if (await cancelledBeforeCard()) return;
@@ -1601,19 +1602,14 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
         // 计划卡不给续问、定时这些结果操作：它们和批准共用这张卡做下一轮的锚点。
         const resultActions = planTask === undefined ? await this.resultActionCapabilities(task, config, state) : {};
         const continueCause = await this.continueCause(config.appId, task.id, currentTurn, task.scopeId, state, task.events);
-        await contributors.decorateResult(state, cardAdditions, cardContext.workspace);
-        // 这一轮的改动摘要与「查看改动」链接：runtime 在结算之前已记下这一轮结束时的快照。
-        const turnDiff = task.sessionId && task.runtimeTaskId
-          ? larkTurnDiffElement(await readTurnDiffRecord(this.workflowOptions.store, task.sessionId, task.runtimeTaskId).catch(() => undefined), config.webBaseUrl) : undefined;
+        const resultElements = await contributors.resultElements(state, cardAdditions, cardContext.workspace);
         const elements = [
           ...reportElements,
           ...plan.fallbackElements,
           ...(continueCause?.settled ? [{ tag: 'markdown', element_id: 'recovery_note', content: larkQuietSettledNote(continueCause) }] : []),
           ...(explicit ? [] : task.steered ? [{ tag: 'markdown', element_id: 'steer_note', content: task.steerNote ?? steeringOutcomeText(task.steered) }] : renderLarkResultElements(verifiedOutput ? [verifiedOutput] : task.events, plan.resultOptions)),
           ...(context ? await this.workflows.result(context, '') : []),
-          ...(cardAdditions.verification ? [cardAdditions.verification] : []),
-          ...(turnDiff ? [turnDiff] : []),
-          ...(cardAdditions.gitStatus ? [cardAdditions.gitStatus] : []),
+          ...resultElements,
           ...plan.mentionElements];
         // The task ledger remains raw. Only replace the final prose element,
         // before the first provider attempt, and freeze it under its delivery key.

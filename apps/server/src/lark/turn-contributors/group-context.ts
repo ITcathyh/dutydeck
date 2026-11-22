@@ -39,7 +39,7 @@ export function groupContextContributor({ task, session, config, event, options,
         if (prompt.groupInstructions) prompt.groupInstructionsRevision = snapshot.revision;
       } else prompt.groupInstructions = (await withLarkContextReadTimeout(options.participation.instructions({ appId: config.appId, chatId: event.chatId }), '群长期指令读取')).trim();
     },
-    onReplay() { groupContextCommit = undefined; },
+    accepted(receipt) { if (receipt.replayed) groupContextCommit = undefined; },
     async settling(status) {
       const commit = groupContextCommit;
       groupContextCommit = undefined;

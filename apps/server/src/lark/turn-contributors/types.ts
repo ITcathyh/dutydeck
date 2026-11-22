@@ -1,12 +1,16 @@
-import type { ChannelMappingRepository, PromptPart, Session } from '@dutydeck/shared';
-import type { LarkMessageCoordinator, LarkTask } from '../coordinator.js';
+import type { ChannelMappingRepository, ConfigRepository, PromptPart, Session } from '@dutydeck/shared';
+import type { LarkTask } from '../coordinator.js';
+import type { LarkGroupParticipation } from '../group-participation.js';
+import type { LarkMemoryStore } from '../memory.js';
+import type { LarkMemoryPipeline } from '../memory-pipeline.js';
+import type { LarkCardInput } from '../service.js';
 import type { ListenerLog } from '../listener.js';
 import type { composeLarkDispatchPrompt } from '../prompt-contributors.js';
 import type { LarkCardElement } from '../card-renderer.js';
 import type { LarkCardCapabilities } from '../card-actions.js';
 import type { TerminalState } from '../terminal-plan.js';
 
-type CoordinatorOptions = ConstructorParameters<typeof LarkMessageCoordinator>[10];
+export type TurnReceipt = { id: string; replayed?: boolean };
 
 type VerificationCapabilities = Pick<LarkCardCapabilities, 'canVerify' | 'verificationSuggestion'>;
 type VerificationPlan = { command: string; turn: number; recordId?: string };
@@ -26,6 +30,7 @@ export interface TurnResult {
   changedCode: boolean;
   verification?: LarkCardElement;
   gitStatus?: LarkCardElement;
+  diff?: LarkCardElement;
   capabilities: VerificationCapabilities;
 }
 
@@ -39,7 +44,11 @@ export interface TurnContext {
   reattaching: boolean;
   materialPrompt: string;
   materialParts?: PromptPart[];
-  options: Pick<CoordinatorOptions, 'store' | 'participation' | 'memory'>;
+  options: {
+    store: ConfigRepository;
+    participation?: LarkGroupParticipation;
+    memory?: { store: LarkMemoryStore; pipeline?: LarkMemoryPipeline };
+  };
   verification: TurnVerification;
   cardMappings: ChannelMappingRepository;
   log: ListenerLog;
@@ -50,17 +59,16 @@ export type TurnPrompt = Pick<Parameters<typeof composeLarkDispatchPrompt>[0], '
 };
 
 export interface TurnContributor {
-  decorateResult?(state: TerminalState, result: TurnResult, workspace?: string): Promise<void>;
+  beforeCard?(card: Pick<LarkCardInput, 'scenarioRecall'>): Promise<void>;
+  readContext?(): Promise<void>;
+  preparePrompt?(): Promise<void>;
   captureWorkspace?(): Promise<void>;
+  freezeRequest?(): Promise<void>;
+  accepted?(receipt: TurnReceipt): Promise<void> | void;
+  attached?(receipt: TurnReceipt): Promise<void>;
+  settling?(state: TerminalState): Promise<void>;
   planDelivery?(state: TerminalState): Promise<void>;
   inspectResult?(state: TerminalState, result: TurnResult): Promise<void>;
-  freezeRequest?(): Promise<void>;
-  accepted?(receipt: { id: string; replayed?: boolean }): Promise<void>;
-  beforeCard?(card: Pick<import('../service.js').LarkCardInput, 'scenarioRecall'>): Promise<void>;
-  preparePrompt?(): Promise<void>;
-  attached?(receipt: { id: string; replayed?: boolean }): Promise<void>;
+  decorateResult?(state: TerminalState, result: TurnResult, workspace?: string): Promise<void>;
   afterDelivery?(state: TerminalState, runtimeTaskId?: string): void;
-  readContext?(): Promise<void>;
-  onReplay?(): void;
-  settling?(state: TerminalState): Promise<void>;
 }
