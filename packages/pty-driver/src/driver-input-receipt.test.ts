@@ -481,7 +481,7 @@ it('refuses a recovered compact draft at the real writer without appending busin
   const real = createCliAdapter('claude-code');
   (driver as any).adapter = { ...real, prepareInput: undefined,
     writeInput(backend: any, prompt: string) { prompts.push(prompt); return real.writeInput(backend, prompt); } };
-  await (driver as any).markTmuxReattached();
+  await (driver as any).markReattached();
   const pending = driver.send('business body'); void pending.catch(() => {});
   await vi.advanceTimersByTimeAsync(15_000);
   await expect(pending).rejects.toBeInstanceOf(PromptNotWrittenError);
