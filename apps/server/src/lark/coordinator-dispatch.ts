@@ -10,7 +10,6 @@ import { recordTaskAuthorization } from '../task-authorization.js';
 import { larkMessageAnchor } from './message-anchor.js';
 import { canonicalExecutionJson, type TaskRequestV1, type PromptPart } from '@dutydeck/shared';
 import { composeLarkDispatchPrompt } from './prompt-contributors.js';
-import { readGitCodeSignature, readGitStatusLine } from './git-status.js';
 import { larkTurnDiffElement } from './turn-diff.js';
 import { readTurnDiffRecord } from '../turn-diff.js';
 import { redactTraceText } from './secret-redaction.js';
@@ -1530,8 +1529,6 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
     };
     let terminalDelivery: Promise<void> | undefined;
     let verifiedOutput: AgentEvent | undefined;
-    /** 本轮开始时工作目录的代码状态签名；结束时再取一次，不同就是这一轮改了这个仓库。重启后接上的任务没有它。 */
-    let codeSignatureBefore: string | undefined;
     // Freeze the process card, then send one immutable result. Neither operation
     // counts as success for the other; reconciliation retries only the missing part.
     const deliverTerminal = (state: 'completed' | 'failed' | 'interrupted' | 'cancelled', completed = false) => {
@@ -1600,13 +1597,11 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
         // 「它说做完了，其实没做完」是这类产品最常见的失望。平台验证是可核对的反证，
         // 但此前只存在于 Web；结果卡上必须把「验证过没有」和 Agent 的自述分开写清楚。
         // 本轮有没有改这个仓库：「使用这个验证命令」按钮和 git 状态行都只在改了的时候才有意义。
-        const changedCode = state === 'completed' && codeSignatureBefore !== undefined
-          && await readGitCodeSignature(session.cwd) !== codeSignatureBefore;
-        const cardAdditions = await contributors.inspectResult(state, changedCode);
+        const cardAdditions = await contributors.inspectResult(state);
         // 计划卡不给续问、定时这些结果操作：它们和批准共用这张卡做下一轮的锚点。
         const resultActions = planTask === undefined ? await this.resultActionCapabilities(task, config, state) : {};
         const continueCause = await this.continueCause(config.appId, task.id, currentTurn, task.scopeId, state, task.events);
-        const gitStatus = changedCode ? await this.readGitStatusLine(state, session.cwd ?? cardContext.workspace) : undefined;
+        await contributors.decorateResult(state, cardAdditions, cardContext.workspace);
         // 这一轮的改动摘要与「查看改动」链接：runtime 在结算之前已记下这一轮结束时的快照。
         const turnDiff = task.sessionId && task.runtimeTaskId
           ? larkTurnDiffElement(await readTurnDiffRecord(this.workflowOptions.store, task.sessionId, task.runtimeTaskId).catch(() => undefined), config.webBaseUrl) : undefined;
@@ -1618,7 +1613,7 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
           ...(context ? await this.workflows.result(context, '') : []),
           ...(cardAdditions.verification ? [cardAdditions.verification] : []),
           ...(turnDiff ? [turnDiff] : []),
-          ...(gitStatus ? [{ tag: 'markdown', element_id: 'git_status', content: gitStatus }] : []),
+          ...(cardAdditions.gitStatus ? [cardAdditions.gitStatus] : []),
           ...plan.mentionElements];
         // The task ledger remains raw. Only replace the final prose element,
         // before the first provider attempt, and freeze it under its delivery key.
@@ -1888,7 +1883,6 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
       // 重启后接上的任务没有开始时的指纹，共享目录里就不自动验证。
       if (!previous) {
         await contributors.captureWorkspace();
-        codeSignatureBefore = await readGitCodeSignature(session.cwd);
       }
       if (this.stopped || task.turn !== currentTurn) { cleanup(); return; }
       if (task.epoch !== (group.epoch ?? 0) || task.cancelRequested) { await closePreparedTurn(); cleanup(); return; }
@@ -1987,11 +1981,6 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
       await deliverTerminal('failed', false);
       cleanup();
     }
-  }
-
-  private async readGitStatusLine(state: string, cwd?: string): Promise<string | undefined> {
-    if (state !== 'completed' || !cwd) return undefined;
-    return readGitStatusLine(cwd);
   }
 
   protected abstract cancelUndeliveredRetries(group: LarkGroup): void;

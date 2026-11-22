@@ -1,4 +1,5 @@
 import { verificationContributor } from './verification.js';
+import { gitStatusContributor } from './git-status.js';
 import { groupContextContributor } from './group-context.js';
 import { memoryContributor } from './memory.js';
 import { scenarioContributor } from './scenario.js';
@@ -17,6 +18,7 @@ export function createTurnContributors(context: TurnContext) {
   const scenario = scenarioContributor(context, prompt);
   const versions = versionsContributor(context, prompt);
   const verification = verificationContributor(context);
+  const git = gitStatusContributor(context);
   return {
     prompt,
     beforeCard: scenario.beforeCard,
@@ -26,13 +28,18 @@ export function createTurnContributors(context: TurnContext) {
       await versions.preparePrompt();
     },
     attached: memory.attached,
-    captureWorkspace: verification.captureWorkspace,
+    async captureWorkspace() {
+      await verification.captureWorkspace();
+      await git.captureWorkspace();
+    },
     planDelivery: verification.planDelivery,
-    async inspectResult(state: TerminalState, changedCode: boolean) {
-      const result: TurnResult = { changedCode, capabilities: {} };
+    async inspectResult(state: TerminalState) {
+      const result: TurnResult = { changedCode: false, capabilities: {} };
+      await git.inspectResult(state, result);
       await verification.inspectResult(state, result);
       return result;
     },
+    decorateResult: git.decorateResult,
     afterDelivery(state: TerminalState, runtimeTaskId?: string) {
       verification.afterDelivery();
       memory.afterDelivery(state, runtimeTaskId);

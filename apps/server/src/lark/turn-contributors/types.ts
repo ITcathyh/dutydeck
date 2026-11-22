@@ -25,6 +25,7 @@ export interface TurnVerification {
 export interface TurnResult {
   changedCode: boolean;
   verification?: LarkCardElement;
+  gitStatus?: LarkCardElement;
   capabilities: VerificationCapabilities;
 }
 
@@ -49,6 +50,7 @@ export type TurnPrompt = Pick<Parameters<typeof composeLarkDispatchPrompt>[0], '
 };
 
 export interface TurnContributor {
+  decorateResult?(state: TerminalState, result: TurnResult, workspace?: string): Promise<void>;
   captureWorkspace?(): Promise<void>;
   planDelivery?(state: TerminalState): Promise<void>;
   inspectResult?(state: TerminalState, result: TurnResult): Promise<void>;
