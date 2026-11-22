@@ -1,5 +1,6 @@
 // 卡片「查看详情」一次性登录链接的浏览器验收：管理员点按钮 → 私信里拿到链接 → 未登录的浏览器打开确认页、点按钮后看到会话页。
 // 边界：飞书 transport 与 Agent driver 为进程内合成；Chromium、Fastify HTTP、SQLite、Runtime 与 Web 构建产物都是真实的。
+import { defaultDriverProviders } from '../apps/server/src/driver-providers.js';
 import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -75,6 +76,7 @@ async function runTest() {
   await mkdir(workspace, { recursive: true });
   repos = createRepositories(join(directory, 'state.sqlite'), { mode: 'runtime', newDatabaseAuthority: 'ledger_v1' });
   runtime = new DutydeckRuntime(repos, {
+    providers: defaultDriverProviders(),
     probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }),
     driverFactory: (_config, _protocol, emit) => {
       const driver: AgentDriver = {

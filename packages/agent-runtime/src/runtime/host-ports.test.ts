@@ -1,3 +1,4 @@
+import { defaultDriverProviders } from '../../../../apps/server/src/driver-providers.js';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -40,6 +41,7 @@ it('delivers the active attempt to the assembler and holds settlement only for t
     if (event.type === 'turn.ended') order.push('ended');
   });
   const runtime = new DutydeckRuntime(repos, {
+    providers: defaultDriverProviders(),
     events,
     beforeSettlement: async () => { order.push('snapshot'); await snapshot; },
     launchContext: {
@@ -76,6 +78,7 @@ it('uses the registered source and ID pattern for admission and reuse', async ()
   const spec = { ...dutydeckSessionKinds.workItem, source: 'sample-job', idPattern: /^sample_[0-9]+$/g };
   const validate = vi.spyOn(spec, 'validate');
   const runtime = new DutydeckRuntime(repos, {
+    providers: defaultDriverProviders(),
     sessionKinds: { ...dutydeckSessionKinds, workItem: spec },
     launchContext: {
       probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }),

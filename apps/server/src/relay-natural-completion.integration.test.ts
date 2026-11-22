@@ -1,3 +1,4 @@
+import { defaultDriverProviders } from './driver-providers.js';
 import { expect, it, vi } from 'vitest';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -15,7 +16,7 @@ it.each(['broker', 'ask-wait', 'ask'] as const)('checks durable settlement durin
   const repos = createRepositories(join(directory, 'state.db'), { newDatabaseAuthority: 'ledger_v1' });
   let entered = () => {}, complete = () => {};
   const agent = agentConfigSchema.parse({ id: 'fixture', name: 'Fixture', command: process.execPath, protocol: 'acp', cwd: directory });
-  const runtime = new DutydeckRuntime(repos, { cleanupIntervalMs: 0,
+  const runtime = new DutydeckRuntime(repos, { providers: defaultDriverProviders(), cleanupIntervalMs: 0,
     probe: () => ({ protocol: 'acp', available: true, pause: false, resume: false }),
     driverFactory: (_agent, _protocol, emit) => ({
       start: async () => {}, resume: async () => {}, isStopped: async () => true,

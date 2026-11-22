@@ -6,7 +6,7 @@ import { dirname, join } from 'node:path';
 import { childProcessIdentity, observeProcess } from '@dutydeck/storage/helpers';
 import { dutydeckPtySessionName } from '@dutydeck/pty-driver/support';
 import type { Session } from '@dutydeck/shared';
-import { createPtyRetirementControl } from './pty-recovery.js';
+import { createPtyRetirementControl } from '@dutydeck/pty-driver';
 
 let root: string, socket: string, saved: string | undefined;
 const servers: ReturnType<typeof childProcessIdentity>[] = [];

@@ -1,5 +1,6 @@
 // 「查看改动」在飞书里的两头：结果卡上的改动摘要行，和分享链接上提交的行评论变成原话题里的确认卡。
 // 真实 DutydeckRuntime + SQLite + 真实 git 仓库，飞书接口用替身。
+import { defaultDriverProviders } from '../driver-providers.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { execFile } from 'node:child_process';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
@@ -38,6 +39,7 @@ async function harness() {
   const repos = createRepositories(join(state, 'state.db'), { newDatabaseAuthority: 'ledger_v1' });
   const prompts: string[] = [];
   const runtime = new DutydeckRuntime(repos, {
+    providers: defaultDriverProviders(),
     probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }),
     observeTurn: createTurnDiffObserver(repos.config),
     driverFactory: (_config, _protocol, emit) => ({

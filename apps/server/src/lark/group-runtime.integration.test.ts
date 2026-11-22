@@ -1,3 +1,4 @@
+import { defaultDriverProviders } from '../driver-providers.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
@@ -99,6 +100,7 @@ async function setupHarness(members: string[] = [ALICE, BOB, CAROL]): Promise<Ha
   };
 
   const runtime = new DutydeckRuntime(repos, {
+    providers: defaultDriverProviders(),
     probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }),
     driverFactory: factory as any,
     // 与 apps/server/src/service.ts 接线后的语义一致：非 work item 会话把 prepareTurn

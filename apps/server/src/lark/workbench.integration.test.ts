@@ -1,3 +1,4 @@
+import { defaultDriverProviders } from '../driver-providers.js';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -39,6 +40,7 @@ async function fixture(mode: 'normal' | 'permission' | 'permissions' | 'held' | 
   let work!: WorkItemService;
   let tools!: LarkAgentToolsService;
   const runtime = new DutydeckRuntime(repos, {
+    providers: defaultDriverProviders(),
     cleanupIntervalMs: 0,
     probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }),
     authorizeTask: (session, task, phase) => work.authorizeTask(session, task, phase),

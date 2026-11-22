@@ -1,3 +1,4 @@
+import { defaultDriverProviders } from '../../../apps/server/src/driver-providers.js';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -34,7 +35,7 @@ describe('typed provider terminal failure through real ACP and Runtime', () => {
   it('settles heartbeat-only timeout as an idle-timeout failure only after a real cancelled prompt response', async () => {
     const cwd = await mkdtemp(join(tmpdir(), 'dutydeck-provider-cancel-'));
     const repos = createRepositories(join(cwd, 'state.db'), { newDatabaseAuthority: 'ledger_v1' });
-    const runtime = new DutydeckRuntime(repos, { cleanupIntervalMs: 0 });
+    const runtime = new DutydeckRuntime(repos, { providers: defaultDriverProviders(), cleanupIntervalMs: 0 });
     const agent = agentConfigSchema.parse({ id: 'cancel-fixture', name: 'Cancel fixture', command: process.execPath, args: [resolve('packages/acp-client/tests/fixtures/typed-failure-agent.mjs')], protocol: 'acp', cwd, env: {}, permissionMode: 'ask', timeout: 0.6, capabilities: { pause: false, resume: true } });
     try {
       await runtime.initialize([agent]); const session = await runtime.start({ agentId: agent.id });
@@ -50,7 +51,7 @@ describe('typed provider terminal failure through real ACP and Runtime', () => {
   it('settles the current failure and keeps quoted JSON, old errors and warnings successful', async () => {
     const cwd = await mkdtemp(join(tmpdir(), 'dutydeck-provider-terminal-'));
     const repos = createRepositories(join(cwd, 'state.db'), { newDatabaseAuthority: 'ledger_v1' });
-    const runtime = new DutydeckRuntime(repos, { cleanupIntervalMs: 0 });
+    const runtime = new DutydeckRuntime(repos, { providers: defaultDriverProviders(), cleanupIntervalMs: 0 });
     const agent = agentConfigSchema.parse({ id: 'typed-fixture', name: 'Typed fixture', command: process.execPath, args: [resolve('packages/acp-client/tests/fixtures/typed-failure-agent.mjs')], protocol: 'acp', cwd, env: {}, permissionMode: 'ask', timeout: 10, capabilities: { pause: false, resume: true } });
     try {
       await runtime.initialize([agent]); const session = await runtime.start({ agentId: agent.id });

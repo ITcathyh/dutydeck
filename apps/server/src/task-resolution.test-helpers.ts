@@ -1,3 +1,4 @@
+import { defaultDriverProviders } from './driver-providers.js';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -22,7 +23,7 @@ export async function unknownTaskRuntime(options: { source?: string; sourceId?: 
       emit({ type: 'text', data: { text: `done ${prompt}` } }); emit({ type: 'completed', data: { stopReason: 'end_turn' } });
     } });
   const agent: AgentConfig = { id: 'fixture', name: 'fixture', command: process.execPath, args: [], cwd, env: {}, protocol: 'acp', permissionMode: 'ask', timeout: 10, capabilities: { pause: false, resume: true }, builtin: false };
-  let runtime = new DutydeckRuntime(repos, { driverFactory: factory, cleanupIntervalMs: 0 });
+  let runtime = new DutydeckRuntime(repos, { providers: defaultDriverProviders(), driverFactory: factory, cleanupIntervalMs: 0 });
   await runtime.initialize([agent]);
   const session = await runtime.start({ agentId: agent.id, ...(options.source ? { source: options.source } : {}), ...(options.sourceId ? { sourceId: options.sourceId } : {}) });
   const task = await runtime.send(session.id, 'original');
@@ -30,7 +31,7 @@ export async function unknownTaskRuntime(options: { source?: string; sourceId?: 
   await vi.waitFor(() => expect(runtime.getActiveTaskContext(session.id)).toBeUndefined());
   await runtime.shutdown();
   fail = false;
-  runtime = new DutydeckRuntime(repos, { driverFactory: factory, cleanupIntervalMs: 0 });
+  runtime = new DutydeckRuntime(repos, { providers: defaultDriverProviders(), driverFactory: factory, cleanupIntervalMs: 0 });
   await runtime.initialize([agent]);
   return {
     repos, session, task, prompts, get runtime() { return runtime; },

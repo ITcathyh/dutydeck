@@ -1,3 +1,4 @@
+import { defaultDriverProviders } from '../driver-providers.js';
 import { createRepositories } from '@dutydeck/storage';
 import { DutydeckRuntime, type AgentDriver } from '@dutydeck/runtime';
 import type { AgentConfig } from '@dutydeck/shared';
@@ -10,6 +11,7 @@ export async function deliveryCoordinator(cwd: string, fetcher: typeof fetch, an
   let finish = () => {};
   let ready = false;
   const runtime = new DutydeckRuntime(repos, {
+    providers: defaultDriverProviders(),
     probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }),
     driverFactory: (_config, _protocol, emit) => ({
       start: async () => {}, resume: async () => {}, stop: async () => {}, interrupt: async () => {},

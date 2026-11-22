@@ -1,12 +1,14 @@
-import type { AcceptedTaskInputV2, AgentConfig, AgentDriver, AgentEvent, AttemptFence, AttemptRef, BoundExecutionRepository, CommitResult, DriverFactory, EventType, NormalizedDriverEvent, PromptAssemblyData, PromptSourceDiagnostics, PublicTaskRecord, RepositoryBundle, RuntimeControlClaim, Session, SessionFence, TaskAttempt, TaskRecord, ToolRiskPolicy } from '@dutydeck/shared';
-import { canonicalExecutionJson, errorMessage, isTerminalTaskStatus, makeId, now, PROMPT_NOT_WRITTEN, redactCredentialText, RuntimeError, supportsRemoteApproval } from '@dutydeck/shared';
+import { turnSubmission } from './submission.js';
+import type { DriverRegistry } from './driver-registry.js';
+import type { AcceptedTaskInputV2, AgentConfig, AgentDriver, AgentEvent, AttemptFence, AttemptRef, BoundExecutionRepository, CommitResult, EventType, NormalizedDriverEvent, PromptAssemblyData, PromptSourceDiagnostics, PublicTaskRecord, RepositoryBundle, RuntimeControlClaim, Session, SessionFence, TaskAttempt, TaskRecord, ToolRiskPolicy } from '@dutydeck/shared';
+import { canonicalExecutionJson, errorMessage, isTerminalTaskStatus, makeId, now, PROMPT_NOT_WRITTEN, redactCredentialText, RuntimeError } from '@dutydeck/shared';
 import { createHash, randomUUID } from 'node:crypto';
 import { mkdir, rename, unlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { AgentUnavailable } from '../agent-availability.js';
 import { localOnlyDriverContext } from '../driver-context.js';
 import type { RuntimeHost } from './host-ports.js';
-import { digest, type DriverConfigurationLedger, type LocalDriverLedger, nativeTargetOf, type ExecutionOptions } from '../ledger.js';
+import { type DriverConfigurationLedger, type LocalDriverLedger, nativeTargetOf, type ExecutionOptions } from '../ledger.js';
 import type { RuntimeSessionMutations } from '../ownership.js';
 import type { DriverSupervisor } from './driver-supervisor.js';
 import type { EventIngest } from './event-ingest.js';
@@ -33,7 +35,7 @@ interface TurnRunnerDependencies {
   emit: (sessionId: string, type: EventType, data: unknown, raw?: string, eventId?: string, sourceId?: string) => Promise<AgentEvent<unknown>>;
   events: EventIngest;
   exitedDriverGenerations: Map<string, number>;
-  factory: DriverFactory;
+  registry: DriverRegistry;
   fence: (session: Session) => SessionFence;
   flushInsightSources: (driver: AgentDriver) => void;
   humanWaits: HumanWaits;
@@ -110,8 +112,8 @@ export class TurnRunner {
       const compact = async (submission?: import('@dutydeck/shared').DriverSubmission) => {
         if (!compactDue) return true;
         const cancellationVersion = this.deps.events.compactionVersion(id);
-        const outcome = driver.compact ? await driver.compact(submission) : 'unsupported';
-        if (!driver.compact) await this.deps.emit(id, 'status', { state: 'compaction', phase: 'unsupported', proactive: true });
+        const outcome = this.deps.registry.supports(driver, 'compact') ? await driver.compact(submission) : 'unsupported';
+        if (!this.deps.registry.supports(driver, 'compact')) await this.deps.emit(id, 'status', { state: 'compaction', phase: 'unsupported', proactive: true });
         this.mutations.check();
         const interrupted = this.deps.bound().getPendingQueueActions(this.deps.fence(session)).some(action => action.interrupt && action.target?.attemptId === ref.attemptId);
         if (outcome === 'cancelled' || interrupted) {
@@ -127,15 +129,10 @@ export class TurnRunner {
         return true;
       };
       const submissionId = makeId('submission');
-      const controlled=this.deps.localResources.get(driver)?.controlled;
       const submissionInput=Object.freeze({taskId:ref.taskId,attemptId:ref.attemptId,submissionId,prompt,executionOptions:Object.freeze({...input.executionOptions})});
-      if(controlled&&driver.prepareTurn){
-        const operation=controlled.beginPreparation(()=>this.mutations.valid(token));
-        await this.deps.supervisor.driverOperation(driver,async()=>{
-          try { await driver.prepareTurn!(submissionInput,operation); }
-          finally { controlled.endPreparation(operation); }
-        });
-      }
+      const submission = turnSubmission(this.deps.localResources, driver, submissionInput, key => this.deps.registry.supports(driver, key));
+      const run = (operation: () => Promise<void>) => this.deps.supervisor.driverOperation(driver, operation);
+      if (submission.prepare) await submission.prepare(() => this.mutations.valid(token), run);
       await this.deps.authorize(id, task.executionContext?.actorId, true);
       await this.mutations.wait(() => this.deps.options.policy.authorize({ phase: 'submit', session, task }));
       const beforeSubmit = this.deps.repos.execution.getAttempt(ref);
@@ -150,33 +147,23 @@ export class TurnRunner {
       await this.deps.events.flushDriverEvents(id);
       await this.deps.emit(id, 'text', { text: task.prompt, role: 'user', taskId: task.id });
       this.mutations.check();
-      let prepared:ReturnType<NonNullable<AgentDriver['prepareSubmission']>>|undefined;
       await this.mutations.write(id, async () => {
         await this.deps.configurations.assertClear(id); this.mutations.check();
-        const recovery = controlled ? undefined : await driver.checkpoint?.();
+        const intent = await submission.freeze(() => this.mutations.check());
         this.mutations.check();
-        prepared = controlled ? driver.prepareSubmission?.(submissionInput) : undefined;
-        if (controlled && !prepared) throw new RuntimeError('DRIVER_SUBMISSION_UNSUPPORTED','Controlled driver must freeze its submission',409);
         if (this.deps.supervisor.drivers.get(id) !== driver || this.deps.exitedDriverGenerations.get(id) === this.deps.sessionGenerations.get(id)) throw new RuntimeError('DRIVER_EXITED_BEFORE_SUBMISSION', 'Agent exited before submission; input was not sent', 409);
-        this.deps.wake(this.deps.bound().markSubmissionPending(this.deps.attemptFence(ref), { submissionId, inputDigest: prepared?.inputDigest ?? digest({ prompt, executionOptions: input.executionOptions }), resourceRefs: prepared?.resourceRefs ?? this.deps.localResources.refs(driver), authorizationRefs: [], ...(controlled?{driverInstanceId:controlled.driverInstanceId}:{}),...(prepared?.nativeContextRef ? {nativeContextRef:prepared.nativeContextRef,contextProofId:prepared.contextProofId}:{}), ...(prepared?.recovery || recovery ? { recovery:prepared?.recovery ?? recovery } : {}) }));
+        this.deps.wake(this.deps.bound().markSubmissionPending(this.deps.attemptFence(ref), intent));
       });
-      if (controlled && prepared) {
-        const operation=controlled.beginSubmission(prepared), frozen=prepared;
-        await this.deps.supervisor.driverOperation(driver,async()=>{
-          try {
-            const submission = Object.freeze({...frozen,operation,onAccepted:(receipt:import('@dutydeck/shared').SubmissionReceipt)=>{this.deps.wake(this.deps.bound().markSubmitted(this.deps.attemptFence(ref),receipt));}});
-            if (await compact(submission)) await driver.send(submission);
-          }
-          finally {controlled.endSubmission(operation);}
-        });
-      } else await this.deps.supervisor.driverOperation(driver, async () => { if (await compact()) await driver.send(prompt); });
+      await submission.send(run, compact, receipt => {
+        this.deps.wake(this.deps.bound().markSubmitted(this.deps.attemptFence(ref), receipt));
+      });
       const result = await this.settlement.driverResult(ref, submissionId, { capacityRetry: 'if_safe', observeEnd });
       if (result.status === 'completed') this.deps.agentUnavailable.delete(session.agentId);
     } catch (error) {
       if (agentId) await this.deps.noteAgentFailure(agentId, { message: errorMessage(error), code: (error as { code?: unknown } | undefined)?.code });
       // Stop owns revoked attempts and retains its claim until this cleanup finishes.
       if (this.mutations.valid(token)) {
-        const exitDriver = this.deps.supervisor.drivers.get(id), exitSource = exitDriver?.drainExitedOutput?.();
+        const exitDriver = this.deps.supervisor.drivers.get(id), exitSource = this.deps.registry.method(exitDriver, 'drainExitedOutput')?.();
         const exitDrain = exitDriver && exitSource ? this.deps.events.settleExitedDriver(id, exitDriver, exitSource) : undefined;
         if (!exitDrain) await this.deps.events.flushDriverEvents(id).catch(failure => this.deps.warnCaught('executeTask.flushDriverEvents', id, failure));
         this.deps.events.markEventsFlushed(ref.attemptId);
@@ -216,15 +203,15 @@ export class TurnRunner {
     const buffered: NormalizedDriverEvent[] = [];
     let attached = false;
     const emit = this.deps.events.onDriverEvent(session, generation);
-    const driver = this.deps.factory({ ...await this.deps.configureAgentForSession(agent, session), ...options }, session.protocol!,
+    const driver = this.deps.registry.create({ ...await this.deps.configureAgentForSession(agent, session), ...options }, session,
       event => { if (attached) emit(event); else buffered.push(event); },
       code => {
         if (!attached || !this.mutations.valid(lifecycle) || this.deps.sessionGenerations.get(session.id) !== generation) return;
         this.deps.exitedDriverGenerations.set(session.id, generation);
         this.deps.notifyDriverExit(session.id, code);
-      }, session.id,
+      },
       localOnlyDriverContext(this.deps.fence(session), resource.resourceId));
-    if (!driver.recover) return false;
+    if (!this.deps.registry.supports(driver, 'recover')) return false;
     // attach/recover 前订阅；未采纳（!attached）时在 finally 取消。
     // local-only anchor 是子资源行 id（= resource.resourceId），不是 identity.identityId。
     this.mutations.run(token, () => this.deps.subscribeInsightSources(session, driver, generation, resource.resourceId));
@@ -288,10 +275,10 @@ export class TurnRunner {
   private async configureTaskDriver(session: Session, options: ExecutionOptions) {
     await this.mutations.wait(() => this.deps.configurations.assertClear(session.id));
     let existing = this.deps.supervisor.drivers.get(session.id);
-    if (session.protocol === 'pty-cli' && !['ask', 'full-trust'].includes(options.permissionMode)) {
+    if (this.deps.registry.capabilities(session.protocol)?.persistentTerminal && !['ask', 'full-trust'].includes(options.permissionMode)) {
       // deny-all 只作任务级选项（先出计划）出现，由 Claude 家族终端的 PreToolUse 守卫拦写操作。
       const agent = ['approve-reads', 'deny-all'].includes(options.permissionMode) ? await this.deps.repos.agents.get(session.agentId) : undefined;
-      if (!agent || !supportsRemoteApproval({ ...agent, protocol: 'pty-cli' })) throw new RuntimeError('PERMISSION_MODE_UNSUPPORTED', 'PTY CLI cannot enforce the requested permission mode', 422);
+      if (!agent || !this.deps.registry.capabilities(session.protocol, agent)?.remoteApproval) throw new RuntimeError('PERMISSION_MODE_UNSUPPORTED', 'PTY CLI cannot enforce the requested permission mode', 422);
     }
     if (existing && this.deps.exitedDriverGenerations.get(session.id) === this.deps.sessionGenerations.get(session.id)) {
       // Only an unsubmitted Attempt reaches here. Retain the normal physical
@@ -309,7 +296,7 @@ export class TurnRunner {
   async applyRiskPolicy(session: Session, driver: AgentDriver | undefined, policy?: ToolRiskPolicy) {
     if (this.deps.options.policy.riskPolicy) policy = await this.mutations.wait(() => this.deps.options.policy.riskPolicy!(session.id, policy));
     this.mutations.check();
-    await this.mutations.write(session.id, async () => { driver?.setRiskPolicy?.(policy); });
+    await this.mutations.write(session.id, async () => { this.deps.registry.method(driver, 'setRiskPolicy')?.(policy); });
     const directory = join(session.cwd, '.dutydeck', 'security', 'sessions');
     await this.mutations.wait(() => mkdir(directory, { recursive: true }));
     await this.mutations.write(session.id, async () => {
@@ -338,8 +325,8 @@ export class TurnRunner {
         if (defaults) Object.assign(session, await this.deps.patchSession(session.id, defaults));
         return undefined;
       }
-      if (owned.options.permissionMode !== target.permissionMode && !driver.setPermissionMode || !driver.configureNative && (owned.options.model !== target.model && (!target.model || !driver.setModel)
-        || owned.options.reasoningEffort !== target.reasoningEffort && (!target.reasoningEffort || !driver.setReasoningEffort))) throw new RuntimeError('TASK_OPTIONS_UNSUPPORTED', 'This driver cannot prove a context-preserving configuration reset before submission', 422);
+      if (owned.options.permissionMode !== target.permissionMode && !this.deps.registry.supports(driver, 'setPermissionMode') || !this.deps.registry.supports(driver, 'configureNative') && (owned.options.model !== target.model && (!target.model || !this.deps.registry.supports(driver, 'setModel'))
+        || owned.options.reasoningEffort !== target.reasoningEffort && (!target.reasoningEffort || !this.deps.registry.supports(driver, 'setReasoningEffort')))) throw new RuntimeError('TASK_OPTIONS_UNSUPPORTED', 'This driver cannot prove a context-preserving configuration reset before submission', 422);
       return this.deps.configurations.begin(session.id, owned.identityId, target);
     });
     if (!operation) return;
@@ -350,7 +337,7 @@ export class TurnRunner {
         this.mutations.check(token);
         const target = operation.target;
         if (owned.options.permissionMode !== target.permissionMode) { applied = true; driver.setPermissionMode!(target.permissionMode); }
-        if(owned.controlled&&driver.configureNative) {
+        if(owned.controlled&&this.deps.registry.supports(driver, 'configureNative')) {
           const nativeTarget=nativeTargetOf(target);
           const proof=await driver.configureNative({operationId:operation.operationId,target:nativeTarget});
           const selected=this.deps.repos.execution.getNativeContext(session.id);

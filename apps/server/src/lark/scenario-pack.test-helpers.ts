@@ -4,6 +4,7 @@
 // 不连飞书，不启动 daemon；数据库在临时目录，close() 删除。
 // P3：关联行取卡片映射里存好的 scenario_recall.line（旧映射的 alert_recall 由 scenario-legacy.ts 按旧格式画出）。
 
+import { defaultDriverProviders } from '../driver-providers.js';
 import { createHash } from 'node:crypto';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -84,6 +85,7 @@ export async function createAlarmHarness(options: AlarmHarnessOptions = {}) {
   const answer = options.answer ?? defaultAnswer;
 
   const runtime = new DutydeckRuntime(repos, {
+    providers: defaultDriverProviders(),
     probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }),
     driverFactory: (_config, _protocol, emit) => {
       const driver: AgentDriver = {

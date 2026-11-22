@@ -1,3 +1,5 @@
+import { DatabaseSync } from 'node:sqlite';
+import { defaultDriverProviders } from '../apps/server/src/driver-providers.js';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -41,7 +43,7 @@ function acpAgent(cwd: string): AgentConfig {
 function open(dir: string, database: string) {
   const repos = createRepositories(database, { newDatabaseAuthority: 'ledger_v1' });
   repositories.push(repos);
-  const runtime = new DutydeckRuntime(repos, { workspaceRoot: join(dir, 'workspaces'), cleanupIntervalMs: 0 });
+  const runtime = new DutydeckRuntime(repos, { providers: defaultDriverProviders(), workspaceRoot: join(dir, 'workspaces'), cleanupIntervalMs: 0 });
   runtimes.push(runtime);
   return { repos, runtime };
 }
@@ -342,4 +344,29 @@ describe('本地 JSONL/Pipe 与 Runtime 停止资源核验与正常流转', () =
     await runtime.stop(session.id);
     await expect.poll(() => pidGone(newChildPid), { timeout: 5_000 }).toBe(true);
   });
+});
+
+it('reopens a session stored without a protocol using its original local JSONL submission', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'dutydeck-runtime-legacy-'));
+  directories.push(dir);
+  const database = join(dir, 'state.db');
+  const agent = agentConfigSchema.parse({ id: 'legacy', name: 'Legacy', command: process.execPath,
+    args: [turnFixture], protocol: 'jsonl', cwd: dir });
+  const first = open(dir, database);
+  await first.runtime.initialize([agent]);
+  const session = await first.runtime.start({ agentId: agent.id });
+  await first.runtime.stop(session.id);
+  await first.runtime.shutdown();
+  first.repos.close();
+  runtimes.splice(runtimes.indexOf(first.runtime), 1);
+  repositories.splice(repositories.indexOf(first.repos), 1);
+  const fixture = new DatabaseSync(database);
+  try { fixture.prepare('UPDATE sessions SET protocol = NULL WHERE id = ?').run(session.id); }
+  finally { fixture.close(); }
+
+  const restored = open(dir, database);
+  await restored.runtime.initialize([agent]);
+  await restored.runtime.resume(session.id);
+  expect((await restored.runtime.send(session.id, 'old session')).status).toBe('completed');
+  expect(restored.repos.execution.getResources(session.id).some(resource => resource.kind === 'local_only')).toBe(true);
 });

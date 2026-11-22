@@ -1,3 +1,4 @@
+import { defaultDriverProviders } from '../driver-providers.js';
 import { mkdtemp, mkdir, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -46,6 +47,7 @@ async function harness(scope: string, workspace?: string, reusedCwd?: string | n
   if (useRuntime) {
     const repos = createRepositories(':memory:', { newDatabaseAuthority: 'ledger_v1' });
     const actual = new DutydeckRuntime(repos, {
+      providers: defaultDriverProviders(),
       workspaceRoot: path('/workspaces'), driverIdleTimeoutMs: 0,
       probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }),
       driverFactory: (agent, _protocol, emit) => ({

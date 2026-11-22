@@ -1,3 +1,4 @@
+import { defaultDriverProviders } from '../../../apps/server/src/driver-providers.js';
 import { afterAll, afterEach, describe, expect, it, vi } from 'vitest';
 import { execFileSync, spawn } from 'node:child_process';
 import { chmodSync, cpSync, existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync, mkdirSync } from 'node:fs';
@@ -77,6 +78,7 @@ function driverFactory(sent: string[] = [], start = vi.fn(async () => {})): Driv
 function open(database: string, options: RuntimeOptions = {}, sent: string[] = []) {
   const repos = createRepositories(database, { newDatabaseAuthority: 'ledger_v1' });
   const runtime = new DutydeckRuntime(repos, {
+    providers: defaultDriverProviders(),
     probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }),
     driverFactory: driverFactory(sent), driverIdleTimeoutMs: 0, ...options
   });
@@ -99,6 +101,7 @@ describe('managed Session workspaces', () => {
     const startedCwds: string[] = [];
     const repos = createRepositories(':memory:', { newDatabaseAuthority: 'ledger_v1' });
     const runtime = new DutydeckRuntime(repos, {
+      providers: defaultDriverProviders(),
       workspaceRoot, driverIdleTimeoutMs: 0,
       probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }),
       driverFactory: configured => {
@@ -148,6 +151,7 @@ describe('managed Session workspaces', () => {
     const start = vi.fn(async () => {});
     const repos = createRepositories(':memory:', { newDatabaseAuthority: 'ledger_v1' });
     const runtime = new DutydeckRuntime(repos, {
+      providers: defaultDriverProviders(),
       workspaceRoot, driverIdleTimeoutMs: 0,
       probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }),
       driverFactory: driverFactory([], start)
@@ -480,7 +484,7 @@ process.stdout.write(marker.slice(4));
     const gate = new Promise<void>(resolve => { release = resolve; });
     const busyDriver: AgentDriver = { start: async () => {}, send: () => gate, interrupt: async () => {}, resume: async () => {}, stop: async () => { release(); } };
     const busyRepos = createRepositories(':memory:', { newDatabaseAuthority: 'ledger_v1' });
-    const busy = new DutydeckRuntime(busyRepos, { driverIdleTimeoutMs: 0, probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }), driverFactory: () => busyDriver });
+    const busy = new DutydeckRuntime(busyRepos, { providers: defaultDriverProviders(), driverIdleTimeoutMs: 0, probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }), driverFactory: () => busyDriver });
     repositories.push(busyRepos); runtimes.push(busy);
     await busy.initialize([agent]); const busySession = await busy.start({ agentId: agent.id, cwd: source });
     void busy.dispatch(busySession.id, 'busy'); await vi.waitFor(async () => expect((await busy.getTasks(busySession.id))[0]?.status).toBe('running'));
@@ -520,6 +524,7 @@ process.stdout.write(marker.slice(4));
     const sent: string[] = [], gates = new Map<string, () => void>(), lost = new Set<string>(), background = new Set<string>();
     const repos = createRepositories(':memory:', { newDatabaseAuthority: 'ledger_v1' });
     const runtime = new DutydeckRuntime(repos, {
+      providers: defaultDriverProviders(),
       driverIdleTimeoutMs: 0, probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }), ...options,
       driverFactory: (_agent, _protocol, emit, _exit, sessionId) => ({
         start: async () => {}, interrupt: async () => {}, resume: async () => {}, isStopped: async () => true,
@@ -541,6 +546,7 @@ process.stdout.write(marker.slice(4));
     let stopGate: Promise<void> | undefined;
     const repos = createRepositories(':memory:', { newDatabaseAuthority: 'ledger_v1' });
     const runtime = new DutydeckRuntime(repos, {
+      providers: defaultDriverProviders(),
       driverIdleTimeoutMs: 0, probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }), ...options,
       driverFactory: (_agent, _protocol, emit) => ({
         start: async () => {}, interrupt: async () => {}, resume: async () => {}, stop: async () => { stopCalls++; await stopGate; },
@@ -855,6 +861,7 @@ describe('immutable task prompt preparation', () => {
     const source = repository(); const sent: string[] = [];
     const repos = createRepositories(':memory:', { newDatabaseAuthority: 'ledger_v1' });
     const runtime = new DutydeckRuntime(repos, {
+      providers: defaultDriverProviders(),
       driverIdleTimeoutMs: 0,
       probe: () => ({ protocol, available: true, pause: false, resume: true }),
       driverFactory: driverFactory(sent),

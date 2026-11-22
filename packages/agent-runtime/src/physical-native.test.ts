@@ -1,3 +1,4 @@
+import { defaultDriverProviders } from '../../../apps/server/src/driver-providers.js';
 import { afterAll, afterEach, describe, expect, it, vi } from 'vitest';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
@@ -16,21 +17,28 @@ const nativeCreationCrash=lazyBundleForTest('native-creation-crash',resolve('pac
 afterAll(()=>nativeCreationCrash.cleanup());
 const cleanup:Array<()=>Promise<void>>=[];
 afterEach(async()=>{for(const run of cleanup.splice(0).reverse())await run();vi.restoreAllMocks();});
-async function setup(env:Record<string,string>={},observeBound?: (bound:BoundExecutionRepository)=>void,expectedStartError?:string,input:Partial<StartSessionInput>={}) {
+async function setup(env:Record<string,string>={},observeBound?: (bound:BoundExecutionRepository)=>void,expectedStartError?:string,input:Partial<StartSessionInput>={}, providers=defaultDriverProviders()) {
  const dir=await mkdtemp(join(tmpdir(),'dutydeck-physical-native-'));cleanup.push(()=>rm(dir,{recursive:true,force:true}));
  const agent=agentConfigSchema.parse({id:'strict',name:'Strict',protocol:'acp',command:process.execPath,args:[resolve('tests/fixtures/acp-strict-native-agent.mjs')],cwd:dir,env:{native_directory:dir,...env},permissionMode:'full-trust',timeout:10,capabilities:{pause:false,resume:true}});
- const repos=createRepositories(join(dir,'db'),{newDatabaseAuthority:'ledger_v1'});const bind=repos.execution.bind.bind(repos.execution);vi.spyOn(repos.execution,'bind').mockImplementation(claim=>{const result=bind(claim);observeBound?.(result);return result;});const runtime=new DutydeckRuntime(repos,{cleanupIntervalMs:0});
+ const repos=createRepositories(join(dir,'db'),{newDatabaseAuthority:'ledger_v1'});const bind=repos.execution.bind.bind(repos.execution);vi.spyOn(repos.execution,'bind').mockImplementation(claim=>{const result=bind(claim);observeBound?.(result);return result;});const runtime=new DutydeckRuntime(repos,{ providers,cleanupIntervalMs:0});
  cleanup.push(async()=>{await rm(join(dir,'hold-config'),{force:true});await rm(join(dir,'hold-new'),{force:true});await rm(join(dir,'hold-load'),{force:true});await runtime.shutdown();repos.close();});
  await runtime.initialize([agent]);
  const session=await runtime.start({agentId:agent.id,...input}).catch(async(error:unknown)=>{if(!expectedStartError)throw error;expect(error).toBeInstanceOf(Error);expect((error as Error).message).toContain(expectedStartError);const value=(await repos.sessions.list())[0];if(!value)throw error;return value;});
  const calls=async()=> (await readFile(join(dir,'native-calls.jsonl'),'utf8')).trim().split('\n').map(line=>JSON.parse(line) as {method:string;params?:Record<string,unknown>;env?:string});
  return {dir,agent,repos,runtime,session,calls,store:createRuntimeStore({stateDir:join(dir,'.dutydeck','acpx')})};
 }
+function providersWithPreparation(prepareTurn: () => Promise<void>) {
+ return defaultDriverProviders().map(provider => provider.protocol !== 'acp' ? provider : {
+  ...provider,
+  capabilities: () => ({ ...provider.capabilities(), operations: [...provider.capabilities().operations, 'prepareTurn' as const] }),
+  create: (input: import('@dutydeck/shared').DriverCreateInput) => Object.assign(provider.create(input), { prepareTurn }),
+ });
+}
 describe('controlled physical resources and strict native context',()=>{
  it('finishes asynchronous turn preparation before recording intent and freezes only after its tail',async()=>{
-  const h=await setup();let release!:()=>void;const gate=new Promise<void>(yes=>{release=yes;});let entered=false;
-  Object.defineProperty(AcpxAdapter.prototype,'prepareTurn',{configurable:true,value:async()=>{entered=true;await gate;}});
-  cleanup.push(async()=>{release();Reflect.deleteProperty(AcpxAdapter.prototype,'prepareTurn');});
+  let release!:()=>void;const gate=new Promise<void>(yes=>{release=yes;});let entered=false;
+  const h=await setup({}, undefined, undefined, {}, providersWithPreparation(async()=>{entered=true;await gate;}));
+  cleanup.push(async()=>{release();});
   const result=h.runtime.send(h.session.id,'prepared');await expect.poll(()=>entered).toBe(true);
   const tasks=await h.repos.tasks.listBySession(h.session.id);const attempt=h.repos.execution.getTaskExecution(tasks[0]!.id)!.currentAttempt!;
   expect(attempt.submissionState).toBe('not_submitted');
@@ -40,9 +48,9 @@ describe('controlled physical resources and strict native context',()=>{
   expect(h.repos.execution.getResources(h.session.id).filter(r=>r.kind==='operation'&&r.stage==='pending')).toHaveLength(0);
  });
  it('keeps an interrupted preparation operation pending until its real tail ends and never submits',async()=>{
-  const h=await setup();let release!:()=>void;const gate=new Promise<void>(yes=>{release=yes;});let entered=false;
-  Object.defineProperty(AcpxAdapter.prototype,'prepareTurn',{configurable:true,value:async()=>{entered=true;await gate;}});
-  cleanup.push(async()=>{release();Reflect.deleteProperty(AcpxAdapter.prototype,'prepareTurn');});
+  let release!:()=>void;const gate=new Promise<void>(yes=>{release=yes;});let entered=false;
+  const h=await setup({}, undefined, undefined, {}, providersWithPreparation(async()=>{entered=true;await gate;}));
+  cleanup.push(async()=>{release();});
   const result=h.runtime.send(h.session.id,'cancel preparation');await expect.poll(()=>entered).toBe(true);
   const interruption=h.runtime.interrupt(h.session.id);
   expect((await result).status).toBe('cancelled');
@@ -116,7 +124,7 @@ describe('controlled physical resources and strict native context',()=>{
   const h=await setup({},value=>{bound=value;},undefined,{permissionMode:'deny-all',source:'lark-decision',sourceId:'decision'});
   await writeFile(join(h.dir,'fail-config'),'1');await expect(h.runtime.setModel(h.session.id,'B')).rejects.toThrow();
   await rm(join(h.dir,'fail-config'));await h.runtime.shutdown();
-  const runtime=new DutydeckRuntime(h.repos,{cleanupIntervalMs:0});cleanup.push(()=>runtime.shutdown());await runtime.initialize([h.agent]);
+  const runtime=new DutydeckRuntime(h.repos,{ providers: defaultDriverProviders(),cleanupIntervalMs:0});cleanup.push(()=>runtime.shutdown());await runtime.initialize([h.agent]);
   bound.patchSessionState({sessionId:h.session.id,runId:h.session.runId!},'before-repair',{state,error:'original failure'});
   const before=await h.repos.sessions.get(h.session.id),native=h.repos.execution.getNativeContext(h.session.id)!.selection.context;
   const blocker=await h.repos.config.get(`runtime_driver_configuration:${h.session.id}`);
@@ -263,7 +271,7 @@ describe('controlled physical resources and strict native context',()=>{
   let stderr='';child.stderr?.on('data',data=>{stderr+=String(data);});
   const exited=once(child,'exit');cleanup.push(async()=>{if(child.exitCode===null&&child.signalCode===null)child.kill('SIGKILL');await exited;});
   const [message]=await once(child,'message');expect(message).toEqual({phase:'native-file-saved'});await exited;expect(stderr).toBe('');
-  const repos=createRepositories(join(dir,'db'),{newDatabaseAuthority:'ledger_v1'});const runtime=new DutydeckRuntime(repos,{cleanupIntervalMs:0});cleanup.push(async()=>{await runtime.shutdown();repos.close();});
+  const repos=createRepositories(join(dir,'db'),{newDatabaseAuthority:'ledger_v1'});const runtime=new DutydeckRuntime(repos,{ providers: defaultDriverProviders(),cleanupIntervalMs:0});cleanup.push(async()=>{await runtime.shutdown();repos.close();});
   const agents=await repos.agents.list();await runtime.initialize(agents);const session=(await repos.sessions.list())[0];if(!session)throw new Error('Missing original Session');
   await expect.poll(async()=>{await runtime.probeNativeResources(session.id,{kind:'installation_owner',id:'installation_owner'});return repos.execution.getSessionResourceBlockers(session.id).length;}).toBe(0);
   const resources=repos.execution.getResources(session.id);expect(resources.some(r=>r.creationClosure?.evidence.state==='dead')).toBe(true);
@@ -310,7 +318,7 @@ describe('controlled factory failure cleanup',()=>{
   const repos=createRepositories(join(dir,'db'),{newDatabaseAuthority:'ledger_v1'});
   if(configure){const bind=repos.execution.bind.bind(repos.execution);vi.spyOn(repos.execution,'bind').mockImplementation(claim=>{const bound=bind(claim);configure(bound);return bound;});}
   factory.controlledResources=()=>true;
-  const runtime=new DutydeckRuntime(repos,{driverFactory:factory,cleanupIntervalMs:0});
+  const runtime=new DutydeckRuntime(repos,{ providers: defaultDriverProviders(),driverFactory:factory,cleanupIntervalMs:0});
   cleanup.push(async()=>{await runtime.shutdown();repos.close();});
   const agent=agentConfigSchema.parse({id:'factory',name:'Factory',protocol:'pipe',command:process.execPath,cwd:dir,permissionMode:'ask',timeout:10,capabilities:{pause:false,resume:false}});
   await runtime.initialize([agent]);return {repos,runtime,agent};

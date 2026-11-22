@@ -1,3 +1,4 @@
+import { defaultDriverProviders } from '../../../apps/server/src/driver-providers.js';
 import { runtimeComponents } from '../test-support/components.js';
 import { captureBoundExecution } from '../../../tests/support/bound-execution.js';
 import { afterEach, expect, it, vi } from 'vitest';
@@ -13,7 +14,7 @@ async function fixture(action: 'off' | 'diagnose' | 'retire' = 'retire') {
   const state = { input: 0, cpu: 0, at: 0, prepared: true, idle: true, background: false, ask: false, stopped: true };
   const log = { warn: vi.fn(), info: vi.fn() };
   const drivers: AgentDriver[] = [];
-  const runtime = new DutydeckRuntime(repos, { cleanupIntervalMs: 0, driverIdleTimeoutMs: 0, driverIdleCpuAction: action,
+  const runtime = new DutydeckRuntime(repos, { providers: defaultDriverProviders(), cleanupIntervalMs: 0, driverIdleTimeoutMs: 0, driverIdleCpuAction: action,
     log, awaitingAnswer: () => state.ask, probe: () => ({ protocol: 'pty-cli', available: true, resume: true }),
     driverFactory: (_agent, _protocol, emit) => {
       const driver: AgentDriver = { start: async () => {}, resume: async () => {}, interrupt: async () => {},

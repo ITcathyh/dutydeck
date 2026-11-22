@@ -1,3 +1,4 @@
+import { defaultDriverProviders } from '../../../apps/server/src/driver-providers.js';
 import { WorkspaceManager } from './workspace.js';
 import { afterEach, expect, it, vi } from 'vitest';
 import { execFileSync } from 'node:child_process';
@@ -31,7 +32,7 @@ async function fixture(archive = true) {
   git(root, 'init', '-q', source); git(source, 'config', 'user.name', 'test'); git(source, 'config', 'user.email', 'test@example.com');
   writeFileSync(join(source, 'file'), 'baseline'); git(source, 'add', '.'); git(source, 'commit', '-qm', 'baseline');
   const repos = createRepositories(join(root, 'runtime.sqlite'), { newDatabaseAuthority: 'ledger_v1' });
-  const options: RuntimeOptions = { workspaceRoot: join(root, 'workspaces'), driverIdleTimeoutMs: 0,
+  const options: RuntimeOptions = { providers: defaultDriverProviders(), workspaceRoot: join(root, 'workspaces'), driverIdleTimeoutMs: 0,
     probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }),
     driverFactory: () => ({ start: async () => {}, send: async () => {}, stop: async () => {}, interrupt: async () => {}, resume: async () => {}, isStopped: async () => true }) };
   const runtime = new DutydeckRuntime(repos, options);

@@ -1,3 +1,4 @@
+import { defaultDriverProviders } from '../../../apps/server/src/driver-providers.js';
 import { describe, expect, it, vi } from 'vitest';
 import { createRepositories } from '@dutydeck/storage';
 import type { AgentConfig } from '@dutydeck/shared';
@@ -13,6 +14,7 @@ function harness(hostOptions: Pick<RuntimeOptions, 'reviewPermission' | 'onTaskS
     stop: vi.fn(async () => {}), resolvePermission: vi.fn(async () => true), setModel: vi.fn(async () => {}), setReasoningEffort: vi.fn(async () => {}), setPermissionMode: vi.fn()
   };
   const runtime = new DutydeckRuntime(repos, {
+    providers: defaultDriverProviders(),
     probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }),
     driverFactory: (_agent, _p, onEvent) => { emit = onEvent; return driver; },
     ...hostOptions

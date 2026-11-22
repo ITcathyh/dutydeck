@@ -1,3 +1,4 @@
+import { defaultDriverProviders } from '../../../apps/server/src/driver-providers.js';
 import { describe, expect, it, vi, afterEach } from 'vitest';
 import { randomUUID } from 'node:crypto';
 import { createRepositories } from '@dutydeck/storage';
@@ -154,7 +155,7 @@ describe('runtime transcript source: real start path flush (controlled ACP)', ()
       ]
     };
     factory.controlledResources = () => true;
-    const runtime = new DutydeckRuntime(repos, { driverFactory: factory, cleanupIntervalMs: 0 });
+    const runtime = new DutydeckRuntime(repos, { providers: defaultDriverProviders(), driverFactory: factory, cleanupIntervalMs: 0 });
     try {
       await runtime.initialize([strictAgent]);
       const session = await runtime.start({ agentId: strictAgent.id });
@@ -191,7 +192,7 @@ describe('runtime transcript source: real local_only (PTY-equivalent) anchor', (
       emitDuringStart: [rootObs('pty-start-root')]
     };
     // local-only：不声明 controlledResources，reconnect 走 beforeCreate(local_only) 分支。
-    const runtime = new DutydeckRuntime(repos, { ptyDriverFactory: factory, probe: () => ({ protocol: 'pty-cli', available: true, pause: false, resume: true }), cleanupIntervalMs: 0 });
+    const runtime = new DutydeckRuntime(repos, { providers: defaultDriverProviders(), ptyDriverFactory: factory, probe: () => ({ protocol: 'pty-cli', available: true, pause: false, resume: true }), cleanupIntervalMs: 0 });
     try {
       await runtime.initialize([ptyAgent]);
       const session = await runtime.start({ agentId: ptyAgent.id });
@@ -219,6 +220,7 @@ describe('runtime transcript source: in-flight realpath stale races', () => {
     const { factory, drivers } = makeFactory();
     (factory as unknown as { __opts: DriverOpts }).__opts = { controlled: false };
     const runtime = new DutydeckRuntime(repos, {
+      providers: defaultDriverProviders(),
       ptyDriverFactory: factory,
       probe: () => ({ protocol: 'pty-cli', available: true, pause: false, resume: true }),
       cleanupIntervalMs: 0
@@ -265,7 +267,7 @@ describe('runtime transcript source: in-flight realpath stale races', () => {
     const { factory, drivers } = makeFactory();
     (factory as unknown as { __opts: DriverOpts }).__opts = { controlled: true };
     factory.controlledResources = () => true;
-    const runtime = new DutydeckRuntime(repos, { driverFactory: factory, cleanupIntervalMs: 0 });
+    const runtime = new DutydeckRuntime(repos, { providers: defaultDriverProviders(), driverFactory: factory, cleanupIntervalMs: 0 });
     await runtime.initialize([strictAgent]);
     const session = await runtime.start({ agentId: strictAgent.id });
 
@@ -289,7 +291,7 @@ describe('runtime transcript source: historical origin run (controlled native re
     const { factory } = makeFactory();
     (factory as unknown as { __opts: DriverOpts }).__opts = { controlled: true };
     factory.controlledResources = () => true;
-    const runtime = new DutydeckRuntime(repos, { driverFactory: factory, cleanupIntervalMs: 0 });
+    const runtime = new DutydeckRuntime(repos, { providers: defaultDriverProviders(), driverFactory: factory, cleanupIntervalMs: 0 });
     try {
       await runtime.initialize([strictAgent]);
       const session = await runtime.start({ agentId: strictAgent.id });
@@ -317,6 +319,7 @@ describe('runtime transcript source: historical origin run (controlled native re
     factory.controlledResources = () => true;
     const warnings: Array<Record<string, unknown>> = [];
     const runtime = new DutydeckRuntime(repos, {
+      providers: defaultDriverProviders(),
       driverFactory: factory, cleanupIntervalMs: 0,
       log: { warn: data => warnings.push(data) }
     });
@@ -372,6 +375,7 @@ describe('runtime transcript source: local-only (PTY) historical run collection'
     const { factory, drivers } = makeFactory();
     (factory as unknown as { __opts: DriverOpts }).__opts = { controlled: false };
     const runtime = new DutydeckRuntime(repos, {
+      providers: defaultDriverProviders(),
       ptyDriverFactory: factory,
       probe: () => ({ protocol: 'pty-cli', available: true, pause: false, resume: true }),
       cleanupIntervalMs: 0
@@ -405,7 +409,7 @@ describe('runtime transcript source: unsubscribe, replay, idempotency, proof, in
     const { factory, drivers } = makeFactory();
     (factory as unknown as { __opts: DriverOpts }).__opts = { controlled: true };
     factory.controlledResources = () => true;
-    const runtime = new DutydeckRuntime(repos, { driverFactory: factory, cleanupIntervalMs: 0 });
+    const runtime = new DutydeckRuntime(repos, { providers: defaultDriverProviders(), driverFactory: factory, cleanupIntervalMs: 0 });
     try {
       await runtime.initialize([strictAgent]);
       const session = await runtime.start({ agentId: strictAgent.id });
@@ -430,6 +434,7 @@ describe('runtime transcript source: unsubscribe, replay, idempotency, proof, in
     factory.controlledResources = () => true;
     const warnings: Array<Record<string, unknown>> = [];
     const runtime = new DutydeckRuntime(repos, {
+      providers: defaultDriverProviders(),
       driverFactory: factory, cleanupIntervalMs: 0,
       log: { warn: data => warnings.push(data) }
     });
@@ -468,6 +473,7 @@ describe('runtime transcript source: unsubscribe, replay, idempotency, proof, in
     factory.controlledResources = () => true;
     const warnings: Array<Record<string, unknown>> = [];
     const runtime = new DutydeckRuntime(repos, {
+      providers: defaultDriverProviders(),
       driverFactory: factory, cleanupIntervalMs: 0,
       log: { warn: data => warnings.push(data) }
     });
@@ -491,7 +497,7 @@ describe('runtime transcript source: unsubscribe, replay, idempotency, proof, in
     const h1 = makeFactory();
     (h1.factory as unknown as { __opts: DriverOpts }).__opts = { controlled: true };
     h1.factory.controlledResources = () => true;
-    const runtime1 = new DutydeckRuntime(repos, { driverFactory: h1.factory, cleanupIntervalMs: 0 });
+    const runtime1 = new DutydeckRuntime(repos, { providers: defaultDriverProviders(), driverFactory: h1.factory, cleanupIntervalMs: 0 });
     await runtime1.initialize([strictAgent]);
     const first = await repos.config.get('insight.instance_id');
     expect(first).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
@@ -501,7 +507,7 @@ describe('runtime transcript source: unsubscribe, replay, idempotency, proof, in
     const h2 = makeFactory();
     (h2.factory as unknown as { __opts: DriverOpts }).__opts = { controlled: true };
     h2.factory.controlledResources = () => true;
-    const runtime2 = new DutydeckRuntime(repos, { driverFactory: h2.factory, cleanupIntervalMs: 0 });
+    const runtime2 = new DutydeckRuntime(repos, { providers: defaultDriverProviders(), driverFactory: h2.factory, cleanupIntervalMs: 0 });
     await runtime2.initialize([strictAgent]);
     expect(await repos.config.get('insight.instance_id')).toBe(first);
     await runtime2.shutdown();

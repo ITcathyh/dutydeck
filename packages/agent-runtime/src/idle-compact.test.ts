@@ -1,3 +1,4 @@
+import { defaultDriverProviders } from '../../../apps/server/src/driver-providers.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createRepositories } from '@dutydeck/storage';
 import type { AgentConfig, AgentDriver } from '@dutydeck/shared';
@@ -14,7 +15,7 @@ async function fixture(compact?: AgentDriver['compact'], emitCancellation = fals
   const repos = createRepositories(':memory:', { newDatabaseAuthority: 'ledger_v1' });
   const order: string[] = [];
   let driver!: AgentDriver;
-  const runtime = new DutydeckRuntime(repos, { driverIdleTimeoutMs: 0, probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }), driverFactory: (_agent, _protocol, emit) => {
+  const runtime = new DutydeckRuntime(repos, { providers: defaultDriverProviders(), driverIdleTimeoutMs: 0, probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }), driverFactory: (_agent, _protocol, emit) => {
     driver = { start: async () => {}, resume: async () => {}, stop: async () => {}, interrupt: async () => {}, isStopped: async () => true, setModel: async () => {},
       send: vi.fn(async input => { order.push(typeof input === 'string' ? input : input.prompt); emit({ type: 'text', data: { text: 'done' } }); emit({ type: 'completed', data: { stopReason: 'end_turn' } }); }),
       ...(compact ? { compact: vi.fn(async submission => {

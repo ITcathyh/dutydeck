@@ -9,6 +9,7 @@
 // 7) 待收尾记录每个机器人一行，任务的验证收尾后移除，不随任务数增长；
 // 8) 旧结果卡的记忆删除回调触发重绘后：验证状态行与「运行验证」按钮仍按当前记录显示。
 // 9) 管理群里自动验证带上发起人身份、手动「运行验证」带上点击人身份，都过得了执行授权。
+import { defaultDriverProviders } from '../driver-providers.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import '../../../../tests/support/fast-wait-for.js';
 import { execFileSync } from 'node:child_process';
@@ -102,6 +103,7 @@ async function harness(options: { adhdMode?: boolean; verificationCommand?: stri
     const repos = createRepositories(join(root, 'state.db'), { newDatabaseAuthority: 'ledger_v1' });
     let groups: LarkGroupManager | undefined;
     const runtime = new DutydeckRuntime(repos, {
+      providers: defaultDriverProviders(),
       ...(options.managed ? { authorizeExecution: (sessionId: string, actorId?: string) => groups!.prepareTurn(sessionId, actorId) } : {}),
       probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }),
       driverFactory: (_config, _protocol, emit) => ({

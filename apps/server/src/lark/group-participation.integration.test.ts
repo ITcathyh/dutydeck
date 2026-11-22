@@ -1,3 +1,4 @@
+import { defaultDriverProviders } from '../driver-providers.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -29,6 +30,7 @@ describe('group participation with persistent repository and real runtime', () =
     const driverPrompts: string[] = [];
     const lifecycle: string[] = [];
     const runtime = new DutydeckRuntime(repos, {
+      providers: defaultDriverProviders(),
       probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }),
       driverFactory: (agent, _protocol, emit) => {
         driverModes.push(agent.permissionMode);
@@ -99,6 +101,7 @@ describe('group participation with persistent repository and real runtime', () =
     const phases: Array<{ phase: string; snapshot: CollaborationSnapshot; sessionId: string; mode: string }> = [];
     const lifecycle: string[] = [];
     const runtime = new DutydeckRuntime(repos, {
+      providers: defaultDriverProviders(),
       probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }),
       driverFactory: (agent, _protocol, emit, _onExit, sessionId) => {
         let stopped = false;

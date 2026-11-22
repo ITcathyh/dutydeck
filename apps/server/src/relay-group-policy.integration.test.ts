@@ -1,3 +1,4 @@
+import { defaultDriverProviders } from './driver-providers.js';
 import { afterEach, expect, it, vi } from 'vitest';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -19,7 +20,7 @@ async function fixture(emailOnly = false) {
   const dir = await mkdtemp(join(tmpdir(), 'dutydeck-relay-policy-'));
   const repos = createRepositories(join(dir, 'state.db'), { newDatabaseAuthority: 'ledger_v1' });
   const agent = agentConfigSchema.parse({ id: 'fixture', name: 'fixture', command: process.execPath, cwd: dir, protocol: 'pipe' });
-  const runtime = new DutydeckRuntime(repos, { cleanupIntervalMs: 0, probe: () => ({ protocol: 'pipe', available: true, pause: false, resume: false }),
+  const runtime = new DutydeckRuntime(repos, { providers: defaultDriverProviders(), cleanupIntervalMs: 0, probe: () => ({ protocol: 'pipe', available: true, pause: false, resume: false }),
     driverFactory: () => ({ start: async () => {}, send: async () => {}, stop: async () => {}, interrupt: async () => {}, resume: async () => {}, isStopped: async () => true }) });
   await runtime.initialize([agent]);
   let time = new Date();

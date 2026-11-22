@@ -1,3 +1,4 @@
+import { defaultDriverProviders } from '../../../apps/server/src/driver-providers.js';
 import { expect, it, vi } from 'vitest';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -18,7 +19,7 @@ it('ends a stuck ACP Agent after a timed-out turn so its result-unknown task can
   const agent: AgentConfig = { id: 'stuck', name: 'Stuck', command: process.execPath, args: [resolve('tests/fixtures/acp-lifecycle-agent.mjs')], protocol: 'acp', cwd,
     env: { lifecycle_directory: cwd, lifecycle_cancel_gate: '1' }, permissionMode: 'full-trust', timeout: 2, capabilities: { pause: false, resume: true }, builtin: false };
   const repos = createRepositories(':memory:', { newDatabaseAuthority: 'ledger_v1' });
-  const runtime = new DutydeckRuntime(repos, { cleanupIntervalMs: 0 });
+  const runtime = new DutydeckRuntime(repos, { providers: defaultDriverProviders(), cleanupIntervalMs: 0 });
   try {
     await runtime.initialize([agent]);
     const session = await runtime.start({ agentId: agent.id, cwd });

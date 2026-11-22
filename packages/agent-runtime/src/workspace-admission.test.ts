@@ -1,3 +1,4 @@
+import { defaultDriverProviders } from '../../../apps/server/src/driver-providers.js';
 import { runtimeComponents } from '../test-support/components.js';
 import { afterEach, expect, it, vi } from 'vitest';
 import { execFileSync } from 'node:child_process';
@@ -25,7 +26,7 @@ async function fixture(options: { stopProven?: boolean; emitOnStop?: boolean } =
   const sent:string[]=[],stopped:string[]=[], gates=new Map<string,ReturnType<typeof deferred>>();
   const background=new Set<string>(), emitters=new Map<string,(event:NormalizedDriverEvent)=>void>();
   let proveIdle=true,proveBackground=true;
-  const runtime=new DutydeckRuntime(repos,{workspaceRoot:join(cwd,'workspaces'),cleanupIntervalMs:0,
+  const runtime=new DutydeckRuntime(repos,{ providers: defaultDriverProviders(),workspaceRoot:join(cwd,'workspaces'),cleanupIntervalMs:0,
     probe:(()=>({available:true,protocol:'acp',acp:true})) as any,
     driverFactory:(_agent,_protocol,emit,_exit,id)=>{
       let busy=false,stoppedDriver=false,submitted=false;emitters.set(id,emit);
@@ -240,7 +241,7 @@ it.each([undefined, ''])('reattaches the original idle Herdr terminal across res
   const cwd=await mkdtemp(join(tmpdir(),'runtime-admission-attach-')),path=join(cwd,'state.db');
   const agent=agentConfigSchema.parse({id:'terminal',name:'Terminal',command:'fake',protocol:'pty-cli',cwd,permissionMode:'ask'});
   let repos=createRepositories(path,{newDatabaseAuthority:'ledger_v1'}),detached=false;
-  let runtime=new DutydeckRuntime(repos,{cleanupIntervalMs:0,driverIdleTimeoutMs:0,terminalBackend:async()=>'herdr',
+  let runtime=new DutydeckRuntime(repos,{ providers: defaultDriverProviders(),cleanupIntervalMs:0,driverIdleTimeoutMs:0,terminalBackend:async()=>'herdr',
     probe:()=>({available:true,protocol:'pty-cli'}),
     driverFactory:()=>({start:async()=>{},send:async()=>{},interrupt:async()=>{},stop:async()=>{},isStopped:async()=>!detached,
       prepareForDaemonShutdown:()=>{detached=true;},isDetachedForShutdown:()=>detached,
@@ -253,7 +254,7 @@ it.each([undefined, ''])('reattaches the original idle Herdr terminal across res
     expect(receipt.options.model).toBe(model);
     const attachTerminal = vi.fn(async () => true);
     await runtime.shutdown();repos.close();repos=createRepositories(path);
-    runtime=new DutydeckRuntime(repos,{cleanupIntervalMs:0,driverIdleTimeoutMs:0,probe:()=>({available:true,protocol:'pty-cli'}),
+    runtime=new DutydeckRuntime(repos,{ providers: defaultDriverProviders(),cleanupIntervalMs:0,driverIdleTimeoutMs:0,probe:()=>({available:true,protocol:'pty-cli'}),
       driverFactory:(_agent,_protocol,emit,_exit,id)=>({
         start:async()=>{},attachTerminal,interrupt:async()=>{},
         isIdle:()=>id!==original.id||attachedIdle,hasBackgroundWork:()=>false,

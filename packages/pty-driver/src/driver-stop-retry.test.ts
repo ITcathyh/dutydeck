@@ -1,3 +1,4 @@
+import { defaultDriverProviders } from '../../../apps/server/src/driver-providers.js';
 import { afterEach, expect, it, vi } from 'vitest';
 import { createRepositories } from '@dutydeck/storage';
 import { DutydeckRuntime } from '@dutydeck/runtime';
@@ -47,6 +48,7 @@ it('runtime stop retries release the original blocked driver after physical exit
   const repos = createRepositories(':memory:', { newDatabaseAuthority: 'ledger_v1' });
   let f!: ReturnType<typeof fixture>;
   const runtime = new DutydeckRuntime(repos, {
+    providers: defaultDriverProviders(),
     cleanupIntervalMs: 0,
     probe: () => ({ protocol: 'pty-cli', available: true, pause: false, resume: true }),
     driverFactory(_agent, _protocol, onEvent, onExit, sessionId) {

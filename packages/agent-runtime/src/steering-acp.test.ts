@@ -1,3 +1,4 @@
+import { defaultDriverProviders } from '../../../apps/server/src/driver-providers.js';
 import { createHash } from 'node:crypto';
 import { afterEach, describe, expect, it } from 'vitest';
 import { mkdtemp, rm } from 'node:fs/promises';
@@ -17,7 +18,7 @@ async function fixture(env: Record<string, string> = { mock_acp_steering: '1', m
   const directory = await mkdtemp(join(tmpdir(), 'runtime-steering-acp-'));
   const repos = createRepositories(join(directory, 'state.sqlite'), { newDatabaseAuthority: 'ledger_v1' });
   const agent = agentConfigSchema.parse({ id: 'mock', name: 'Mock', command: process.execPath, args: [resolve('tests/fixtures/mock-acp-agent.mjs')], protocol: 'acp', cwd: directory, env, permissionMode: 'ask', timeout: 10 });
-  const runtime = new DutydeckRuntime(repos, { sessionPrompt, driverIdleTimeoutMs: 0, probe: (() => ({ available: true, protocol: 'acp', acp: true })) as any });
+  const runtime = new DutydeckRuntime(repos, { providers: defaultDriverProviders(), sessionPrompt, driverIdleTimeoutMs: 0, probe: (() => ({ available: true, protocol: 'acp', acp: true })) as any });
   cleanup.push(async () => { await runtime.shutdown(); repos.close(); await rm(directory, { recursive: true, force: true }); });
   await runtime.initialize([agent]);
   const session = await runtime.start({ agentId: agent.id, cwd: directory });

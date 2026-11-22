@@ -1,3 +1,4 @@
+import { defaultDriverProviders } from '../../../apps/server/src/driver-providers.js';
 import { captureBoundExecution } from '../../../tests/support/bound-execution.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { execFileSync } from 'node:child_process';
@@ -38,7 +39,7 @@ async function fixture(options: RuntimeOptions = {}) {
   };
   const agent: AgentConfig = { id: 'fixture', name: 'Fixture', command: 'fake', args: [], cwd, env: {}, protocol: 'pty-cli', permissionMode: 'ask', timeout: 10, capabilities: { pause: false, resume: true }, builtin: false };
   const warn = vi.fn(), notices = vi.fn();
-  const open = (extra: RuntimeOptions = {}) => new DutydeckRuntime(repos, { driverFactory: factory, cleanupIntervalMs: 0,
+  const open = (extra: RuntimeOptions = {}) => new DutydeckRuntime(repos, { providers: defaultDriverProviders(), driverFactory: factory, cleanupIntervalMs: 0,
     probe: () => ({ available: true, protocol: 'pty-cli', pause: false, resume: true }), log: { warn, info: () => {} }, onSessionNotice: notices, ...options, ...extra });
   let runtime = open();
   cleanups.push(async () => { for (const gate of gates.values()) gate.resolve(); await runtime.shutdown(); repos.close(); await rm(cwd, { recursive: true, force: true }); });

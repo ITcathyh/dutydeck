@@ -1,3 +1,4 @@
+import { defaultDriverProviders } from '../../../apps/server/src/driver-providers.js';
 import { afterEach, expect, it, vi } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -14,6 +15,7 @@ afterEach(async () => { vi.useRealTimers(); for (const close of cleanup.splice(0
 function runtimeFor(repos: ReturnType<typeof createRepositories>, state: { exited: boolean; prepared: boolean; hold?: Promise<void> } = { exited: true, prepared: true }) {
   const log = { warn: vi.fn(), info: vi.fn() }, notices: SessionNotice[] = [], drivers: AgentDriver[] = [];
   const runtime = new DutydeckRuntime(repos, {
+    providers: defaultDriverProviders(),
     cleanupIntervalMs: 0, driverIdleTimeoutMs: 10, log, onSessionNotice: (_session, notice) => { notices.push(notice); },
     probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }),
     driverFactory: (_agent, _protocol, emit) => {
@@ -192,7 +194,7 @@ it('logs a maintenance loop failure instead of swallowing it', async () => {
   cleanup.push(() => repos.close());
   vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
   const log = { warn: vi.fn(), info: vi.fn() };
-  const runtime = new DutydeckRuntime(repos, { cleanupIntervalMs: 1_000, log, probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }), driverFactory: () => { throw new Error('unused'); } });
+  const runtime = new DutydeckRuntime(repos, { providers: defaultDriverProviders(), cleanupIntervalMs: 1_000, log, probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }), driverFactory: () => { throw new Error('unused'); } });
   cleanup.push(() => runtime.shutdown());
   await runtime.initialize([agent]);
   vi.spyOn(repos.execution, 'getReconcileRequiredAttempts').mockImplementation(() => { throw new Error('ledger read failed'); });

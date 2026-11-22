@@ -1,11 +1,13 @@
+import { privateSessionStore, privateWorkspaceDirectory } from './native-session-store.js';
+export { readNativeCreationRecord } from './native-session-store.js';
 import { createHash } from 'node:crypto';
 import type { ChildProcess } from 'node:child_process';
 import { basename, delimiter, dirname, join, resolve } from 'node:path';
 import { accessSync, chmodSync, constants, existsSync, mkdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { assertNativeContextRecord, createAcpRuntime, createAgentRegistry, createRuntimeStore, type AcpPermissionDecision, type AcpPermissionRequest, type AcpRuntime, type AcpRuntimeResourceScope, type AcpRuntimeHandle, type AcpRuntimeProcessEvent, type AcpRuntimeStatus, type AcpRuntimeTurn, type AcpSessionStore } from 'acpx/runtime';
-import type { AgentConfig, AgentDriver, DriverSteeringOutcome, DriverTranscriptSourceObservation, InsightClient, NormalizedDriverEvent, PermissionMode, ToolRiskPolicy, DriverSubmission, DriverSubmissionInput, NativeContextIdentity, NativeContextExpected, NativeConfigurationRequest, NativeConfigurationProof, OperationPermit, ChildPermit } from '@dutydeck/shared';
-import { RuntimeError, errorMessage, agentCommandApprovalReason, isAgentCommandAutoApproval, AGENT_IDLE_TIMEOUT, PromptNotWrittenError, claudeRateLimits, permissionDisplayText, taskExecutionSchemas, canonicalExecutionJson, type AgentIdleTimeoutData } from '@dutydeck/shared';
+import { createAcpRuntime, createAgentRegistry, type AcpPermissionDecision, type AcpPermissionRequest, type AcpRuntime, type AcpRuntimeResourceScope, type AcpRuntimeHandle, type AcpRuntimeProcessEvent, type AcpRuntimeStatus, type AcpRuntimeTurn, type AcpSessionStore } from 'acpx/runtime';
+import type { AgentConfig, AgentDriver, DriverSteeringOutcome, DriverTranscriptSourceObservation, InsightClient, NormalizedDriverEvent, PermissionMode, ToolRiskPolicy, DriverSubmission, DriverSubmissionInput, NativeContextIdentity, NativeConfigurationRequest, NativeConfigurationProof, OperationPermit, ChildPermit } from '@dutydeck/shared';
+import { RuntimeError, errorMessage, agentCommandApprovalReason, isAgentCommandAutoApproval, AGENT_IDLE_TIMEOUT, PromptNotWrittenError, claudeRateLimits, permissionDisplayText, type AgentIdleTimeoutData } from '@dutydeck/shared';
 import { warnCaught, type DiagnosticLog } from '@dutydeck/shared';
 import { eventContentText, eventHasContent, normalizeEventContent, shellQuote } from '@dutydeck/shared';
 import { childEnvironment } from '@dutydeck/shared/child-environment';
@@ -187,39 +189,9 @@ export function prepareAcpxAgentLaunch(agent: AgentConfig, options: ({ runtimeDi
   };
 }
 
-/** `<cwd>/.dutydeck` holds session credentials inside the Agent's workspace: private directories, never in the repository. */
-function privateWorkspaceDirectory(cwd: string, ...segments: string[]) {
-  const root = join(cwd, '.dutydeck');
-  const directory = join(root, ...segments);
-  mkdirSync(directory, { recursive: true, mode: 0o700 });
-  for (let current = directory; ; current = dirname(current)) { chmodSync(current, 0o700); if (current === root) break; }
-  try { writeFileSync(join(root, '.gitignore'), '*\n', { flag: 'wx' }); }
-  catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error; }
-  return directory;
-}
-
 /** Under `<cwd>/.dutydeck`: where a Dutydeck launcher reports the Agent group it detached. */
 const LAUNCHER_REPORTS = 'launchers';
 const usesDutydeckLauncher = (args: readonly string[]) => args.some(arg => arg === envLauncherPath() || arg === claudeLauncherPath());
-
-/** acpx writes records with the process umask; they carry relay and group-tool tokens. */
-function privateSessionStore(cwd: string): AcpSessionStore {
-  const store = createRuntimeStore({ stateDir: join(cwd, '.dutydeck', 'acpx') });
-  const sessionFile = (id: string) => join(privateWorkspaceDirectory(cwd, 'acpx', 'sessions'), `${encodeURIComponent(id)}.json`);
-  return {
-    async load(sessionId) {
-      const file = sessionFile(sessionId);
-      const record = await store.load(sessionId);
-      if (record) chmodSync(file, 0o600);
-      return record;
-    },
-    async save(record) {
-      const file = sessionFile(record.acpxRecordId);
-      await store.save(record);
-      chmodSync(file, 0o600);
-    }
-  };
-}
 
 const RISK_TEXT_MAX_DEPTH = 64;
 const RISK_TEXT_MAX_SIZE = 1_000_000;
@@ -377,17 +349,6 @@ class AcpxStoppedError extends Error {
   constructor() { super('ACP adapter is stopped'); this.name = 'AcpxStoppedError'; }
 }
 
-/** Read the first durable creation receipt without creating or connecting a client. */
-export async function readNativeCreationRecord(expected: NativeContextExpected): Promise<NativeContextIdentity | undefined> {
-  const store=privateSessionStore(expected.cwd);
-  const record=await store.load(expected.sessionKey);if(!record)return;
-  const raw=record.acpx?.dutydeck_native_identity;if(!raw)return;
-  const identity=taskExecutionSchemas.nativeIdentitySchema.parse(JSON.parse(raw));
-  const {acpxRecordId,backendSessionId,agentSessionId,defaults,...saved}=identity;
-  if(canonicalExecutionJson(saved)!==canonicalExecutionJson(expected))throw new Error('NATIVE_CONTEXT_IDENTITY_CONFLICT');
-  assertNativeContextRecord(record,identity);
-  return identity;
-}
 export class AcpxAdapter implements AgentDriver {
   private readonly runtime: AcpRuntime;
   private readonly sessionStore: AcpSessionStore;

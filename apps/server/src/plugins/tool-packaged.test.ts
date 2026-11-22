@@ -1,3 +1,4 @@
+import { defaultDriverProviders } from '../driver-providers.js';
 import { DutydeckRuntime } from '@dutydeck/runtime';
 import { LarkMessageCoordinator } from '../lark/coordinator.js';
 import { larkBotsConfigKey, type StoredLarkConfig } from '../lark/config.js';
@@ -65,7 +66,7 @@ it('installs packed fake-ticket without its source and executes real external HT
   expect(seen.at(-1)).toMatchObject({ actor: 'alice', auth: 'Bearer synthetic-a' });
   // Real inbound coordinator -> packaged provider -> actual local HTTP -> fixed chat reply.
   const driverFactory = vi.fn(() => { throw new Error('A direct query must never start an Agent'); });
-  const runtime = new DutydeckRuntime(repos, { driverFactory }); await runtime.initialize([]);
+  const runtime = new DutydeckRuntime(repos, { providers: defaultDriverProviders(), driverFactory }); await runtime.initialize([]);
   cleanup.push(() => runtime.shutdown());
   const config: StoredLarkConfig = { appId: 'cli_app', appSecret: 'synthetic', workspace: temp, listening: true, permissionMode: 'ask', fullTrustConfirmed: false, preInjectPrompt: '', pushIntervalMs: 1000, hideTraceOnComplete: false, allowedUsers: [], allowedEmails: [], allowedBots: [], peerBotsAllowed: false, highRiskAllowedUsers: [], highRiskAllowedEmails: [], highRiskPattern: '', riskControlMode: 'off' };
   await repos.config.set(larkBotsConfigKey, JSON.stringify([config]));

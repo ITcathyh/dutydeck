@@ -1,3 +1,4 @@
+import type { DriverRegistry } from './driver-registry.js';
 import type { RuntimeHost } from './host-ports.js';
 import type { SteeringOutcome, SteeringResult } from '../index.js';
 import { clearTaskReportSafely } from '@dutydeck/shared';
@@ -13,6 +14,7 @@ import { RevokedOperation, type RuntimeSessionMutations } from '../ownership.js'
 const STEERING_TIMEOUT_MS = 30_000;
 
 interface SteeringServiceDependencies {
+  registry: DriverRegistry;
   acceptedInput: (task: TaskRecord) => AcceptedTaskInputV2;
   active: (id: string) => Promise<{ session: Session; driver: AgentDriver | undefined; }>;
   actor: (session: Session, actorId?: string) => ExecutionActor;
@@ -79,7 +81,7 @@ export class SteeringService {
       const task = projection?.task;
       if (!task || task.sessionId !== id || task.status !== 'queued') throw new RuntimeError('QUEUED_TASK_NOT_FOUND','Queued task is missing',404);
       const skipped = (outcome: SteeringOutcome, error?: string): SteeringResult => result(this.deps.repos.execution.getTaskExecution(taskId)!, outcome, error);
-      if (!driver?.steer || this.deps.repos.execution.getAcceptedTask(taskId)?.request?.namespace !== steerableTaskNamespace) return skipped('unsupported');
+      if (!this.deps.registry.supports(driver, 'steer') || this.deps.repos.execution.getAcceptedTask(taskId)?.request?.namespace !== steerableTaskNamespace) return skipped('unsupported');
       const running = () => {
         const token = this.mutations.attempts.get(id);
         const ref = token && this.mutations.attemptRefs.get(token);

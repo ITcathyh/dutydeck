@@ -1,3 +1,4 @@
+import { defaultDriverProviders } from '../apps/server/src/driver-providers.js';
 import { afterEach, expect, it } from 'vitest';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -17,7 +18,7 @@ it.each([
   const directory = await mkdtemp(join(tmpdir(), 'history-preparation-'));
   const repos = createRepositories(':memory:', { newDatabaseAuthority: 'ledger_v1' });
   const marker = `UNPROMPTED_${phase.toUpperCase()}_FAILURE`;
-  const runtime = new DutydeckRuntime(repos, { cleanupIntervalMs: 0,
+  const runtime = new DutydeckRuntime(repos, { providers: defaultDriverProviders(), cleanupIntervalMs: 0,
     authorizeTask: async (_session, task) => { if (phase === 'authorize' && task.prompt === 'fail') throw new Error(marker); },
     sessionPrompt: async (_session, prompt) => { if (phase === 'prepare' && prompt === 'fail') throw new Error(marker); return prompt; },
     driverFactory: (_agent, _protocol, emit) => ({ start: async () => {}, resume: async () => {}, stop: async () => {}, interrupt: async () => {}, isIdle: () => true, isStopped: async () => true,

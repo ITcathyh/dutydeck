@@ -1,3 +1,4 @@
+import { defaultDriverProviders } from '../../../apps/server/src/driver-providers.js';
 import { runtimeComponents } from '../test-support/components.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createHash } from 'node:crypto';
@@ -31,7 +32,7 @@ async function fixture(options: RuntimeOptions = {}, onSend?: (emit: (event: Nor
   const stopGate = deferred();
   let emit!: (event: NormalizedDriverEvent) => void;
   let driver!: AgentDriver;
-  const runtime = new DutydeckRuntime(repos, { driverIdleTimeoutMs: 0, ...options,
+  const runtime = new DutydeckRuntime(repos, { providers: defaultDriverProviders(), driverIdleTimeoutMs: 0, ...options,
     probe: () => ({ protocol: 'jsonl', available: true, pause: false, resume: true }),
     driverFactory: (_config, _protocol, onEvent) => {
       emit = onEvent;
@@ -177,7 +178,7 @@ describe('Runtime uses the execution ledger', () => {
 
   it('rejects legacy before saving Agent config or obtaining a Runtime claim', async () => {
     const repos = createRepositories(':memory:'); const save = vi.spyOn(repos.agents, 'save'), attach = vi.spyOn(repos.control, 'attachRuntime');
-    const runtime = new DutydeckRuntime(repos, { driverIdleTimeoutMs: 0 });
+    const runtime = new DutydeckRuntime(repos, { providers: defaultDriverProviders(), driverIdleTimeoutMs: 0 });
     await expect(runtime.initialize([agent])).rejects.toMatchObject({ code: 'EXECUTION_UPGRADE_REQUIRED' });
     expect(save).not.toHaveBeenCalled(); expect(attach).not.toHaveBeenCalled(); await runtime.shutdown();
   });
@@ -593,7 +594,7 @@ describe('Runtime uses the execution ledger', () => {
     await h.runtime.shutdown(); h.repos.close();
     const repos = createRepositories(h.path, { newDatabaseAuthority: 'ledger_v1' });
     const create = vi.fn((): AgentDriver => { throw new Error('must not recreate unknown turn'); });
-    const runtime = new DutydeckRuntime(repos, { driverFactory: create, cleanupIntervalMs: 0 });
+    const runtime = new DutydeckRuntime(repos, { providers: defaultDriverProviders(), driverFactory: create, cleanupIntervalMs: 0 });
     cleanup.push(async () => { await runtime.shutdown(); repos.close(); });
     await runtime.initialize([{ ...agent, cwd: h.directory }]);
     const restored = repos.execution.getTaskExecution(task.id)!.currentAttempt!;
@@ -849,7 +850,7 @@ describe('Runtime uses the execution ledger', () => {
     else {const target=h.repos.execution.getTaskExecution(first.id)!.currentAttempt!;const queued=h.repos.execution.getTaskExecution(second.id)!.task;execution.beginQueuedSteering({sessionId:h.session.id,runId:h.session.runId},second.id,queued.revision,{operationId:'pending-before-crash',actor:{kind:'installation_owner',id:'installation_owner'},target:{taskId:first.id,attemptId:target.attemptId}});}
     gate.resolve();await vi.waitFor(()=>expect(h.repos.execution.getTaskExecution(first.id)?.task.status).toBe('completed'));await h.runtime.shutdown();
     const factory=vi.fn(()=>{throw new Error('must not create a replacement driver');});
-    const next=new DutydeckRuntime(h.repos,{driverFactory:factory,driverIdleTimeoutMs:0});cleanup.push(async()=>{await next.shutdown();});await next.initialize([{...agent,cwd:h.directory}]);
+    const next=new DutydeckRuntime(h.repos,{ providers: defaultDriverProviders(),driverFactory:factory,driverIdleTimeoutMs:0});cleanup.push(async()=>{await next.shutdown();});await next.initialize([{...agent,cwd:h.directory}]);
     expect(factory).not.toHaveBeenCalled();expect(h.repos.execution.getTaskExecution(second.id)).toMatchObject({task:{status:'reconcile_required'},attempts:[],steering:{state:'unknown'}});
     expect(h.repos.execution.getUnresolvedTasks(h.session.id)).toContainEqual({id:second.id,status:'reconcile_required'});
   });

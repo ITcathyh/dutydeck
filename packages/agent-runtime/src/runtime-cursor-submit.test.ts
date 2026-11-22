@@ -1,3 +1,5 @@
+import { setTimeout as delay } from 'node:timers/promises';
+import { defaultDriverProviders } from '../../../apps/server/src/driver-providers.js';
 import { afterEach, expect, it, vi } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -10,21 +12,15 @@ import { createRepositories } from '@dutydeck/storage';
 import { PtyCliDriver } from '../../pty-driver/src/driver.js';
 import { DutydeckRuntime } from './index.js';
 let release: (() => Promise<void>) | undefined;
-afterEach(async () => { await release?.(); release = undefined; vi.useRealTimers(); });
-// vi.waitFor advances fake time by one interval per real interval; step fake time directly instead.
-async function until(check: () => void, timeout: number) {
-  for (let elapsed = 0; ; elapsed += 50) {
-    try { check(); return; } catch (error) { if (elapsed >= timeout) throw error; }
-    await vi.advanceTimersByTimeAsync(50);
-  }
-}
+afterEach(async () => { await release?.(); release = undefined; });
+// Queue release also waits for real filesystem I/O. Poll both the terminal and ledger on the same clock.
+const until = (check: () => void, timeout: number) => vi.waitFor(check, { timeout, interval: 50 });
 
 it('keeps ordinary Cursor input queued until the real previous driver turn completes, then submits each task once', async () => {
-  vi.useFakeTimers();
   const directory = mkdtempSync(join(tmpdir(), 'dd-cursor-queue-'));
   const repos = createRepositories(':memory:', { newDatabaseAuthority: 'ledger_v1' });
   let output!: (data: string) => void; const writes: string[] = [], submits: string[] = []; let draft = '';
-  const runtime = new DutydeckRuntime(repos, { probe: () => ({ protocol: 'pty-cli', available: true, pause: false, resume: true }),
+  const runtime = new DutydeckRuntime(repos, { providers: defaultDriverProviders(), probe: () => ({ protocol: 'pty-cli', available: true, pause: false, resume: true }),
     driverFactory: (agent, _protocol, onEvent, onExit, sessionId) => {
       const backend: SessionBackend & Partial<PtyLike> = { kind: 'pty', spawn() {}, resize() {}, kill() {}, interrupt() {}, onExit() {}, onData(cb) { output = cb; },
         write(data) { writes.push(data); }, sendText(data) { writes.push(data); draft += data; }, sendSpecialKeys(...keys) {
@@ -39,7 +35,7 @@ it('keeps ordinary Cursor input queued until the real previous driver turn compl
   const first = await runtime.dispatch(session.id, 'first task');
   await until(() => expect(submits).toHaveLength(1), 20_000); expect(submits[0]).toContain('first task');
   const second = await runtime.dispatch(session.id, 'second\nline');
-  await vi.advanceTimersByTimeAsync(2000); expect(submits).toHaveLength(1);
+  await delay(2000); expect(submits).toHaveLength(1);
   expect(repos.execution.getTaskExecution(second.id)?.task.status).toBe('queued');
   output('\x1b[2J\x1b[Hfirst answer\r\n→ Add a follow-up');
   await until(() => expect(repos.execution.getTaskExecution(first.id)?.currentAttempt?.state).toBe('settled'), 10_000);
@@ -57,4 +53,4 @@ it('keeps ordinary Cursor input queued until the real previous driver turn compl
   await until(() => expect(repos.execution.getTaskExecution(second.id)?.currentAttempt?.state).toBe('settled'), 10_000);
   expect(repos.execution.getTaskExecution(second.id)?.currentAttempt?.outcome).toBe('failed');
   expect((await runtime.getEvents(session.id)).filter(event => event.type === 'completed')).toHaveLength(2);
-});
+}, 60_000);

@@ -1,3 +1,4 @@
+import type { DriverRegistry } from './driver-registry.js';
 import type { AgentDriver, AgentEvent, AttemptRef, EventType, NormalizedDriverEvent, RepositoryBundle, Session, SessionFence, ToolCallData } from '@dutydeck/shared';
 import { canonicalExecutionJson, deferredConfirmationId, eventHasContent, isBackgroundFollowup, makeId, normalizeEventContent, now, RuntimeError, withTimeout } from '@dutydeck/shared';
 import type { AsyncLocalStorage } from 'node:async_hooks';
@@ -32,6 +33,7 @@ interface AttemptTools {
 }
 
 interface EventIngestDependencies {
+  registry: DriverRegistry;
   artifact<K extends 'saveError' | 'saveToolCall'>(method: K, ...args: Parameters<RepositoryBundle['artifacts'][K]>): Promise<unknown>;
   currentRef: (id: string) => (AttemptRef & SessionFence) | SessionFence | undefined;
   emit: (sessionId: string, type: EventType, data: unknown, raw?: string, eventId?: string, sourceId?: string) => Promise<AgentEvent<unknown>>;
@@ -105,7 +107,7 @@ export class EventIngest {
     if (error) throw error;
   }
   /** Share one bounded driver-tail and Runtime-persistence drain before either error cleanup or stop revokes ownership. */
-  settleExitedDriver(sessionId: string, driver: AgentDriver | undefined, source = driver?.drainExitedOutput?.()): Promise<unknown> {
+  settleExitedDriver(sessionId: string, driver: AgentDriver | undefined, source = this.deps.registry.method(driver, 'drainExitedOutput')?.()): Promise<unknown> {
     if (!driver || !source) return Promise.resolve(undefined);
     const cached = this.exitedDriverDrains.get(driver);
     if (cached?.source === source) return cached.settled;

@@ -1,3 +1,4 @@
+import { defaultDriverProviders } from '../driver-providers.js';
 import { afterEach, expect, it } from 'vitest';
 import { appendFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -40,7 +41,7 @@ it('preserves the short business answer and memory postscript from real native r
 });
 it('retains memory evidence through runtime tool-ID scoping, persistence and result rendering', async () => {
   const h = await answer(), repos = createRepositories(':memory:', { newDatabaseAuthority: 'ledger_v1' });
-  const runtime = new DutydeckRuntime(repos, { cleanupIntervalMs: 0, driverFactory: (_agent, _protocol, emit) => ({
+  const runtime = new DutydeckRuntime(repos, { providers: defaultDriverProviders(), cleanupIntervalMs: 0, driverFactory: (_agent, _protocol, emit) => ({
     start: async () => {}, resume: async () => {}, stop: async () => {}, isStopped: async () => true, interrupt: async () => {},
     send: async () => { for (const event of h.events) emit(event); emit({ type: 'completed', data: { stopReason: 'end_turn' } }); },
   }) });

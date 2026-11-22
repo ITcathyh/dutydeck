@@ -1,3 +1,4 @@
+import { defaultDriverProviders } from './driver-providers.js';
 import { afterEach, expect, it, vi } from 'vitest';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -21,7 +22,7 @@ async function httpFixture(owned = false, status: 'pending' | 'answered' = 'answ
   const agent = agentConfigSchema.parse({ id: 'fixture', name: 'fixture', command: process.execPath, cwd: dir, protocol: 'acp' });
   let finish: (() => void) | undefined;
   let exit = (_code: number) => {};
-  const runtime = new DutydeckRuntime(repos, { cleanupIntervalMs: 0,
+  const runtime = new DutydeckRuntime(repos, { providers: defaultDriverProviders(), cleanupIntervalMs: 0,
     probe: () => ({ protocol: 'acp', available: true, pause: false, resume: false }),
     driverFactory: (_agent, _protocol, emit, onExit) => {
       exit = onExit;

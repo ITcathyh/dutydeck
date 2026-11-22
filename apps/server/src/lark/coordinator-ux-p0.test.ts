@@ -5,6 +5,7 @@ import { TestLarkCoordinator } from './coordinator-test-fixture.js';
 // card-mentions）与 workflow-interactions 层各有单测；这里只锁定「coordinator 真实接线」：
 // 真实 DutydeckRuntime + SQLite 持久化 + 真实 LarkWorkflowInteractions，service 为内存 mock。
 // /repair 的外部发布绝不真实发生：open-platform-session 整体被 mock，client 为测试桩。
+import { defaultDriverProviders } from '../driver-providers.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import '../../../../tests/support/fast-wait-for.js';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
@@ -64,6 +65,7 @@ async function harness(
   const gate = new Promise<void>(done => { release = done; });
   const send = vi.fn(); const resolvePermission = vi.fn(); const interrupt = vi.fn();
   const runtime = new DutydeckRuntime(repos, {
+    providers: defaultDriverProviders(),
     matterTracking: new MattersService(repos),
     ...(options.authorizeTask ? { authorizeTask: options.authorizeTask } : {}),
     probe: () => ({ protocol, available: true, pause: false, resume: true }),

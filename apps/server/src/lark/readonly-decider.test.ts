@@ -1,3 +1,4 @@
+import { defaultDriverProviders } from '../driver-providers.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import '../../../../tests/support/short-acpx-reply-drain.js';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
@@ -29,6 +30,7 @@ async function harness(reply: string | string[] | null | Error, timeoutMs = 3000
   const drivers: AgentDriver[] = [];
   const prompts: string[] = [];
   const runtime = new DutydeckRuntime(repositories, {
+    providers: defaultDriverProviders(),
     probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }),
     driverFactory: (agent, _protocol, emit) => {
       starts.push(agent);
@@ -273,7 +275,7 @@ describe('read-only participation decision', () => {
     const original = await readFile(resolve('tests/fixtures/mock-acp-agent.mjs'), 'utf8');
     await writeFile(fixture, original.replace('`Permission: ${decision.outcome.outcome} ${JSON.stringify(decision.outcome)}`', 'JSON.stringify(prompt.includes("群回复生成器") ? {response:JSON.stringify(decision.outcome)} : {action:"reply",reason:JSON.stringify(decision.outcome),evidenceIds:["obs_1"]})'));
     const repositories = createRepositories(join(cwd, 'state.db'), { newDatabaseAuthority: 'ledger_v1' });
-    const runtime = new DutydeckRuntime(repositories, { probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }) });
+    const runtime = new DutydeckRuntime(repositories, { providers: defaultDriverProviders(), probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }) });
     cleanup.push(async () => { await runtime.shutdown(); repositories.close(); await rm(cwd, { force: true, recursive: true }); });
     await runtime.initialize([{ id: 'mock', name: 'Mock', command: process.execPath, args: [fixture], protocol: 'acp', cwd, env: {}, permissionMode: 'full-trust', timeout: 10, capabilities: { pause: false, resume: true }, builtin: false }]);
     const decider = new ReadonlyParticipationDecider({ runtime, repos: repositories, workspaceRoot: join(cwd, 'decision'), timeoutMs: 5000 });

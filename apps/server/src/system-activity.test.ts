@@ -1,4 +1,6 @@
-import { describe, expect, it, vi } from 'vitest';
+import { createRepositories } from '@dutydeck/storage';
+import { defaultDriverProviders } from './driver-providers.js';
+import { describe, expect, it, onTestFinished, vi } from 'vitest';
 import { buildApp } from './app.js';
 import { DutydeckRuntime } from '@dutydeck/runtime';
 import type { AgentDriver } from '@dutydeck/shared';
@@ -98,7 +100,10 @@ describe('GET /api/system/activity', () => {
       ['session-6', { id: 'task-6', status: 'cancelled' }]
     ]);
 
-    const fakeRuntime = Object.create(DutydeckRuntime.prototype);
+    const repos = createRepositories(':memory:', { newDatabaseAuthority: 'ledger_v1' });
+    const runtime = new DutydeckRuntime(repos, { providers: defaultDriverProviders(), cleanupIntervalMs: 0 });
+    onTestFinished(async () => { await runtime.shutdown(); repos.close(); });
+    const fakeRuntime = Object.create(runtime);
     Object.defineProperty(fakeRuntime, 'activeTasks', {
       value: mockTasks,
       writable: true

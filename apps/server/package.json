@@ -52,6 +52,7 @@
     "@dutydeck/legacy-importer": "workspace:*",
     "@dutydeck/cli-adapters": "workspace:*",
     "@dutydeck/pty-driver": "workspace:*",
+    "@dutydeck/transports": "workspace:*",
     "@dutydeck/relay": "workspace:*",
     "@dutydeck/secret-provider": "workspace:*",
     "@types/better-sqlite3": "9.6.0",

@@ -1,5 +1,6 @@
 // 群记忆范围的协调器级回归：真实 DutydeckRuntime + SQLite + 真实 LarkMessageCoordinator。
 // 锁定 shared 下 A 群 /remember 的内容在 B 群可见、per-group 下不可见，以及切换范围不丢数据。
+import { defaultDriverProviders } from '../driver-providers.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -27,6 +28,7 @@ async function harness() {
   const repos = createRepositories(join(cwd, 'state.db'), { newDatabaseAuthority: 'ledger_v1' });
   const prompts: string[] = [];
   const runtime = new DutydeckRuntime(repos, {
+    providers: defaultDriverProviders(),
     probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }),
     driverFactory: (_config, _protocol, emit) => {
       const driver: AgentDriver = {

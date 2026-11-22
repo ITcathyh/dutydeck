@@ -1,3 +1,4 @@
+import { defaultDriverProviders } from '../../../apps/server/src/driver-providers.js';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -18,14 +19,14 @@ it('defers a persisted idle Herdr constructor failure without blocking instance 
       persistentTerminalIdentity: async () => persistent ? { original: 'immutable-physical-fixture' } : undefined };
   };
   let repos = createRepositories(path, { newDatabaseAuthority: 'ledger_v1' });
-  let runtime = new DutydeckRuntime(repos, { driverIdleTimeoutMs: 0, terminalBackend: async () => 'herdr', driverFactory: agent => mock(agent.id === terminal.id) });
+  let runtime = new DutydeckRuntime(repos, { providers: defaultDriverProviders(), driverIdleTimeoutMs: 0, terminalBackend: async () => 'herdr', driverFactory: agent => mock(agent.id === terminal.id) });
   try {
     await runtime.initialize([terminal, other]);
     const session = await runtime.start({ agentId: terminal.id });
     expect(JSON.parse((await repos.config.get(`runtime_idle_terminal:${session.id}`))!).identity).toEqual({original:'immutable-physical-fixture'});
     await runtime.shutdown(); repos.close();
     repos = createRepositories(path);
-    runtime = new DutydeckRuntime(repos, { driverIdleTimeoutMs: 0, driverFactory: agent => {
+    runtime = new DutydeckRuntime(repos, { providers: defaultDriverProviders(), driverIdleTimeoutMs: 0, driverFactory: agent => {
       if (agent.id === terminal.id) throw new Error('HERDR_UNAVAILABLE constructor fixture');
       return mock(false);
     } });
@@ -52,14 +53,14 @@ it.each(['configure', 'release'] as const)('keeps initialization and other sessi
       persistentTerminalIdentity: async () => persistent ? { original: 'immutable-physical-fixture' } : undefined };
   };
   let repos = createRepositories(path, { newDatabaseAuthority: 'ledger_v1' });
-  let runtime = new DutydeckRuntime(repos, { driverIdleTimeoutMs: 0, terminalBackend: async () => 'herdr', driverFactory: agent => mock(agent.id === terminal.id) });
+  let runtime = new DutydeckRuntime(repos, { providers: defaultDriverProviders(), driverIdleTimeoutMs: 0, terminalBackend: async () => 'herdr', driverFactory: agent => mock(agent.id === terminal.id) });
   let lateEmit: ((event: NormalizedDriverEvent) => void) | undefined;
   try {
     await runtime.initialize([terminal, other]);
     const session = await runtime.start({ agentId: terminal.id });
     await runtime.shutdown(); repos.close();
     repos = createRepositories(path);
-    runtime = new DutydeckRuntime(repos, { driverIdleTimeoutMs: 0,
+    runtime = new DutydeckRuntime(repos, { providers: defaultDriverProviders(), driverIdleTimeoutMs: 0,
       configureAgent: async agent => { if (failure === 'configure' && agent.id === terminal.id) throw new Error('agent configuration fixture failure'); return agent; },
       driverFactory: (agent, _protocol, emit) => {
         if (agent.id !== terminal.id) return mock(false);

@@ -1,3 +1,4 @@
+import { defaultDriverProviders } from '../../../../apps/server/src/driver-providers.js';
 import { runtimeStateKeys } from '@dutydeck/shared';
 import { createRepositories } from '@dutydeck/storage';
 import type { AgentConfig, AgentDriver } from '@dutydeck/shared';
@@ -9,6 +10,7 @@ const agent: AgentConfig = { id: 'crash-fixture', name: 'Crash fixture', command
 const driver: AgentDriver = { start: async () => {}, send: async () => {}, interrupt: async () => {}, resume: async () => {}, stop: async () => {} };
 const repos = createRepositories(database);
 const runtime = new DutydeckRuntime(repos, {
+  providers: defaultDriverProviders(),
   driverIdleTimeoutMs: 0,
   probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }),
   driverFactory: () => driver

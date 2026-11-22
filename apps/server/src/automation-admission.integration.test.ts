@@ -1,3 +1,4 @@
+import { defaultDriverProviders } from './driver-providers.js';
 import { execFile } from 'node:child_process';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -44,6 +45,7 @@ async function continuation(kind: 'ci' | 'pr', missing: boolean) {
   let service!: CiWebhookService | PullRequestService;
   let sends = 0;
   const makeRuntime = () => new DutydeckRuntime(repositories, {
+    providers: defaultDriverProviders(),
     workspaceRoot: join(root, 'workspaces'), cleanupIntervalMs: 0,
     probe: () => ({ available: true, protocol: 'acp', pause: false, resume: true }),
     authorizeTask: (_session, task, phase) => service.authorizeTask(task, phase),

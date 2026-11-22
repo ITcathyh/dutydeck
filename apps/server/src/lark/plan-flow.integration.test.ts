@@ -1,3 +1,4 @@
+import { defaultDriverProviders } from '../driver-providers.js';
 import { readTaskReport, writeTaskReport } from '@dutydeck/shared';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { mkdtemp, rm } from 'node:fs/promises';
@@ -26,6 +27,7 @@ async function harness(agentId = 'claude', options: { completionReactionOnly?: b
   const repos = createRepositories(join(cwd, 'state.db'), { newDatabaseAuthority: 'ledger_v1' });
   const turns: Array<{ prompt: string; mode: PermissionMode }> = [];
   const runtime = new DutydeckRuntime(repos, {
+    providers: defaultDriverProviders(),
     probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }),
     driverFactory: (config, _protocol, emit) => {
       let mode = config.permissionMode;

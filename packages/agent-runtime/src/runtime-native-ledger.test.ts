@@ -1,3 +1,4 @@
+import { defaultDriverProviders } from '../../../apps/server/src/driver-providers.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { access, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -21,7 +22,7 @@ async function fixture(protocol: 'acp' | 'jsonl' | 'pipe') {
   const path = join(directory, 'state.db');
   const open = async () => {
     const repos = createRepositories(path, { newDatabaseAuthority: 'ledger_v1' });
-    const runtime = new DutydeckRuntime(repos, { cleanupIntervalMs: 0 });
+    const runtime = new DutydeckRuntime(repos, { providers: defaultDriverProviders(), cleanupIntervalMs: 0 });
     releases.push(async () => { await runtime.shutdown(); repos.close(); });
     await runtime.initialize([agent]); return { repos, runtime };
   };
@@ -136,7 +137,7 @@ async function configurationFixture() {
     env: { configuration_directory: directory }, model: 'model-a', permissionMode: 'full-trust', timeout: 10, capabilities: { pause: false, resume: true } });
   const open = async () => {
     const repos = createRepositories(join(directory, 'db'), { newDatabaseAuthority: 'ledger_v1' });
-    const runtime = new DutydeckRuntime(repos, { cleanupIntervalMs: 0 });
+    const runtime = new DutydeckRuntime(repos, { providers: defaultDriverProviders(), cleanupIntervalMs: 0 });
     releases.push(async () => { await runtime.shutdown(); repos.close(); });
     await runtime.initialize([agent]); return { repos, runtime };
   };

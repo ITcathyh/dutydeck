@@ -1,3 +1,4 @@
+import { defaultDriverProviders } from '../driver-providers.js';
 import { readTaskReport, writeTaskReport } from '@dutydeck/shared';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { mkdtemp, rm } from 'node:fs/promises';
@@ -109,7 +110,7 @@ async function blockedTopic({ thread = true, web = false } = {}) {
   // 第一个进程：两条请求进同一个话题会话，第一条执行中、第二条排队。
   let repos = createRepositories(path, { newDatabaseAuthority: 'ledger_v1' });
   await repos.config.set(larkBotsConfigKey, JSON.stringify([config]));
-  let runtime = new DutydeckRuntime(repos, { driverIdleTimeoutMs: 0, probe, driverFactory: factory(false) as any });
+  let runtime = new DutydeckRuntime(repos, { providers: defaultDriverProviders(), driverIdleTimeoutMs: 0, probe, driverFactory: factory(false) as any });
   await runtime.initialize([agent]);
   const first = new LarkMessageCoordinator(runtime as any, cardService('p1') as any, silentLog(), Math.random, 'ou_bot',
     undefined, repos.channelMappings, undefined, undefined, undefined, { store: repos.config });
@@ -126,7 +127,7 @@ async function blockedTopic({ thread = true, web = false } = {}) {
 
   // 守护进程重启：旧执行无法确认安全停止，重启后的 driverFactory 对旧会话一律拒绝。
   repos = createRepositories(path, { newDatabaseAuthority: 'ledger_v1' });
-  runtime = new DutydeckRuntime(repos, { driverIdleTimeoutMs: 0, probe, driverFactory: factory(true) as any });
+  runtime = new DutydeckRuntime(repos, { providers: defaultDriverProviders(), driverIdleTimeoutMs: 0, probe, driverFactory: factory(true) as any });
   await runtime.initialize([agent]);
   const coordinators: LarkMessageCoordinator[] = [];
   const liveRepos = repos, liveRuntime = runtime;

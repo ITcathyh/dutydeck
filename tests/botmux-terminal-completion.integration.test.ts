@@ -1,3 +1,4 @@
+import { defaultDriverProviders } from '../apps/server/src/driver-providers.js';
 import { createHash } from 'node:crypto';
 import { appendFileSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -17,6 +18,7 @@ it('settles the real runtime digest only after a late Claude final has been publ
   const repos = createRepositories(':memory:', { newDatabaseAuthority: 'ledger_v1' });
   const timers: ReturnType<typeof setTimeout>[] = [];
   const runtime = new DutydeckRuntime(repos, {
+    providers: defaultDriverProviders(),
     probe: () => ({ protocol: 'pty-cli', available: true, pause: false, resume: true }),
     ptyDriverFactory: (agent, _protocol, onEvent, onExit, sessionId) => {
       const transcript = join(project, `${pinnedSessionUuid(sessionId)}.jsonl`); writeFileSync(transcript, '');

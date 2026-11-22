@@ -1,3 +1,4 @@
+import { defaultDriverProviders } from '../../../apps/server/src/driver-providers.js';
 import { afterEach, expect, it, vi } from 'vitest';
 import { mkdtempSync, readFileSync, realpathSync, rmSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
@@ -19,7 +20,7 @@ async function fixture(child?: string) {
   vi.stubEnv('HOME', cwd); vi.stubEnv('TMUX_TMPDIR', cwd);
   const repos = createRepositories(join(cwd, 'state.db'), { newDatabaseAuthority: 'ledger_v1' });
   const drivers: PtyCliDriver[] = [], launches: string[][] = [];
-  const runtime = new DutydeckRuntime(repos, { cleanupIntervalMs: 0, driverIdleTimeoutMs: 0, driverIdleCpuAction: 'retire',
+  const runtime = new DutydeckRuntime(repos, { providers: defaultDriverProviders(), cleanupIntervalMs: 0, driverIdleTimeoutMs: 0, driverIdleCpuAction: 'retire',
     probe: () => ({ available: true, protocol: 'pty-cli', resume: true }),
     ptyDriverFactory: (agent, _protocol, onEvent, onExit, sessionId) => {
       const driver = new PtyCliDriver({ agent, adapter: { ...createCliAdapter('seed'), prepareInput: undefined,

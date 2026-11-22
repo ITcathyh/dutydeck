@@ -1,3 +1,4 @@
+import { defaultDriverProviders } from './driver-providers.js';
 import { chmod, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -142,7 +143,7 @@ it('runtime resolves launch-only env and keeps secrets out of agent and executio
   const { settings, agent, repos } = await fixture();
   await settings.set('claude', { apiKey: 'RUNTIME_KEY_CANARY' });
   const launched: typeof agent[] = [];
-  const runtime = new DutydeckRuntime(repos, { configureAgent: agent => settings.resolve(agent), driverIdleTimeoutMs: 0, probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }), driverFactory: config => { launched.push(config); return { start: async () => {}, send: async () => {}, stop: async () => {}, interrupt: async () => {}, resume: async () => {}, isStopped: async () => true }; } });
+  const runtime = new DutydeckRuntime(repos, { providers: defaultDriverProviders(), configureAgent: agent => settings.resolve(agent), driverIdleTimeoutMs: 0, probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }), driverFactory: config => { launched.push(config); return { start: async () => {}, send: async () => {}, stop: async () => {}, interrupt: async () => {}, resume: async () => {}, isStopped: async () => true }; } });
   cleanups.push(() => runtime.shutdown());
   await runtime.initialize(await settings.defaultsForBoot([agent]));
   const session = await runtime.start({ agentId: 'claude' });
@@ -172,7 +173,7 @@ it('does not construct a late driver after stop revokes an asynchronous config r
   const entered = new Promise<void>(resolve => { enter = resolve; });
   const gate = new Promise<void>(resolve => { release = resolve; });
   const factory = vi.fn(() => ({ start: async () => {}, send: async () => {}, stop: async () => {}, interrupt: async () => {}, resume: async () => {}, isStopped: async () => true }));
-  const runtime = new DutydeckRuntime(repos, { configureAgent: async config => { enter(); await gate; return config; }, driverIdleTimeoutMs: 0, probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }), driverFactory: factory });
+  const runtime = new DutydeckRuntime(repos, { providers: defaultDriverProviders(), configureAgent: async config => { enter(); await gate; return config; }, driverIdleTimeoutMs: 0, probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }), driverFactory: factory });
   cleanups.push(() => runtime.shutdown());
   await runtime.initialize([agent]);
   const starting = runtime.start({ agentId: 'claude' }).catch(error => error);
@@ -192,7 +193,7 @@ it('preserves the surviving driver and events when simultaneous resumes finish a
   let waiting = 0;
   const both = new Promise<void>(resolve => { entered = resolve; });
   const factories: Array<{ emit: (event: any) => void }> = [];
-  const runtime = new DutydeckRuntime(repos, { configureAgent: async config => { if (gate) { if (++waiting === 2) entered(); await gate; } return config; }, driverIdleTimeoutMs: 1, cleanupIntervalMs: 0, probe: () => ({ protocol: 'jsonl', available: true, pause: false, resume: true }), driverFactory: (_config, _protocol, emit) => { factories.push({ emit }); return { start: async () => {}, send: async () => {}, stop: async () => {}, interrupt: async () => {}, resume: async () => {}, isStopped: async () => true }; } });
+  const runtime = new DutydeckRuntime(repos, { providers: defaultDriverProviders(), configureAgent: async config => { if (gate) { if (++waiting === 2) entered(); await gate; } return config; }, driverIdleTimeoutMs: 1, cleanupIntervalMs: 0, probe: () => ({ protocol: 'jsonl', available: true, pause: false, resume: true }), driverFactory: (_config, _protocol, emit) => { factories.push({ emit }); return { start: async () => {}, send: async () => {}, stop: async () => {}, interrupt: async () => {}, resume: async () => {}, isStopped: async () => true }; } });
   cleanups.push(() => runtime.shutdown());
   await runtime.initialize([{ ...agent, protocol: 'jsonl' }]);
   const session = await runtime.start({ agentId: 'claude' });
@@ -331,7 +332,7 @@ it('runtime selects bot accounts for chats, background and child sessions, prese
   const launched: typeof agent[] = [];
   const parentIds = new Map<string, string>();
   const parentOf = async (id: string) => parentIds.has(id) ? { parentSessionId: parentIds.get(id)! } : undefined;
-  const runtime = new DutydeckRuntime(repos, { configureAgent: (config, session) => settings.resolveForSession(config, session, parentOf), driverIdleTimeoutMs: 1, cleanupIntervalMs: 0, probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }), driverFactory: config => { launched.push(config); return { start: async () => {}, send: async () => {}, stop: async () => {}, interrupt: async () => {}, resume: async () => {}, isStopped: async () => true }; } });
+  const runtime = new DutydeckRuntime(repos, { providers: defaultDriverProviders(), configureAgent: (config, session) => settings.resolveForSession(config, session, parentOf), driverIdleTimeoutMs: 1, cleanupIntervalMs: 0, probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }), driverFactory: config => { launched.push(config); return { start: async () => {}, send: async () => {}, stop: async () => {}, interrupt: async () => {}, resume: async () => {}, isStopped: async () => true }; } });
   cleanups.push(() => runtime.shutdown());
   await runtime.initialize([agent]);
   const root = await runtime.start({ agentId: 'claude', source: 'lark', sourceId: 'cli_a:ou_owner:p2p', model: 'bot-model' });

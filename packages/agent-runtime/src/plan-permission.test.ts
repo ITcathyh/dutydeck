@@ -1,3 +1,4 @@
+import { defaultDriverProviders } from '../../../apps/server/src/driver-providers.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -16,7 +17,7 @@ describe('task-level deny-all for the plan phase', () => {
     const directory = await mkdtemp(join(tmpdir(), 'runtime-plan-acp-'));
     const repos = createRepositories(join(directory, 'state.sqlite'), { newDatabaseAuthority: 'ledger_v1' });
     const agent = agentConfigSchema.parse({ id: 'mock', name: 'Mock', command: process.execPath, args: [resolve('tests/fixtures/mock-acp-agent.mjs')], protocol: 'acp', cwd: directory, env: {}, permissionMode: 'ask', timeout: 10 });
-    const runtime = new DutydeckRuntime(repos, { driverIdleTimeoutMs: 0, probe: (() => ({ available: true, protocol: 'acp', acp: true })) as any });
+    const runtime = new DutydeckRuntime(repos, { providers: defaultDriverProviders(), driverIdleTimeoutMs: 0, probe: (() => ({ available: true, protocol: 'acp', acp: true })) as any });
     cleanup.push(async () => { await runtime.shutdown(); repos.close(); await rm(directory, { recursive: true, force: true }); });
     await runtime.initialize([agent]);
     const session = await runtime.start({ agentId: agent.id, cwd: directory });
@@ -42,7 +43,7 @@ describe('task-level deny-all for the plan phase', () => {
     const configured: AgentConfig[] = [];
     const driver: AgentDriver = { start: vi.fn(async () => {}), send: vi.fn(async () => { emit({ type: 'text', data: { text: 'answer' } }); emit({ type: 'completed', data: { stopReason: 'end_turn' } }); }),
       interrupt: vi.fn(async () => {}), resume: vi.fn(async () => {}), isStopped: async () => true, stop: vi.fn(async () => {}), setPermissionMode: vi.fn() };
-    const runtime = new DutydeckRuntime(repos, { probe: () => ({ protocol: 'pty-cli' as const, available: true, pause: false, resume: true }),
+    const runtime = new DutydeckRuntime(repos, { providers: defaultDriverProviders(), probe: () => ({ protocol: 'pty-cli' as const, available: true, pause: false, resume: true }),
       ptyDriverFactory: (config, _protocol, onEvent) => { configured.push(config); emit = onEvent; return driver; } });
     const agent: AgentConfig = { id: agentId, name: agentId, command: process.execPath, args: [], protocol: 'pty-cli', cwd: '/tmp', env: {}, permissionMode: 'ask', timeout: 10, capabilities: { pause: false, resume: true }, builtin: false };
     cleanup.push(async () => { await runtime.shutdown(); repos.close(); });

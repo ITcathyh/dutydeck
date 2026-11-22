@@ -1,3 +1,4 @@
+import { defaultDriverProviders } from '../../../apps/server/src/driver-providers.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { once } from 'node:events';
@@ -25,7 +26,7 @@ async function fixture(send: (emit: Emit, prompt: string) => Promise<void>, insp
   }
   const children: Array<{ child: ChildProcess; exited: Promise<unknown> }> = [];
   const emitters: Emit[] = [];
-  const runtime = new DutydeckRuntime(repos, { driverIdleTimeoutMs: 0, driverFactory: (_agent, _protocol, emit) => {
+  const runtime = new DutydeckRuntime(repos, { providers: defaultDriverProviders(), driverIdleTimeoutMs: 0, driverFactory: (_agent, _protocol, emit) => {
     emitters.push(emit);
     let processEntry: typeof children[number] | undefined;
     const stopped = deferred();

@@ -1,3 +1,4 @@
+import { defaultDriverProviders } from './driver-providers.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
 import * as fs from 'node:fs/promises';
@@ -390,6 +391,7 @@ describe('HTTP API boundary', () => {
     const repos = createRepositories(':memory:', { newDatabaseAuthority: 'ledger_v1' }); repositories.push(repos);
     let stopped = false;
     const runtime = new DutydeckRuntime(repos, {
+      providers: defaultDriverProviders(),
       cleanupIntervalMs: 0,
       driverIdleTimeoutMs: 0,
       probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }),

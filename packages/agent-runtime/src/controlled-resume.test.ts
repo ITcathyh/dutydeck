@@ -1,3 +1,4 @@
+import { defaultDriverProviders } from '../../../apps/server/src/driver-providers.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { once } from 'node:events';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
@@ -16,7 +17,7 @@ async function fixture(protocol: 'jsonl' | 'pipe') {
   const dir = await mkdtemp(join(tmpdir(), 'controlled-resume-'));
   const log = join(dir, 'prompts.jsonl');
   const repos = createRepositories(join(dir, 'state.sqlite'), { newDatabaseAuthority: 'ledger_v1' });
-  const runtime = new DutydeckRuntime(repos, { driverIdleTimeoutMs: 0 });
+  const runtime = new DutydeckRuntime(repos, { providers: defaultDriverProviders(), driverIdleTimeoutMs: 0 });
   cleanup.push(async () => { await runtime.shutdown(); repos.close(); await rm(dir, { recursive: true, force: true }); });
   const agent = agentConfigSchema.parse({ id: protocol, name: protocol, protocol, command: process.execPath,
     args: [new URL('../../transports/tests/fixtures/process-resource-agent.mjs', import.meta.url).pathname], cwd: dir,

@@ -7,6 +7,7 @@ it('releases completed wait and workspace-read contexts while their parents rema
     import { AsyncLocalStorage } from 'node:async_hooks';
     import { setImmediate } from 'node:timers/promises';
     import { createRepositories } from '@dutydeck/storage';
+    import { defaultDriverProviders } from ${JSON.stringify(new URL('../../../apps/server/src/driver-providers.ts', import.meta.url).href)};
     import { DutydeckRuntime } from ${JSON.stringify(new URL('./index.ts', import.meta.url).href)};
     import { owner, SessionMutations } from ${JSON.stringify(new URL('./ownership.ts', import.meta.url).href)};
 
@@ -15,6 +16,7 @@ it('releases completed wait and workspace-read contexts while their parents rema
     const parent = owner('long-lived-parent');
     const repos = createRepositories(':memory:', { newDatabaseAuthority: 'ledger_v1' });
     const runtime = new DutydeckRuntime(repos, {
+      providers: defaultDriverProviders(),
       driverIdleTimeoutMs: 0,
       probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }),
       driverFactory: () => ({ start: async () => {}, send: async () => {}, stop: async () => {},

@@ -1,3 +1,4 @@
+import { defaultDriverProviders } from '../apps/server/src/driver-providers.js';
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
@@ -30,7 +31,7 @@ const submitted = (root: string) => existsSync(join(root, 'submissions.jsonl')) 
 function open(root: string, failAfterWrite = false) {
   let failNextWrite = failAfterWrite;
   const repos = createRepositories(join(root, 'state.db'), { newDatabaseAuthority: 'ledger_v1' });
-  const runtime = new DutydeckRuntime(repos, { cleanupIntervalMs: 0, driverIdleTimeoutMs: 0, terminalBackend: async () => 'tmux',
+  const runtime = new DutydeckRuntime(repos, { providers: defaultDriverProviders(), cleanupIntervalMs: 0, driverIdleTimeoutMs: 0, terminalBackend: async () => 'tmux',
     probe: () => ({ available: true, protocol: 'pty-cli', pause: false, resume: true }),
     ptyDriverFactory: (agent, _protocol, onEvent, onExit, sessionId) => {
       const builtin = createCliAdapter('claude-code');

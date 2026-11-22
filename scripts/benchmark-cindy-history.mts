@@ -1,3 +1,4 @@
+import { defaultDriverProviders } from '../apps/server/src/driver-providers.js';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
@@ -77,7 +78,7 @@ async function main() {
         emit({ type: 'completed', data: { stopReason: 'end_turn' } });
       } };
   };
-  const runtime = new DutydeckRuntime(repos, { driverFactory, cleanupIntervalMs: 0 });
+  const runtime = new DutydeckRuntime(repos, { providers: defaultDriverProviders(), driverFactory, cleanupIntervalMs: 0 });
   let browser: Awaited<ReturnType<typeof chromium.launch>> | undefined;
   const results: any = { methodology: { backend: 'same real candidate Runtime + file SQLite; baseline and candidate real buildApp HTTP endpoints', browser: 'headless Chromium; cold new browser context per revision', bytes: 'CDP Network.loadingFinished.encodedDataLength (actual HTTP transfer, headers included); responseBytes from actual Chromium response body', heap: 'CDP Runtime.getHeapUsage before and after explicit HeapProfiler.collectGarbage', firstScreen: 'navigation to active user prompt visible plus two animation frames', background: 'both revisions sampled 1500ms after first visible; settled additionally waits for baseline automatic full canonical cache', limits: 'single host/sample; summary list remains proportional to completed turns; no real model or live Lark' }, configuration: { turns, toolsPerTurn, fragmentsPerTurn, toolBodyBytes: 32768, samplesPerRevision: 1, nodeVersion: process.version }, measurements: [] };
   try {

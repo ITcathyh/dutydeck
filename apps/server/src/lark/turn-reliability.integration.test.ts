@@ -1,3 +1,4 @@
+import { defaultDriverProviders } from '../driver-providers.js';
 import { TestLarkCoordinator } from './coordinator-test-fixture.js';
 import { TurnRecoveryDecisions, turnDecisionKey } from './recovery-decision.js';
 import { MattersService } from '../matters.js';
@@ -126,7 +127,7 @@ async function topic(options: { fallback?: boolean; agentStatusCheck?: () => Pro
   const boot = async (first: boolean, age?: (runtime: DutydeckRuntime) => void) => {
     const repos = createRepositories(join(cwd, 'state.db'), { newDatabaseAuthority: 'ledger_v1' });
     if (first) await repos.config.set(larkBotsConfigKey, JSON.stringify([config]));
-    const runtime = new DutydeckRuntime(repos, { matterTracking: new MattersService(repos), driverIdleTimeoutMs: 0, probe, driverFactory: factory,
+    const runtime = new DutydeckRuntime(repos, { providers: defaultDriverProviders(), matterTracking: new MattersService(repos), driverIdleTimeoutMs: 0, probe, driverFactory: factory,
       ...(options.agentStatusCheck ? { agentStatusCheck: options.agentStatusCheck } : {}) } as any);
     await runtime.initialize([agent, ...(options.fallback ? [{ ...agent, id: 'spare', name: 'Spare', model: 'spare-model' }] : [])]);
     age?.(runtime);

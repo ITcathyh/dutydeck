@@ -1,3 +1,4 @@
+import { defaultDriverProviders } from './driver-providers.js';
 import Database from 'better-sqlite3';
 import { createHash } from 'node:crypto';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
@@ -75,6 +76,7 @@ async function fixture(mode: 'jsonl' | 'factory' = 'jsonl', hooks: Hooks = {}) {
   });
   const factoryAgent = agentConfigSchema.parse({ id: 'native', name: 'Factory fixture', command: 'fake', protocol: 'jsonl', cwd: directory, permissionMode: 'ask' });
   const makeRuntime = (targetRepos = repos) => new DutydeckRuntime(targetRepos, {
+    providers: defaultDriverProviders(),
     workspaceRoot: join(directory, 'workspaces'), cleanupIntervalMs: 0,
     probe: () => ({ available: true, protocol: 'jsonl', pause: false, resume: true }),
     authorizeExecution: async (id, actor) => { await service.authorizeExecution(id, actor); },
@@ -438,6 +440,7 @@ describe('WorkItem ledger integration with real SQLite and local drivers', () =>
 
     // 启动 Runtime 与 WorkItemService，观察旧来源尝试
     const runtime = new DutydeckRuntime(legacyRepos, {
+      providers: defaultDriverProviders(),
       workspaceRoot: join(dir, 'workspaces'), cleanupIntervalMs: 0,
       probe: () => ({ available: true, protocol: 'jsonl', pause: false, resume: true })
     });
@@ -475,6 +478,7 @@ describe('WorkItem ledger integration with real SQLite and local drivers', () =>
     const make = () => {
       let s!: WorkItemService;
       const r = new DutydeckRuntime(repos, {
+        providers: defaultDriverProviders(),
         workspaceRoot: join(directory, 'workspaces'), cleanupIntervalMs: 0,
         probe: () => ({ available: true, protocol: 'jsonl', pause: false, resume: true }),
         // 挂载真实 Runtime 授权回调，保证授权链完整

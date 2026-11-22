@@ -1,3 +1,4 @@
+import { defaultDriverProviders } from './driver-providers.js';
 import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { existsSync, writeFileSync } from 'node:fs';
@@ -74,6 +75,7 @@ describe('SessionAutomation real CI recovery across a true SQLite close and a br
     });
 
     const makeRuntime = (target: typeof repos) => new DutydeckRuntime(target, {
+      providers: defaultDriverProviders(),
       workspaceRoot: join(directory, 'workspaces'), cleanupIntervalMs: 0,
       probe: () => ({ available: true, protocol: 'jsonl', pause: false, resume: true }),
       authorizeExecution: async () => {},

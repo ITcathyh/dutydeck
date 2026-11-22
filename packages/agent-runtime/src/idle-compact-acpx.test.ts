@@ -1,3 +1,4 @@
+import { defaultDriverProviders } from '../../../apps/server/src/driver-providers.js';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
@@ -28,7 +29,7 @@ async function fixture(mode = 'codex') {
   const agent: AgentConfig = { id: 'compact-native', name: 'Compact native', command: process.execPath, args: [resolve('packages/acp-client/tests/fixtures/compact-agent.mjs'), mode], cwd, env: { compact_test_log: log }, protocol: 'acp', permissionMode: 'deny-all', timeout: 10, capabilities: { pause: false, resume: true }, builtin: false };
   const factory: DriverFactory = Object.assign((configured, _protocol, onEvent, onExit, sessionId, context) => new AcpxAdapter(configured, { onEvent, onExit, sessionKey: sessionId, context }), { controlledResources: () => true });
   const createRuntime = async () => {
-    const runtime = new DutydeckRuntime(repos, { driverIdleTimeoutMs: 0, probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }), driverFactory: factory });
+    const runtime = new DutydeckRuntime(repos, { providers: defaultDriverProviders(), driverIdleTimeoutMs: 0, probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }), driverFactory: factory });
     cleanup.push(() => runtime.shutdown());
     await runtime.initialize([agent]); return runtime;
   };

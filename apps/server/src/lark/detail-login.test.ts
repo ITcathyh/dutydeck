@@ -1,6 +1,7 @@
 // 卡片「查看详情」在 Web 要求登录时的行为：渲染成回调按钮，点击后只给机器人管理员私信一次性登录链接。
 //
 // 协调器部分用真实 DutydeckRuntime + SQLite 卡片账本，飞书 service 为内存 mock，不触网、不发真实消息。
+import { defaultDriverProviders } from '../driver-providers.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
@@ -207,6 +208,7 @@ async function harness(options: { loginLinks?: boolean; managedGroup?: boolean; 
   const repos = createRepositories(join(cwd, 'state.db'), { newDatabaseAuthority: 'ledger_v1' });
   let sends = 0;
   const runtime = new DutydeckRuntime(repos, {
+    providers: defaultDriverProviders(),
     probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }),
     driverFactory: (_config, _protocol, emit) => {
       const driver: AgentDriver = {

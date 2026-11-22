@@ -1,3 +1,4 @@
+import { defaultDriverProviders } from '../../../apps/server/src/driver-providers.js';
 import { describe, expect, it, vi } from 'vitest';
 import { createRepositories } from '@dutydeck/storage';
 import type { AgentConfig, NormalizedDriverEvent } from '@dutydeck/shared';
@@ -10,7 +11,7 @@ describe('terminal program status projection', () => {
     const repos = createRepositories(':memory:', { newDatabaseAuthority: 'ledger_v1' });
     let emit!: (event: NormalizedDriverEvent) => void, release!: () => void;
     const driver: AgentDriver = { start: async () => {}, send: vi.fn(() => new Promise<void>(resolve => { release = resolve; })), interrupt: async () => {}, resume: async () => {}, stop: async () => {}, isStopped: async () => true };
-    const runtime = new DutydeckRuntime(repos, { probe: () => ({ protocol: 'acp', available: true, pause: false, resume: false }), driverFactory: (_a, _p, onEvent) => { emit = onEvent; return driver; } });
+    const runtime = new DutydeckRuntime(repos, { providers: defaultDriverProviders(), probe: () => ({ protocol: 'acp', available: true, pause: false, resume: false }), driverFactory: (_a, _p, onEvent) => { emit = onEvent; return driver; } });
     try {
       await runtime.initialize([agent]); const session = await runtime.start({ agentId: 'mock' });
       await runtime.dispatch(session.id, 'test'); await vi.waitFor(() => expect(driver.send).toHaveBeenCalled());

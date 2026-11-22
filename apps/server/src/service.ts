@@ -46,8 +46,8 @@ import { createAcceptPrompt, DutydeckRuntime, RuntimeEventBus } from '@dutydeck/
 import { loadConfigWithDiagnosticsAsync, resolveDatabaseUrl, type AppConfig } from '@dutydeck/config';
 import { logDroppedAgents } from './agent-config-log.js';
 import { assertBotProcessStartup, childProcessIdentity, createRepositories, observeProcess } from '@dutydeck/storage';
-import { createPtyRetirementControl } from './pty-recovery.js';
-import { channelExecutionAppId, dutydeckSessionKinds, renderSessionNotice, backgroundKindFor, COLLABORATION_LIST_LIMIT, installationOwnerTaskActor, makeId, parseLarkSourceId, RuntimeError, timeLoop, workPlanConfirmationRequired, type DriverFactory, type PolicyAction, type PolicyDecision, type Session } from '@dutydeck/shared';
+import { defaultDriverProviders } from './driver-providers.js';
+import { channelExecutionAppId, dutydeckSessionKinds, renderSessionNotice, backgroundKindFor, COLLABORATION_LIST_LIMIT, installationOwnerTaskActor, makeId, parseLarkSourceId, RuntimeError, timeLoop, workPlanConfirmationRequired, type PolicyAction, type PolicyDecision, type Session } from '@dutydeck/shared';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { larkResourceRoot, pruneLarkResourceDirectories, readLarkResourceReferences } from './resource-retention.js';
@@ -85,12 +85,11 @@ import { requestLarkTurnDiffReview } from './lark/turn-diff.js';
 import type { TerminalStreamProvider } from './terminal/terminal-ws.js';
 import {
   createDutydeckPersistentBackend,
-  createPtyCliDriver,
+  createPtyCliProvider,
   PTY_AGENT_CONTRIBUTIONS,
 } from '@dutydeck/pty-driver';
 import { claudeDataDir, codexHome, traeHome } from '@dutydeck/pty-driver/support';
 import { childEnvironment } from '@dutydeck/shared/child-environment';
-import { createCliAdapter } from '@dutydeck/cli-adapters';
 import { RelayAskBroker, RelayCapabilityRegistry, RelayService, loadOrCreateRelaySigningSecret } from '@dutydeck/relay';
 import { LocalFileSecretProvider, localFileSecretProviderName, secretDirectoryForDatabase } from '@dutydeck/secret-provider';
 import { LarkIdentityPreflightProbe } from './lark/identity-preflight.js';
@@ -404,25 +403,11 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
     ownerId: `dutydeck:${sessionId}`, processProbe: { identify: childProcessIdentity, observe: observeProcess }, env, log,
   });
   const terminalSettings = new TerminalSettings(repos.config, env);
-  // pty-cli 协议驱动工厂：protocol='pty-cli' 的会话路由到 Dutydeck 的 PtyCliDriver。
-  // 自定义命令可通过 adapterId 复用已有 CLI 家族，同时保留独立 agent id。
-  const ptyDriverFactory: DriverFactory = (agent, _protocol, onEvent, onExit, sessionId, context) => {
-    const adapter = createCliAdapter(agent.adapterId ?? agent.id);
-    return createPtyCliDriver({
-      agent,
-      adapter,
-      backend: agent.env.dutydeck_terminal_backend === 'herdr' ? primaryHerdrBackend(sessionId) : createProductionPtyBackend(sessionId, log),
-      log,
-      processProbe: { identify: childProcessIdentity, observe: observeProcess },
-      onEvent,
-      onExit,
-      sessionId,
-      awaitingAnswer: () => relayBroker.listPending(sessionId).length > 0,
-      nativeForkSessionId: context.nativeForkSessionId,
-      claudeResumeSource: repos.insight.listSources(sessionId).filter(source => source.client === 'claude'
-        && source.proofKind === 'launch_observed' && source.identityProof?.startsWith('pty-claude-process-v1:')).at(-1),
-    });
-  };
+  const ptyProvider = createPtyCliProvider({
+    herdrBackend: primaryHerdrBackend,
+    claudeResumeSource: sessionId => repos.insight.listSources(sessionId).filter(source => source.client === 'claude'
+      && source.proofKind === 'launch_observed' && source.identityProof?.startsWith('pty-claude-process-v1:')).at(-1),
+  });
   const pluginWiring = pluginHost ? wirePlugins(pluginHost, {
     runtime: () => runtime,
     repositories: repos,
@@ -466,7 +451,6 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
       return request && !isAutomatedRequest(request) && request.actor.kind === 'channel' ? request.actor.id : undefined;
     }
   }) : undefined;
-  const ptyRetirement = createPtyRetirementControl({ identify: childProcessIdentity, observe: observeProcess }, session => primaryHerdrBackend(session.id));
   // claudeAutoMemory 的会话标记要读机器人配置（异步），所以放在这里而不是同步的 sessionEnvironment。
   const sessionAgentConfig = async (agent: import('@dutydeck/shared').AgentConfig, session: Session) => withClaudeAutoMemoryMarker(
     await agentModelSettings.resolveForSession(agent, session, async id => await workItems.parentForSession(id) ?? await delegations.parentForSession(id)),
@@ -484,11 +468,12 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
   });
   if (pluginWiring) events.subscribe('plugin', pluginWiring.onRuntimeEvent);
   const runtime: DutydeckRuntime = new DutydeckRuntime(repos, {
+    providers: defaultDriverProviders(ptyProvider),
     events, beforeSettlement: (session, taskId) => observeTurn(session, taskId, 'end'),
     matterSummary: id => matters.summary(id),
     sessionKinds: dutydeckSessionKinds, renderNotice: renderSessionNotice,
     launchContext: {
-      configureAgent: sessionAgentConfig, ptyRetirement, acpxCommand: config.acpxCommand, ptyDriverFactory,
+      configureAgent: sessionAgentConfig, acpxCommand: config.acpxCommand,
       terminalBackend: () => terminalSettings.current(),
       environment: session => backgroundKindFor(session.source)?.injectHost === false ? {} : ({ ...capabilities.environmentFor(session), ...relayCapabilities.environmentFor(session.id), ...herdr.environmentFor(session.id),
         ...(session.protocol === 'pty-cli' && isFrozenCollaborationSession(session) ? { dutydeck_frozen_materials: 'true' } : {}) }),
@@ -976,7 +961,7 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
         await readLarkConfigs(repos.config, { readOnly: true }),
         { listeningDisabled: env.DUTYDECK_DISABLE_LARK_LISTENER === 'true', appId: env.DUTYDECK_BOT_APP_ID,
           // tmux 查询只读；Herdr 或非终端会话 captureAbsence 不给证据，按终端仍在处理。
-          terminalAbsent: async session => Boolean(await ptyRetirement.captureAbsence?.(session)) }),
+          terminalAbsent: async session => Boolean(await ptyProvider.retirement?.captureAbsence?.(session)) }),
       send: async input => {
         const bots = await readLarkConfigs(repos.config, { readOnly: true });
         const bot = bots.find(bot => bot.appId === input.appId);

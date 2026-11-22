@@ -1,3 +1,4 @@
+import { defaultDriverProviders } from '../driver-providers.js';
 import { afterEach, expect, it, vi } from 'vitest';
 import { createRepositories } from '@dutydeck/storage';
 import { DutydeckRuntime, type AgentDriver } from '@dutydeck/runtime';
@@ -10,7 +11,7 @@ import { PluginResultToolRegistry } from '../plugins/result-tools.js';
 const cleanup:Array<()=>unknown|Promise<unknown>>=[];afterEach(async()=>{for(const work of cleanup.splice(0).reverse())await work();});
 async function harness() {
   const repos=createRepositories(':memory:',{newDatabaseAuthority:'ledger_v1'});cleanup.push(()=>repos.close());let release!:()=>void;const gate=new Promise<void>(r=>release=r);
-  const runtime=new DutydeckRuntime(repos,{probe:()=>({protocol:'acp',available:true,pause:false,resume:true}),driverFactory:(_config,_protocol,emit)=>({start:async()=>{},resume:async()=>{},stop:async()=>{release();},interrupt:async()=>{release();},send:async()=>{await gate;emit({type:'text',data:{text:'done'}});emit({type:'completed',data:{stopReason:'end_turn'}});}} satisfies AgentDriver)});
+  const runtime=new DutydeckRuntime(repos,{ providers: defaultDriverProviders(),probe:()=>({protocol:'acp',available:true,pause:false,resume:true}),driverFactory:(_config,_protocol,emit)=>({start:async()=>{},resume:async()=>{},stop:async()=>{release();},interrupt:async()=>{release();},send:async()=>{await gate;emit({type:'text',data:{text:'done'}});emit({type:'completed',data:{stopReason:'end_turn'}});}} satisfies AgentDriver)});
   const agent:AgentConfig={id:'fake',name:'Fake',command:'node',args:[],protocol:'acp',cwd:'/tmp',env:{},permissionMode:'ask',timeout:60,capabilities:{pause:false,resume:true},builtin:false};await runtime.initialize([agent]);cleanup.push(async()=>{release();await runtime.shutdown();});
   await repos.config.set('lark.bots',JSON.stringify([{appId:'cli_original',appSecret:'synthetic',listening:true,webBaseUrl:'https://host.test',groupToolsEnabled:true,groupToolsAllowSend:true,allowedUsers:[],allowedEmails:[]}]))
   const session=await runtime.start({agentId:'fake',source:'lark',sourceId:'cli_original:oc_original:group:user:ou_alice'});

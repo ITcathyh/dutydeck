@@ -1,5 +1,6 @@
 // history list/show 的端到端回归：真实 DutydeckRuntime + SQLite + HTTP 路由。
 // mock driver 按 prompt 回答，任务结果经执行账本结算，与线上读取最终回答的路径一致。
+import { defaultDriverProviders } from '../driver-providers.js';
 import Fastify from 'fastify';
 import Database from 'better-sqlite3';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -25,6 +26,7 @@ async function harness(options: { output?: string; gate?: Promise<void>; fail?: 
   const cwd = await mkdtemp(join(tmpdir(), 'dutydeck-agent-history-'));
   const repos = createRepositories(join(cwd, 'state.db'), { newDatabaseAuthority: 'ledger_v1' });
   const runtime = new DutydeckRuntime(repos, {
+    providers: defaultDriverProviders(),
     probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }),
     driverFactory: (_config, _protocol, emit) => {
       let busy = false;
@@ -152,6 +154,7 @@ async function explicitFinalHarness(options: { holdFinal?: boolean; capacity?: b
   const finalGate = new Promise<void>(resolve => { deliverFinal = resolve; });
   let initialFailure = false;
   const runtime = new DutydeckRuntime(repos, {
+    providers: defaultDriverProviders(),
     probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }),
     driverFactory: (_config, _protocol, emit, _exit, sessionId) => {
       let stopped = false;

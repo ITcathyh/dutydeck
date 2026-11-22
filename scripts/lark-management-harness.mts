@@ -1,3 +1,4 @@
+import { defaultDriverProviders } from '../apps/server/src/driver-providers.js';
 import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -78,6 +79,7 @@ export async function createLarkManagementHarness(
     });
 
     runtime = new DutydeckRuntime(repositories, {
+      providers: defaultDriverProviders(),
       workspaceRoot: workspacesRoot,
       authorizeExecution: (sessionId, actorId) => manager.prepareTurn(sessionId, actorId),
       resolveRiskPolicy: (sessionId, fallback) => manager.riskPolicy(sessionId, fallback)

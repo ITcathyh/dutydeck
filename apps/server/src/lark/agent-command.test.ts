@@ -1,3 +1,4 @@
+import { defaultDriverProviders } from '../driver-providers.js';
 import { TestLarkCoordinator } from './coordinator-test-fixture.js';
 import { createAutomationIntegration } from '../automation-integration.js';
 import { SessionAutomationService } from '../session-automation.js';
@@ -42,6 +43,7 @@ async function harness(workflow: Record<string, unknown> = {}, holdFirst = false
   let release!: () => void;
   const held = new Promise<void>(resolve => { release = resolve; });
   const runtime = new DutydeckRuntime(repos, {
+    providers: defaultDriverProviders(),
     probe: () => ({ protocol: terminal ? 'pty-cli' : 'acp', available: true, pause: false, resume: true }),
     driverFactory: (_config, _protocol, emit) => ({
       ...(!terminal ? { steer: async (prompt: string) => { steers.push(prompt); return 'injected' as const; } } : {}),

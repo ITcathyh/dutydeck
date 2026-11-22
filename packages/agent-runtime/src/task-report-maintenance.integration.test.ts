@@ -1,3 +1,4 @@
+import { defaultDriverProviders } from '../../../apps/server/src/driver-providers.js';
 import { afterEach, expect, it, vi } from 'vitest';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -12,7 +13,7 @@ async function fixture(holdFirst?: Promise<void>) {
   const cwd = await mkdtemp(join(tmpdir(), 'report-maintenance-'));
   const repos = createRepositories(join(cwd, 'state.db'), { newDatabaseAuthority: 'ledger_v1' });
   const warn = vi.fn(); const send = vi.fn();
-  const runtime = new DutydeckRuntime(repos, { cleanupIntervalMs: 0, log: { warn },
+  const runtime = new DutydeckRuntime(repos, { providers: defaultDriverProviders(), cleanupIntervalMs: 0, log: { warn },
     probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }),
     driverFactory: (_a, _p, emit) => ({ start: async () => {}, resume: async () => {}, stop: async () => {}, isStopped: async () => true,
       interrupt: async () => {}, send: async prompt => { send(prompt); if (prompt === 'first') await holdFirst; emit({ type: 'text', data: { text: 'done' } }); emit({ type: 'completed', data: { stopReason: 'end_turn' } }); } }) });
@@ -94,7 +95,7 @@ it.each([false, true])('clears persisted reports after a real reopen (reference 
   else await h.repos.config.set('task_report/' + first.id, JSON.stringify(report));
   await h.close();
   const repos = createRepositories(join(h.cwd, 'state.db'), { newDatabaseAuthority: 'ledger_v1' });
-  const runtime = new DutydeckRuntime(repos, { cleanupIntervalMs: 0, probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }) });
+  const runtime = new DutydeckRuntime(repos, { providers: defaultDriverProviders(), cleanupIntervalMs: 0, probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }) });
   cleanups.push(async () => { await runtime.shutdown(); repos.close(); });
   await runtime.initialize([h.agent]);
   expect(await runtime.getSessionTaskReport(h.session.id)).toEqual(report);

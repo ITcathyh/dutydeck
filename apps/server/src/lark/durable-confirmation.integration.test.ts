@@ -1,3 +1,4 @@
+import { defaultDriverProviders } from '../driver-providers.js';
 import { TestLarkCoordinator } from './coordinator-test-fixture.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import '../../../../tests/support/fast-wait-for.js';
@@ -34,6 +35,7 @@ async function harness(options: { deliveryFailures?: number; threaded?: boolean;
   const sends: string[] = [];
   let finish: (() => void) | undefined;
   const createRuntime = () => new DutydeckRuntime(repos, {
+    providers: defaultDriverProviders(),
     probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }),
     driverFactory: (_agent, _protocol, emit) => {
       const cancel = () => { emit({ type: 'completed', data: { stopReason: 'cancelled' } }); finish?.(); finish = undefined; };

@@ -1,3 +1,4 @@
+import { defaultDriverProviders } from '../../../apps/server/src/driver-providers.js';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { once } from 'node:events';
 import { mkdtemp, rm } from 'node:fs/promises';
@@ -20,7 +21,7 @@ async function fixture(stop: 'verified' | 'unverified' | 'failed' = 'verified') 
   const entered = new Promise<void>(resolve => { started = resolve; });
   const pending = new Promise<void>(resolve => { finish = resolve; });
   const send = vi.fn(async () => { started(); await pending; });
-  const runtime = new DutydeckRuntime(repos, { driverIdleTimeoutMs: 0,
+  const runtime = new DutydeckRuntime(repos, { providers: defaultDriverProviders(), driverIdleTimeoutMs: 0,
     probe: () => ({ protocol: 'jsonl', available: true, pause: false, resume: true }),
     driverFactory: (_config, _protocol, onEvent): AgentDriver => {
       emit = onEvent;
@@ -60,7 +61,7 @@ it('archives a physically stopped turn with unknown effects, ignores late receip
   await h.close();
   const repos = createRepositories(h.path);
   const factory = vi.fn();
-  const recovered = new DutydeckRuntime(repos, { driverFactory: factory });
+  const recovered = new DutydeckRuntime(repos, { providers: defaultDriverProviders(), driverFactory: factory });
   try {
     await recovered.initialize([h.agent]);
     expect(await recovered.getSession(h.session.id)).toMatchObject({ archivedAt: archived.archivedAt, state: 'stopped', runId: h.session.runId });

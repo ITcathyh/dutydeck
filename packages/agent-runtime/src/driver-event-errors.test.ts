@@ -1,3 +1,4 @@
+import { defaultDriverProviders } from '../../../apps/server/src/driver-providers.js';
 import { afterEach, expect, it, vi } from 'vitest';
 import { createRepositories } from '@dutydeck/storage';
 import type { AgentConfig, NormalizedDriverEvent } from '@dutydeck/shared';
@@ -16,7 +17,7 @@ async function fixture(onSend?: (emit: (event: NormalizedDriverEvent) => void, r
     start: vi.fn(async () => {}), resume: vi.fn(async () => {}), interrupt: vi.fn(async () => {}), stop: vi.fn(async () => {}), isStopped: async () => true,
     send: vi.fn(async () => { onSend?.(emit, ++round); emit({ type: 'text', data: { text: 'answer' } }); emit({ type: 'completed', data: { stopReason: 'end_turn' } }); }),
   };
-  const runtime = new DutydeckRuntime(repos, { cleanupIntervalMs: 0, log, probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }), driverFactory: (_agent, _protocol, onEvent) => { emit = onEvent; return driver; } });
+  const runtime = new DutydeckRuntime(repos, { providers: defaultDriverProviders(), cleanupIntervalMs: 0, log, probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }), driverFactory: (_agent, _protocol, onEvent) => { emit = onEvent; return driver; } });
   cleanup.push(() => runtime.shutdown());
   await runtime.initialize([agent]);
   const session = await runtime.start({ agentId: agent.id });
