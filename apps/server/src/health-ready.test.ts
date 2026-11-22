@@ -23,6 +23,7 @@ function heldListenerPool(outcome: 'connected' | 'failed') {
 async function app(lark: Record<string, unknown>) {
   const built = await buildApp({ listAgents: vi.fn(async () => []) } as any, { lark: { env: { LARK_APP_ID: 'cli_test', LARK_APP_SECRET: 'secret_test' }, ...lark } } as any);
   apps.push(built);
+  await built.listen({ host: '127.0.0.1', port: 0 });
   return built;
 }
 

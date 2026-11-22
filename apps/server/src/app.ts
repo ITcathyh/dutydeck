@@ -29,7 +29,7 @@ import { createHash } from 'node:crypto';
 import { extname, resolve, sep } from 'node:path';
 import { installationOwnerTaskActor, permissionModes, supportsCodexProfiles, RuntimeError, toPublicAgent, type ExecutionActor, type PermissionMode, type PolicyAction, type PolicyDecision } from '@dutydeck/shared';
 import type { DutydeckRuntime } from '@dutydeck/runtime';
-import { registerLarkRoutes, type LarkRoutesOptions } from './lark/routes.js';
+import { createLarkRouteServices, registerLarkRoutes, type LarkRoutesOptions } from './lark/routes.js';
 import { discoverAgentModels } from './agent-models.js';
 import { discoverSessionAgentModels } from './session-model-probe.js';
 import { registerSystemRoutes, type SystemRoutesOptions } from './system-routes.js';
@@ -232,11 +232,16 @@ export async function buildApp(runtime: DutydeckRuntime, options: BuildAppOption
     return { ok: true };
   });
   // 就绪：启动时要建立的外部入口（飞书长连接）都已有结果。部署与重启等它再认定新进程接管了服务。
-  // 路由在 lark 路由注册前声明，只在请求时读取检查函数。
-  let readinessChecks: Array<() => string | undefined> = [];
+  const larkOptions: LarkRoutesOptions = {
+    ...options.lark, runtime: options.lark?.runtime ?? runtime,
+    clearBotModelSettings: appId => options.agentModelSettings?.clearBot(appId) ?? Promise.resolve(),
+    renameBotModelSettings: (from, to) => options.agentModelSettings?.renameBot(from, to) ?? Promise.resolve(),
+  };
+  const lark = createLarkRouteServices(app.log, larkOptions);
+  app.addHook('onListen', async () => lark.start());
   app.get('/health/ready', async (_request, reply) => {
     void reply.header(DUTYDECK_PRODUCT_HEADER, DUTYDECK_PRODUCT);
-    const pending = readinessChecks.map(check => check()).filter((reason): reason is string => reason !== undefined);
+    const pending = [lark.readiness()].filter((reason): reason is string => reason !== undefined);
     return { ok: true, ready: pending.length === 0, pending };
   });
   if (options.auth) {
@@ -322,8 +327,7 @@ export async function buildApp(runtime: DutydeckRuntime, options: BuildAppOption
   if (options.turnDiffs) registerTurnDiffRoutes(app, runtime, { ...options.turnDiffs, getShareSecret: options.auth?.getShareSecret,
     authorize: (request, sessionId, action) => requireSessionExecution(request, sessionId, 'session', action) });
   await registerSystemRoutes(app, options.system);
-  const lark = await registerLarkRoutes(app, { ...options.lark, clearBotModelSettings: appId => options.agentModelSettings?.clearBot(appId) ?? Promise.resolve(), renameBotModelSettings: (oldAppId, newAppId) => options.agentModelSettings?.renameBot(oldAppId, newAppId) ?? Promise.resolve(), runtime: options.lark?.runtime ?? runtime });
-  readinessChecks = [lark.readiness];
+  await registerLarkRoutes(app, larkOptions, lark);
   app.get<{ Querystring: { excludeSessionId?: string; restart?: string } }>('/api/system/activity', async request => {
     const excludeSessionId = request.query.excludeSessionId?.trim() || undefined;
     return request.query.restart === 'true' ? runtime.getRestartActivity(excludeSessionId)

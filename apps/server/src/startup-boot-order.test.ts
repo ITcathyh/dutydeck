@@ -66,13 +66,13 @@ describe('启动引导顺序', () => {
     } as any);
     apps.push(app);
 
-    // sync 真的跨过了事件循环——这正是旧实现被 boot 抢跑的窗口。
-    expect(listener.sync).toHaveBeenCalled();
+    expect(listener.sync).not.toHaveBeenCalled();
     // buildApp 走完了：Lark 那步的 addHook 没有因为 boot 提前跑完而抛异常。
     expect(typeof app.listen).toBe('function');
 
     // 到这里还不该 boot 完成；boot 应当由 listen 触发，而不是注册期间被抢跑。
     await app.listen({ host: '127.0.0.1', port: 0 });
+    await vi.waitFor(() => expect(listener.sync).toHaveBeenCalledTimes(1));
     const address = app.server.address();
     if (!address || typeof address === 'string') throw new Error('no port');
 

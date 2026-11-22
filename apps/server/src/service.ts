@@ -1,3 +1,4 @@
+import { composeCollaboration } from './compose/collaboration.js';
 import { composeWork } from './compose/work.js';
 import { composeAutomation } from './compose/automation.js';
 import { composeDrivers,composeRuntime } from './compose/runtime.js';
@@ -30,7 +31,6 @@ import { rememberSecretValues } from './platform/secret-redaction.js';
 import { dutydeckGroupToolsCommand } from './lark/agent-tools.js';
 import { resolveExplicitFinalContext } from './lark/explicit-final.js';
 import { larkResultDeliveryIssues } from './lark/reconciler.js';
-import { createCollaborationIntegration } from './collaboration-integration.js';
 import { isAutomatedRequest } from './agent-request-tools.js';
 import { renderMemoryIndex } from './lark/memory-view.js';
 import type { CollaborationExtensions } from './collaboration-extensions.js';
@@ -41,8 +41,7 @@ import { loadConfigWithDiagnosticsAsync,resolveDatabaseUrl,type AppConfig } from
 import { logDroppedAgents } from './agent-config-log.js';
 import { assertBotProcessStartup,createRepositories } from '@dutydeck/storage';
 import { installationOwnerTaskActor,RuntimeError,timeLoop } from '@dutydeck/shared';
-import { tmpdir } from 'node:os';
-import { dirname,join,resolve } from 'node:path';
+import { dirname } from 'node:path';
 import { larkResourceRoot,pruneLarkResourceDirectories,readLarkResourceReferences } from './resource-retention.js';
 import { fileURLToPath } from 'node:url';
 import { buildApp,createAppLogger } from './app.js';
@@ -191,17 +190,15 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
   const workbenchHttp = createWorkbenchFetch();
   lifecycle.register('workbenchHttp', () => workbenchHttp.close());
   const groupManager: LarkGroupManager = new LarkGroupManager(repos, { env, fetcher: workbenchHttp.fetch, onPolicyChanged: (): Promise<void> => groupManager.refreshPolicies(runtime) });
-  let readCollaborationMemory: (scope: import('@dutydeck/shared').CollaborationScope) => Promise<string> = async () => '';
-  let collaboration: ReturnType<typeof createCollaborationIntegration> | undefined;
   const isAutomatedTask = (taskId: string) => isAutomatedRequest(repos.execution.getAcceptedTask(taskId)?.request);
   const polishReply: ReplyPolish = (...args) => replyPolisher.polish(...args);
   const agentTools = composeAgentTools(context, capabilities, groupManager, legacyExecutionPolicy, isAutomatedTask,
     { ChannelTools: LarkAgentToolsService, privatePaths: instancePrivatePaths, resolveFinal: resolveExplicitFinalContext }, {
       polishReply, activeTask: id => runtime.getActiveTaskContext(id),
-      authorizeTool: (id, action, preview) => collaboration!.background.authorizeTool(id, action, preview),
+      authorizeTool: (id, action, preview) => collaboration.background.authorizeTool(id, action, preview),
       previewWork: (id, actor) => automationIntegration.previewAuthorize(id, actor),
-      previewCollaboration: (binding, actor) => collaboration!.previewAuthorize(binding, actor, 'write'),
-      teamSearch: () => collaboration!.teamSearch,
+      previewCollaboration: (binding, actor) => collaboration.previewAuthorize(binding, actor, 'write'),
+      teamSearch: () => collaboration.teamSearch,
     });
   const drivers = composeDrivers(context, herdr);
   const { terminalSettings, ptyProvider } = drivers;
@@ -210,7 +207,7 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
     drivers, pluginHost, pluginWiring, groupManager, workbenchHttp, capabilities, relayCapabilities, herdr,
     agentTools, agentModelSettings, isAutomatedTask,
   }, {
-    workItems: () => workItems, delegations: () => delegations, collaboration: () => collaboration!,
+    workItems: () => workItems, delegations: () => delegations, collaboration: () => collaboration,
     automation: () => schedules, awaitingAnswer: id => relayBroker.listPending(id).length > 0,
   });
   const replyPolisher = new LarkReplyPolisher({ runtime, repos, log: { warn: (details, message) => log.warn(details, message) } });
@@ -229,13 +226,12 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
   const { businessToolGrants, businessTools, pluginResultIdentity, pluginResultRegistry, pluginResultAdapter, pluginResultService } = pluginResults;
   const schedules = composeAutomation(context, runtime, groupManager, workbenchHttp, pluginHost, pluginWiring, {
     workItems: () => workItems, awaitingAnswer: id => relayBroker.listPending(id).length > 0,
-    mandateCards: { callback: (...args) => collaboration!.mandateCards.callback(...args) },
+    mandateCards: { callback: (...args) => collaboration.mandateCards.callback(...args) },
   });
   const { automation, automationIntegration, ciWebhook } = schedules;
   const work = composeWork(context, runtime, groupManager, workbenchHttp, automationIntegration);
   const { workbench, workItems, delegations, workInteractions, relayBroker, relayContinuation } = work;
   const { authorizeSessionRequest, authorizeSessionRequests } = sessionAuthorization(runtime, workItems, groupManager, auth);
-  let collaborationTimer: NodeJS.Timeout | undefined;
   let resourceRetentionTimer: NodeJS.Timeout | undefined;
   const historyRetention = new AbortController();
   let historyRetentionRun: Promise<void> | undefined;
@@ -263,7 +259,6 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
   };
   let app: Awaited<ReturnType<typeof buildApp>> | undefined;
   let closeWatch: (() => Promise<void>) | undefined;
-  lifecycle.beforeStop('collaboration', () => clearInterval(collaborationTimer));
   lifecycle.register('historyRetention', () => {
     if (resourceRetentionTimer) clearInterval(resourceRetentionTimer);
     historyRetention.abort();
@@ -274,15 +269,8 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
   lifecycle.register('watch', () => closeWatch?.(), false);
   lifecycle.register('http', () => app?.close(), false);
   lifecycle.assembledCore();
-    collaboration = createCollaborationIntegration({ polishReply, repositories: repos, runtime, groups: groupManager,
-      workspaceRoot: config.databaseUrl === ':memory:' ? join(tmpdir(), 'dutydeck-decisions') : join(dirname(resolve(config.databaseUrl)), 'decisions'),
-      client: bot => createLarkCardService(env, workbenchHttp.fetch, bot), configureExtensions: options.configureCollaborationExtensions,
-      readMemory: scope => readCollaborationMemory(scope),
-      usageRefusal: async scope => await usageLedger.refusal(scope.appId, scope.chatId)
-        ?? await usageLedger.automaticRefusal(scope.appId),
-      listeningDisabled: env.DUTYDECK_DISABLE_LARK_LISTENER === 'true', scenarios,
-      log: { warn: (details, message) => log.warn(details, message) } });
-    lifecycle.register('collaboration', () => collaboration?.close(), false);
+  const groups = composeCollaboration(context, runtime, groupManager, workbenchHttp, usageLedger, polishReply, scenarios);
+  const { collaboration, memoryStore } = groups;
     startupPhase('integrations');
     await relayBroker.initialize();
     startupPhase('relay');
@@ -294,40 +282,7 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
     await relayBroker.refreshPending();
     startupPhase('sessions');
     const webRoot = options.webRoot ?? fileURLToPath(new URL('../public', import.meta.url));
-    const memoryRoot = config.databaseUrl === ':memory:'
-      ? join(tmpdir(), 'dutydeck-memory')
-      : join(dirname(resolve(config.databaseUrl)), 'memory');
-    let memoryProjection!: LarkMemoryProjection;
-    const memoryStore = new LarkMemoryStore(repos.config, {
-      onChange: scope => memoryProjection.write(scope)
-    });
-    memoryProjection = new LarkMemoryProjection(
-      memoryStore,
-      memoryRoot,
-      { warn: (obj, msg) => log.warn(obj, msg) }
-    );
-    const memoryPipeline = new LarkMemoryPipeline({
-      runtime,
-      jobs: repos.memoryJobs,
-      policyConfig: repos.config,
-      controlActorId: installationOwnerTaskActor,
-      repos: { execution: repos.execution },
-      store: memoryStore,
-      projection: memoryProjection,
-      readConfig: async appId => (await readLarkConfigs(repos.config)).find(bot => bot.appId === appId),
-      log: {
-        info: (obj, msg) => log.info(obj, msg),
-        warn: (obj, msg) => log.warn(obj, msg),
-        error: (obj, msg) => log.error(obj, msg)
-      }
-    });
-    for (const bot of await readLarkConfigs(repos.config)) void memoryPipeline.recoverJobs(bot.appId).catch(error => log.error({ error, appId: bot.appId }, '恢复后台记忆作业失败'));
-    // 协作作用域都是群：读本机器人的群记忆池（shared 时是各群共享池，来源是别的群的条目标「其他群」；per-group 时是本群的池）。
-    readCollaborationMemory = async scope => {
-      const bot = (await readLarkConfigs(repos.config)).find(entry => entry.appId === scope.appId);
-      const memoryScope = larkMemoryScope(scope.appId, scope.chatId, 'group', bot?.groupMemoryScope);
-      return !bot || !larkMemoryEnabled(bot) ? '' : renderMemoryIndex(await memoryStore.list(memoryScope), await memoryStore.getState(memoryScope), { currentChatId: scope.chatId }).text;
-    };
+    const memoryPipeline = await groups.recoverMemory();
     const resourceRoot = larkResourceRoot(config.databaseUrl);
     app = await buildApp(runtime, {
       loggerInstance: log,
@@ -361,11 +316,11 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
       ...(workspaceApprovals ? { workspaceApprovals: { service: workspaceApprovals, authorize: async (request: import('fastify').FastifyRequest) => Boolean(await resolveInstallationPrincipal(request)) } } : {}),
       collaboration: { service: collaboration.service, runtime, tools: agentTools, evaluation: collaboration.evaluation, extensions: collaboration.extensions,
         authorizeManagement: async request => await resolveInstallationPrincipal(request) ? installationOwnerTaskActor : undefined,
-        bootstrap: scope => collaboration!.participation.bootstrap(scope), prepareSettings: (scope, patch) => collaboration!.prepareSettings(scope, patch), onChange: scope => collaboration!.onChange(scope),
-        confirmMandate: (scope, actorId, body, origin) => collaboration!.mandateCards.request(scope, actorId, body, origin),
-        confirmMandateUpdate: (scope, actorId, id, body, origin) => collaboration!.mandateCards.requestUpdate(scope, actorId, id, body, origin),
-        updateDuty: (scope, patch, actorId) => collaboration!.participation.updateDuty(scope, patch, actorId), scenarios: scope => collaboration!.participation.scenarioOverview(scope),
-        previewScenario: (scope, id, input) => collaboration!.participation.previewScenario(scope, id, input) },
+        bootstrap: scope => collaboration.participation.bootstrap(scope), prepareSettings: (scope, patch) => collaboration.prepareSettings(scope, patch), onChange: scope => collaboration.onChange(scope),
+        confirmMandate: (scope, actorId, body, origin) => collaboration.mandateCards.request(scope, actorId, body, origin),
+        confirmMandateUpdate: (scope, actorId, id, body, origin) => collaboration.mandateCards.requestUpdate(scope, actorId, id, body, origin),
+        updateDuty: (scope, patch, actorId) => collaboration.participation.updateDuty(scope, patch, actorId), scenarios: scope => collaboration.participation.scenarioOverview(scope),
+        previewScenario: (scope, id, input) => collaboration.participation.previewScenario(scope, id, input) },
       system: { directoryRoots: async () => [...config.agents.map(agent => agent.cwd).filter((cwd): cwd is string => Boolean(cwd)), ...(await readLarkConfigs(repos.config)).map(bot => bot.workspace).filter((cwd): cwd is string => Boolean(cwd))] },
       lark: {
         resourceRoot,
@@ -512,12 +467,7 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
     work.startWorkItems();
     work.startDelegations();
     schedules.start();
-    let lastCollaborationPrune = 0;
-    const tickCollaboration = () => {
-      if (Date.now() - lastCollaborationPrune > 3_600_000) { lastCollaborationPrune = Date.now(); void timeLoop('collaboration.prune', loopLog, () => collaboration!.prune()).catch(error => log.warn({ error }, '群上下文保留期清理失败')); }
-      void timeLoop('collaboration.tick', loopLog, () => collaboration!.scheduler.tick()).catch(error => log.warn({ error }, '群委托轮询失败')); };
-    collaborationTimer = setInterval(tickCollaboration, 5_000);
-    collaborationTimer.unref(); tickCollaboration();
+    groups.start();
   return { config, runtime, close: lifecycle.close, shutdownPhases: lifecycle.phases };
   } catch (error) {
     try { await lifecycle.close(); } catch (cleanupError) { throw new AggregateError([error, cleanupError], 'Dutydeck startup and cleanup failed'); }

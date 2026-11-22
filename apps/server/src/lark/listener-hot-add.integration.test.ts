@@ -40,8 +40,9 @@ it('starts a new ask-mode bot through HTTP without restarting the server or exis
   };
   const app = Fastify();
   try {
-    await registerLarkRoutes(app, { config, fetcher, env: {} });
-    // 启动时在后台建立长连接，路由注册不等握手。
+    const channel = await registerLarkRoutes(app, { config, fetcher, env: {} });
+    await app.listen({ host: '127.0.0.1', port: 0 });
+    channel.start();
     await vi.waitFor(() => expect(sockets.map(socket => socket.appId)).toEqual(['cli_existing']));
     const existing = sockets[0]!;
 
