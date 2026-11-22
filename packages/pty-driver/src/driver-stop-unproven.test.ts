@@ -1,10 +1,11 @@
+import { hostname } from 'node:os';
 import { expect, it, vi } from 'vitest';
 import { TmuxBackend } from '@dutydeck/session-backends';
 import type { AgentConfig } from '@dutydeck/shared';
 
 const exit = vi.hoisted(() => ({ proven: false, stops: 0, failOnce: '' }));
-vi.mock('@dutydeck/session-backends', async importOriginal => ({
-  ...await importOriginal<typeof import('@dutydeck/session-backends')>(),
+vi.mock('../../session-backends/src/owned-tmux.js', async importOriginal => ({
+  ...await importOriginal<typeof import('../../session-backends/src/owned-tmux.js')>(),
   // kill-session was issued but the pane root has not exited within the proof deadline.
   stopOwnedTmux: vi.fn(async (identity: object) => {
     exit.stops++;
@@ -28,7 +29,8 @@ function fixture(id: string) {
     agent, adapter: { id: 'fixture', capabilities: {}, buildArgs: () => [], writeInput() {} }, backend, sessionId: `ses_${id}`,
     processProbe: { identify() { throw new Error('unused'); }, observe: () => 'alive' }, onEvent() {}, onExit() {},
   });
-  (driver as unknown as { tmuxIdentity: object }).tmuxIdentity = { targetId: '$1', identities: [] };
+  vi.spyOn(backend, 'getSocketPath').mockReturnValue('/tmp/test.sock');
+  (backend as unknown as { liveIdentity: object }).liveIdentity = { scope: { socketPath: '/tmp/test.sock', ownerId: backend.ownerId, sessionName: backend.sessionName, hostname: hostname(), uid: process.getuid!() }, targetId: '$1', identities: [] };
   return driver;
 }
 
@@ -52,7 +54,8 @@ it('keeps the unproven tmux exit proof so a later recheck proves exit without st
     agent, adapter: { id: 'fixture', capabilities: {}, buildArgs: () => [], writeInput() {} }, backend, sessionId: 'ses_stop_unproven',
     processProbe: { identify() { throw new Error('unused'); }, observe: () => 'alive' }, onEvent() {}, onExit() {},
   });
-  (driver as unknown as { tmuxIdentity: object }).tmuxIdentity = { targetId: '$1', identities: [] };
+  vi.spyOn(backend, 'getSocketPath').mockReturnValue('/tmp/test.sock');
+  (backend as unknown as { liveIdentity: object }).liveIdentity = { scope: { socketPath: '/tmp/test.sock', ownerId: backend.ownerId, sessionName: backend.sessionName, hostname: hostname(), uid: process.getuid!() }, targetId: '$1', identities: [] };
   await driver.stop();
   expect(await driver.isStopped()).toBe(false);
   exit.proven = true;

@@ -1,4 +1,4 @@
-import { captureOwnedTmuxIdentity, captureOwnedTmuxAbsence, stopOwnedTmux, verifyOwnedTmuxAbsence, verifyOwnedTmuxExit, type OwnedTmuxIdentity, type OwnedTmuxExitProof, type OwnedTmuxAbsence, type ProcessProbe } from './owned-tmux.js';
+import { processIdentityKey, captureOwnedTmuxIdentity, captureOwnedTmuxAbsence, stopOwnedTmux, verifyOwnedTmuxAbsence, verifyOwnedTmuxExit, type OwnedTmuxIdentity, type OwnedTmuxExitProof, type OwnedTmuxAbsence, type ProcessProbe } from './owned-tmux.js';
 import { isDeepStrictEqual } from 'node:util';
 import { programStatusCommand } from './program-status-launch.js';
 import { RuntimeError, warnCaught, type DiagnosticLog } from '@dutydeck/shared';
@@ -424,6 +424,71 @@ export class TmuxBackend implements PersistentSessionBackend {
   getMetadata(key: TerminalMetadataKey) { return this.getDutydeckMetadata(key); }
   setMetadata(key: TerminalMetadataKey, value: string) { return this.setDutydeckMetadata(key, value); }
   reattach(size: { cols: number; rows: number }) { return this.attach(size); }
+  private liveIdentity?: OwnedTmuxIdentity;
+  private exitProof?: OwnedTmuxExitProof;
+  private absence?: OwnedTmuxAbsence;
+
+  async rememberIdentity(probe?: ProcessProbe) {
+    this.liveIdentity = undefined;
+    this.absence = undefined;
+    this.exitProof = undefined;
+    this.liveIdentity = await this.captureIdentity(probe);
+  }
+
+  async stopAttached(probe?: ProcessProbe) {
+    if (!probe) { try { await this.kill(); } catch { /* exit remains unverified */ } return; }
+    try {
+      this.disposeCapture();
+      if (!this.liveIdentity && !this.absence) {
+        let captureError: unknown;
+        try { this.liveIdentity = await this.captureIdentity(probe); } catch (error) { captureError = error; }
+        if (!this.liveIdentity) {
+          this.absence = await this.captureAbsence(probe).catch(error => { this.warnCaught('stop.captureTmuxAbsence', error); return undefined; });
+          if (!this.absence && captureError !== undefined) throw captureError;
+        }
+      }
+      if (this.liveIdentity) {
+        // Retrying a stop must retain descendants observed by every earlier attempt.
+        const identity = this.exitProof
+          ? { ...this.liveIdentity, identities: mergeIdentities(this.liveIdentity.identities, this.exitProof.identities) }
+          : this.liveIdentity;
+        this.exitProof = await this.stopOwned(identity, probe);
+      }
+    } catch (error) {
+      const pending = error as { code?: string; proof?: OwnedTmuxExitProof };
+      if (pending.code === 'LEGACY_TMUX_EXIT_UNPROVEN' && pending.proof) {
+        this.exitProof = pending.proof;
+        return;
+      }
+      const code = pending.code ?? (error instanceof Error ? error.message : String(error));
+      throw Object.assign(new Error(`Tmux stop failed (${code}); the terminal may still be running`), { code: 'PTY_TMUX_STOP_FAILED', cause: error });
+    }
+  }
+  async attachedExitVerified(probe: ProcessProbe | undefined, pid: number | undefined, preserve: boolean) {
+    if (!probe || (preserve && !this.exitProof)) return false;
+    if (!this.liveIdentity && this.absence) return (await this.verifyExit(this.absence, probe)) && !processRunning(pid) && this.captureDisposed();
+    return !!this.exitProof && (await this.verifyExit(this.exitProof, probe)) && this.captureDisposed();
+  }
+  idleProcessesVerified(identity: string, probe: ProcessProbe) {
+    return !!this.liveIdentity && this.liveIdentity.identities.every(item => processIdentityKey(item) === identity || probe.observe(item) === 'dead');
+  }
+  async adoptionIdentity(allowIdle: boolean, probe?: ProcessProbe, pid?: number) {
+    if (!allowIdle || !this.liveIdentity || !probe || !pid) return undefined;
+    const process = probe.identify(pid);
+    if (probe.observe(process) !== 'alive') return undefined;
+    return { kind: 'tmux', reason: 'unconfirmed_claude_source', tmux: this.liveIdentity, process };
+  }
+  async verifyAdoption(snapshot: unknown, idle: () => boolean, probe?: ProcessProbe, pid?: number) {
+    const expected = snapshot as { kind?: string; tmux?: OwnedTmuxIdentity; process?: ReturnType<ProcessProbe['identify']> };
+    const current = this.liveIdentity, process = pid && probe?.identify(pid);
+    if (expected.kind !== 'tmux' || !expected.tmux || !expected.process || !current || !process
+      || !isDeepStrictEqual(expected.tmux.scope, current.scope) || !isDeepStrictEqual(expected.tmux.socket, current.socket)
+      || expected.tmux.targetId !== current.targetId || !isDeepStrictEqual(expected.tmux.server, current.server)
+      || !isDeepStrictEqual(expected.process, process) || probe?.observe(expected.process) !== 'alive' || !idle()) {
+      throw new Error('Persistent tmux identity changed or no longer idle');
+    }
+  }
+
   private ownedScope() {
     const socketPath = this.getSocketPath() ?? this.options.retirementSocketPath;
     if (!this.ownerId || !socketPath) return undefined;
@@ -1105,4 +1170,15 @@ export class TmuxBackend implements PersistentSessionBackend {
   private cleanup(): void {
     this.capture?.close(); this.capture = undefined;
   }
+}
+
+function mergeIdentities(...lists: OwnedTmuxIdentity['identities'][]): OwnedTmuxIdentity['identities'] {
+  const merged = new Map<string, OwnedTmuxIdentity['identities'][number]>();
+  for (const item of lists.flat()) merged.set(processIdentityKey(item), item);
+  return [...merged.values()];
+}
+/** False only when the PID no longer exists (ESRCH); an unknown answer counts as running. */
+function processRunning(pid: number | undefined): boolean {
+  if (!pid) return false;
+  try { process.kill(pid, 0); return true; } catch (error) { return (error as NodeJS.ErrnoException).code !== 'ESRCH'; }
 }

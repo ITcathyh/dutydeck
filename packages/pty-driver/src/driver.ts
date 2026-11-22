@@ -26,15 +26,13 @@ import {
 } from '@dutydeck/shared';
 import type { AdapterSessionContext, CliAdapter, PtyLike } from '@dutydeck/cli-adapters';
 import { buildDutydeckRoutingBlock, ownedClaudeCompactMenu, ownedClaudeComposer } from '@dutydeck/cli-adapters';
-import { ProgramStatusFramingStream, captureOwnedTmuxIdentity, captureOwnedTmuxAbsence, stopOwnedTmux, processIdentityKey, verifyOwnedTmuxExit, verifyOwnedTmuxAbsence, PtyBackend, TmuxBackend, HerdrBackend, orphanedTmuxSocketMessage, type SessionBackend, type ProcessProbe, type OwnedTmuxIdentity, type OwnedTmuxExitProof, type OwnedTmuxAbsence } from '@dutydeck/session-backends';
+import { ProgramStatusFramingStream, processIdentityKey, PtyBackend, TmuxBackend, HerdrBackend, orphanedTmuxSocketMessage, type SessionBackend, type ProcessProbe } from '@dutydeck/session-backends';
 import { TerminalSnapshot } from '@dutydeck/terminal-renderer';
 import { IdleDetector, type IdleTimings } from './idle-detector.js';
 import { IdleCpuProcess } from './idle-cpu-process.js';
 import { TurnCpu } from './turn-cpu.js';
 import { createTranscriptTailer, type TranscriptEventSource, type TranscriptPosition } from './transcript/index.js';
 import { buildSessionMarker, resolveCliSessionId, hasPinnedClaudeSession } from './session-id/index.js';
-import { hostname } from 'node:os';
-import { isDeepStrictEqual } from 'node:util';
 import { statSync } from 'node:fs';
 import { createHash, randomUUID } from 'node:crypto';
 import { ClaudeSettings, claudeAdapters } from './claude-settings.js';
@@ -333,10 +331,6 @@ export class PtyCliDriver implements AgentDriver {
   private stoppedPid: number | undefined;
   private readonly processProbe: ProcessProbe | undefined;
   private readonly timings: PtyCliDriverTimings;
-  private tmuxIdentity: OwnedTmuxIdentity | undefined;
-  private tmuxExitProof: OwnedTmuxExitProof | undefined;
-  /** The tmux session had already ended by itself when stop() tried to capture its identity. */
-  private tmuxAbsence: OwnedTmuxAbsence | undefined;
   /** Runtime shutdown preserves active/unknown sessions; proven idle sessions
    * may be stopped when their native context can be restored. */
   private detachOnStop = false;
@@ -1753,9 +1747,7 @@ export class PtyCliDriver implements AgentDriver {
       || this.terminalWrites > 0 || this.maintenanceActive || this.maintenanceUnknown || !this.terminalIsIdle(false) || this.hasBackgroundWork() || this.hookPermissions.size || this.humanWaits.size
       || this.awaitingAnswer?.() || this.backendPid?.backend !== this.backend) return undefined;
     if (this.processProbe.observe(this.idleCpuRoot) !== 'alive') return undefined;
-    if (this.backend instanceof TmuxBackend && (!this.tmuxIdentity
-      || this.tmuxIdentity.identities.some(identity => processIdentityKey(identity) !== this.idleCpuIdentity
-        && this.processProbe!.observe(identity) !== 'dead'))) return undefined;
+    if (this.backend.persistent?.idleProcessesVerified?.(this.idleCpuIdentity, this.processProbe) === false) return undefined;
     if (isClaudeFamilyCli(this.adapter.id)) {
       const source = this.sampleClaudeNativeSession?.(true);
       if (!source || !this.claudeSourceConfirmed || !this.claudeNativeSelectionVerified
@@ -1873,7 +1865,7 @@ export class PtyCliDriver implements AgentDriver {
     await this.transcript?.flush().catch(error => this.warnCaught('stop.flushTranscript', error));
     this.teardownWiring();
     this.terminalSubscribers.clear();
-    let tmuxStopError: unknown;
+    let stopError: unknown;
     try {
       if (this.recoveryRejected) {
         // Nothing was attached: this is a foreign/mismatched live pane which
@@ -1882,45 +1874,17 @@ export class PtyCliDriver implements AgentDriver {
         (await tmuxBackend.detach());
         this.detachedForShutdown = true;
       }
-      else if (tmuxBackend instanceof HerdrBackend) await tmuxBackend.stopOwnedIdentity();
-      else if (tmuxBackend && this.processProbe) {
-        // Clean up only our local capture; never redirect a tmux command via
-        // mutable process.env or mark a failed/unknown stop as gone.
-        tmuxBackend.disposeCapture();
-        // Wiring may have missed the identity (a busy pane during spawn or reattach): capture it now, or stop never touches tmux.
-        if (!this.tmuxIdentity && !this.tmuxAbsence && tmuxBackend instanceof TmuxBackend) {
-          let captureError: unknown;
-          try { this.tmuxIdentity = await this.captureTmuxIdentity(tmuxBackend); }
-          catch (error) { captureError = error; }
-          if (!this.tmuxIdentity) {
-            // The pane or session already ended by itself: nothing is left to kill, and the session's absence is the proof.
-            this.tmuxAbsence = await this.captureTmuxAbsence(tmuxBackend).catch(error => { this.warnCaught('stop.captureTmuxAbsence', error); return undefined; });
-            if (!this.tmuxAbsence && captureError !== undefined) tmuxStopError = captureError;
-          }
-        }
-        if (this.tmuxIdentity) {
-          // A repeated stop must not narrow the proof back to the wire-time processes: keep every process the earlier stop recorded.
-          const recorded = this.tmuxExitProof;
-          const identity = recorded ? { ...this.tmuxIdentity, identities: mergeIdentities(this.tmuxIdentity.identities, recorded.identities) } : this.tmuxIdentity;
-          this.tmuxExitProof = await stopOwnedTmux(identity, this.processProbe);
-        }
-      } else (await this.backend.kill());
+      else if (tmuxBackend) await tmuxBackend.stopAttached(this.processProbe);
+      else await this.backend.kill();
     } catch (error) {
-      // best effort：后端可能已退出。已发出 kill、只是退出还没证实时留下待证明据，
-      // isStopped() 每次都重新核验它，之后的复核不必再停一次。
-      const unproven = error as { code?: string; proof?: OwnedTmuxExitProof };
-      if (unproven.code === 'LEGACY_TMUX_EXIT_UNPROVEN' && unproven.proof) this.tmuxExitProof = unproven.proof;
-      else if (!preservePersistentSession && !this.recoveryRejected && tmuxBackend instanceof TmuxBackend && this.processProbe) tmuxStopError = error;
+      if ((error as { code?: string }).code === 'PTY_TMUX_STOP_FAILED') stopError = error;
     } finally {
       this.stoppedCallback?.();
     }
     if (!preservePersistentSession && !this.recoveryRejected && await this.isStopped()) this.claudeSettings.cleanup();
     // A tmux stop that never killed or never captured its target is not "exit pending": report the real cause so the
     // caller's stop block names it and a later stop() retries the kill.
-    else if (tmuxStopError !== undefined) {
-      const code = (tmuxStopError as { code?: string }).code ?? (tmuxStopError instanceof Error ? tmuxStopError.message : String(tmuxStopError));
-      throw Object.assign(new Error(`Tmux stop failed (${code}); the terminal may still be running`), { code: 'PTY_TMUX_STOP_FAILED', cause: tmuxStopError });
-    }
+    else if (stopError !== undefined) throw stopError;
     // onExit 由 backend 的 exit 事件驱动（kill 会触发）；若后端已自行退出，
     // handleExit 早已回调过，exitReported 保证恰好一次。
   }
@@ -1935,17 +1899,9 @@ export class PtyCliDriver implements AgentDriver {
 
   async isStopped(): Promise<boolean> {
     if (!this.stopped || this.recoveryRejected || this.detachedForShutdown) return false;
-    if (this.backend instanceof HerdrBackend) return (await this.backend.isStopped());
-    if (this.detachOnStop && !this.tmuxExitProof) return false;
-    if (this.backend instanceof TmuxBackend && !this.tmuxIdentity && this.tmuxAbsence) {
-      return !!this.processProbe && (await verifyOwnedTmuxAbsence(this.tmuxAbsence, this.processProbe))
-        && !processRunning(this.backendPid?.pid) && this.backend.captureDisposed();
-    }
-    if (this.backend instanceof TmuxBackend) {
-      return !!this.processProbe && !!this.tmuxExitProof
-        && (await verifyOwnedTmuxExit(this.tmuxExitProof, this.processProbe))
-        && this.backend.captureDisposed();
-    }
+    const persistent = this.backend.persistent;
+    if (persistent) return persistent.attachedExitVerified(this.processProbe, this.backendPid?.pid, this.detachOnStop);
+    if (this.detachOnStop) return false;
     if (!(this.backend instanceof PtyBackend) || this.stoppedPid === undefined) return false;
     try { process.kill(this.stoppedPid, 0); return false; }
     catch (error) { return (error as NodeJS.ErrnoException).code === 'ESRCH'; }
@@ -2023,15 +1979,8 @@ export class PtyCliDriver implements AgentDriver {
   }
 
   async persistentTerminalIdentity(): Promise<unknown> {
-    if (this.backend instanceof HerdrBackend) return await this.backend.captureOwnedIdentity();
-    // Only the new unconfirmed-source preservation case opts into idle tmux
-    // adoption. Other tmux restart behavior keeps its existing recovery rules.
-    if (!(this.backend instanceof TmuxBackend) || this.claudeSourceConfirmed || !this.claudeResumeSource
-      || !this.safeIdleTmuxReceipt() || !this.tmuxIdentity || !this.processProbe || !this.backendPid) return undefined;
-    const process = this.processProbe.identify(this.backendPid.pid);
-    if (this.processProbe.observe(process) !== 'alive') return undefined;
-    return { kind: 'tmux', reason: 'unconfirmed_claude_source', tmux: this.tmuxIdentity, process };
-
+    return this.backend.persistent?.adoptionIdentity(!this.claudeSourceConfirmed && !!this.claudeResumeSource
+      && this.safeIdleTmuxReceipt(), this.processProbe, this.backendPid?.pid);
   }
 
   private safeIdleTmuxReceipt(): boolean {
@@ -2060,17 +2009,7 @@ export class PtyCliDriver implements AgentDriver {
       (await this.reattachTmux(name, false));
       if (identity !== undefined) {
         await this.transcript?.flush();
-        const expected = identity as { kind?: string; tmux?: OwnedTmuxIdentity; process?: ReturnType<ProcessProbe['identify']> };
-        const current = { tmux: this.tmuxIdentity, process: this.backendPid && this.processProbe?.identify(this.backendPid.pid) };
-        // A matching name/owner alone does not authorize adopting a replaced pane.
-        // Socket inode, server birth, target id, and pane process birth must agree.
-        if (expected.kind !== 'tmux' || !expected.tmux || !expected.process || !current?.tmux || !current.process
-          || !isDeepStrictEqual(expected.tmux.scope, current.tmux.scope)
-          || !isDeepStrictEqual(expected.tmux.socket, current.tmux.socket)
-          || expected.tmux.targetId !== current.tmux.targetId
-          || !isDeepStrictEqual(expected.tmux.server, current.tmux.server)
-          || !isDeepStrictEqual(expected.process, current.process)
-          || this.processProbe?.observe(expected.process) !== 'alive' || !this.safeIdleTmuxReceipt()) throw new Error('Persistent tmux identity changed or no longer idle');
+        await this.backend.persistent!.verifyAdoption(identity, () => this.safeIdleTmuxReceipt(), this.processProbe, this.backendPid?.pid);
       }
       (await this.markTmuxReattached());
       this.recoveryRejected = false;
@@ -2086,22 +2025,6 @@ export class PtyCliDriver implements AgentDriver {
   private get usesProgramStatus(): boolean {
     // Herdr's control API streams rendered screen updates, stripping OSC frames.
     return this.adapter.capabilities.programStatus === true && this.backend.kind !== 'herdr';
-  }
-
-  private ownedTmuxScope(backend: TmuxBackend) {
-    const socketPath = backend.getSocketPath();
-    if (!this.processProbe || !backend.ownerId || !socketPath) return undefined;
-    return { socketPath, sessionName: backend.sessionName, ownerId: backend.ownerId, hostname: hostname(), uid: process.getuid!() };
-  }
-
-  private async captureTmuxAbsence(backend: TmuxBackend): Promise<OwnedTmuxAbsence | undefined> {
-    const scope = this.ownedTmuxScope(backend);
-    return scope && captureOwnedTmuxAbsence(scope, this.processProbe!);
-  }
-
-  private async captureTmuxIdentity(backend: TmuxBackend): Promise<OwnedTmuxIdentity | undefined> {
-    const scope = this.ownedTmuxScope(backend);
-    return scope && captureOwnedTmuxIdentity(scope, this.processProbe!);
   }
 
   /** 把一个后端接线进事件流（start / reattach / respawn 共用）。 */
@@ -2121,13 +2044,7 @@ export class PtyCliDriver implements AgentDriver {
     this.idleCpuRoot = rootIdentity;
     this.idleCpuIdentity = rootIdentity && processIdentityKey(rootIdentity);
     this.idleCpuProcess = rootIdentity && new IdleCpuProcess(rootIdentity.pid, rootIdentity.start);
-    this.tmuxIdentity = undefined;
-    this.tmuxExitProof = undefined;
-    this.tmuxAbsence = undefined;
-    if (backend instanceof TmuxBackend) {
-      // Unknown physical identity keeps isStopped false; stop() captures it again.
-      try { this.tmuxIdentity = await this.captureTmuxIdentity(backend); } catch (error) { this.warnCaught('wire.captureTmuxIdentity', error); }
-    }
+    try { await backend.persistent?.rememberIdentity?.(this.processProbe); } catch (error) { this.warnCaught('wire.captureTmuxIdentity', error); }
     check();
     const initial = backend instanceof TmuxBackend || backend instanceof HerdrBackend ? backend.initialScreen : undefined;
     this.snapshot = new TerminalSnapshot(initial?.cols ?? DEFAULT_COLS, initial?.rows ?? DEFAULT_ROWS);
@@ -3145,15 +3062,4 @@ function mergedEnv(agentEnv: Record<string, string>): Record<string, string> {
   // daemon 的运行身份，不是被桥接 CLI 的。CLI 应该用自己的配置（~/.claude/）
   // 或 agent.env 里显式声明的变量。
   return childEnvironment(process.env, agentEnv, { stripClaude: true });
-}
-
-function mergeIdentities(...lists: OwnedTmuxIdentity['identities'][]): OwnedTmuxIdentity['identities'] {
-  const merged = new Map<string, OwnedTmuxIdentity['identities'][number]>();
-  for (const item of lists.flat()) merged.set(processIdentityKey(item), item);
-  return [...merged.values()];
-}
-/** False only when the PID no longer exists (ESRCH); an unknown answer counts as running. */
-function processRunning(pid: number | undefined): boolean {
-  if (!pid) return false;
-  try { process.kill(pid, 0); return true; } catch (error) { return (error as NodeJS.ErrnoException).code !== 'ESRCH'; }
 }

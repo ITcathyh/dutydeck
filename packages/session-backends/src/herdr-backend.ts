@@ -48,6 +48,12 @@ export class HerdrBackend implements PersistentSessionBackend {
   getMetadata(key: TerminalMetadataKey) { return this.getDutydeckMetadata(key); }
   setMetadata(key: TerminalMetadataKey, value: string) { return this.setDutydeckMetadata(key, value); }
   reattach(size: { cols: number; rows: number }) { return this.attach(size); }
+  async stopAttached() {
+    try { await this.stopOwnedIdentity(); } catch { /* A subsequent exit check must prove the stop. */ }
+  }
+  attachedExitVerified() { return this.isStopped(); }
+  adoptionIdentity() { return this.captureOwnedIdentity(); }
+  verifyAdoption(snapshot: unknown) { return this.assertOwnedIdentity(snapshot); }
   captureIdentity() { return this.captureOwnedIdentity(); }
   async captureAbsence() { return undefined; }
   stopOwned(snapshot: unknown, _probe?: ProcessProbe, beforeKill?: (snapshot: unknown) => Promise<void>) {

@@ -69,6 +69,12 @@ export type TerminalMetadataKey = 'first_prompt_sent' | 'turn_id';
 export interface PersistentSessionBackend extends SessionBackend {
   readonly ownerId?: string;
   readonly initialScreen?: { data: string; cols: number; rows: number };
+  rememberIdentity?(probe?: ProcessProbe): Promise<void>;
+  stopAttached(probe?: ProcessProbe): Promise<void>;
+  attachedExitVerified(probe: ProcessProbe | undefined, pid: number | undefined, preserve: boolean): Promise<boolean>;
+  idleProcessesVerified?(identity: string, probe: ProcessProbe): boolean;
+  adoptionIdentity(allowIdle: boolean, probe?: ProcessProbe, pid?: number): Promise<unknown>;
+  verifyAdoption(snapshot: unknown, idle: () => boolean, probe?: ProcessProbe, pid?: number): Promise<void>;
   captureIdentity(probe?: ProcessProbe): Promise<unknown>;
   captureAbsence(probe?: ProcessProbe): Promise<unknown>;
   stopOwned(snapshot: unknown, probe?: ProcessProbe, beforeKill?: (snapshot: unknown) => Promise<void>): Promise<unknown>;
