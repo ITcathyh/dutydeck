@@ -340,8 +340,8 @@ function sameV2Binding(a: TaskBindingV2, b: TaskBindingV2) {
 }
 
 type Dependencies = Pick<SessionAutomationService['scheduler'],
-  'ciCondition' | 'clock' | 'executionSession' | 'hasPendingOccurrence' | 'options' | 'preconditions'
-  | 'resetStreak' | 'retireFreshSessions' | 'service' | 'watchSession'>;
+  'ci' | 'clock' | 'executionSession' | 'hasPendingOccurrence' | 'options' | 'preconditions' | 'resetStreak'
+  | 'retireFreshSessions' | 'service' | 'watchSession'>;
 
 export class AutomationStore {
   readonly quarantinedSchedules = new Set<string>();
@@ -558,7 +558,7 @@ export class AutomationStore {
     await this.assertFollowUpSettings(sessionId, { ...input, mode: input.mode ?? 'session', deadlineAt, enabled: false }, actorId, { deadline: true, template: true });
     this.automation.preconditions.assertPreconditionInput(input.precondition, actorId);
     this.automation.preconditions.assertPreconditionCondition(input.condition, Boolean(input.precondition));
-    const condition = input.condition.kind === 'always' ? input.condition : await this.automation.ciCondition(session, input.condition);
+    const condition = input.condition.kind === 'always' ? input.condition : await this.automation.ci.ciCondition(session, input.condition);
     await receipt?.prepareDelivery?.(id);
     if (input.mode === 'fresh' && !this.automation.options.runtime.startScheduleSession) throw new RuntimeError('FRESH_SCHEDULE_UNAVAILABLE', 'Fresh-session schedules are unavailable on this instance', 503);
     if (input.mode === 'independent') {
@@ -897,7 +897,7 @@ export class AutomationStore {
     this.automation.preconditions.assertPreconditionCondition(input.condition ?? stored.value.condition, input.precondition !== undefined ? Boolean(input.precondition)
       : Boolean((await this.automation.preconditions.readPrecondition(id))?.value.command));
     let condition = stored.value.condition;
-    if (input.condition) condition = input.condition.kind === 'always' ? input.condition : await this.automation.ciCondition(session, input.condition);
+    if (input.condition) condition = input.condition.kind === 'always' ? input.condition : await this.automation.ci.ciCondition(session, input.condition);
     const now = this.automation.clock();
     const executionChanged = Object.keys(input).some(key => !['name', 'expectedRevision'].includes(key));
     const candidate = {

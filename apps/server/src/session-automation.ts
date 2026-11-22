@@ -23,7 +23,6 @@ import {
   openRunStatuses,
   plus,
   publicOccurrence,
-  publicSubscription,
   resolveAutomationActor,
   SCHEDULE_PREFIX,
   scheduleKey,
@@ -39,7 +38,6 @@ import {
   type TickParseCache
 } from './automation/store.js';
 import {
-  cancelCiInputSchema,
   canonicalExecutionJson,
   ciSubscriptionSchema,
   ciSubscriptionV2Schema,
@@ -55,7 +53,6 @@ import {
   sessionScheduleOccurrenceSchema,
   sessionScheduleOccurrenceV2Schema,
   sessionScheduleSchema,
-  subscribeCiInputSchema,
   type AcceptedTask,
   type AttemptResultV1,
   type AutomationBlockReason,
@@ -63,9 +60,6 @@ import {
   type AutomationRunDetail,
   type AutomationSchedulePage,
   type AutomationScheduleQuery,
-  type CiProvider,
-  type CiRepository,
-  type CiRun,
   type CiSubscription,
   type CiSubscriptionV2,
   type CreateSessionScheduleInput,
@@ -89,11 +83,12 @@ import {
 } from '@dutydeck/shared';
 import { AutomationPreconditions } from './automation/precondition.js';
 import { AutomationDelivery, deliverySettled } from './automation/delivery.js';
+import { AutomationCiPoll, DEFAULT_POLL_MS, sameHead } from './automation/ci-poll.js';
 import { z } from 'zod';
 import { createHash, randomUUID } from 'node:crypto';
-import { ciProviderLabel, CiProviderRegistry, resolveCiHead, type CiHead } from './ci-providers.js';
 import { observeAdmittedTask } from './task-results.js';
 import { MattersService } from './matters.js';
+import type { CiHead } from './ci-providers.js';
 import { workItemId } from './work-items.js';
 import { recordAutomationAuthorization } from './task-authorization.js';
 
@@ -136,9 +131,6 @@ const errorReasons: Record<string, string> = {
   SESSION_NOT_ACTIVE: '执行会话已不可用', SESSION_STOPPING: '执行会话正在停止', SESSION_RESOURCE_BLOCKED: '执行会话的终端还没收干净',
   AGENT_UNAVAILABLE: 'Agent 环境暂不可用'
 };
-
-const DEFAULT_POLL_MS = 60_000;
-const runStatuses = new Set(['queued', 'running', 'completed']);
 
 /** 一轮扫描的时刻与迟到宽限：同一轮里排在后面的计划，不因前面开会话、派发花的时间被判迟到。 */
 type ScanTiming = { observedAt: Date; graceMs: number };
@@ -188,30 +180,6 @@ function acceptedActorId(label: AutomationTaskLabel, accepted: AcceptedTask | un
     : actualActor.kind === 'channel' ? actualActor.id : undefined;
 }
 
-function formatCiPrompt(basePrompt: string, providerName: string, repository: string, headSha: string, runs: CiRun[]): string {
-  const lines = runs.map(run => `- ${run.name.slice(0, 80)}: ${(run.conclusion ?? run.result ?? 'completed').slice(0, 40)} (run ${run.id}, ${run.url.slice(0, 400)})`);
-  return `${basePrompt}\n\n${providerName} completed for ${repository} at ${headSha}:\n${lines.join('\n')}`;
-}
-
-/** 提供方返回的构建进提示词之前做一次形状检查：只留这个提交的、字段齐全的构建，同一 id 取最新一次重跑。 */
-function normalizeRuns(runs: unknown, headSha: string, completedOnly = false): CiRun[] {
-  if (!Array.isArray(runs)) throw new RuntimeError('CI_PROVIDER_RESPONSE_INVALID', 'CI 提供方返回的构建列表格式不正确', 502);
-  const latest = new Map<number, CiRun>();
-  for (const value of runs.slice(0, 100) as Array<Partial<CiRun>>) {
-    if (!value || !Number.isSafeInteger(value.id) || (value.id as number) < 0 || typeof value.name !== 'string' || typeof value.url !== 'string') continue;
-    if (typeof value.headSha !== 'string' || value.headSha.toLowerCase() !== headSha || !runStatuses.has(String(value.status))) continue;
-    if (completedOnly && value.status !== 'completed') continue;
-    const attempt = Number.isSafeInteger(value.attempt) && (value.attempt as number) > 0 ? value.attempt as number : 1;
-    const run: CiRun = { id: value.id as number, name: value.name, attempt, headSha, status: value.status as CiRun['status'], url: value.url,
-      ...(value.result ? { result: value.result } : {}), ...(typeof value.conclusion === 'string' ? { conclusion: value.conclusion } : {}) };
-    if (!latest.has(run.id) || latest.get(run.id)!.attempt < run.attempt) latest.set(run.id, run);
-  }
-  return [...latest.values()].sort((left, right) => left.id - right.id);
-}
-
-const sameHead = (resolved: CiHead, provider: string, repository: CiRepository, headSha: string) =>
-  resolved.provider.id === provider && resolved.repository.slug.toLowerCase() === repository.slug.toLowerCase() && resolved.headSha === headSha;
-
 interface ReconcileOutcome {
   status: 'pending' | 'cancelled' | 'settled' | 'blocked';
   result?: AttemptResultV1;
@@ -223,11 +191,10 @@ class AutomationScheduler {
   readonly store: AutomationStore;
   readonly preconditions: AutomationPreconditions;
   readonly delivery: AutomationDelivery;
+  readonly ci: AutomationCiPoll;
 
   readonly ownerId = `automation_${randomUUID()}`;
   readonly clock: () => Date;
-  private readonly providers: CiProviderRegistry;
-  private readonly pollIntervalMs: number;
   closed = false;
   private currentTick?: Promise<void>;
   private readonly manualRuns = new Set<Promise<PublicSessionScheduleOccurrence>>();
@@ -261,34 +228,11 @@ class AutomationScheduler {
   constructor(readonly options: SessionAutomationServiceOptions, readonly service: Pick<SessionAutomationService,
     'createSchedule' | 'getScheduleDefinition' | 'sourceSessionId' | 'tick' | 'updateSchedule'>) {
     this.clock = options.clock ?? (() => new Date());
-    this.pollIntervalMs = Math.max(60_000, Math.min(60 * 60_000, options.pollIntervalMs ?? DEFAULT_POLL_MS));
-    this.providers = options.ciProviders ?? new CiProviderRegistry();
 
     this.store = new AutomationStore(this);
     this.preconditions = new AutomationPreconditions(this);
     this.delivery = new AutomationDelivery(this);
-  }
-
-  /** 至少装了一个 CI 插件；/ci 据此判断「未安装 CI 插件」。 */
-  get ciConfigured() { return this.providers.size > 0; }
-
-  listCiProviders(): PublicCiProvider[] { return this.providers.describe(); }
-
-  private pollingProvider(id: string): CiProvider & Required<Pick<CiProvider, 'getPipelineStatus'>> {
-    const provider = this.providers.get(id);
-    if (!provider) throw new RuntimeError('CI_PROVIDER_UNAVAILABLE', `CI 插件提供方 ${id} 没有加载`, 409);
-    if (typeof provider.getPipelineStatus !== 'function') throw new RuntimeError('CI_PROVIDER_POLLING_UNSUPPORTED', `${provider.displayName} 不支持查询构建状态`, 400);
-    return provider as CiProvider & Required<Pick<CiProvider, 'getPipelineStatus'>>;
-  }
-
-  private async listRuns(providerId: string, repository: CiRepository, headSha: string, workflow?: string, completedOnly = false): Promise<CiRun[]> {
-    const status = await this.pollingProvider(providerId).getPipelineStatus({ repository, sha: headSha, ...(workflow ? { workflow } : {}), ...(completedOnly ? { completedOnly } : {}) });
-    return normalizeRuns(status?.runs, headSha, completedOnly);
-  }
-
-  /** 只在能查询构建状态的提供方里按 origin 匹配。 */
-  private ciHead(cwd: string, providerId?: string) {
-    return resolveCiHead(cwd, this.providers, providerId, provider => typeof provider.getPipelineStatus === 'function');
+    this.ci = new AutomationCiPoll(this);
   }
 
   /** 固定 number=1 Attempt 后读取唯一权威结果；不跟随 currentAttempt，不把 unknown 当 failed。 */
@@ -326,21 +270,7 @@ class AutomationScheduler {
     return { status: 'settled', result: read.result };
   }
 
-  async ciCondition(session: Session, input: { kind: 'ci_new_failure'; provider?: string; workflow?: string }) {
-    const resolved = await this.ciHead(session.cwd, input.provider);
-    const runs = await this.listRuns(resolved.provider.id, resolved.repository, resolved.headSha, input.workflow, true);
-    return {
-      kind: 'ci_new_failure' as const,
-      provider: resolved.provider.id,
-      ...(input.workflow ? { workflow: input.workflow } : {}),
-      repository: resolved.repository,
-      headSha: resolved.headSha,
-      observedRunIds: runs.map(run => run.id),
-      observedRunAttempts: runs.map(run => ({ id: run.id, attempt: run.attempt }))
-    };
-  }
-
-  private buildRequest(session: Session, namespace: TaskRequestV1['namespace'], key: string, prompt: string, actor: ExecutionActor): TaskRequestV1 {
+  buildRequest(session: Session, namespace: TaskRequestV1['namespace'], key: string, prompt: string, actor: ExecutionActor): TaskRequestV1 {
     return {
       version: 1,
       namespace,
@@ -434,61 +364,6 @@ class AutomationScheduler {
     if (occurrence.created) await this.processOccurrence(occurrence);
     const latest = await this.store.getRecord(occurrenceKey(occurrence.value.id), value => sessionScheduleOccurrenceSchema.parse(value));
     return publicOccurrence(latest!.value);
-  }
-
-  async subscribeCi(sessionId: string, rawInput: SubscribeCiInput, actorId?: string): Promise<PublicCiSubscription> {
-    await this.store.requireAuthorized(sessionId, actorId);
-    const session = await this.store.requireSession(sessionId);
-    if (!isSessionRunnable(session)) throw new RuntimeError('SESSION_NOT_ACTIVE', 'Session is not active', 409);
-    const input = subscribeCiInputSchema.parse(rawInput);
-    const resolved = await this.ciHead(session.cwd, input.provider);
-    const now = this.clock();
-    const id = `ci_${randomUUID()}`;
-    await this.options.prepareDelivery?.(sessionId, id);
-    const record = ciSubscriptionSchema.parse({
-      schemaVersion: 1,
-      id,
-      revision: 1,
-      sessionId,
-      ...(actorId ? { actorId } : {}),
-      provider: resolved.provider.id,
-      repository: resolved.repository,
-      headSha: resolved.headSha,
-      ...(input.workflow ? { workflow: input.workflow } : {}),
-      prompt: input.prompt ?? `Review the completed ${resolved.provider.displayName} result and continue the task.`,
-      status: 'waiting',
-      expiresAt: plus(now, input.ttlSeconds * 1_000),
-      nextPollAt: iso(now),
-      delivery: { status: this.options.deliver ? 'pending' : 'not_requested', attempts: 0, updatedAt: iso(now) },
-      createdAt: iso(now),
-      updatedAt: iso(now)
-    });
-    if (!await this.store.createRecord(ciKey(record.id), record)) throw new RuntimeError('SESSION_AUTOMATION_CONFLICT', 'CI subscription identifier already exists', 409);
-    return publicSubscription(record);
-  }
-
-  async cancelCi(sessionId: string, id: string, rawInput: { expectedRevision: number }, actorId?: string): Promise<PublicCiSubscription> {
-    await this.store.requireAuthorized(sessionId, actorId);
-    await this.store.requireSession(sessionId);
-    const input = cancelCiInputSchema.parse(rawInput);
-    const stored = await this.store.getRecord(ciKey(id), value => ciSubscriptionSchema.parse(value));
-    if (!stored || stored.value.sessionId !== sessionId) throw new RuntimeError('SESSION_AUTOMATION_CI_NOT_FOUND', 'CI subscription not found', 404);
-    if (stored.value.taskStartedAt) throw new RuntimeError('SESSION_AUTOMATION_CI_ALREADY_STARTED', 'CI continuation has already started', 409);
-    if (stored.value.revision !== input.expectedRevision) throw new RuntimeError('SESSION_AUTOMATION_REVISION_CONFLICT', 'CI subscription revision changed', 409);
-    if (!['waiting', 'dispatching', 'accepted'].includes(stored.value.status)) return publicSubscription(stored.value);
-    const now = iso(this.clock());
-    const cancelled = ciSubscriptionSchema.parse({
-      ...stored.value,
-      revision: stored.value.revision + 1,
-      status: 'cancelled',
-      nextPollAt: undefined,
-      delivery: { status: 'not_requested', attempts: stored.value.delivery.attempts, updatedAt: now },
-      leaseOwner: undefined,
-      leaseExpiresAt: undefined,
-      updatedAt: now
-    });
-    if (!await this.store.replace(ciKey(id), stored.raw, cancelled)) throw new RuntimeError('SESSION_AUTOMATION_REVISION_CONFLICT', 'CI subscription revision changed', 409);
-    return publicSubscription(cancelled);
   }
 
   /** No schedule ID is accepted: only the current occurrence's durable host binding can request this. */
@@ -653,7 +528,7 @@ class AutomationScheduler {
       if (!started && schedule.value.condition.kind === 'ci_new_failure') {
         const condition = schedule.value.condition;
         let resolved: CiHead;
-        try { resolved = await this.ciHead(session!.cwd, condition.provider); }
+        try { resolved = await this.ci.ciHead(session!.cwd, condition.provider); }
         catch (error) {
           await this.finishOccurrence(occurrenceStored, { conditionStatus: 'invalidated', runStatus: 'invalidated', error: errorMessage(error) });
           throw new RuntimeError('SESSION_AUTOMATION_TASK_STALE_HEAD', 'Scheduled task CI HEAD is unavailable before execution', 409);
@@ -729,31 +604,31 @@ class AutomationScheduler {
     assertAdmissionMatchesAccepted('CI continuation', subscription.admission, accepted);
     const started = Boolean(subscription.taskStartedAt);
     if (!started && (!['dispatching', 'accepted'].includes(subscription.status) || new Date(subscription.expiresAt) <= this.clock())) {
-      if (['dispatching', 'accepted'].includes(subscription.status) && new Date(subscription.expiresAt) <= this.clock()) await this.finishCi(subscriptionStored, 'expired', 'CI continuation expired before execution');
+      if (['dispatching', 'accepted'].includes(subscription.status) && new Date(subscription.expiresAt) <= this.clock()) await this.ci.finishCi(subscriptionStored, 'expired', 'CI continuation expired before execution');
       throw new RuntimeError('SESSION_AUTOMATION_TASK_REVOKED', 'CI continuation is no longer authorized to run', 403);
     }
     const session = await this.options.runtime.getSession(task.sessionId);
     if (!isSessionRunnable(session)) {
-      if (!started) await this.finishCi(subscriptionStored, 'session_inactive', 'Session is no longer active');
+      if (!started) await this.ci.finishCi(subscriptionStored, 'session_inactive', 'Session is no longer active');
       throw new RuntimeError('SESSION_AUTOMATION_TASK_REVOKED', 'CI continuation session is no longer active', 403);
     }
     const ciActorId = acceptedActorId('CI continuation', accepted, subscription.admission, subscription.actor, session);
     try { await this.store.requireAuthorized(task.sessionId, ciActorId); }
     catch (error) {
-      if (!started) await this.finishCi(subscriptionStored, 'revoked', errorMessage(error));
+      if (!started) await this.ci.finishCi(subscriptionStored, 'revoked', errorMessage(error));
       throw new RuntimeError('SESSION_AUTOMATION_TASK_REVOKED', 'CI continuation authorization was revoked', 403);
     }
     // 首次尚未提交时继续真正 HEAD 核验，删掉以 !accepted 为条件的 HEAD 绕过。
     if (!started) {
       const providerId = subscription.provider ?? LEGACY_GITHUB_PROVIDER_ID;
       let resolved: CiHead;
-      try { resolved = await this.ciHead(session!.cwd, providerId); }
+      try { resolved = await this.ci.ciHead(session!.cwd, providerId); }
       catch (error) {
-        await this.finishCi(subscriptionStored, 'stale_head', errorMessage(error));
+        await this.ci.finishCi(subscriptionStored, 'stale_head', errorMessage(error));
         throw new RuntimeError('SESSION_AUTOMATION_TASK_STALE_HEAD', 'CI continuation HEAD is unavailable before execution', 409);
       }
       if (!sameHead(resolved, providerId, subscription.repository, subscription.headSha)) {
-        await this.finishCi(subscriptionStored, 'stale_head', 'CI continuation HEAD changed before execution');
+        await this.ci.finishCi(subscriptionStored, 'stale_head', 'CI continuation HEAD changed before execution');
         throw new RuntimeError('SESSION_AUTOMATION_TASK_STALE_HEAD', 'CI continuation HEAD changed before execution', 409);
       }
     }
@@ -811,11 +686,11 @@ class AutomationScheduler {
       if (this.closed) return;
       await this.isolate(async () => {
         const value = migrateCi(item.value);
-        if (value.status === 'waiting' && (!value.nextPollAt || new Date(value.nextPollAt) <= this.clock())) await this.claimAndPollCi(item);
-        else if (value.status === 'dispatching' && (!value.leaseExpiresAt || new Date(value.leaseExpiresAt) <= this.clock())) await this.recoverDispatchingCi(item);
+        if (value.status === 'waiting' && (!value.nextPollAt || new Date(value.nextPollAt) <= this.clock())) await this.ci.claimAndPollCi(item);
+        else if (value.status === 'dispatching' && (!value.leaseExpiresAt || new Date(value.leaseExpiresAt) <= this.clock())) await this.ci.recoverDispatchingCi(item);
         else if (value.status === 'accepted' && new Date(value.expiresAt) <= this.clock() && value.taskId) {
           const task = await this.options.repositories.tasks.get?.(value.taskId);
-          if (task?.status === 'queued' && !value.taskStartedAt) await this.finishCi(item, 'expired', 'CI continuation expired before execution');
+          if (task?.status === 'queued' && !value.taskStartedAt) await this.ci.finishCi(item, 'expired', 'CI continuation expired before execution');
         }
       });
     }
@@ -1048,11 +923,11 @@ class AutomationScheduler {
       let observedAttempts: SessionScheduleOccurrenceV2['conditionObservedRunAttempts'];
       try {
         const condition = schedule.condition;
-        const resolved = await this.ciHead(session!.cwd, condition.provider);
+        const resolved = await this.ci.ciHead(session!.cwd, condition.provider);
         if (!sameHead(resolved, condition.provider, condition.repository, condition.headSha)) {
           throw new Error('CI repository or HEAD changed after the schedule generation was created');
         }
-        const runs = await this.listRuns(condition.provider, condition.repository, condition.headSha, condition.workflow, true);
+        const runs = await this.ci.listRuns(condition.provider, condition.repository, condition.headSha, condition.workflow, true);
         const seen = new Set(condition.observedRunIds);
         const attempts = new Map(condition.observedRunAttempts?.map(run => [run.id, run.attempt]));
         // 旧记录只有 ID：首轮为这些 ID 补齐当前 attempt，不重放历史失败。
@@ -1272,7 +1147,7 @@ class AutomationScheduler {
    * 按已固定的准入派发一条自动化任务。重投先查接受事实，命中只补同一映射，不再读 HEAD/材料、不重拼 prompt；
    * 派发报错时以执行账本是否已接受为准。结算交给调用方：accepted 记接受，conflict 记准入冲突（afterDispatch 区分派发前后），failed 记派发失败。
    */
-  private async dispatchAdmitted(request: TaskRequestV1, taskId: string, binding: TaskBinding, settle: {
+  async dispatchAdmitted(request: TaskRequestV1, taskId: string, binding: TaskBinding, settle: {
     accepted: (taskId: string) => Promise<unknown>;
     conflict: (error: string, afterDispatch: boolean) => Promise<unknown>;
     failed: (error: unknown) => Promise<unknown>;
@@ -1554,232 +1429,6 @@ class AutomationScheduler {
     return await this.store.replace(scheduleKey(stored.value.id), stored.raw, disabled);
   }
 
-  private async claimAndPollCi(stored: { raw: string; value: CiSubscription }) {
-    const now = this.clock();
-    const base = migrateCi(stored.value);
-    if (new Date(base.expiresAt) <= now) {
-      const expired = ciSubscriptionV2Schema.parse({ ...base, revision: base.revision + 1, schemaVersion: 2, status: 'expired', nextPollAt: undefined, updatedAt: iso(now) });
-      await this.store.replace(ciKey(base.id), stored.raw, expired);
-      return;
-    }
-    if (base.leaseExpiresAt && new Date(base.leaseExpiresAt) > now) return;
-    const claimed = await this.claimCiLease(stored.raw, base, now);
-    if (!claimed) return;
-    await this.pollCi(claimed);
-  }
-
-  /** 以 CAS 领取 CI 订阅租约；被他人改过返回 undefined。 */
-  private async claimCiLease(raw: string, base: CiSubscriptionV2, now: Date) {
-    const claimed = ciSubscriptionV2Schema.parse({ ...base, revision: base.revision + 1, schemaVersion: 2, leaseOwner: this.ownerId, leaseExpiresAt: plus(now, CLAIM_TTL_MS), updatedAt: iso(now) });
-    return await this.store.replace(ciKey(base.id), raw, claimed) ? { raw: JSON.stringify(claimed), value: claimed } : undefined;
-  }
-
-  private async pollCi(stored: { raw: string; value: CiSubscription }) {
-    const current0 = migrateCi(stored.value);
-    const providerId = current0.provider ?? LEGACY_GITHUB_PROVIDER_ID;
-    let runs: CiRun[];
-    try { runs = await this.listRuns(providerId, current0.repository, current0.headSha, current0.workflow); }
-    catch (error) {
-      await this.returnCiToWaiting(stored, errorMessage(error));
-      return;
-    }
-    if (runs.length === 0 || runs.some(run => run.status !== 'completed')) {
-      await this.returnCiToWaiting(stored);
-      return;
-    }
-    const current = await this.store.getRecord(ciKey(current0.id), value => ciSubscriptionSchema.parse(value));
-    if (!current) return;
-    const currentValue = migrateCi(current.value);
-    if (currentValue.status !== 'waiting' || currentValue.leaseOwner !== this.ownerId) return;
-    const session = await this.options.runtime.getSession(currentValue.sessionId);
-    if (!isSessionRunnable(session)) {
-      await this.finishCi(current, 'session_inactive', 'Session is no longer active');
-      return;
-    }
-    let resolved: CiHead;
-    try { resolved = await this.ciHead(session!.cwd, providerId); }
-    catch (error) { await this.finishCi(current, 'stale_head', errorMessage(error)); return; }
-    if (!sameHead(resolved, providerId, currentValue.repository, currentValue.headSha)) {
-      await this.finishCi(current, 'stale_head', 'Session repository or HEAD changed while waiting for CI');
-      return;
-    }
-    try { await this.store.requireAuthorized(currentValue.sessionId, currentValue.actorId); }
-    catch (error) { await this.finishCi(current, 'revoked', errorMessage(error)); return; }
-    // 首次 dispatchPrompt 在收到完成 run 列表后冻结；恢复使用原文本，不再拼接提供方新的返回。
-    const dispatchPrompt = formatCiPrompt(currentValue.prompt, ciProviderLabel(this.providers, providerId), currentValue.repository.slug, currentValue.headSha, runs);
-    const dispatching = ciSubscriptionV2Schema.parse({
-      ...currentValue,
-      schemaVersion: 2,
-      revision: currentValue.revision + 1,
-      status: 'dispatching',
-      completedRunIds: runs.map(run => run.id),
-      dispatchPrompt,
-      nextPollAt: undefined,
-      updatedAt: iso(this.clock())
-    });
-    if (!await this.store.replace(ciKey(currentValue.id), current.raw, dispatching)) return;
-    await this.dispatchCi({ raw: JSON.stringify(dispatching), value: dispatching }, session!);
-  }
-
-  private async recoverDispatchingCi(stored: { raw: string; value: CiSubscription }) {
-    const claimed0 = migrateCi(stored.value);
-    if (!claimed0.dispatchPrompt) {
-      await this.finishCi(stored, 'error', 'Persisted CI continuation prompt is missing');
-      return;
-    }
-    const now = this.clock();
-    const expired = new Date(claimed0.expiresAt) <= now;
-
-    // 统一来源恢复前序：先读原 admission/明确 taskId，在任何新 HEAD/材料/当前默认配置前核实际接受事实。
-    if (claimed0.admission) {
-      const accepted = this.store.execution.getAcceptedTask(claimed0.admission.taskId);
-      if (accepted) {
-        // 恢复命中已接受事实：完整接受 request 必须与冻结 admission 相等，否则持久 blocked，不借 ID 补映射。
-        if (accepted.request && claimed0.admission.request && canonicalExecutionJson(accepted.request) !== canonicalExecutionJson(claimed0.admission.request)) {
-          await this.finishCi(stored, 'blocked', 'The accepted task request conflicts with the frozen CI admission');
-          return;
-        }
-        // TTL 只拒绝尚未获得提交授权的工作；已开始的任务即使 accepted 回写丢失也要收尾投递。
-        if (expired && !claimed0.taskStartedAt) { await this.finishCi(stored, 'expired', 'CI continuation expired before execution'); return; }
-        await this.store.ensureTaskBinding(claimed0.admission.taskId, {
-          schemaVersion: 2,
-          kind: 'ci',
-          sessionId: claimed0.sessionId,
-          subscriptionId: claimed0.id,
-          taskId: claimed0.admission.taskId,
-          taskIdVersion: claimed0.admission.taskIdVersion,
-          generation: CI_BINDING_GENERATION
-        });
-        await this.markCiAccepted(claimed0.id, claimed0.admission.taskId);
-        return;
-      }
-    }
-
-    const claimed = await this.claimCiLease(stored.raw, claimed0, now);
-    if (!claimed) return;
-    const session = await this.options.runtime.getSession(claimed.value.sessionId);
-    if (!isSessionRunnable(session)) { await this.finishCi(claimed, 'session_inactive', 'Session is no longer active'); return; }
-    try {
-      await this.store.requireAuthorized(claimed.value.sessionId, claimed.value.actorId);
-    } catch (error) {
-      await this.finishCi(claimed, 'revoked', errorMessage(error));
-      return;
-    }
-    await this.dispatchCi(claimed, session!);
-  }
-
-  private async dispatchCi(dispatching: { value: CiSubscriptionV2; raw: string }, session: Session) {
-    let record = dispatching.value;
-    const prompt = record.dispatchPrompt;
-    if (!prompt) throw new RuntimeError('SESSION_AUTOMATION_CI_PROMPT_MISSING', 'Persisted CI continuation prompt is missing', 500);
-    const actor = record.actor ?? resolveAutomationActor(session, record.actorId);
-    if (!actor) { await this.finishCi({ raw: dispatching.raw, value: record }, 'error', 'CI actor domain cannot be verified'); return; }
-
-    let request: TaskRequestV1;
-    let taskId: string;
-    let taskIdVersion: 'v1' | 'legacy' = 'v1';
-
-    if (record.admission) {
-      // 原样使用已冻结的 request，绝不用新默认值覆盖！
-      request = record.admission.request ?? this.buildRequest(session, 'automation', ciRequestKey(record.id), prompt, actor);
-      taskId = record.admission.taskId;
-      taskIdVersion = record.admission.taskIdVersion;
-    } else {
-      const candidateRequest = this.buildRequest(session, 'automation', ciRequestKey(record.id), prompt, actor);
-      let existingAccepted;
-      try {
-        existingAccepted = this.store.execution.lookupAccepted(candidateRequest);
-      } catch (err) {
-        await this.finishCi({ raw: dispatching.raw, value: record }, 'blocked', errorMessage(err));
-        return;
-      }
-      const frozen = freezeAdmission('automation', record.sessionId, candidateRequest, existingAccepted, actor);
-      ({ request } = frozen);
-      ({ taskId, taskIdVersion } = frozen.admission);
-      const withAdmission = ciSubscriptionV2Schema.parse({
-        ...record,
-        schemaVersion: 2,
-        revision: record.revision + 1,
-        ...frozen.fields,
-        updatedAt: iso(this.clock())
-      });
-      if (!await this.store.replace(ciKey(record.id), dispatching.raw, withAdmission)) return;
-      record = withAdmission;
-    }
-
-    const stored: { raw: string; value: CiSubscriptionV2 } = { raw: JSON.stringify(record), value: record };
-    const subscriptionId = record.id;
-    await this.dispatchAdmitted(request, taskId, {
-      schemaVersion: 2,
-      kind: 'ci',
-      sessionId: record.sessionId,
-      subscriptionId,
-      taskId,
-      taskIdVersion,
-      generation: CI_BINDING_GENERATION
-    }, {
-      accepted: id => this.markCiAccepted(subscriptionId, id),
-      conflict: (error, afterDispatch) => afterDispatch
-        ? this.finishCi(stored, { status: 'blocked', blockReason: 'admission_conflict', error })
-        : this.finishCi(stored, 'blocked', error),
-      failed: async error => {
-        const latest = await this.store.getRecord(ciKey(subscriptionId), value => ciSubscriptionSchema.parse(value));
-        if (latest) await this.finishCi(latest, { status: 'error', error: errorMessage(error) });
-      }
-    });
-  }
-
-  private async returnCiToWaiting(stored: { raw: string; value: CiSubscription }, error?: string) {
-    const now = this.clock();
-    const base = migrateCi(stored.value);
-    const waiting = ciSubscriptionV2Schema.parse({
-      ...base,
-      schemaVersion: 2,
-      revision: base.revision + 1,
-      status: 'waiting',
-      nextPollAt: plus(now, this.pollIntervalMs),
-      ...(error ? { error } : { error: undefined }),
-      leaseOwner: undefined,
-      leaseExpiresAt: undefined,
-      updatedAt: iso(now)
-    });
-    await this.store.replace(ciKey(base.id), stored.raw, waiting);
-  }
-
-  private async finishCi(stored: { raw: string; value: CiSubscription }, patchOrStatus: CiSubscriptionV2['status'] | Partial<CiSubscriptionV2>, error?: string) {
-    const patch: Partial<CiSubscriptionV2> = typeof patchOrStatus === 'string'
-      ? { status: patchOrStatus, ...(error ? { error } : {}) }
-      : { ...patchOrStatus, ...(error ? { error } : {}) };
-    const base = migrateCi(stored.value);
-    const status = patch.status ?? base.status;
-    const noDelivery = !['waiting', 'dispatching', 'accepted', 'completed'].includes(status);
-    const shouldResetDelivery = noDelivery && base.delivery.status !== 'delivered';
-    const updated = ciSubscriptionV2Schema.parse({
-      ...base,
-      ...patch,
-      schemaVersion: 2,
-      revision: base.revision + 1,
-      status,
-      nextPollAt: undefined,
-      ...(shouldResetDelivery ? { delivery: this.delivery.undelivered(base.delivery) } : {}),
-      leaseOwner: undefined,
-      leaseExpiresAt: undefined,
-      updatedAt: iso(this.clock())
-    });
-    await this.store.replace(ciKey(base.id), stored.raw, updated);
-  }
-
-  private async markCiAccepted(id: string, taskId: string) {
-    const current = await this.store.getRecord(ciKey(id), value => ciSubscriptionSchema.parse(value));
-    if (!current) return;
-    const currentValue = migrateCi(current.value);
-    if (currentValue.status !== 'dispatching') return;
-    // CAS 核原来源身份：冻结 admission 的 taskId 必须与实际接受 Task 一致，不借最新 dispatching 记录绑定不同请求。
-    if (currentValue.admission && currentValue.admission.taskId !== taskId) return;
-    const accepted = ciSubscriptionV2Schema.parse({ ...currentValue, schemaVersion: 2, revision: currentValue.revision + 1, status: 'accepted', taskId, leaseOwner: undefined, leaseExpiresAt: undefined, updatedAt: iso(this.clock()) });
-    await this.store.replace(ciKey(id), current.raw, accepted);
-  }
-
   private async refreshAcceptedWork(parsed: TickParseCache) {
     // 已结算的历史不再变化（结果投递另按投递状态扫描）：每个 tick 只读还可能推进的记录，开销不随历史增长。
     const [occurrences, subscriptions, records] = await Promise.all([
@@ -2027,7 +1676,7 @@ class AutomationScheduler {
           taskId: value.admission!.taskId, taskIdVersion: value.admission!.taskIdVersion, generation: CI_BINDING_GENERATION
         });
       } catch (err) {
-        await this.finishCi(working, { status: 'blocked', blockReason: 'admission_conflict', error: errorMessage(err) });
+        await this.ci.finishCi(working, { status: 'blocked', blockReason: 'admission_conflict', error: errorMessage(err) });
         return;
       }
     }
@@ -2052,7 +1701,7 @@ class AutomationScheduler {
     if (outcome.status === 'pending') return;
     if (outcome.status === 'blocked') {
       if (working.value.status !== 'blocked') {
-        await this.finishCi(working, {
+        await this.ci.finishCi(working, {
           status: 'blocked',
           ...(outcome.reason ? { blockReason: outcome.reason } : {}),
           ...(outcome.reason === 'legacy_output_unresolved' ? { resultBoundary: 'legacy_output_unresolved' } : {}),
@@ -2062,7 +1711,7 @@ class AutomationScheduler {
       return;
     }
     if (outcome.status === 'cancelled') {
-      if (working.value.status === 'accepted' || working.value.status === 'dispatching') await this.finishCi(working, 'cancelled');
+      if (working.value.status === 'accepted' || working.value.status === 'dispatching') await this.ci.finishCi(working, 'cancelled');
       return;
     }
     const result = outcome.result!;
@@ -2089,7 +1738,7 @@ class AutomationScheduler {
       if (!await this.store.replace(ciKey(value.id), working.raw, completed)) return;
     } else if (!working.value.result) {
       if (['waiting', 'dispatching', 'error'].includes(working.value.status)) {
-        await this.finishCi(working, 'blocked', 'Historical terminal CI continuation has no verifiable result');
+        await this.ci.finishCi(working, 'blocked', 'Historical terminal CI continuation has no verifiable result');
       }
       return;
     }
@@ -2105,7 +1754,7 @@ export class SessionAutomationService {
 
   /** 至少装了一个 CI 插件；/ci 据此判断「未安装 CI 插件」。 */
   get ciConfigured() {
-    return this.scheduler.ciConfigured;
+    return this.scheduler.ci.ciConfigured;
   }
 
   get ciWebhook() { return this.options.ciWebhook; }
@@ -2113,7 +1762,7 @@ export class SessionAutomationService {
   get pullRequests() { return this.options.pullRequests; }
 
   listCiProviders(): PublicCiProvider[] {
-    return this.scheduler.listCiProviders();
+    return this.scheduler.ci.listCiProviders();
   }
 
   /** 群委托的确认卡与产出卡按钮处理；群协作集成装配好后挂上，飞书卡片回调经此进入。 */
@@ -2208,11 +1857,11 @@ export class SessionAutomationService {
   }
 
   subscribeCi(sessionId: string, rawInput: SubscribeCiInput, actorId?: string): Promise<PublicCiSubscription> {
-    return this.scheduler.subscribeCi(sessionId, rawInput, actorId);
+    return this.scheduler.ci.subscribeCi(sessionId, rawInput, actorId);
   }
 
   cancelCi(sessionId: string, id: string, rawInput: { expectedRevision: number }, actorId?: string): Promise<PublicCiSubscription> {
-    return this.scheduler.cancelCi(sessionId, id, rawInput, actorId);
+    return this.scheduler.ci.cancelCi(sessionId, id, rawInput, actorId);
   }
 
   /** No schedule ID is accepted: only the current occurrence's durable host binding can request this. */
