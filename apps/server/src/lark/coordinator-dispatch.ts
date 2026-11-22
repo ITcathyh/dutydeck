@@ -4,33 +4,26 @@ import { planTerminalDelivery } from './terminal-plan.js';
 import { toRecord } from './turn-record.js';
 import { readTaskReportSafely } from '@dutydeck/shared';
 import { taskReportCardElements } from './task-report-card.js';
-import { clearPendingPromptUsage, type BotPromptUsage, freezePromptUsage, pendingPromptUsageKey, promptUsageSnapshot, recordPromptUsage } from './prompt-versions.js';
 import { larkAgentUnavailableReason, larkFallbackHasActivity } from './agent-fallback.js';
 import { allowedHighRiskActor } from '../policy/high-risk.js';
 import { recordTaskAuthorization } from '../task-authorization.js';
 import { larkMessageAnchor } from './message-anchor.js';
 import { canonicalExecutionJson, type TaskRequestV1, type PromptPart } from '@dutydeck/shared';
-import { composeLarkDispatchPrompt, memoryUnavailablePrompt } from './prompt-contributors.js';
-import { readGitCodeSignature, readGitStatusLine } from './git-status.js';
-import { larkTurnDiffElement } from './turn-diff.js';
-import { readTurnDiffRecord } from '../turn-diff.js';
+import { composeLarkDispatchPrompt } from './prompt-contributors.js';
 import { redactTraceText } from './secret-redaction.js';
 import { OnlineProcessCard, type CardUpdateOutcome } from './online-process-card.js';
 import { completeExplicitFinal, explicitFinalContext, hasExplicitFinal, withExplicitFinalLock } from './explicit-final.js';
-import { mergeGroupTaskWatermark } from './group-task-context.js';
+import type { TurnVerification } from './turn-contributors/types.js';
+import { createTurnContributors } from './turn-contributors/index.js';
 import { describeLarkTaskRecovery, larkAgentUnavailableText, larkQuietSettledNote, larkStallNote, larkSteeringUnknownNote, notifyLarkTaskRecovery, verifiedLarkRecoveryOutput } from './task-recovery.js';
 import { validateLarkLaunchOptions, type LarkLaunchOptions } from './new-session.js';
-import { collectLarkTaskContext, larkMaterialMessageIds } from './task-context.js';
+import { collectLarkTaskContext } from './task-context.js';
 import type { LarkScenarioRecallLine } from './scenario-recall.js';
-import type { ModelScenarioExecution } from './scenario-model.js';
-import { larkScenarioAdoptionOf } from './scenario-legacy.js';
 import { withLarkContextReadTimeout } from './context-read-timeout.js';
-import { isLarkGroupMemoryPool, larkMemoryScope, type LarkMemoryEntry, type LarkMemoryScope } from './memory.js';
-import { relevantMemoryBudget, renderLarkMemoryInjection, renderMemoryIndex } from './memory-view.js';
 import type { AgentEvent, PolicyAction, Session, TaskRecord, ToolRiskPolicy } from '@dutydeck/shared';
 import { deferredConfirmationId, isBackgroundFollowup, RuntimeError, supportsRemoteApproval } from '@dutydeck/shared';
 import { isBotSenderType } from './card-mentions.js';
-import { defaultHighRiskPattern, defaultLarkIdleCompactHours, defaultLarkTraceLimit, larkMemoryEnabled, larkPermissionMode, readLarkConfigs, type StoredLarkConfig } from './config.js';
+import { defaultHighRiskPattern, defaultLarkIdleCompactHours, defaultLarkTraceLimit, larkPermissionMode, type StoredLarkConfig } from './config.js';
 import { boundLarkCardElements, larkIdentityPermissionHelp, LarkServiceError } from './service.js';
 import {
   loadLarkTaskEvents,
@@ -1003,46 +996,14 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
     }
   }
 
-  /**
-   * 同群其他开了记忆的机器人在本群记下的约定，按内容去重（本机器人已有的 own 也算在内）；没有时返回 undefined。
-   * 任何读取失败都只记日志并返回 undefined，不影响本轮注入自己的记忆。
-   */
-  private async peerGroupMemories(appId: string, chatId: string, own: LarkMemoryEntry[]): Promise<Array<{ botName: string; entry: LarkMemoryEntry }> | undefined> {
-    const memoryStore = this.workflowOptions.memory?.store;
-    const configStore = this.workflowOptions.store;
-    if (!memoryStore || !configStore) return undefined;
-    try {
-      const allBots = await withLarkContextReadTimeout(readLarkConfigs(configStore, { readOnly: true }), '机器人配置读取');
-      const peerBots = allBots.filter(b => b.appId !== appId && larkMemoryEnabled(b));
-      if (peerBots.length === 0) return undefined;
-      const peerResults = await withLarkContextReadTimeout(Promise.all(peerBots.map(async peerBot => {
-        try {
-          // 对端的群共享池里也有它在别的群记下的条目，下面只取本群的。只读：不替对端触发旧账本迁移。
-          const peerList = await memoryStore.peek(larkMemoryScope(peerBot.appId, chatId, 'group', peerBot.groupMemoryScope));
-          const botName = peerBot.name?.trim() || peerBot.displayName?.trim() || peerBot.appId;
-          return { botName, peerList };
-        } catch {
-          return undefined;
-        }
-      })), '同群其他机器人记忆读取');
-      const seen = new Set(own.map(e => e.content.trim()));
-      const collected: Array<{ botName: string; entry: LarkMemoryEntry }> = [];
-      for (const res of peerResults) {
-        if (!res) continue;
-        for (const item of res.peerList) {
-          if (item.topic !== 'conventions' || item.chatId !== chatId) continue;
-          const text = item.content.trim();
-          if (seen.has(text)) continue;
-          seen.add(text);
-          collected.push({ botName: res.botName, entry: item });
-        }
-      }
-      return collected.length > 0 ? collected : undefined;
-    } catch (peerError) {
-      this.log.warn({ error: peerError, chatId }, '读取同群其他机器人偏好失败，跳过共享记忆');
-      return undefined;
-    }
-  }
+  private readonly turnVerification: TurnVerification = {
+    fingerprint: (task, session) => this.sharedWorkspaceFingerprint(task, session),
+    plan: (task, before) => this.planAutoVerification(task, before),
+    run: (task, plan) => this.runAutoVerification(task, plan),
+    inFlight: taskId => this.verifyInFlight.has(taskId),
+    settle: (appId, taskId) => this.settlePendingVerification(appId, taskId),
+    view: (task, config, state, changed) => this.verificationView(task, config, state, changed),
+  };
 
   protected async runTurn(task: LarkTask, launcherRecovery = false) {
     if (!await this.confirmationInputAllowed(task.inbox)) return;
@@ -1374,18 +1335,11 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
       : [];
     if (!resumeTask) task.startedAt = Date.now();
     task.interruptRequested = false;
-    // 场景包的关联：这个 Bot 之前在本群别的话题处理过同一件事，上次的结论带给 Agent，过程卡顶部挂一行。读不到只少这一项。
-    task.scenarioRecall = undefined;
-    if (this.workflowOptions.participation) {
-      const cardMappings = this.cardMappings;
-      try {
-        task.scenarioRecall = await this.workflowOptions.participation.scenarioRecall({ appId: config.appId, chatId: event.chatId }, config, { materialPrompt, scopeId: task.scopeId, before: task.startedAt!,
-          mappings: () => cardMappings.list(larkCardChannel(config.appId)), brand: config.brand, webBaseUrl: config.webBaseUrl });
-      } catch (error) {
-        this.log.warn({ error, taskId: task.id }, '查找上一轮关联失败，本轮不带上次结论');
-      }
-      if (task.scenarioRecall) cardContext.scenarioRecall = { packId: task.scenarioRecall.packId, line: task.scenarioRecall.line };
-    }
+    const contributors = createTurnContributors({
+      task, config, event, session, botSender, currentTurn, reattaching: Boolean(previous), materialPrompt, materialParts,
+      verification: this.turnVerification, cardMappings: this.cardMappings, options: this.workflowOptions, log: this.log,
+    });
+    await contributors.beforeCard(cardContext);
     // An accepted task keeps its original card and mapping while reattaching.
     if (await cancelledBeforeCard()) return;
     if (!resumeTask || !task.cardMessageId && !silentProgress) {
@@ -1576,8 +1530,6 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
     };
     let terminalDelivery: Promise<void> | undefined;
     let verifiedOutput: AgentEvent | undefined;
-    /** 本轮开始时工作目录的代码状态签名；结束时再取一次，不同就是这一轮改了这个仓库。重启后接上的任务没有它。 */
-    let codeSignatureBefore: string | undefined;
     // Freeze the process card, then send one immutable result. Neither operation
     // counts as success for the other; reconciliation retries only the missing part.
     const deliverTerminal = (state: 'completed' | 'failed' | 'interrupted' | 'cancelled', completed = false) => {
@@ -1646,25 +1598,18 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
         // 「它说做完了，其实没做完」是这类产品最常见的失望。平台验证是可核对的反证，
         // 但此前只存在于 Web；结果卡上必须把「验证过没有」和 Agent 的自述分开写清楚。
         // 本轮有没有改这个仓库：「使用这个验证命令」按钮和 git 状态行都只在改了的时候才有意义。
-        const changedCode = state === 'completed' && codeSignatureBefore !== undefined
-          && await readGitCodeSignature(session.cwd) !== codeSignatureBefore;
-        const verification = await this.verificationView(task, config, state, changedCode);
+        const cardAdditions = await contributors.inspectResult(state);
         // 计划卡不给续问、定时这些结果操作：它们和批准共用这张卡做下一轮的锚点。
         const resultActions = planTask === undefined ? await this.resultActionCapabilities(task, config, state) : {};
         const continueCause = await this.continueCause(config.appId, task.id, currentTurn, task.scopeId, state, task.events);
-        const gitStatus = changedCode ? await this.readGitStatusLine(state, session.cwd ?? cardContext.workspace) : undefined;
-        // 这一轮的改动摘要与「查看改动」链接：runtime 在结算之前已记下这一轮结束时的快照。
-        const turnDiff = task.sessionId && task.runtimeTaskId
-          ? larkTurnDiffElement(await readTurnDiffRecord(this.workflowOptions.store, task.sessionId, task.runtimeTaskId).catch(() => undefined), config.webBaseUrl) : undefined;
+        const resultElements = await contributors.resultElements(state, cardAdditions, cardContext.workspace);
         const elements = [
           ...reportElements,
           ...plan.fallbackElements,
           ...(continueCause?.settled ? [{ tag: 'markdown', element_id: 'recovery_note', content: larkQuietSettledNote(continueCause) }] : []),
           ...(explicit ? [] : task.steered ? [{ tag: 'markdown', element_id: 'steer_note', content: task.steerNote ?? steeringOutcomeText(task.steered) }] : renderLarkResultElements(verifiedOutput ? [verifiedOutput] : task.events, plan.resultOptions)),
           ...(context ? await this.workflows.result(context, '') : []),
-          ...(verification.element ? [verification.element] : []),
-          ...(turnDiff ? [turnDiff] : []),
-          ...(gitStatus ? [{ tag: 'markdown', element_id: 'git_status', content: gitStatus }] : []),
+          ...resultElements,
           ...plan.mentionElements];
         // The task ledger remains raw. Only replace the final prose element,
         // before the first provider attempt, and freeze it under its delivery key.
@@ -1689,7 +1634,7 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
           // 只有完成的结果卡是只读收据；失败、中断、取消时过程卡已收成一行，「重试」只能放在这张卡上。
           sessionId: task.sessionId, turn: currentTurn, readOnly: state === 'completed',
           elapsedSeconds: (Date.now() - task.startedAt!) / 1_000,
-          capabilities: { ...this.capabilitiesForTask(task), ...verification.capabilities, ...resultActions, ...(continueCause ? { canContinueInPlace: true } : {}) },
+          capabilities: { ...this.capabilitiesForTask(task), ...cardAdditions.capabilities, ...resultActions, ...(continueCause ? { canContinueInPlace: true } : {}) },
           ...(config.webBaseUrl ? { webBaseUrl: config.webBaseUrl } : {})
         };
         const beforeSend = async () => {
@@ -1791,107 +1736,26 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
       if (state === 'completed' || state === 'failed' || state === 'interrupted' || state === 'cancelled') return deliverTerminal(state, completed);
       await update(state);
     };
-    let groupContext: { text: string; promptParts?: PromptPart[] } | undefined;
-    let memoryBlock: string | undefined;
-    let scenarioExecution: ModelScenarioExecution | undefined;
-    let groupInstructions = '';
-    let groupInstructionsRevision: number | undefined;
-    // 群上下文按运行时会话增量注入，水位只在确认 prompt 已提交给 Agent 后推进。运行时对外只暴露任务状态：
-    // running 在领取时就发，此时可能还在准备、尚未提交；completed / interrupted 只能来自已提交轮次的驱动结果
-    // 或人工确认，failed 分不清是否提交过。所以只认这两种终态；其余终态、准备失败或重放旧任务都保留旧水位，
-    // 下一轮按旧水位重读，内容只会更多不会漏。
-    let groupContextCommit: (() => Promise<unknown>) | undefined;
-    const commitGroupContext = async (status: unknown) => {
-      const commit = groupContextCommit;
-      groupContextCommit = undefined;
-      if (status !== 'completed' && status !== 'interrupted') return;
-      await commit?.().catch(error => this.log.warn({ error, taskId: task.id, sessionId: session.id }, '群上下文水位推进失败，下一轮按旧水位注入'));
-    };
-    if (event.chatType === 'group' && this.workflowOptions.participation) {
-      try {
-        const store = this.workflowOptions.store;
-        const watermarkKey = `lark.group-context.${config.appId}.${session.id}`;
-        const watermark = await store.get(watermarkKey);
-        const materialMessageIds = larkMaterialMessageIds(materialParts, event.chatId);
-        const observedContext = await withLarkContextReadTimeout(this.workflowOptions.participation.taskContext({ appId: config.appId, chatId: event.chatId }, { triggerMessageId: larkMessageAnchor(event), watermark, groupTools: config.groupToolsEnabled, materialMessageIds }), '群上下文读取');
-        if (observedContext) {
-          groupContext = observedContext;
-          // 排队的几轮都基于同一个旧水位；后完成的一轮 CAS 失败时读出当前值合并再写，最多 3 次，仍冲突就留日志。
-          if (store.compareAndSet) groupContextCommit = async () => {
-            let expected = watermark;
-            let next = observedContext.watermark;
-            for (let attempt = 0; attempt < 3; attempt++) {
-              if (await store.compareAndSet!(watermarkKey, expected, next)) return;
-              expected = await store.get(watermarkKey);
-              next = mergeGroupTaskWatermark(expected, observedContext.watermark);
-              if (next === expected) return;
-            }
-            throw new Error('群上下文水位写回多次冲突');
-          };
-        }
-        if (this.workflowOptions.participation.instructionsSnapshot) {
-          const snapshot = await withLarkContextReadTimeout(this.workflowOptions.participation.instructionsSnapshot({ appId: config.appId, chatId: event.chatId }), '群长期指令读取');
-          groupInstructions = snapshot.instructions.trim();
-          if (groupInstructions) groupInstructionsRevision = snapshot.revision;
-        } else groupInstructions = (await withLarkContextReadTimeout(this.workflowOptions.participation.instructions({ appId: config.appId, chatId: event.chatId }), '群长期指令读取')).trim();
-      } catch (error) {
-        if (this.stopped || task.turn !== currentTurn || await closePreparedTurn()) return;
-        this.log.warn({ error, chatId: event.chatId, messageId: event.messageId }, '执行前读取群上下文失败');
-        if (!previous) {
-          this.pushTaskError(task, '上下文读取超时或失败，Agent 尚未执行。请稍后重新发送请求。');
-          task.state = 'failed'; task.retryable = false;
-          await this.failPendingInbox(task, '上下文读取超时或失败');
-          await deliverTerminal('failed', false);
-          await clearAcknowledgement();
-          return;
-        }
+    try {
+      await contributors.readContext();
+    } catch (error) {
+      if (this.stopped || task.turn !== currentTurn || await closePreparedTurn()) return;
+      this.log.warn({ error, chatId: event.chatId, messageId: event.messageId }, '执行前读取群上下文失败');
+      if (!previous) {
+        this.pushTaskError(task, '上下文读取超时或失败，Agent 尚未执行。请稍后重新发送请求。');
+        task.state = 'failed'; task.retryable = false;
+        await this.failPendingInbox(task, '上下文读取超时或失败');
+        await deliverTerminal('failed', false);
+        await clearAcknowledgement();
+        return;
       }
     }
     if (this.stopped || task.turn !== currentTurn || await closePreparedTurn()) return;
-    // 会话记忆随 agentPrompt 一起冻结进任务账本：事后能核对这一轮 Agent 看到的是哪几条记忆。
-    // 读取失败只丢本轮注入并留日志，不阻断任务。注入了哪几条另记一份，供 Web 任务详情查看。
-    let memoryTurn: { scope: LarkMemoryScope; ids: string[] } | undefined;
-    if (larkMemoryEnabled(config) && this.workflowOptions.memory) {
-      try {
-        const { store } = this.workflowOptions.memory;
-        const scope = larkMemoryScope(config.appId, event.chatId, event.chatType, config.groupMemoryScope);
-        const shared = isLarkGroupMemoryPool(scope);
-        // 没有注入任何条目也要记：本轮 Agent 保存的、后台从本轮提取的记忆都按这份记录找到记忆池。
-        memoryTurn = { scope, ids: [] };
-        const [entries, state] = await withLarkContextReadTimeout(Promise.all([
-          store.list(scope),
-          store.getState(scope)
-        ]), '会话记忆读取');
-
-        const sharedEntries = event.chatType === 'group' ? await this.peerGroupMemories(config.appId, event.chatId, entries) : undefined;
-
-        const index = renderMemoryIndex(entries, state, { ...(shared ? { currentChatId: event.chatId } : {}), sharedEntries, query: materialPrompt.slice(0, 2_000), budget: relevantMemoryBudget });
-        memoryBlock = renderLarkMemoryInjection(index.text, { shared });
-        if (memoryBlock) memoryTurn.ids = index.ids;
-      } catch (error) {
-        this.log.warn({ error, appId: config.appId, chatId: event.chatId, taskId: task.id }, '读取飞书会话记忆失败，本轮不注入记忆');
-        memoryBlock = memoryUnavailablePrompt;
-      }
-    }
-    // model 场景包判为 act 的消息：判定时冻结的执行指令和材料，用户请求仍是原文。读不到或对不上时这一轮不带。
-    const scenarioAdoption = larkScenarioAdoptionOf(event);
-    if (scenarioAdoption?.mode === 'model' && this.workflowOptions.participation) {
-      scenarioExecution = await this.workflowOptions.participation.scenarioExecution({ appId: config.appId, chatId: event.chatId }, scenarioAdoption, larkMessageAnchor(event))
-        .catch(error => { this.log.warn({ error, taskId: task.id }, '读取场景执行内容失败，本轮不带场景指令'); return undefined; });
-    }
-    let promptUsage: BotPromptUsage | undefined = {
-      schemaVersion: 1, taskId: task.id, appId: config.appId, groupInstructionsRevision
-    };
-    try {
-      promptUsage = await promptUsageSnapshot(this.workflowOptions.store, {
-        taskId: task.id, appId: config.appId, configRevision: config.revision, text: config.preInjectPrompt?.trim() ?? '', groupInstructionsRevision
-      });
-    } catch (error) { this.log.warn({ error, taskId: task.id }, '读取提示词历史失败，继续派发'); }
-    if (promptUsage?.botPromptVersion === undefined) this.log.warn({ taskId: task.id }, '本轮未记录版本，继续派发');
+    await contributors.preparePrompt();
     const { agentPrompt, promptParts } = await composeLarkDispatchPrompt({
-      session, config, event, groupContext, memoryBlock, groupInstructions, scenarioRecall: task.scenarioRecall, scenarioExecution,
+      session, config, event, ...contributors.prompt,
       silentProgress, highRiskPattern: riskControlEnabled && !highRiskAuthorized ? highRiskPattern : undefined,
-      redispatch: task.redispatch, plan: planTask !== undefined, materialPrompt, materialParts, scenarioAdoption
+      redispatch: task.redispatch, plan: planTask !== undefined, materialPrompt, materialParts
     });
 
     if (this.stopped || task.turn !== currentTurn || await closePreparedTurn()) return;
@@ -1915,8 +1779,6 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
 
     task.state = 'queued';
     let runtimeTaskId: string | undefined;
-    /** 共享目录在本轮派发前的代码指纹；本轮结束时与当前指纹比较，判断这一轮有没有改代码。 */
-    let codeBefore: string | undefined;
     let active = false;
     let settling = false;
     let settled = false;
@@ -1937,7 +1799,7 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
       if (settling || settled) return;
       settling = true;
       active = false;
-      void commitGroupContext(state);
+      void contributors.settling(state);
       heartbeatActive = false;
       void (async () => {
         if (runtimeTaskId) {
@@ -1964,21 +1826,9 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
         active = false;
         task.state = resolvedState;
         if (runtimeTaskId) await this.workflows.expireTask(config.appId, runtimeTaskId);
-        // 本轮改了代码就自动验证：结果卡按「验证执行中」交付，交付之后在后台真实执行验证命令。
-        // 插话送达的这一条没有自己的一轮，代码是正在执行的那一轮改的，验证留给那一轮的结果卡。
-        const autoVerification = resolvedState === 'completed' && !task.steered ? await this.planAutoVerification(task, codeBefore) : undefined;
+        await contributors.planDelivery(resolvedState);
         await deliverTerminal(resolvedState, resolvedState === 'completed').finally(cleanup);
-        if (autoVerification) void this.runAutoVerification(task, autoVerification);
-        // 本轮不自动验证：这个任务若是返修轮次，返修到此为止，登记的轮次移出待收尾。
-        else if (config.verificationCommand?.trim() && !this.verifyInFlight.has(task.id)) {
-          void this.settlePendingVerification(config.appId, task.id).catch(error => this.log.warn({ error, taskId: task.id }, '移出待收尾的自动验证失败'));
-        }
-        // 记忆提取排在终态交付之后，且只记真实 dispatch 过的完成轮次；失败只留日志。
-        const memoryPipeline = this.workflowOptions.memory?.pipeline;
-        if (memoryPipeline && resolvedState === 'completed' && runtimeTaskId) {
-          void memoryPipeline.onTurnCompleted(larkMemoryScope(config.appId, event.chatId, event.chatType, config.groupMemoryScope), { sessionId: session.id, taskId: runtimeTaskId, senderId: event.senderOpenId, senderKind: botSender ? 'bot' : 'human', sourceMessageId: larkMessageAnchor(event) })
-            .catch(error => this.log.warn({ error, appId: config.appId, chatId: event.chatId, taskId: runtimeTaskId }, '飞书会话记忆后台提取触发失败'));
-        }
+        contributors.afterDelivery(resolvedState, runtimeTaskId);
       })().catch(error => this.log.error({ error, taskId: task.id, runtimeTaskId }, '生成飞书任务终态失败'));
     };
     const receive = (agentEvent: AgentEvent) => {
@@ -2028,20 +1878,11 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
     try {
       // 重启后接上的任务没有开始时的指纹，共享目录里就不自动验证。
       if (!previous) {
-        codeBefore = await this.sharedWorkspaceFingerprint(task, session);
-        codeSignatureBefore = await readGitCodeSignature(session.cwd);
+        await contributors.captureWorkspace();
       }
       if (this.stopped || task.turn !== currentTurn) { cleanup(); return; }
       if (task.epoch !== (group.epoch ?? 0) || task.cancelRequested) { await closePreparedTurn(); cleanup(); return; }
-      const pendingUsageKey = pendingPromptUsageKey(config.appId, event.messageId, currentTurn);
-      let frozenUsage: Awaited<ReturnType<typeof freezePromptUsage>> = undefined;
-      try {
-        frozenUsage = await freezePromptUsage(this.workflowOptions.store,
-          pendingUsageKey, previous ? undefined : promptUsage);
-      } catch (error) {
-        if (error instanceof LarkServiceError && error.code === 'PROMPT_USAGE_CONFLICT') throw error;
-        this.log.warn({ error, taskId: task.id }, '冻结提示词版本失败，继续派发');
-      }
+      await contributors.freezeRequest();
       if (this.stopped || task.turn !== currentTurn) { cleanup(); return; }
       if (task.epoch !== (group.epoch ?? 0) || task.cancelRequested) { await closePreparedTurn(); cleanup(); return; }
       task.submissionStarted = true;
@@ -2055,22 +1896,7 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
           config.managedGroup ? event.senderOpenId : undefined, undefined, undefined, undefined, idleCompactHours, promptParts,
           planTask !== undefined ? 'deny-all' : undefined);
       runtimeTaskId = runtimeTask.id;
-      // 重放只能补原准备快照；pending 已清理时保留已有 usage，不能拿当前配置补旧轮。
-      const usedPromptUsage = runtimeTask.replayed ? (frozenUsage && !frozenUsage.created ? frozenUsage.usage : undefined) : promptUsage;
-      let recorded = false;
-      if (usedPromptUsage) {
-        try {
-          await recordPromptUsage(this.workflowOptions.store, { ...usedPromptUsage, taskId: runtimeTask.id });
-          recorded = true;
-        } catch (error) { this.log.warn({ error, taskId: runtimeTask.id }, '记录本轮提示词版本失败'); }
-      }
-      // 重放时新建的快照不属于原任务，无论旧 usage 是否存在都不能用于补记。
-      if (frozenUsage && (recorded || runtimeTask.replayed && frozenUsage.created)) {
-        await clearPendingPromptUsage(this.workflowOptions.store, pendingUsageKey, frozenUsage.usage)
-          .catch(error => this.log.warn({ error, taskId: runtimeTask.id }, '清理提示词准备快照失败'));
-      }
-      // 重连或按幂等键重放的是早先派发的那条 prompt，本轮新读的群上下文没有交给 Agent。
-      if (runtimeTask.replayed) groupContextCommit = undefined;
+      await contributors.accepted(runtimeTask);
       // S8：恢复接上的任务只置位一次；之后排队 PATCH 与每一帧非终态心跳都带重启注记。
       if (runtimeTask.replayed) task.replayedNote = true;
       // Evidence belongs to this accepted runtime task even if the visible turn has changed.
@@ -2086,11 +1912,7 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
       if (task.turn !== currentTurn) return;
       task.runtimeTaskId = runtimeTask.id;
       task.launcherRecoveryPending = false;
-      // 重放的是早先那次派发，本轮新读的记忆没有交给 Agent，记录以那一次为准。
-      if (memoryTurn && !runtimeTask.replayed) {
-        await this.workflowOptions.memory!.store.recordTurn(memoryTurn.scope, { taskId: runtimeTask.id, sessionId: session.id, injected: memoryTurn.ids })
-          .catch(error => this.log.warn({ error, runtimeTaskId }, '记录本轮注入的会话记忆失败，结果卡不列本轮记忆'));
-      }
+      await contributors.attached(runtimeTask);
       // /steer：先尝试插话；明确未投递才可降级为提到队首，结果未知时等待核对。
       // 注记按真实结果写：插话送达、提升成功、提升失败、或本来就没有排队都各说各的，不预告成功。
       if (task.steer || task.busySupplement && (await this.runtime.getTasks?.(session.id))?.some(item => item.id === task.busySupplement?.taskId && item.status === 'running')) {
@@ -2155,11 +1977,6 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
       await deliverTerminal('failed', false);
       cleanup();
     }
-  }
-
-  private async readGitStatusLine(state: string, cwd?: string): Promise<string | undefined> {
-    if (state !== 'completed' || !cwd) return undefined;
-    return readGitStatusLine(cwd);
   }
 
   protected abstract cancelUndeliveredRetries(group: LarkGroup): void;
