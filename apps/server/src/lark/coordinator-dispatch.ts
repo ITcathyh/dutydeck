@@ -4,7 +4,6 @@ import { planTerminalDelivery } from './terminal-plan.js';
 import { toRecord } from './turn-record.js';
 import { readTaskReportSafely } from '@dutydeck/shared';
 import { taskReportCardElements } from './task-report-card.js';
-import { clearPendingPromptUsage, type BotPromptUsage, freezePromptUsage, pendingPromptUsageKey, promptUsageSnapshot, recordPromptUsage } from './prompt-versions.js';
 import { larkAgentUnavailableReason, larkFallbackHasActivity } from './agent-fallback.js';
 import { allowedHighRiskActor } from '../policy/high-risk.js';
 import { recordTaskAuthorization } from '../task-authorization.js';
@@ -1329,7 +1328,7 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
       : [];
     if (!resumeTask) task.startedAt = Date.now();
     task.interruptRequested = false;
-    const contributors = createTurnContributors({ task, config, event, session, botSender, materialPrompt, materialParts, cardMappings: this.cardMappings, options: this.workflowOptions, log: this.log });
+    const contributors = createTurnContributors({ task, config, event, session, botSender, currentTurn, reattaching: Boolean(previous), materialPrompt, materialParts, cardMappings: this.cardMappings, options: this.workflowOptions, log: this.log });
     await contributors.beforeCard(cardContext);
     // An accepted task keeps its original card and mapping while reattaching.
     if (await cancelledBeforeCard()) return;
@@ -1752,16 +1751,6 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
     }
     if (this.stopped || task.turn !== currentTurn || await closePreparedTurn()) return;
     await contributors.preparePrompt();
-    const { groupInstructionsRevision } = contributors.prompt;
-    let promptUsage: BotPromptUsage | undefined = {
-      schemaVersion: 1, taskId: task.id, appId: config.appId, groupInstructionsRevision
-    };
-    try {
-      promptUsage = await promptUsageSnapshot(this.workflowOptions.store, {
-        taskId: task.id, appId: config.appId, configRevision: config.revision, text: config.preInjectPrompt?.trim() ?? '', groupInstructionsRevision
-      });
-    } catch (error) { this.log.warn({ error, taskId: task.id }, '读取提示词历史失败，继续派发'); }
-    if (promptUsage?.botPromptVersion === undefined) this.log.warn({ taskId: task.id }, '本轮未记录版本，继续派发');
     const { agentPrompt, promptParts } = await composeLarkDispatchPrompt({
       session, config, event, ...contributors.prompt,
       silentProgress, highRiskPattern: riskControlEnabled && !highRiskAuthorized ? highRiskPattern : undefined,
@@ -1902,15 +1891,7 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
       }
       if (this.stopped || task.turn !== currentTurn) { cleanup(); return; }
       if (task.epoch !== (group.epoch ?? 0) || task.cancelRequested) { await closePreparedTurn(); cleanup(); return; }
-      const pendingUsageKey = pendingPromptUsageKey(config.appId, event.messageId, currentTurn);
-      let frozenUsage: Awaited<ReturnType<typeof freezePromptUsage>> = undefined;
-      try {
-        frozenUsage = await freezePromptUsage(this.workflowOptions.store,
-          pendingUsageKey, previous ? undefined : promptUsage);
-      } catch (error) {
-        if (error instanceof LarkServiceError && error.code === 'PROMPT_USAGE_CONFLICT') throw error;
-        this.log.warn({ error, taskId: task.id }, '冻结提示词版本失败，继续派发');
-      }
+      await contributors.freezeRequest();
       if (this.stopped || task.turn !== currentTurn) { cleanup(); return; }
       if (task.epoch !== (group.epoch ?? 0) || task.cancelRequested) { await closePreparedTurn(); cleanup(); return; }
       task.submissionStarted = true;
@@ -1924,22 +1905,7 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
           config.managedGroup ? event.senderOpenId : undefined, undefined, undefined, undefined, idleCompactHours, promptParts,
           planTask !== undefined ? 'deny-all' : undefined);
       runtimeTaskId = runtimeTask.id;
-      // 重放只能补原准备快照；pending 已清理时保留已有 usage，不能拿当前配置补旧轮。
-      const usedPromptUsage = runtimeTask.replayed ? (frozenUsage && !frozenUsage.created ? frozenUsage.usage : undefined) : promptUsage;
-      let recorded = false;
-      if (usedPromptUsage) {
-        try {
-          await recordPromptUsage(this.workflowOptions.store, { ...usedPromptUsage, taskId: runtimeTask.id });
-          recorded = true;
-        } catch (error) { this.log.warn({ error, taskId: runtimeTask.id }, '记录本轮提示词版本失败'); }
-      }
-      // 重放时新建的快照不属于原任务，无论旧 usage 是否存在都不能用于补记。
-      if (frozenUsage && (recorded || runtimeTask.replayed && frozenUsage.created)) {
-        await clearPendingPromptUsage(this.workflowOptions.store, pendingUsageKey, frozenUsage.usage)
-          .catch(error => this.log.warn({ error, taskId: runtimeTask.id }, '清理提示词准备快照失败'));
-      }
-      // 重连或按幂等键重放的是早先派发的那条 prompt，本轮新读的群上下文没有交给 Agent。
-      if (runtimeTask.replayed) contributors.onReplay();
+      await contributors.accepted(runtimeTask);
       // S8：恢复接上的任务只置位一次；之后排队 PATCH 与每一帧非终态心跳都带重启注记。
       if (runtimeTask.replayed) task.replayedNote = true;
       // Evidence belongs to this accepted runtime task even if the visible turn has changed.

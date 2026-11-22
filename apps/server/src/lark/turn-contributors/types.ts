@@ -12,6 +12,8 @@ export interface TurnContext {
   event: LarkTask['event'];
   session: Session;
   botSender: boolean;
+  currentTurn: number;
+  reattaching: boolean;
   materialPrompt: string;
   materialParts?: PromptPart[];
   options: Pick<CoordinatorOptions, 'store' | 'participation' | 'memory'>;
@@ -24,6 +26,8 @@ export type TurnPrompt = Pick<Parameters<typeof composeLarkDispatchPrompt>[0], '
 };
 
 export interface TurnContributor {
+  freezeRequest?(): Promise<void>;
+  accepted?(receipt: { id: string; replayed?: boolean }): Promise<void>;
   beforeCard?(card: Pick<import('../service.js').LarkCardInput, 'scenarioRecall'>): Promise<void>;
   preparePrompt?(): Promise<void>;
   attached?(receipt: { id: string; replayed?: boolean }): Promise<void>;
