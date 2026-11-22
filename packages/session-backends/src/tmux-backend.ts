@@ -1,5 +1,7 @@
+import { captureOwnedTmuxIdentity, captureOwnedTmuxAbsence, stopOwnedTmux, verifyOwnedTmuxAbsence, verifyOwnedTmuxExit, type OwnedTmuxIdentity, type OwnedTmuxExitProof, type OwnedTmuxAbsence, type ProcessProbe } from './owned-tmux.js';
+import { isDeepStrictEqual } from 'node:util';
 import { programStatusCommand } from './program-status-launch.js';
-import { warnCaught, type DiagnosticLog } from '@dutydeck/shared';
+import { RuntimeError, warnCaught, type DiagnosticLog } from '@dutydeck/shared';
 /**
  * TmuxBackend — session backend backed by a detached tmux session.
  *
@@ -36,9 +38,9 @@ import { stripVTControlCharacters } from 'node:util';
 import { chmod, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { existsSync, readFileSync, statSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
-import { tmpdir } from 'node:os';
+import { hostname, tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { SessionBackend, SessionProbe, SpawnOptions } from './types.js';
+import type { PersistentSessionBackend, TerminalMetadataKey, SessionProbe, SpawnOptions } from './types.js';
 
 // ─── Typed errors ──────────────────────────────────────────────────────────
 
@@ -383,6 +385,8 @@ export interface TmuxBackendOptions {
    */
   ownerId?: string;
   log?: DiagnosticLog;
+  /** Trusted server socket for retirement after a daemon restart. */
+  retirementSocketPath?: string;
 }
 
 function dutydeckSessionId(ownerId: string | undefined, sessionName: string): string {
@@ -415,7 +419,40 @@ export function cleanTmuxSubmissionCapture(partialAnsi: string, fullCapture: str
   return fullRows.join('\n') + (fullCapture.endsWith('\n') ? '\n' : '');
 }
 
-export class TmuxBackend implements SessionBackend {
+export class TmuxBackend implements PersistentSessionBackend {
+  get persistent(): PersistentSessionBackend { return this; }
+  getMetadata(key: TerminalMetadataKey) { return this.getDutydeckMetadata(key); }
+  setMetadata(key: TerminalMetadataKey, value: string) { return this.setDutydeckMetadata(key, value); }
+  reattach(size: { cols: number; rows: number }) { return this.attach(size); }
+  private ownedScope() {
+    const socketPath = this.getSocketPath() ?? this.options.retirementSocketPath;
+    if (!this.ownerId || !socketPath) return undefined;
+    return { socketPath, sessionName: this.sessionName, ownerId: this.ownerId, hostname: hostname(), uid: process.getuid!() };
+  }
+  async captureIdentity(probe?: ProcessProbe) {
+    const scope = this.ownedScope();
+    return scope && probe && captureOwnedTmuxIdentity(scope, probe);
+  }
+  async captureAbsence(probe?: ProcessProbe) {
+    const scope = this.ownedScope();
+    return scope && probe && captureOwnedTmuxAbsence(scope, probe);
+  }
+  private checkedSnapshot(raw: unknown) {
+    const snapshot = raw as OwnedTmuxIdentity | OwnedTmuxAbsence;
+    if (!snapshot?.scope || !isDeepStrictEqual(snapshot.scope, this.ownedScope())) {
+      throw new RuntimeError('PTY_RETIREMENT_SCOPE_CONFLICT', 'Stored snapshot does not match this session on this host', 409);
+    }
+    return snapshot;
+  }
+  async stopOwned(raw: unknown, probe: ProcessProbe, beforeKill?: (snapshot: unknown) => Promise<void>) {
+    if ((raw as OwnedTmuxAbsence)?.absent) throw new RuntimeError('PTY_EXIT_UNVERIFIED', 'An absence proof cannot stop a terminal', 409);
+    return stopOwnedTmux(this.checkedSnapshot(raw) as OwnedTmuxIdentity, probe, beforeKill);
+  }
+  async verifyExit(raw: unknown, probe: ProcessProbe) {
+    const snapshot = this.checkedSnapshot(raw);
+    if ('absent' in snapshot) return verifyOwnedTmuxAbsence(snapshot, probe);
+    return verifyOwnedTmuxExit({ ...snapshot, stoppedAt: (snapshot as OwnedTmuxExitProof).stoppedAt ?? new Date().toISOString() }, probe);
+  }
   readonly kind = 'tmux' as const;
 
   /** SessionBackend contract: the tmux session this backend owns. */

@@ -1,3 +1,5 @@
+import type { ProcessProbe } from './owned-tmux.js';
+
 /**
  * Session backend contract — PTY and terminal multiplexer implementations.
  * Third-party attribution: see THIRD_PARTY_NOTICES.md.
@@ -17,6 +19,7 @@ export interface SpawnOptions {
 }
 
 export interface SessionBackend {
+  readonly persistent?: PersistentSessionBackend;
   readonly kind: 'pty' | 'tmux' | 'herdr';
   /**
    * The multiplexer session this backend is bound to (tmux/Herdr session
@@ -61,3 +64,18 @@ export interface SessionBackend {
 
 /** Tri-state tmux session probe (command failure ≠ session missing). */
 export type SessionProbe = 'exists' | 'missing' | 'unknown';
+
+export type TerminalMetadataKey = 'first_prompt_sent' | 'turn_id';
+export interface PersistentSessionBackend extends SessionBackend {
+  readonly ownerId?: string;
+  readonly initialScreen?: { data: string; cols: number; rows: number };
+  captureIdentity(probe?: ProcessProbe): Promise<unknown>;
+  captureAbsence(probe?: ProcessProbe): Promise<unknown>;
+  stopOwned(snapshot: unknown, probe?: ProcessProbe, beforeKill?: (snapshot: unknown) => Promise<void>): Promise<unknown>;
+  verifyExit(snapshot: unknown, probe?: ProcessProbe): Promise<boolean>;
+  getMetadata(key: TerminalMetadataKey): Promise<string | undefined>;
+  setMetadata(key: TerminalMetadataKey, value: string): Promise<void>;
+  reattach(size: { cols: number; rows: number }): Promise<void>;
+  detach(): Promise<void>;
+  cancelPending(): Promise<void>;
+}
