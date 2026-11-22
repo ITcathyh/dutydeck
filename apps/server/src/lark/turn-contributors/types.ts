@@ -11,17 +11,21 @@ export interface TurnContext {
   config: LarkTask['config'];
   event: LarkTask['event'];
   session: Session;
+  botSender: boolean;
   materialPrompt: string;
   materialParts?: PromptPart[];
-  options: Pick<CoordinatorOptions, 'store' | 'participation'>;
+  options: Pick<CoordinatorOptions, 'store' | 'participation' | 'memory'>;
   log: ListenerLog;
 }
 
-export type TurnPrompt = Pick<Parameters<typeof composeLarkDispatchPrompt>[0], 'groupContext' | 'groupInstructions'> & {
+export type TurnPrompt = Pick<Parameters<typeof composeLarkDispatchPrompt>[0], 'groupContext' | 'groupInstructions' | 'memoryBlock'> & {
   groupInstructionsRevision?: number;
 };
 
 export interface TurnContributor {
+  preparePrompt?(): Promise<void>;
+  attached?(receipt: { id: string; replayed?: boolean }): Promise<void>;
+  afterDelivery?(state: TerminalState, runtimeTaskId?: string): void;
   readContext?(): Promise<void>;
   onReplay?(): void;
   settling?(state: TerminalState): Promise<void>;

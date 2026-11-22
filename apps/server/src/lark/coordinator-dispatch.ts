@@ -10,7 +10,7 @@ import { allowedHighRiskActor } from '../policy/high-risk.js';
 import { recordTaskAuthorization } from '../task-authorization.js';
 import { larkMessageAnchor } from './message-anchor.js';
 import { canonicalExecutionJson, type TaskRequestV1, type PromptPart } from '@dutydeck/shared';
-import { composeLarkDispatchPrompt, memoryUnavailablePrompt } from './prompt-contributors.js';
+import { composeLarkDispatchPrompt } from './prompt-contributors.js';
 import { readGitCodeSignature, readGitStatusLine } from './git-status.js';
 import { larkTurnDiffElement } from './turn-diff.js';
 import { readTurnDiffRecord } from '../turn-diff.js';
@@ -25,12 +25,10 @@ import type { LarkScenarioRecallLine } from './scenario-recall.js';
 import type { ModelScenarioExecution } from './scenario-model.js';
 import { larkScenarioAdoptionOf } from './scenario-legacy.js';
 import { withLarkContextReadTimeout } from './context-read-timeout.js';
-import { isLarkGroupMemoryPool, larkMemoryScope, type LarkMemoryEntry, type LarkMemoryScope } from './memory.js';
-import { relevantMemoryBudget, renderLarkMemoryInjection, renderMemoryIndex } from './memory-view.js';
 import type { AgentEvent, PolicyAction, Session, TaskRecord, ToolRiskPolicy } from '@dutydeck/shared';
 import { deferredConfirmationId, isBackgroundFollowup, RuntimeError, supportsRemoteApproval } from '@dutydeck/shared';
 import { isBotSenderType } from './card-mentions.js';
-import { defaultHighRiskPattern, defaultLarkIdleCompactHours, defaultLarkTraceLimit, larkMemoryEnabled, larkPermissionMode, readLarkConfigs, type StoredLarkConfig } from './config.js';
+import { defaultHighRiskPattern, defaultLarkIdleCompactHours, defaultLarkTraceLimit, larkPermissionMode, type StoredLarkConfig } from './config.js';
 import { boundLarkCardElements, larkIdentityPermissionHelp, LarkServiceError } from './service.js';
 import {
   loadLarkTaskEvents,
@@ -1003,47 +1001,6 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
     }
   }
 
-  /**
-   * 同群其他开了记忆的机器人在本群记下的约定，按内容去重（本机器人已有的 own 也算在内）；没有时返回 undefined。
-   * 任何读取失败都只记日志并返回 undefined，不影响本轮注入自己的记忆。
-   */
-  private async peerGroupMemories(appId: string, chatId: string, own: LarkMemoryEntry[]): Promise<Array<{ botName: string; entry: LarkMemoryEntry }> | undefined> {
-    const memoryStore = this.workflowOptions.memory?.store;
-    const configStore = this.workflowOptions.store;
-    if (!memoryStore || !configStore) return undefined;
-    try {
-      const allBots = await withLarkContextReadTimeout(readLarkConfigs(configStore, { readOnly: true }), '机器人配置读取');
-      const peerBots = allBots.filter(b => b.appId !== appId && larkMemoryEnabled(b));
-      if (peerBots.length === 0) return undefined;
-      const peerResults = await withLarkContextReadTimeout(Promise.all(peerBots.map(async peerBot => {
-        try {
-          // 对端的群共享池里也有它在别的群记下的条目，下面只取本群的。只读：不替对端触发旧账本迁移。
-          const peerList = await memoryStore.peek(larkMemoryScope(peerBot.appId, chatId, 'group', peerBot.groupMemoryScope));
-          const botName = peerBot.name?.trim() || peerBot.displayName?.trim() || peerBot.appId;
-          return { botName, peerList };
-        } catch {
-          return undefined;
-        }
-      })), '同群其他机器人记忆读取');
-      const seen = new Set(own.map(e => e.content.trim()));
-      const collected: Array<{ botName: string; entry: LarkMemoryEntry }> = [];
-      for (const res of peerResults) {
-        if (!res) continue;
-        for (const item of res.peerList) {
-          if (item.topic !== 'conventions' || item.chatId !== chatId) continue;
-          const text = item.content.trim();
-          if (seen.has(text)) continue;
-          seen.add(text);
-          collected.push({ botName: res.botName, entry: item });
-        }
-      }
-      return collected.length > 0 ? collected : undefined;
-    } catch (peerError) {
-      this.log.warn({ error: peerError, chatId }, '读取同群其他机器人偏好失败，跳过共享记忆');
-      return undefined;
-    }
-  }
-
   protected async runTurn(task: LarkTask, launcherRecovery = false) {
     if (!await this.confirmationInputAllowed(task.inbox)) return;
     if (this.stopped) return;
@@ -1374,7 +1331,7 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
       : [];
     if (!resumeTask) task.startedAt = Date.now();
     task.interruptRequested = false;
-    const contributors = createTurnContributors({ task, config, event, session, materialPrompt, materialParts, options: this.workflowOptions, log: this.log });
+    const contributors = createTurnContributors({ task, config, event, session, botSender, materialPrompt, materialParts, options: this.workflowOptions, log: this.log });
     // 场景包的关联：这个 Bot 之前在本群别的话题处理过同一件事，上次的结论带给 Agent，过程卡顶部挂一行。读不到只少这一项。
     task.scenarioRecall = undefined;
     if (this.workflowOptions.participation) {
@@ -1792,7 +1749,6 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
       if (state === 'completed' || state === 'failed' || state === 'interrupted' || state === 'cancelled') return deliverTerminal(state, completed);
       await update(state);
     };
-    let memoryBlock: string | undefined;
     let scenarioExecution: ModelScenarioExecution | undefined;
     try {
       await contributors.readContext();
@@ -1809,31 +1765,7 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
       }
     }
     if (this.stopped || task.turn !== currentTurn || await closePreparedTurn()) return;
-    // 会话记忆随 agentPrompt 一起冻结进任务账本：事后能核对这一轮 Agent 看到的是哪几条记忆。
-    // 读取失败只丢本轮注入并留日志，不阻断任务。注入了哪几条另记一份，供 Web 任务详情查看。
-    let memoryTurn: { scope: LarkMemoryScope; ids: string[] } | undefined;
-    if (larkMemoryEnabled(config) && this.workflowOptions.memory) {
-      try {
-        const { store } = this.workflowOptions.memory;
-        const scope = larkMemoryScope(config.appId, event.chatId, event.chatType, config.groupMemoryScope);
-        const shared = isLarkGroupMemoryPool(scope);
-        // 没有注入任何条目也要记：本轮 Agent 保存的、后台从本轮提取的记忆都按这份记录找到记忆池。
-        memoryTurn = { scope, ids: [] };
-        const [entries, state] = await withLarkContextReadTimeout(Promise.all([
-          store.list(scope),
-          store.getState(scope)
-        ]), '会话记忆读取');
-
-        const sharedEntries = event.chatType === 'group' ? await this.peerGroupMemories(config.appId, event.chatId, entries) : undefined;
-
-        const index = renderMemoryIndex(entries, state, { ...(shared ? { currentChatId: event.chatId } : {}), sharedEntries, query: materialPrompt.slice(0, 2_000), budget: relevantMemoryBudget });
-        memoryBlock = renderLarkMemoryInjection(index.text, { shared });
-        if (memoryBlock) memoryTurn.ids = index.ids;
-      } catch (error) {
-        this.log.warn({ error, appId: config.appId, chatId: event.chatId, taskId: task.id }, '读取飞书会话记忆失败，本轮不注入记忆');
-        memoryBlock = memoryUnavailablePrompt;
-      }
-    }
+    await contributors.preparePrompt();
     // model 场景包判为 act 的消息：判定时冻结的执行指令和材料，用户请求仍是原文。读不到或对不上时这一轮不带。
     const scenarioAdoption = larkScenarioAdoptionOf(event);
     if (scenarioAdoption?.mode === 'model' && this.workflowOptions.participation) {
@@ -1851,7 +1783,7 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
     } catch (error) { this.log.warn({ error, taskId: task.id }, '读取提示词历史失败，继续派发'); }
     if (promptUsage?.botPromptVersion === undefined) this.log.warn({ taskId: task.id }, '本轮未记录版本，继续派发');
     const { agentPrompt, promptParts } = await composeLarkDispatchPrompt({
-      session, config, event, ...contributors.prompt, memoryBlock, scenarioRecall: task.scenarioRecall, scenarioExecution,
+      session, config, event, ...contributors.prompt, scenarioRecall: task.scenarioRecall, scenarioExecution,
       silentProgress, highRiskPattern: riskControlEnabled && !highRiskAuthorized ? highRiskPattern : undefined,
       redispatch: task.redispatch, plan: planTask !== undefined, materialPrompt, materialParts, scenarioAdoption
     });
@@ -1935,12 +1867,7 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
         else if (config.verificationCommand?.trim() && !this.verifyInFlight.has(task.id)) {
           void this.settlePendingVerification(config.appId, task.id).catch(error => this.log.warn({ error, taskId: task.id }, '移出待收尾的自动验证失败'));
         }
-        // 记忆提取排在终态交付之后，且只记真实 dispatch 过的完成轮次；失败只留日志。
-        const memoryPipeline = this.workflowOptions.memory?.pipeline;
-        if (memoryPipeline && resolvedState === 'completed' && runtimeTaskId) {
-          void memoryPipeline.onTurnCompleted(larkMemoryScope(config.appId, event.chatId, event.chatType, config.groupMemoryScope), { sessionId: session.id, taskId: runtimeTaskId, senderId: event.senderOpenId, senderKind: botSender ? 'bot' : 'human', sourceMessageId: larkMessageAnchor(event) })
-            .catch(error => this.log.warn({ error, appId: config.appId, chatId: event.chatId, taskId: runtimeTaskId }, '飞书会话记忆后台提取触发失败'));
-        }
+        contributors.afterDelivery(resolvedState, runtimeTaskId);
       })().catch(error => this.log.error({ error, taskId: task.id, runtimeTaskId }, '生成飞书任务终态失败'));
     };
     const receive = (agentEvent: AgentEvent) => {
@@ -2048,11 +1975,7 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
       if (task.turn !== currentTurn) return;
       task.runtimeTaskId = runtimeTask.id;
       task.launcherRecoveryPending = false;
-      // 重放的是早先那次派发，本轮新读的记忆没有交给 Agent，记录以那一次为准。
-      if (memoryTurn && !runtimeTask.replayed) {
-        await this.workflowOptions.memory!.store.recordTurn(memoryTurn.scope, { taskId: runtimeTask.id, sessionId: session.id, injected: memoryTurn.ids })
-          .catch(error => this.log.warn({ error, runtimeTaskId }, '记录本轮注入的会话记忆失败，结果卡不列本轮记忆'));
-      }
+      await contributors.attached(runtimeTask);
       // /steer：先尝试插话；明确未投递才可降级为提到队首，结果未知时等待核对。
       // 注记按真实结果写：插话送达、提升成功、提升失败、或本来就没有排队都各说各的，不预告成功。
       if (task.steer || task.busySupplement && (await this.runtime.getTasks?.(session.id))?.some(item => item.id === task.busySupplement?.taskId && item.status === 'running')) {
