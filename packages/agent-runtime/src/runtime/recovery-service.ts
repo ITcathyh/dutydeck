@@ -4,7 +4,7 @@ import type { HumanWaits } from './human-waits.js';
 import type { WorkspaceManager } from '../workspace.js';
 import { localOnlyDriverContext } from '../driver-context.js';
 import { readNativeCreationRecord } from '@dutydeck/acp-client';
-import type { RuntimeOptions } from '../index.js';
+import type { RuntimeHost } from './host-ports.js';
 import { digest, executionOptionsOf, nativeTargetOf, type DriverConfigurationLedger, type ExecutionOptions, type LocalDriverLedger } from '../ledger.js';
 import { RevokedOperation, type RevocationReason, type RuntimeSessionMutations } from '../ownership.js';
 import type { SessionGate } from '../session-gate.js';
@@ -36,7 +36,7 @@ interface RecoveryDependencies {
   acceptedOptions(task: TaskRecord): ExecutionOptions;
   runRecoveredTurn(turn: RecoveredTurn): Promise<boolean>;
   repos: Pick<RepositoryBundle, 'sessions' | 'tasks' | 'execution' | 'config' | 'agents' | 'control'>;
-  options: Pick<RuntimeOptions, 'log' | 'ptyRetirement' | 'authorizeTask'>;
+  options: Pick<RuntimeHost, 'log' | 'launch' | 'policy'>;
   localResources: LocalDriverLedger;
   configurations: DriverConfigurationLedger;
   gate: SessionGate;
@@ -176,7 +176,7 @@ export class RecoveryService {
     if (workspace) await this.mutations.wait(() => this.deps.workspaces.validate(workspace));
     const options = this.deps.acceptedOptions(task);
     await this.deps.authorize(session.id, task.executionContext?.actorId, true);
-    await this.mutations.wait(() => this.deps.options.authorizeTask?.(session, task, 'prepare') ?? Promise.resolve());
+    await this.mutations.wait(() => this.deps.options.policy.authorize({ phase: 'prepare', session, task }));
     return this.deps.runRecoveredTurn({ session, task, attempt, submission, recovery, resource, agent, options });
   }
 
@@ -335,7 +335,7 @@ export class RecoveryService {
   }
   async retirePtyExecution(id: string, raw: PtyRetirementRecovery, actor: ExecutionActor) {
     this.deps.assertReady(); this.requireRecoveryOwner(actor);
-    const input = ptyRetirementRecoverySchema.parse(raw), control = this.deps.options.ptyRetirement;
+    const input = ptyRetirementRecoverySchema.parse(raw), control = this.deps.options.launch.ptyRetirement;
     if (!control) throw new RuntimeError('PTY_RETIREMENT_UNAVAILABLE', 'Trusted PTY recovery is not configured', 503);
     return this.mutations.run(this.mutations.owners.ownerOf(id), async () => {
       const { session } = await this.deps.active(id);
@@ -573,7 +573,7 @@ export class RecoveryService {
    * 记为已消失（不存在证明写进账本），不结束任何进程。终端还在、查不准或所有者还在，都原样保留。返回写入的证据引用。
    */
   async retireDetachedPty(session: Session): Promise<string[]> {
-    const control = this.deps.options.ptyRetirement, id = session.id;
+    const control = this.deps.options.launch.ptyRetirement, id = session.id;
     if (!control?.captureAbsence || session.protocol !== 'pty-cli' || this.deps.drivers.has(id) || this.deps.gate.stops.driver(id) || this.deps.recoveryInFlight(id)) return [];
     const candidates = this.deps.repos.execution.getResources(id).filter(r => r.runId === session.runId && r.kind === 'local_only' && r.stage === 'created'
       && r.identity && r.observations.at(-1)?.state !== 'gone');

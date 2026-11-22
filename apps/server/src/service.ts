@@ -42,12 +42,12 @@ import { renderMemoryIndex } from './lark/memory-view.js';
 import type { CollaborationExtensions } from './collaboration-extensions.js';
 import { LarkGroupManager } from './lark/group-management.js';
 import { backfillBotPromptVersions, larkMemoryEnabled, readLarkConfig, readLarkConfigs } from './lark/config.js';
-import { DutydeckRuntime } from '@dutydeck/runtime';
+import { createAcceptPrompt, DutydeckRuntime, RuntimeEventBus } from '@dutydeck/runtime';
 import { loadConfigWithDiagnosticsAsync, resolveDatabaseUrl, type AppConfig } from '@dutydeck/config';
 import { logDroppedAgents } from './agent-config-log.js';
 import { assertBotProcessStartup, childProcessIdentity, createRepositories, observeProcess } from '@dutydeck/storage';
 import { createPtyRetirementControl } from './pty-recovery.js';
-import { backgroundKindFor, COLLABORATION_LIST_LIMIT, installationOwnerTaskActor, makeId, parseLarkSourceId, RuntimeError, timeLoop, workPlanConfirmationRequired, type DriverFactory, type PolicyAction, type PolicyDecision, type Session } from '@dutydeck/shared';
+import { channelExecutionAppId, dutydeckSessionKinds, renderSessionNotice, backgroundKindFor, COLLABORATION_LIST_LIMIT, installationOwnerTaskActor, makeId, parseLarkSourceId, RuntimeError, timeLoop, workPlanConfirmationRequired, type DriverFactory, type PolicyAction, type PolicyDecision, type Session } from '@dutydeck/shared';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { larkResourceRoot, pruneLarkResourceDirectories, readLarkResourceReferences } from './resource-retention.js';
@@ -471,71 +471,96 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
   const sessionAgentConfig = async (agent: import('@dutydeck/shared').AgentConfig, session: Session) => withClaudeAutoMemoryMarker(
     await agentModelSettings.resolveForSession(agent, session, async id => await workItems.parentForSession(id) ?? await delegations.parentForSession(id)),
     session, appId => readLarkConfig(repos.config, appId, { readOnly: true }));
+  const events = new RuntimeEventBus();
+  const observeTurn = createTurnDiffObserver(repos.config, { log: { warn: (details, message) => log.warn(details, message) } });
+  events.subscribe('host', event => {
+    switch (event.type) {
+      case 'matter.session': return matters.session(event.sessionId, event.input);
+      case 'task.accepted': return matters.accepted(event.session, event.task);
+      case 'turn.started': return observeTurn(event.session, event.taskId, 'start');
+      case 'usage.reading': return usageLedger.record(event.session, event.attempt, event.reading);
+      case 'notice': return deliverLarkSessionNotice(repos, bot => createLarkCardService(env, workbenchHttp.fetch, bot), event.session, event.notice, log);
+    }
+  });
+  if (pluginWiring) events.subscribe('plugin', pluginWiring.onRuntimeEvent);
   const runtime: DutydeckRuntime = new DutydeckRuntime(repos, {
-    matterTracking: matters,
-    configureAgent: sessionAgentConfig,
-    ptyRetirement,
-    admitTask: pluginWiring
-      ? async (session, request) => { await usageLedger.admit(session, request); await pluginWiring.hooks.taskReceived(session, request); }
-      : (session, request) => usageLedger.admit(session, request),
-    recordUsage: (session, attempt, reading) => usageLedger.record(session, attempt, reading),
-    observeTurn: createTurnDiffObserver(repos.config, { log: { warn: (details, message) => log.warn(details, message) } }),
-    authorizeTask: async (session, task, phase) => { await collaboration?.background.authorizeTask(session, task); await automation.authorizeTask(task, phase); await ciWebhook?.authorizeTask(task, phase); await pullRequests.authorizeTask(task, phase); await workItems.authorizeTask(session, task, phase); },
-    authorizeControl: async (sessionId, actor, _action) => {
-      if (await workItems.authorizeControl(sessionId, actor)) return;
-      if (await collaboration?.background.authorizeControl(sessionId, actor)) return;
-      if (actor.kind !== 'installation_owner' && actor.kind !== 'unspecified') await groupManager.prepareTurn(sessionId, actor.id);
+    events, beforeSettlement: (session, taskId) => observeTurn(session, taskId, 'end'),
+    matterSummary: id => matters.summary(id),
+    sessionKinds: dutydeckSessionKinds, renderNotice: renderSessionNotice,
+    launchContext: {
+      configureAgent: sessionAgentConfig, ptyRetirement, acpxCommand: config.acpxCommand, ptyDriverFactory,
+      terminalBackend: () => terminalSettings.current(),
+      environment: session => backgroundKindFor(session.source)?.injectHost === false ? {} : ({ ...capabilities.environmentFor(session), ...relayCapabilities.environmentFor(session.id), ...herdr.environmentFor(session.id),
+        ...(session.protocol === 'pty-cli' && isFrozenCollaborationSession(session) ? { dutydeck_frozen_materials: 'true' } : {}) }),
     },
-    authorizeExecution: async (sessionId, actorId) => {
-      if (await automation.authorizeExecutionSession(sessionId, actorId)) return;
-      if (await collaboration?.background.authorizeExecution(sessionId, actorId)) return;
-      // work item 授权先行判断并自行短路；其余会话把 prepareTurn 返回的可选本地提交
-      // 交回 Runtime，由其短写序列在归属校验后执行（prepare 不写运行身份）。
-      if (await workItems.authorizeExecution(sessionId, actorId)) return;
-      return groupManager.prepareTurn(sessionId, actorId);
+    executionPolicy: {
+      channelAppId: channelExecutionAppId,
+      admit: async (session, request) => {
+        await usageLedger.admit(session, request);
+        await pluginWiring?.hooks.taskReceived(session, request);
+      },
+      reviewPermission: pluginWiring?.reviewPermission,
+      authorize: async request => {
+        if (request.phase === 'start') {
+          const { sessionId, actorId } = request;
+          if (await automation.authorizeExecutionSession(sessionId, actorId)) return;
+          if (await collaboration?.background.authorizeExecution(sessionId, actorId)) return;
+          // work item 授权先行判断并自行短路；其余会话把 prepareTurn 返回的可选本地提交
+          // 交回 Runtime，由其短写序列在归属校验后执行（prepare 不写运行身份）。
+          if (await workItems.authorizeExecution(sessionId, actorId)) return;
+          return groupManager.prepareTurn(sessionId, actorId);
+        }
+        if (request.phase === 'control') {
+          const { sessionId, actor } = request;
+          if (await workItems.authorizeControl(sessionId, actor)) return;
+          if (await collaboration?.background.authorizeControl(sessionId, actor)) return;
+          if (actor.kind !== 'installation_owner' && actor.kind !== 'unspecified') await groupManager.prepareTurn(sessionId, actor.id);
+          return;
+        }
+        const { session, task, phase } = request;
+        await collaboration?.background.authorizeTask(session, task);
+        await automation.authorizeTask(task, phase);
+        await ciWebhook?.authorizeTask(task, phase);
+        await pullRequests.authorizeTask(task, phase);
+        await workItems.authorizeTask(session, task, phase);
+      },
+      riskPolicy: async (sessionId, fallback) => {
+        const scheduleSource = await automation.sourceSessionId(sessionId);
+        if (scheduleSource) return groupManager.riskPolicy(scheduleSource, fallback);
+        const background = await collaboration?.riskPolicy(sessionId, fallback);
+        if (background) return background.policy;
+        const binding = await workItems.parentForSession(sessionId) ?? await delegations.parentForSession(sessionId);
+        return binding ? workItemRiskPolicy(repos, groupManager, binding.parentSessionId, binding.actorId, fallback, env, workbenchHttp.fetch, capturedRiskPolicy(repos, binding.parentTaskId)) : groupManager.riskPolicy(sessionId, fallback);
+      },
     },
-    resolveRiskPolicy: async (sessionId, fallback) => {
-      const scheduleSource = await automation.sourceSessionId(sessionId);
-      if (scheduleSource) return groupManager.riskPolicy(scheduleSource, fallback);
-      const background = await collaboration?.riskPolicy(sessionId, fallback);
-      if (background) return background.policy;
-      const binding = await workItems.parentForSession(sessionId) ?? await delegations.parentForSession(sessionId);
-      return binding ? workItemRiskPolicy(repos, groupManager, binding.parentSessionId, binding.actorId, fallback, env, workbenchHttp.fetch, capturedRiskPolicy(repos, binding.parentTaskId)) : groupManager.riskPolicy(sessionId, fallback);
+    promptAssembler: {
+      atAccept: createAcceptPrompt(async session => {
+        const parent = await workItems.parentForSession(session.id) ?? await delegations.parentForSession(session.id);
+        if (parent?.parentTaskId) {
+          const task = repos.execution.getAcceptedTask(parent.parentTaskId)?.task;
+          return { version: task?.executionContext?.promptPolicyVersion ?? 'legacy-v1' };
+        }
+        const policy = await readTokenEfficiencyPolicy(repos.config);
+        return { version: promptTemplateVersion(policy.mode), ...(policy.diagnosticReason ? { diagnosticReason: policy.diagnosticReason } : {}) };
+      }, async (session, prompt, skills, context) => {
+        if (backgroundKindFor(session.source)?.injectHost === false) {
+          const prepared: PrepareSkillPromptResult = { agentPrompt: prompt, skillDeliveries: [], ...(context?.promptParts ? { promptParts: context.promptParts } : {}) };
+          return pluginWiring ? pluginWiring.hooks.beforeRun(session, prepared, context?.promptPolicyVersion) : prepared;
+        }
+        return pluginWiring ? prepareBoundTaskPrompt(pluginHost!, pluginWiring.hooks, session, prompt, skills, context)
+          : prepareSkillPrompt(session.cwd, prompt, skills, context);
+      }),
+      atExecute: createSessionPrompt({
+        channelTools: (session, active) => agentTools.toolPromptContributor(session, { active }),
+        plugins: pluginHost, tokens: capabilities, isAutomatedTask, command: options.groupToolsCommand ?? 'dutydeck',
+        projectMemory, scheduleResult: session => automation.resultContext(session), herdr
+      }),
     },
-    acpxCommand: config.acpxCommand,
-    ptyDriverFactory,
-    terminalBackend: () => terminalSettings.current(),
     driverIdleTimeoutMs: config.driverIdleTimeoutMs,
     driverIdleCpuAction: config.driverIdleCpuAction,
     cleanupIntervalMs: config.cleanupIntervalMs,
-    sessionEnvironment: session => backgroundKindFor(session.source)?.injectHost === false ? {} : ({ ...capabilities.environmentFor(session), ...relayCapabilities.environmentFor(session.id), ...herdr.environmentFor(session.id),
-      ...(session.protocol === 'pty-cli' && isFrozenCollaborationSession(session) ? { dutydeck_frozen_materials: 'true' } : {}) }),
-    selectPromptPolicy: async session => {
-      const parent = await workItems.parentForSession(session.id) ?? await delegations.parentForSession(session.id);
-      if (parent?.parentTaskId) {
-        const task = repos.execution.getAcceptedTask(parent.parentTaskId)?.task;
-        return { version: task?.executionContext?.promptPolicyVersion ?? 'legacy-v1' };
-      }
-      const policy = await readTokenEfficiencyPolicy(repos.config);
-      return { version: promptTemplateVersion(policy.mode), ...(policy.diagnosticReason ? { diagnosticReason: policy.diagnosticReason } : {}) };
-    },
-    prepareTaskPrompt: async (session, prompt, skills, context) => {
-      if (backgroundKindFor(session.source)?.injectHost === false) {
-        const prepared: PrepareSkillPromptResult = { agentPrompt: prompt, skillDeliveries: [], ...(context?.promptParts ? { promptParts: context.promptParts } : {}) };
-        return pluginWiring ? pluginWiring.hooks.beforeRun(session, prepared, context?.promptPolicyVersion) : prepared;
-      }
-      return pluginWiring ? prepareBoundTaskPrompt(pluginHost!, pluginWiring.hooks, session, prompt, skills, context)
-        : prepareSkillPrompt(session.cwd, prompt, skills, context);
-    },
-    sessionPrompt: createSessionPrompt({
-      channelTools: session => agentTools.toolPromptContributor(session), activeTask: id => runtime.getActiveTaskContext(id),
-      plugins: pluginHost, tokens: capabilities, isAutomatedTask, command: options.groupToolsCommand ?? 'dutydeck',
-      projectMemory, scheduleResult: session => automation.resultContext(session), herdr
-    }),
     awaitingAnswer: sessionId => relayBroker.listPending(sessionId).length > 0,
-    onSessionNotice: (session, notice) => deliverLarkSessionNotice(repos, bot => createLarkCardService(env, workbenchHttp.fetch, bot), session, notice, log),
-    log: { warn: (...args: unknown[]) => log.warn(...args as [unknown, string]), info: (data, message) => log.info(data, message) },
-    ...pluginWiring?.runtimeOptions
+    log: { warn: (...args: unknown[]) => log.warn(...args as [unknown, string]), info: (data, message) => log.info(data, message) }
   });
   const replyPolisher = new LarkReplyPolisher({ runtime, repos, log: { warn: (details, message) => log.warn(details, message) } });
   setupCleanup.push(() => runtime.shutdown());

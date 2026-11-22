@@ -3,7 +3,7 @@ import { RuntimeError, runtimeStateKeys, sameIdleCpuProof, withTimeout, type Age
 import { commandExists } from '@dutydeck/transports';
 import { digest } from '../digest.js';
 import { IDLE_CPU_MIN_IDLE_MS, IdleCpuWindow } from '../idle-cpu.js';
-import type { RuntimeOptions } from '../index.js';
+import type { RuntimeHost } from './host-ports.js';
 import { DriverConfigurationLedger, executionOptionsOf, LocalDriverLedger, type ExecutionOptions } from '../ledger.js';
 import type { Owner, RevocationReason, RuntimeSessionMutations } from '../ownership.js';
 import { RevokedOperation } from '../ownership.js';
@@ -47,7 +47,7 @@ interface DriverSupervisorDependencies {
   notices: Notices;
   notifyDriverExit: (sessionId: string, code: number | null) => void;
   onDriverEvent: (session: Session, generation: number) => (event: NormalizedDriverEvent) => void;
-  options: RuntimeOptions;
+  options: RuntimeHost;
   persistTerminalReceipt(session: Session, driver: AgentDriver): Promise<void>;
   probe: (agent: AgentConfig) => AgentCapabilities;
   releaseSteeringDriver(driver: AgentDriver): void;
@@ -487,10 +487,7 @@ export class DriverSupervisor {
       this.deps.options.log?.warn({ sessionId: id, code: error instanceof RuntimeError ? error.code : 'DRIVER_STOP_UNVERIFIED', cause, blockedSince: since, unverifiable }, 'Driver exit is still unverified');
       const session = await this.deps.repos.sessions.get(id);
       const kind = unverifiable ? 'stop_unverifiable' : 'stop_unverified';
-      if (session && this.stops.driver(id)?.driver === driver) await this.mutations.run(undefined, () => this.deps.notices.sessionNotice(session, { id: `notice_${digest([kind, id, since])}`, kind: 'stop_unverified', taskId: '', sessionIds: [id],
-        message: unverifiable ? '这个会话的 Agent 进程没法确认是否已经退出，后台不会再自动复核。新消息会先排队，请管理员核对进程后在执行恢复里解除。'
-          : cause === 'startup' ? '这个会话启动 Agent 失败后，没能确认启动到一半的进程已经退出，暂时不能接新消息。后台会定时复核，确认退出后自动恢复。'
-          : '这个会话闲置关闭时，没能确认它的终端进程已经退出，暂时不能接新消息。后台会定时复核，确认退出后自动恢复。' },
+      if (session && this.stops.driver(id)?.driver === driver) await this.mutations.run(undefined, () => this.deps.notices.sessionNotice(session, { id: `notice_${digest([kind, id, since])}`, taskId: '', sessionIds: [id] }, { kind: 'stop_unverified', cause, unverifiable },
         { key: runtimeStateKeys.notice.key(kind, id), value: since })).catch(failure => this.deps.warnCaught('recheckStop.publishNotice', id, failure));
     }
     if (unverifiable) return;

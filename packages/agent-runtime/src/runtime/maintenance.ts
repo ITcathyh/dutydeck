@@ -1,4 +1,4 @@
-import { RuntimeError, runtimeStateKeys, timeLoop, unknownTaskActionLabels, type AgentDriver, type ExecutionActor, type RepositoryBundle, type Session, type TaskAttempt, type TaskRecord } from '@dutydeck/shared';
+import { RuntimeError, runtimeStateKeys, timeLoop, type AgentDriver, type ExecutionActor, type RepositoryBundle, type Session, type TaskAttempt, type TaskRecord } from '@dutydeck/shared';
 import type { DutydeckRuntime, RuntimeOptions } from '../index.js';
 import { digest } from '../digest.js';
 import type { RuntimeSessionMutations } from '../ownership.js';
@@ -68,16 +68,11 @@ export class Maintenance {
           const abandoned = due && await this.abandonUnknownAttempt(session, attempt);
           if (due && !abandoned) this.unknownTaskRecheckAt.set(attempt.attemptId, at + 60 * 60_000);
           if (abandoned) {
-            await this.deps.notices.sessionNotice(session, { id: `notice_${digest(['unknown_task_abandoned', attempt.attemptId])}`, kind: 'unknown_task_abandoned', taskId: attempt.taskId, attemptId: attempt.attemptId, sessionIds: [session.id],
-              message: '这一轮的结果未知，超过 7 天没人处理，执行它的进程也已确认退出。Dutydeck 已按「结果未知、已放弃」结案：没有重做，也不算完成，不再挡住同一仓库的其他任务。\n\n还需要做的话，请重新发一条消息。' },
+            await this.deps.notices.sessionNotice(session, { id: `notice_${digest(['unknown_task_abandoned', attempt.attemptId])}`, taskId: attempt.taskId, attemptId: attempt.attemptId, sessionIds: [session.id] }, { kind: 'unknown_task_abandoned' },
               { key: runtimeStateKeys.notice.key('unknown_task_abandoned', attempt.attemptId), value: 'sent' });
             return;
           }
-          const labels = unknownTaskActionLabels;
-          await this.deps.notices.sessionNotice(session, { id: `notice_${digest(['unknown_task_overdue', attempt.attemptId])}`, kind: 'unknown_task_overdue', taskId: attempt.taskId, attemptId: attempt.attemptId, sessionIds: [session.id],
-            message: ['这一轮的结果未知，已经超过 24 小时没人处理。它会挡住这个会话后面的消息，也会挡住同一仓库里其他会话的任务。',
-              `处理方法：在 Web 打开这个会话，在执行记录下方选「${labels.retry}」「${labels.completed}」或「${labels.failed}」；原话题里如果有「结果未知」提醒卡，也可以直接点。`,
-              '超过 7 天仍没人处理、且确认执行它的进程已退出时，Dutydeck 会自动按「结果未知、已放弃」结案，不会重做。'].join('\n\n') },
+          await this.deps.notices.sessionNotice(session, { id: `notice_${digest(['unknown_task_overdue', attempt.attemptId])}`, taskId: attempt.taskId, attemptId: attempt.attemptId, sessionIds: [session.id] }, { kind: 'unknown_task_overdue' },
             { key: runtimeStateKeys.notice.key('unknown_task_overdue', attempt.attemptId), value: 'sent' });
         });
       } catch (error) {

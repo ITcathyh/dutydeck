@@ -5,7 +5,7 @@ import { mkdir, rename, unlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { AgentUnavailable } from '../agent-availability.js';
 import { localOnlyDriverContext } from '../driver-context.js';
-import type { RuntimeOptions } from '../index.js';
+import type { RuntimeHost } from './host-ports.js';
 import { digest, type DriverConfigurationLedger, type LocalDriverLedger, nativeTargetOf, type ExecutionOptions } from '../ledger.js';
 import type { RuntimeSessionMutations } from '../ownership.js';
 import type { DriverSupervisor } from './driver-supervisor.js';
@@ -40,7 +40,7 @@ interface TurnRunnerDependencies {
   localResources: LocalDriverLedger;
   noteAgentFailure: (agentId: string, failure: { code?: unknown; detailCode?: unknown; message?: unknown; }) => Promise<void>;
   notifyDriverExit: (sessionId: string, code: number | null) => void;
-  options: RuntimeOptions;
+  options: RuntimeHost;
   patchSession(id: string, patch: Partial<Session>): Promise<Session>;
   publicTask: (task: TaskRecord) => PublicTaskRecord;
   persistTerminalReceipt(session: Session, driver: AgentDriver): Promise<void>;
@@ -78,12 +78,16 @@ export class TurnRunner {
     this.deps.activeTurns.add(id); this.deps.events.startTurn(ref.attemptId); this.deps.humanWaits.clearOscWait(ref.attemptId);
     let agentId: string | undefined;
     let settledSession: Session | undefined;
+    let ended: Session | undefined;
     let observed: Session | undefined;
     const observeEnd = async () => {
       const session = observed;
       observed = undefined;
       // best-effort: the host hook must not block turn settlement on failure.
-      if (session) await this.deps.options.observeTurn!(session, task.id, 'end').catch(() => {});
+      if (session) {
+        ended = session;
+        await this.deps.options.beforeSettlement?.(session, task.id).catch(() => {});
+      }
     };
     try {
       const { session } = await this.deps.active(id);
@@ -91,10 +95,11 @@ export class TurnRunner {
       await this.deps.clearSessionTaskReports(id);
       const input = this.deps.acceptedInput(task);
       await this.deps.authorize(id, task.executionContext?.actorId, true);
-      await this.mutations.wait(() => this.deps.options.authorizeTask?.(session, task, 'prepare') ?? Promise.resolve());
+      await this.mutations.wait(() => this.deps.options.policy.authorize({ phase: 'prepare', session, task }));
       const driver = await this.configureTaskDriver(session, input.executionOptions);
       await this.applyRiskPolicy(session, driver, task.executionContext?.riskPolicy);
-      const assembled = await this.mutations.wait(() => Promise.resolve(this.deps.options.sessionPrompt?.(session, input.executionContext.agentPrompt, input.executionContext) ?? input.executionContext.agentPrompt));
+      const assembled = await this.mutations.wait(() => Promise.resolve(this.deps.options.prompts.atExecute(session, input.executionContext.agentPrompt, input.executionContext,
+        { taskId: task.id, attemptId: ref.attemptId, actorId: task.executionContext?.actorId })));
       const prompt = typeof assembled === 'string' ? assembled : assembled.prompt;
       await this.recordPrompt(id, input.executionContext.agentPrompt, 'accepted_input', 'send', task.id, undefined, input.executionContext.promptDiagnostics);
       await this.recordPrompt(id, prompt, 'session_context', 'send', task.id, undefined, typeof assembled === 'string' ? undefined : assembled.diagnostics);
@@ -132,14 +137,14 @@ export class TurnRunner {
         });
       }
       await this.deps.authorize(id, task.executionContext?.actorId, true);
-      await this.mutations.wait(() => this.deps.options.authorizeTask?.(session, task, 'submit') ?? Promise.resolve());
+      await this.mutations.wait(() => this.deps.options.policy.authorize({ phase: 'submit', session, task }));
       const beforeSubmit = this.deps.repos.execution.getAttempt(ref);
       if (!beforeSubmit || beforeSubmit.state !== 'preparing' || beforeSubmit.submissionState !== 'not_submitted') {
         throw new RuntimeError('ATTEMPT_NOT_PREPARING', 'The attempt was cancelled or changed while awaiting submission authorization', 409);
       }
-      if (this.deps.options.observeTurn) {
+      if (this.deps.options.events.observed || this.deps.options.beforeSettlement) {
         // best-effort: host observation is independent of submission.
-        await this.mutations.wait(() => this.deps.options.observeTurn!(session, task.id, 'start').catch(() => {}));
+        await this.mutations.wait(() => this.deps.options.events.publish({ type: 'turn.started', session, taskId: task.id }).catch(() => {}));
         observed = session;
       }
       await this.deps.events.flushDriverEvents(id);
@@ -201,6 +206,7 @@ export class TurnRunner {
     } finally {
       await this.settlement.release(ref, 'ordinary');
     }
+    if (ended) await this.deps.options.events.publish({ type: 'turn.ended', session: ended, taskId: task.id }).catch(() => {});
     return this.settlement.taskResult(task, settledSession);
   }
   async runRecoveredTurn({ session, task, attempt, submission, recovery, resource, agent, options }: RecoveredTurn): Promise<boolean> {
@@ -301,7 +307,7 @@ export class TurnRunner {
     return existing;
   }
   async applyRiskPolicy(session: Session, driver: AgentDriver | undefined, policy?: ToolRiskPolicy) {
-    if (this.deps.options.resolveRiskPolicy) policy = await this.mutations.wait(() => this.deps.options.resolveRiskPolicy!(session.id, policy));
+    if (this.deps.options.policy.riskPolicy) policy = await this.mutations.wait(() => this.deps.options.policy.riskPolicy!(session.id, policy));
     this.mutations.check();
     await this.mutations.write(session.id, async () => { driver?.setRiskPolicy?.(policy); });
     const directory = join(session.cwd, '.dutydeck', 'security', 'sessions');
@@ -436,9 +442,9 @@ class TurnSettlement {
 
   taskResult(task: TaskRecord, session?: Session): PublicTaskRecord {
     const settled = this.deps.publicTask(this.deps.repos.execution.getTaskExecution(task.id)?.task ?? task);
-    if (session && this.deps.options.onTaskSettled && isTerminalTaskStatus(settled.status)) {
+    if (session && this.deps.options.events.observed && isTerminalTaskStatus(settled.status)) {
       // best-effort: notification follows durable task settlement.
-      void Promise.resolve().then(() => this.deps.options.onTaskSettled!(session, settled)).catch(() => {});
+      void Promise.resolve().then(() => this.deps.options.events.publish({ type: 'task.settled', session, task: settled })).catch(() => {});
     }
     return settled;
   }

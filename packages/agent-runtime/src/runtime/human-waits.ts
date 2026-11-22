@@ -1,7 +1,7 @@
 import type { AsyncLocalStorage } from 'node:async_hooks';
 import { RuntimeError, agentCommandApprovalReason, errorMessage, freeTextInputMaxBytes, isAgentCommandAutoApproval, makeId, permissionDisplayText, type AgentDriver, type AgentEvent, type AttemptRef, type NormalizedDriverEvent, type PermissionRequestData, type RepositoryBundle, type Session, type SessionFence, type TaskRecord } from '@dutydeck/shared';
 import { testRegexWithTimeout } from '@dutydeck/acp-client';
-import type { RuntimeOptions } from '../index.js';
+import type { RuntimeHost } from './host-ports.js';
 import { RevokedOperation, type RuntimeSessionMutations } from '../ownership.js';
 import { isAttemptRef } from './attempt-ref.js';
 
@@ -11,7 +11,7 @@ export type PendingPermission = { request: PermissionRequestData; nativeId: stri
 
 interface HumanWaitDependencies {
   repos: Pick<RepositoryBundle, 'sessions' | 'execution' | 'events'>;
-  options: Pick<RuntimeOptions, 'log' | 'awaitingAnswer' | 'reviewPermission' | 'sessionEnvironment' | 'resolveRiskPolicy'>;
+  options: Pick<RuntimeHost, 'log' | 'awaitingAnswer' | 'launch' | 'policy'>;
   drivers: ReadonlyMap<string, AgentDriver>;
   activeTasks: ReadonlyMap<string, TaskRecord>;
   sessionGenerations: ReadonlyMap<string, number>;
@@ -101,9 +101,9 @@ export class HumanWaits {
     return stoppedPermissions;
   }
   async reviewHostPermission(session: Session, scope: SessionFence, event: NormalizedDriverEvent) {
-    if (!this.deps.options.reviewPermission || event.type !== 'permission_request' || (event.data?.status ?? 'pending') !== 'pending' || !isAttemptRef(scope)) return undefined;
+    if (!this.deps.options.policy.reviewPermission || event.type !== 'permission_request' || (event.data?.status ?? 'pending') !== 'pending' || !isAttemptRef(scope)) return undefined;
     const request = this.deps.driverEventData(scope, event) as PermissionRequestData;
-    const decision = await this.mutations.wait(() => this.deps.options.reviewPermission!(session, request).catch(() => undefined));
+    const decision = await this.mutations.wait(() => this.deps.options.policy.reviewPermission!(session, request).catch(() => undefined));
     return decision === 'allow' || decision === 'deny' ? decision : undefined;
   }
   pendingPermissionCount(id: string) { return [...this.permissions.values()].filter(permission => permission.fence.sessionId === id && this.mutations.validCaptured(permission)).length; }
@@ -154,12 +154,12 @@ export class HumanWaits {
     const accepted = this.deps.repos.execution.getAcceptedTask(task.id);
     if (accepted?.input?.version !== 2) return false;
     const permissionMode = accepted.input.executionOptions.permissionMode;
-    if (!isAgentCommandAutoApproval({ permissionMode, kind, command, env: this.deps.options.sessionEnvironment?.(session) })) return false;
+    if (!isAgentCommandAutoApproval({ permissionMode, kind, command, env: this.deps.options.launch.environment?.(session) })) return false;
     // PreToolUse already guards terminal commands. Recheck the live policy here as well,
     // so auto-approval cannot turn a matching high-risk command into an allow.
     try {
-      const policy = this.deps.options.resolveRiskPolicy
-        ? await this.deps.options.resolveRiskPolicy(sessionId, task.executionContext?.riskPolicy) : task.executionContext?.riskPolicy;
+      const policy = this.deps.options.policy.riskPolicy
+        ? await this.deps.options.policy.riskPolicy(sessionId, task.executionContext?.riskPolicy) : task.executionContext?.riskPolicy;
       if (policy?.enabled && !policy.authorized && await testRegexWithTimeout(policy.pattern, command)) return false;
     } catch { return false; }
     if (this.mutations.attempts.get(sessionId) !== owner || !this.mutations.valid(owner)) return false;

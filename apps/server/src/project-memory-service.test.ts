@@ -18,14 +18,14 @@ it('wires owner APIs and per-turn project memory through the real service and wa
   const seed = createRepositories(database, { newDatabaseAuthority: 'ledger_v1' }); seed.close();
   const prompts: string[] = []; let starts = 0;
   configureRuntime.mockImplementationOnce(options => {
-    options.probe = () => ({ protocol: 'acp', available: true, pause: false, resume: true });
-    options.driverFactory = (_agent, _protocol, emit) => ({ isIdle: () => true, hasBackgroundWork: () => false, resume: async () => {}, start: async () => { starts++; }, stop: async () => {}, isStopped: async () => true, interrupt: async () => {}, send: async prompt => { prompts.push(typeof prompt === 'string' ? prompt : prompt.prompt); emit({ type: 'text', data: { text: '完成' } }); emit({ type: 'completed', data: { stopReason: 'end_turn' } }); } });
+    options.launchContext!.probe = () => ({ protocol: 'acp', available: true, pause: false, resume: true });
+    options.launchContext!.driverFactory = (_agent, _protocol, emit) => ({ isIdle: () => true, hasBackgroundWork: () => false, resume: async () => {}, start: async () => { starts++; }, stop: async () => {}, isStopped: async () => true, interrupt: async () => {}, send: async prompt => { prompts.push(typeof prompt === 'string' ? prompt : prompt.prompt); emit({ type: 'text', data: { text: '完成' } }); emit({ type: 'completed', data: { stopReason: 'end_turn' } }); } });
   });
   const service = await startLocalServer({ webRoot: root, env: { PATH: process.env.PATH, HOME: root, NODE_ENV: 'test', DUTYDECK_HOST: '127.0.0.1', DUTYDECK_PORT: String(port), DUTYDECK_DEFAULT_CWD: root, DUTYDECK_DATABASE_URL: database, DUTYDECK_DAEMON_DIR: join(root, 'daemon'), DUTYDECK_AUTH: 'false', DUTYDECK_DISABLE_LARK_LISTENER: 'true', DUTYDECK_AGENTS_JSON: '[]' } });
   const repos = createRepositories(database);
   try {
     const { options } = runtimeInputs(service.runtime);
-    const promptHook = vi.fn(options.sessionPrompt!); options.sessionPrompt = promptHook;
+    const promptHook = vi.fn(options.promptAssembler!.atExecute); options.promptAssembler!.atExecute = promptHook;
     await repos.agents.save(agentConfigSchema.parse({ id: 'fake', name: 'Fake', command: 'fake', protocol: 'acp', cwd: root }));
     const first = await service.runtime.start({ agentId: 'fake' }); const second = await service.runtime.start({ agentId: 'fake' });
     const request = async (endpoint: string, method = 'GET', body?: unknown) => {

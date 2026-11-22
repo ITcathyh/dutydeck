@@ -43,8 +43,8 @@ export default api => api.registerHookHandler('task.beforeRun', input => {
   const starts: AgentConfig[] = [];
   const send = vi.fn();
   configureRuntime.mockImplementationOnce(options => {
-    options.probe = () => ({ protocol: 'acp', available: true, pause: false, resume: true });
-    options.driverFactory = (agent, _protocol, emit) => {
+    options.launchContext!.probe = () => ({ protocol: 'acp', available: true, pause: false, resume: true });
+    options.launchContext!.driverFactory = (agent, _protocol, emit) => {
       starts.push(agent);
       let stopped = false;
       return { start: async () => {}, resume: async () => {}, stop: async () => { stopped = true; }, isStopped: async () => stopped, interrupt: async () => {},

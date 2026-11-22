@@ -336,7 +336,10 @@ describe('persistent task recovery across a reopened database', () => {
     const terminal = await h.runtime.start({ agentId: agent.id }), other = await h.runtime.start({ agentId: 'acp', cwd: independentCwd });
     await h.runtime.dispatch(terminal.id, 'terminal input');
     await h.runtime.dispatch(other.id, 'ACP input');
-    await vi.waitFor(() => expect(acp.prompts).toHaveLength(1));
+    await vi.waitFor(() => {
+      expect(acp.prompts).toEqual(['ACP input']);
+      expect(pty.prompts).toEqual(['terminal input']);
+    });
     h.runtime.setQueueHeld(true);
     expect(await h.runtime.getRestartActivity()).toEqual({ runningTasks: 2, restartBlockers: 1, recoverableTasks: 1 });
     expect(await h.runtime.getRestartActivity(terminal.id)).toEqual({ runningTasks: 1, restartBlockers: 1, recoverableTasks: 0 });

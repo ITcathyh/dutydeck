@@ -2,7 +2,7 @@ import type { AgentDriver, AgentEvent, AttemptRef, EventType, NormalizedDriverEv
 import { canonicalExecutionJson, deferredConfirmationId, eventHasContent, isBackgroundFollowup, makeId, normalizeEventContent, now, RuntimeError, withTimeout } from '@dutydeck/shared';
 import type { AsyncLocalStorage } from 'node:async_hooks';
 import { createHash } from 'node:crypto';
-import type { RuntimeOptions } from '../index.js';
+import type { RuntimeHost } from './host-ports.js';
 import { digest, eventJson } from '../ledger.js';
 import type { RuntimeSessionMutations, Owner } from '../ownership.js';
 import type { SessionGate } from '../session-gate.js';
@@ -40,7 +40,7 @@ interface EventIngestDependencies {
   gate: SessionGate;
   humanWaits: HumanWaits;
   noteAgentFailure: (agentId: string, failure: { code?: unknown; detailCode?: unknown; message?: unknown; }) => Promise<void>;
-  options: Pick<RuntimeOptions, 'log' | 'recordUsage'>;
+  options: Pick<RuntimeHost, 'log' | 'events'>;
   repos: RepositoryBundle;
   saveState: (session: Session, state: Session["state"], error?: string) => Promise<void>;
   scheduler: Pick<Scheduler, 'sessionHeld' | 'wakeResourceQueues'>;
@@ -87,9 +87,9 @@ export class EventIngest {
   }
   private async recordUsage(session: Session, ref: AttemptRef, event: NormalizedDriverEvent) {
     const usage = event.type === 'status' && event.data?.state === 'turn_usage';
-    if (!this.deps.options.recordUsage || !usage && event.type !== 'completed') return;
+    if (!this.deps.options.events.observed || !usage && event.type !== 'completed') return;
     // best-effort: usage accounting is separate from turn settlement.
-    await this.deps.options.recordUsage(session, { taskId: ref.taskId, attemptId: ref.attemptId }, usage ? event.data : undefined).catch(() => {});
+    await this.deps.options.events.publish({ type: 'usage.reading', session, attempt: { taskId: ref.taskId, attemptId: ref.attemptId }, reading: usage ? event.data : undefined }).catch(() => {});
   }
   async flushDriverEvents(sessionId: string) {
     while (true) {

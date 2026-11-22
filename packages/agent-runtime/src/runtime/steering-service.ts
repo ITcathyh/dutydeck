@@ -1,4 +1,5 @@
-import type { SteeringOutcome, SteeringResult, RuntimeOptions } from '../index.js';
+import type { RuntimeHost } from './host-ports.js';
+import type { SteeringOutcome, SteeringResult } from '../index.js';
 import { clearTaskReportSafely } from '@dutydeck/shared';
 import type { AsyncLocalStorage } from 'node:async_hooks';
 import type { AgentDriver, AgentEvent, EventType, PromptSourceDiagnostics, PublicTaskRecord, RepositoryBundle, Session, TaskRecord } from '@dutydeck/shared';
@@ -28,7 +29,7 @@ interface SteeringServiceDependencies {
   inspectRecovery: RecoveryService['inspectExecutionRecovery'];
   isQueueHeld: () => boolean;
   logTaskRejection: <T>(id: string, operation: Promise<T>) => Promise<T>;
-  options: Pick<RuntimeOptions, 'sessionPrompt' | 'authorizeTask'>;
+  options: Pick<RuntimeHost, 'prompts' | 'policy'>;
   projectQueue: (id: string) => Promise<void>;
   publicTask: (task: TaskRecord) => PublicTaskRecord;
   unblockQueue(id: string): void;
@@ -104,7 +105,7 @@ export class SteeringService {
       });
       try {
         await this.deps.authorize(id,task.executionContext?.actorId);
-        await this.mutations.wait(() => this.deps.options.authorizeTask?.(session,task,'submit') ?? Promise.resolve());
+        await this.mutations.wait(() => this.deps.options.policy.authorize({ phase: 'submit', session, task }));
         if (this.deps.isQueueHeld() || running()?.ref.attemptId !== target.ref.attemptId) return skipped('promptRequired');
         const reserved = await this.mutations.write(id, async () => this.deps.wake(this.deps.bound().beginQueuedSteering(this.deps.fence(session),taskId,task.revision,
           {operationId,actor:this.deps.actor(session,actorId),target:{taskId:target.ref.taskId,attemptId:target.ref.attemptId}},this.deps.idleResourceChecks())));
@@ -113,7 +114,8 @@ export class SteeringService {
         await this.deps.projectQueue(id);
         const steerContext = { ...input.executionContext, promptPolicyVersion: target.task.executionContext?.promptPolicyVersion ?? 'legacy-v1' as const };
         const assembled = steerContext.promptPolicyVersion === 'optimized-v1'
-          ? await this.mutations.wait(() => Promise.resolve(this.deps.options.sessionPrompt?.(session, input.executionContext.agentPrompt, steerContext) ?? input.executionContext.agentPrompt))
+          ? await this.mutations.wait(() => Promise.resolve(this.deps.options.prompts.atExecute(session, input.executionContext.agentPrompt, steerContext,
+            { taskId: target.ref.taskId, attemptId: target.ref.attemptId, actorId: target.task.executionContext?.actorId })))
           : input.executionContext.agentPrompt;
         const steeringPrompt = typeof assembled === 'string' ? assembled : assembled.prompt;
         await this.deps.recordPrompt(id, input.executionContext.agentPrompt, 'accepted_input', 'steer', task.id, operationId, input.executionContext.promptDiagnostics);

@@ -1,13 +1,15 @@
+import { runtimeHost, type ActiveTaskContext, type ExecutionPolicy, type LaunchContext, type PromptAssembler, type RuntimeEventBus, type RuntimeHost } from './runtime/host-ports.js';
+export { createAcceptPrompt, RuntimeEventBus, type ActiveTaskContext, type ExecutionPolicy, type LaunchContext, type PromptAssembler, type RuntimeEvent } from './runtime/host-ports.js';
 import { TurnRunner } from './runtime/turn-runner.js';
 import { EventIngest } from './runtime/event-ingest.js';
 import { Scheduler } from './runtime/scheduler.js';
 import { DriverSupervisor } from './runtime/driver-supervisor.js';
 import { SteeringService } from './runtime/steering-service.js';
-import { backgroundSource, runtimeStateKeys, clearTaskReportSafely, readSessionTaskReportReference, readSessionTaskReport, SESSION_NAME_CONFIG_PREFIX, taskReportInputSchema, writeTaskReport, type SessionWorkspace, type TaskReport, type TaskReportInput } from '@dutydeck/shared';
+import { sessionConfigOf, type SessionKinds, type SessionKindSpec, type NoticeFacts, runtimeStateKeys, clearTaskReportSafely, readSessionTaskReportReference, readSessionTaskReport, SESSION_NAME_CONFIG_PREFIX, taskReportInputSchema, writeTaskReport, type SessionWorkspace, type TaskReport, type TaskReportInput } from '@dutydeck/shared';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { randomUUID } from 'node:crypto';
 import type { AgentCapabilities, AgentConfig, AttemptActivity, AgentDriver, AgentEvent, DriverFactory, DriverTranscriptSourceObservation, EventType, EventWindowOptions, HistoryOutlineQuery, NormalizedDriverEvent, PermissionMode, PermissionRequestData, PromptPart, PromptSourceDiagnostics, PublicTaskRecord, RepositoryBundle, RuntimeControlClaim, Session, SkillDeliveryMetadata, StartSessionInput, TaskExecutionContext, TaskRecord, ToolRiskPolicy, TranscriptSourceObservation, VerificationCommandInput, VerificationResponse, WorkspaceCleanupBlocker, WorkspaceCleanupPreview, WorkspaceCleanupResult, WorkspaceResponse } from '@dutydeck/shared';
-import { canonicalExecutionJson, taskRequestV1Schema, makeId, now, errorMessage, RuntimeError, workspaceModes, sessionNameConfigKey, normalizeSessionName, parseLarkSourceId, supportsRemoteApproval, supportsNativeFork, redactCredentialText } from '@dutydeck/shared';
+import { canonicalExecutionJson, taskRequestV1Schema, makeId, now, errorMessage, RuntimeError, workspaceModes, sessionNameConfigKey, normalizeSessionName, supportsRemoteApproval, supportsNativeFork, redactCredentialText } from '@dutydeck/shared';
 import { warnCaught, type DiagnosticLog } from '@dutydeck/shared';
 import { listAcpxBuiltinAgents, AcpxAdapter, ProcessTreeCpu } from '@dutydeck/acp-client';
 import { commandExists, JsonlTransport, PipeTransport, probeAgent, PtyTransport } from '@dutydeck/transports';
@@ -40,10 +42,6 @@ function isSameOrIntersectingPath(a: string, b: string): boolean {
   return a.startsWith(sepWithB) || b.startsWith(sepWithA);
 }
 
-
-function sessionConfigOf(agent: AgentConfig, input: StartSessionInput) {
-  return { cwd: input.cwd ?? agent.cwd ?? process.cwd(), model: input.model ?? agent.model, codexProfile: input.codexProfile ?? agent.codexProfile, reasoningEffort: input.reasoningEffort ?? agent.reasoningEffort, permissionMode: input.permissionMode ?? agent.permissionMode };
-}
 
 /** 启动期（资源尚未 ready）driver transcript source 观察的有界缓冲上限。 */
 const INSIGHT_SOURCE_MAX_PENDING = 64;
@@ -99,6 +97,15 @@ export interface TaskRequestMaterial {
 }
 
 export interface RuntimeOptions {
+  executionPolicy?: ExecutionPolicy;
+  launchContext?: LaunchContext;
+  promptAssembler?: PromptAssembler;
+  events?: RuntimeEventBus;
+  beforeSettlement?: (session: Session, taskId: string) => Promise<void>;
+  matterSummary?: import('@dutydeck/shared').MatterTracking['summary'];
+  sessionKinds?: SessionKinds;
+  renderNotice?: (facts: NoticeFacts) => string;
+  /** Legacy host callbacks are adapted when the corresponding port is omitted. */
   matterTracking?: import('@dutydeck/shared').MatterTracking;
   ptyRetirement?: PtyRetirementControl;
 
@@ -315,7 +322,9 @@ export class DutydeckRuntime {
   private readonly humanWaits: HumanWaits;
   private readonly notices: Notices;
 
-  constructor(private readonly repos: RepositoryBundle, private readonly options: RuntimeOptions = {}) {
+  private readonly options: RuntimeHost;
+  constructor(private readonly repos: RepositoryBundle, input: RuntimeOptions = {}) {
+    const options = this.options = runtimeHost(input);
     const interval = options.cleanupIntervalMs ?? 5 * 60_000;
     if (!Number.isInteger(interval) || interval < 0 || interval > 2_147_483_647) {
       throw new RuntimeError('INVALID_CLEANUP_INTERVAL', 'cleanupIntervalMs must be 0 (disabled) or an integer between 1 and 2147483647', 400);
@@ -325,14 +334,14 @@ export class DutydeckRuntime {
     this.configurations = new DriverConfigurationLedger(repos.config);
     this.localResources = new LocalDriverLedger(() => this.bound(), repos.execution);
     this.publisher = new PersistentEventPublisher({ highWaterMark: id => repos.events.highWaterMark(id), listWindow: (id, options) => repos.events.listWindow(id, options) }, undefined, options.log);
-    this.workspaces = new WorkspaceManager(repos.config, options.workspaceRoot, (id, commit) => {
+    this.workspaces = new WorkspaceManager(repos.config, options.launch.workspaceRoot, (id, commit) => {
       if (!this.mutations.current()) throw new RuntimeError('WORKSPACE_OWNER_REQUIRED', 'Workspace record writes require an explicit local owner', 500);
       return this.mutations.write(id, commit);
     });
     this.verifications = new VerificationManager(repos.config, (id, commit) => this.mutations.run(undefined, () => this.mutations.write(id, commit)));
-    const ptyDriverFactory = options.ptyDriverFactory;
-    this.factory = options.driverFactory ?? ((agent, protocol, onEvent, onExit, sessionId, context) => {
-      if (protocol === 'acp') return new AcpxAdapter({ ...agent, env: { ...agent.env, dutydeck_session_id: sessionId } }, { sessionKey: sessionId, context, onEvent, log: this.options.log, ...(this.options.resolveRiskPolicy ? { resolveRiskPolicy: (fallback?: ToolRiskPolicy) => this.options.resolveRiskPolicy!(sessionId, fallback) } : {}), ...(this.options.awaitingAnswer ? { awaitingAnswer: () => this.humanWaits.awaitingAnswer(sessionId) } : {}) });
+    const ptyDriverFactory = options.launch.ptyDriverFactory;
+    this.factory = options.launch.driverFactory ?? ((agent, protocol, onEvent, onExit, sessionId, context) => {
+      if (protocol === 'acp') return new AcpxAdapter({ ...agent, env: { ...agent.env, dutydeck_session_id: sessionId } }, { sessionKey: sessionId, context, onEvent, log: this.options.log, ...(this.options.policy.riskPolicy ? { resolveRiskPolicy: (fallback?: ToolRiskPolicy) => this.options.policy.riskPolicy!(sessionId, fallback) } : {}), ...(this.options.awaitingAnswer ? { awaitingAnswer: () => this.humanWaits.awaitingAnswer(sessionId) } : {}) });
       if (protocol === 'pty-cli') {
         if (!ptyDriverFactory) throw new RuntimeError('DRIVER_UNAVAILABLE', 'protocol 为 pty-cli 的 agent 需要注入 ptyDriverFactory（@dutydeck/pty-driver）', 503);
         // 高风险拦截钩子按 dutydeck_session_id 找会话策略，和 ACP 一样由宿主注入。
@@ -342,7 +351,7 @@ export class DutydeckRuntime {
       if (protocol === 'pipe') return new PipeTransport(agent, { onEvent, onExit, context });
       return new JsonlTransport(agent, { onEvent, onExit, context });
     });
-    if (!options.driverFactory) this.factory.controlledResources = protocol => protocol === 'acp' || protocol === 'jsonl' || protocol === 'pipe';
+    if (!options.launch.driverFactory) this.factory.controlledResources = protocol => protocol === 'acp' || protocol === 'jsonl' || protocol === 'pipe';
     this.supervisor = new DriverSupervisor(this.mutations, {
       assertResources: (...args) => this.assertResources(...args),
       assertVerificationRecoverySafe: (...args) => this.assertVerificationRecoverySafe(...args),
@@ -592,7 +601,7 @@ export class DutydeckRuntime {
   private actor(session: Session, actorId?: string): ExecutionActor {
     if (!actorId) return { kind: 'unspecified' };
     if (actorId === 'installation_owner') return { kind: 'installation_owner', id: 'installation_owner' };
-    const appId = session.source === 'lark' ? parseLarkSourceId(session.sourceId).appId : undefined;
+    const appId = this.options.channelAppId(session);
     if (!appId) throw new RuntimeError('ACTOR_REQUIRED', 'Channel execution requires an explicit request with its App identity', 403);
     return { kind: 'channel', id: actorId, appId };
   }
@@ -651,7 +660,7 @@ export class DutydeckRuntime {
     return this.mutations.run(token, () => this.mutations.wait(operation));
   }
   private async authorize(id: string, actorId?: string, activate = false) {
-    const commit = await this.mutations.wait(() => this.options.authorizeExecution?.(id, actorId) ?? Promise.resolve());
+    const commit = await this.mutations.wait(() => this.options.policy.authorize({ phase: 'start', sessionId: id, actorId }));
     if (activate && commit) await this.mutations.write(id, commit);
     this.mutations.check();
   }
@@ -705,7 +714,7 @@ export class DutydeckRuntime {
   }
   private async configureAgentForSession(agent: AgentConfig, session: Session): Promise<AgentConfig> {
     agent = this.agentForSessionProtocol(agent, session);
-    if (this.options.configureAgent) agent = await this.mutations.wait(() => this.options.configureAgent!(agent, session));
+    if (this.options.launch.configureAgent) agent = await this.mutations.wait(() => this.options.launch.configureAgent!(agent, session));
     return {
       ...agent,
       cwd: session.cwd,
@@ -716,7 +725,7 @@ export class DutydeckRuntime {
       permissionMode: session.permissionMode ?? agent.permissionMode,
       // 终端模式的适配器据会话来源决定启动参数（飞书会话固定 CLI 的权限模式），只注入 pty-cli，不进 ACPX session。
       // dutydeck_session_permission_mode：任务以 deny-all（先出计划）运行时，终端仍按会话本身的模式启动 CLI。
-      env: { ...agent.env, ...this.options.sessionEnvironment?.(session), ...(session.protocol === 'pty-cli' ? { dutydeck_terminal_backend: session.terminalBackend ?? 'tmux', dutydeck_session_permission_mode: session.permissionMode ?? agent.permissionMode, ...(session.source ? { dutydeck_session_source: session.source } : {}) } : {}) }
+      env: { ...agent.env, ...this.options.launch.environment?.(session), ...(session.protocol === 'pty-cli' ? { dutydeck_terminal_backend: session.terminalBackend ?? 'tmux', dutydeck_session_permission_mode: session.permissionMode ?? agent.permissionMode, ...(session.source ? { dutydeck_session_source: session.source } : {}) } : {}) }
     };
   }
 
@@ -822,9 +831,8 @@ export class DutydeckRuntime {
     return this.mutations.write(id, async () => {
       const session = await this.repos.sessions.get(id);
       if (!session) throw new RuntimeError('SESSION_NOT_FOUND', `Unknown session: ${id}`, 404);
-      if (session.source === 'work_item') {
-        throw new RuntimeError('INVALID_WORK_SESSION', 'Work-item managed sessions cannot be renamed', 400);
-      }
+      const refusal = this.kindForSource(session.source)?.renameError?.();
+      if (refusal) throw refusal;
       const key = sessionNameConfigKey(id);
       await this.repos.config.set(key, normalizedName ?? '');
       return this.withSessionMetadata(session);
@@ -1185,7 +1193,7 @@ export class DutydeckRuntime {
     if (running) return running;
     const check = (async () => {
       const agent = await this.repos.agents.get(agentId);
-      const pending = agent && (this.options.agentStatusCheck ?? defaultAgentStatusCheck)(agent);
+      const pending = agent && (this.options.launch.agentStatusCheck ?? defaultAgentStatusCheck)(agent);
       if (!agent || !pending) { this.agentUnavailable.delete(agentId); return undefined; }
       const state = await pending.catch(() => 'unknown' as const);
       if (state === 'logged_in') this.agentUnavailable.delete(agentId);
@@ -1264,7 +1272,7 @@ export class DutydeckRuntime {
         () => this.mutations.run(token, () => this.assertVerificationAdmission(session))
       ));
       // best-effort: verification is already settled before this notification.
-      if (this.options.onVerificationCompleted) void Promise.resolve().then(() => this.options.onVerificationCompleted!(session, result)).catch(() => {});
+      if (this.options.events.observed) void Promise.resolve().then(() => this.options.events.publish({ type: 'verification.completed', session, result })).catch(() => {});
       return result;
     } catch (error) {
       if (error instanceof RuntimeError && error.code === 'VERIFICATION_RECOVERY_BLOCKED') this.blockedVerificationSessions.set(id, error.message);
@@ -1389,13 +1397,6 @@ export class DutydeckRuntime {
     };
   }
 
-  private async prepareTask(session: Session, agentPrompt: string, skillRequests?: string[], context?: Pick<TaskExecutionContext, 'promptPolicyVersion' | 'promptParts'>): Promise<{ agentPrompt: string; skillDeliveries?: SkillDeliveryMetadata[]; promptParts?: PromptPart[]; promptDiagnostics?: PromptSourceDiagnostics }> {
-    if (skillRequests?.length && !this.options.prepareTaskPrompt) {
-      throw new RuntimeError('SKILL_DELIVERY_UNAVAILABLE', 'This Runtime has no Skill delivery resolver', 503);
-    }
-    return this.options.prepareTaskPrompt?.(session, agentPrompt, skillRequests, context) ?? { agentPrompt, ...(context?.promptParts ? { promptParts: context.promptParts } : {}) };
-  }
-
   subscribe(sessionId: string, listener: EventListener, options?: SubscribeOptions) {
     return this.publisher.subscribe(sessionId, event => this.eventScope.exit(() => this.mutations.run(undefined, () => listener(event))), options);
   }
@@ -1479,7 +1480,7 @@ export class DutydeckRuntime {
     } catch (error) { (this.options.log ?? console).warn({ error, sessionId }, '读取待清理收尾报告失败，继续处理'); }
   }
 
-  getActiveTaskContext(sessionId: string): { taskId: string; attemptId?: string; actorId?: string } | undefined {
+  getActiveTaskContext(sessionId: string): ActiveTaskContext | undefined {
     const task = this.activeTasks.get(sessionId);
     if (!task) return undefined;
     // 当前 attempt 必须确实属于这个活跃 task；队列/旧 token 残留不能冒充当前轮。
@@ -1547,7 +1548,7 @@ export class DutydeckRuntime {
           && this.repos.execution.getResources(id).find(row => row.resourceId === resource.resourceId)?.revision === resource.revision
           && !this.bound().getPendingQueueActions(this.fence(session)).some(action => action.target?.attemptId === attempt.attemptId);
         if (!unchanged()) continue;
-        const policy = this.options.resolveRiskPolicy ? await this.options.resolveRiskPolicy(id, task.executionContext?.riskPolicy) : task.executionContext?.riskPolicy;
+        const policy = this.options.policy.riskPolicy ? await this.options.policy.riskPolicy(id, task.executionContext?.riskPolicy) : task.executionContext?.riskPolicy;
         if (policy?.enabled && !policy.authorized) continue;
         if (await driver.canRecoverTurn(recovery) && unchanged()) recoverable.set(id, unchanged);
       } catch (error) { this.warnCaught('getRestartActivity.checkRecovery', id, error); }
@@ -1559,23 +1560,29 @@ export class DutydeckRuntime {
 
   async start(input: StartSessionInput): Promise<Session> {
     this.assertReady();
-    if (input?.source === 'schedule') throw new RuntimeError('INVALID_SCHEDULE_SESSION', 'Schedule sessions require the internal admission API', 403);
-    if (input?.source === 'work_item') throw new RuntimeError('INVALID_WORK_SESSION', 'Work-item sessions require the internal admission API', 403);
+    const refusal = this.kindForSource(input?.source)?.publicStartError?.();
+    if (refusal) throw refusal;
     return this.startSession(input);
+  }
+
+  private kindForSource(source: Session['source']): SessionKindSpec | undefined {
+    return Object.values(this.options.sessionKinds).find((spec: SessionKindSpec) => spec.source === source);
+  }
+
+  private validateKind(spec: SessionKindSpec, id: string, input: StartSessionInput) {
+    if (id.search(spec.idPattern) < 0) throw spec.invalidIdentity();
+    spec.validate(undefined, input);
   }
 
   /** Internal orchestration entry: mapping and authority must be durable before birth. */
   async startWorkItemSession(input: StartSessionInput, stableSessionId: string, beforeStart: () => Promise<void>): Promise<Session> {
-    if (input.source !== 'work_item' || !input.sourceId || !/^ses_work_[a-f0-9]{64}$/.test(stableSessionId)) {
-      throw new RuntimeError('INVALID_WORK_SESSION', 'Invalid work-item session identity', 400);
-    }
+    const spec = this.options.sessionKinds.workItem;
+    this.validateKind(spec, stableSessionId, input);
     return this.scoped(stableSessionId, async () => {
     await this.mutations.wait(() => beforeStart());
     const existing = await this.mutations.wait(() => this.repos.sessions.get(stableSessionId));
     if (existing) {
-      if (existing.source !== 'work_item' || existing.sourceId !== input.sourceId || existing.agentId !== input.agentId) {
-        throw new RuntimeError('WORK_SESSION_CONFLICT', 'Work-item session identity conflict', 409);
-      }
+      spec.validate(existing, input);
       return existing;
     }
     if (this.startingWorkSessions.has(stableSessionId)) throw new RuntimeError('WORK_SESSION_STARTING', 'Work session start is already in progress', 409);
@@ -1589,12 +1596,10 @@ export class DutydeckRuntime {
   private readonly backgroundStarts = new Map<string, Promise<Session>>();
   async startBackgroundSession(input: StartSessionInput, stableSessionId: string, beforeStart: () => Promise<void>): Promise<Session> {
     this.assertReady();
-    if (input.source !== 'lark' || !/^[^:]+:[^:]+:group:collaboration:.+$/.test(input.sourceId ?? '') || !/^ses_collab_[a-f0-9]{64}$/.test(stableSessionId) || input.workspaceMode === 'worktree') {
-      throw new RuntimeError('INVALID_BACKGROUND_SESSION', 'Background sessions require a stable authorized Lark group scope and shared workspace', 400);
-    }
+    const spec = this.options.sessionKinds.collaboration;
+    this.validateKind(spec, stableSessionId, input);
     return this.startStable(input, stableSessionId, beforeStart, 'Background', async (existing, agent) => {
-      const expected = { source: input.source, sourceId: input.sourceId, agentId: input.agentId, ...sessionConfigOf(agent, input), systemPrompt: agent.systemPrompt };
-      if (Object.entries(expected).some(([key, value]) => (existing[key as keyof Session] ?? undefined) !== (value ?? undefined))) throw new RuntimeError('BACKGROUND_SESSION_CONFLICT', 'Background session immutable configuration changed', 409);
+      spec.validate(existing, input, agent);
       return existing;
     }, () => this.startBackgroundSession(input, stableSessionId, beforeStart));
   }
@@ -1622,7 +1627,7 @@ export class DutydeckRuntime {
   }
 
   private probe(agent: AgentConfig) {
-    return (this.options.probe ?? probeAgent)(agent, this.options.acpxCommand);
+    return (this.options.launch.probe ?? probeAgent)(agent, this.options.launch.acpxCommand);
   }
 
   private sessionCapability(agent: AgentConfig, input: StartSessionInput) {
@@ -1646,7 +1651,7 @@ export class DutydeckRuntime {
   /** Resolve auto transport before the memory job freezes its permission posture. */
   async resolveMemorySessionInput(input: StartSessionInput): Promise<StartSessionInput & { protocol: AgentCapabilities['protocol'] }> {
     this.assertReady();
-    if (input.source !== backgroundSource.memory || !/^[A-Za-z0-9_-]+:[A-Za-z0-9_-]+:memory$/.test(input.sourceId ?? '')) throw new RuntimeError('INVALID_MEMORY_SESSION', 'Invalid memory session scope', 400);
+    this.options.sessionKinds.memory.validateScope(input);
     const agent = await this.repos.agents.get(input.agentId);
     if (!agent) throw new RuntimeError('AGENT_NOT_FOUND', 'Memory Agent not found', 404);
     const { configured, capability } = await this.newSessionCapability(agent, input);
@@ -1657,13 +1662,11 @@ export class DutydeckRuntime {
 
   async startMemorySession(input: StartSessionInput, stableSessionId: string, beforeStart: () => Promise<void>): Promise<Session> {
     this.assertReady();
-    if (input.source !== backgroundSource.memory || !/^[A-Za-z0-9_-]+:[A-Za-z0-9_-]+:memory$/.test(input.sourceId ?? '') || !/^ses_memory_[a-f0-9]{64}$/.test(stableSessionId) || input.workspaceMode === 'worktree') {
-      throw new RuntimeError('INVALID_MEMORY_SESSION', 'Memory sessions require a stable authorized Lark group scope and shared workspace', 400);
-    }
+    const spec = this.options.sessionKinds.memory;
+    this.validateKind(spec, stableSessionId, input);
     return this.startStable(input, stableSessionId, beforeStart, 'Memory', async (existing, agent) => {
       const { capability } = this.sessionCapability(agent, input);
-      const expected = { protocol: capability.protocol, workspaceMode: input.workspaceMode ?? 'shared', source: input.source, sourceId: input.sourceId, agentId: input.agentId, ...sessionConfigOf(agent, input), systemPrompt: agent.systemPrompt };
-      if (Object.entries(expected).some(([key, value]) => ((key === 'workspaceMode' ? existing.workspaceMode ?? 'shared' : existing[key as keyof Session]) ?? undefined) !== (value ?? undefined))) throw new RuntimeError('MEMORY_SESSION_CONFLICT', 'Memory session immutable configuration changed', 409);
+      spec.validate(existing, input, agent, capability.protocol);
       return existing;
     }, () => this.startMemorySession(input, stableSessionId, beforeStart));
   }
@@ -1672,15 +1675,12 @@ export class DutydeckRuntime {
   async startScheduleSession(input: StartSessionInput, stableSessionId: string, beforeStart: () => Promise<void>): Promise<Session> {
     this.assertReady();
     // independent 计划用受管 worktree；fresh 计划每次触发一个新会话，沿用来源会话的共享目录。
-    if (input.source !== 'schedule' || !input.sourceId || !/^ses_schedule_[a-f0-9]{64}$/.test(stableSessionId) || (input.workspaceMode !== 'worktree' && input.workspaceMode !== 'shared')) {
-      throw new RuntimeError('INVALID_SCHEDULE_SESSION', 'Schedule sessions require a stable identity and an explicit workspace mode', 400);
-    }
+    const spec = this.options.sessionKinds.schedule;
+    this.validateKind(spec, stableSessionId, input);
     return this.startStable(input, stableSessionId, beforeStart, 'Schedule', async (existing, agent) => {
       const current = await this.withSessionMetadata(existing);
       const { capability } = this.sessionCapability(agent, input);
-      const { cwd, ...configured } = sessionConfigOf(agent, input);
-      const expected = { protocol: capability.protocol, workspaceMode: input.workspaceMode, source: input.source, sourceId: input.sourceId, agentId: input.agentId, ...configured, systemPrompt: agent.systemPrompt };
-      if (current.workspaceSourceCwd !== cwd || Object.entries(expected).some(([key, value]) => ((key === 'workspaceMode' ? current.workspaceMode ?? 'shared' : current[key as keyof Session]) ?? undefined) !== (value ?? undefined))) throw new RuntimeError('SCHEDULE_SESSION_CONFLICT', 'Schedule session immutable configuration changed', 409);
+      spec.validate(current, input, agent, capability.protocol);
       // Reusing a schedule session re-runs the admission hook against the existing identity.
       await beforeStart();
       return current;
@@ -1691,7 +1691,7 @@ export class DutydeckRuntime {
   async stopWorkItemSession(sessionId: string, actor: ExecutionActor): Promise<boolean> {
     this.assertReady();
     const session = await this.repos.sessions.get(sessionId);
-    if (session?.source !== 'work_item') throw new RuntimeError('INVALID_WORK_SESSION', 'Not a work-item session', 409);
+    if (session?.source !== this.options.sessionKinds.workItem.source) throw new RuntimeError('INVALID_WORK_SESSION', 'Not a work-item session', 409);
     const startupPending = this.startingWorkSessions.has(sessionId);
     await this.stop(sessionId, actor);
     if (!actor || actor.kind === 'unspecified') throw new RuntimeError('ACTOR_REQUIRED', 'Work-item cancellation requires its recorded actor', 403);
@@ -1771,7 +1771,7 @@ export class DutydeckRuntime {
     const requestedMode = input.workspaceMode ?? 'shared';
     const workspaceMode = !owned && requestedMode === 'worktree' && input.fallbackToShared === true && await isNonGitWorkspace(sourceCwd)
       ? 'shared' : requestedMode;
-    const terminalBackend = capability.protocol === 'pty-cli' ? await this.options.terminalBackend?.() ?? 'tmux' : undefined;
+    const terminalBackend = capability.protocol === 'pty-cli' ? await this.options.launch.terminalBackend?.() ?? 'tmux' : undefined;
     const session: Session = { terminalBackend, id: owned?.id ?? makeId('ses'), agentId: agent.id, state: 'created', cwd: sourceCwd, workspaceMode, model: initialConfigured.model, codexProfile: initialConfigured.codexProfile, reasoningEffort: initialConfigured.reasoningEffort, permissionMode: initialConfigured.permissionMode, source: input.source, sourceId: input.sourceId, protocol: capability.protocol, runId: makeId('run'), createdAt: now(), updatedAt: now(), systemPrompt: agent.systemPrompt };
     return this.scoped(session.id, async () => {
     await this.mutations.write(session.id, async () => this.bound().createSession(eventJson(session) as unknown as Session));
@@ -2079,14 +2079,14 @@ export class DutydeckRuntime {
   }
 
   async trackMatterSession(sessionId: string, input: import('@dutydeck/shared').MatterSessionInput) {
-    try { await this.options.matterTracking?.session(sessionId, input); } catch { console.warn('MATTER_LINK_FAILED'); }
+    try { await this.options.events.publish({ type: 'matter.session', sessionId, input }); } catch { console.warn('MATTER_LINK_FAILED'); }
   }
-  getMatter(sessionId: string) { return this.options.matterTracking?.summary(sessionId); }
+  getMatter(sessionId: string) { return this.options.matterSummary?.(sessionId); }
 
   async dispatchRequest(request: TaskRequestV1, material: TaskRequestMaterial = {}) {
     this.assertReady();
     canonicalExecutionJson(request); taskRequestV1Schema.parse(request);
-    const { sessionId: id, prompt, mode, skills: skillRequests } = request;
+    const { sessionId: id, prompt, mode } = request;
     const actorId = request.actor.kind === 'unspecified' ? undefined : request.actor.id;
     const { agentPrompt = prompt, riskPolicy, idleCompactHours, promptParts } = material;
     const stored = await this.repos.sessions.get(id);
@@ -2094,7 +2094,7 @@ export class DutydeckRuntime {
     if (!stored) throw new RuntimeError('SESSION_NOT_FOUND', 'Session is missing', 404);
     const existing = this.lookupAcceptedTask(request);
     if (existing) {
-      try { await this.options.matterTracking?.accepted(stored, existing.task); } catch { console.warn('MATTER_LINK_FAILED'); }
+      try { await this.options.events.publish({ type: 'task.accepted', session: stored, task: existing.task }); } catch { console.warn('MATTER_LINK_FAILED'); }
       if (this.mutations.valid(this.lifecycle(id)) && !stored.archivedAt && stored.state !== 'stopped') {
         await this.logTaskRejection(id, this.scoped(id, async () => {
           this.scheduler.rememberQueued(existing.task); this.scheduler.unblockQueue(id);
@@ -2111,7 +2111,7 @@ export class DutydeckRuntime {
       const stopBlock = this.gate.stops.recheckingReason(id);
       if (stopBlock) throw new RuntimeError('DRIVER_STOP_UNVERIFIED', `这个会话的 Agent 进程还没确认已经退出，暂时不能接新消息。后台会定时复核，确认退出后自动恢复，之后重新发送即可。（${stopBlock}）`, 409);
       await this.authorize(id, actorId);
-      await this.mutations.wait(() => this.options.admitTask?.(session, request) ?? Promise.resolve());
+      await this.mutations.wait(() => this.options.policy.admit?.(session, request) ?? Promise.resolve());
       const agent = await this.mutations.wait(() => this.repos.agents.get(session.agentId));
       if (!agent) throw new RuntimeError('AGENT_NOT_FOUND', 'Agent is missing', 404);
       const executionOptions: ExecutionOptions = executionOptionsOf({ permissionMode: request.options.permissionMode ?? session.permissionMode ?? agent.permissionMode,
@@ -2120,12 +2120,12 @@ export class DutydeckRuntime {
       const payload = request.sourcePayload as { promptPolicyVersion?: unknown; promptParts?: unknown };
       const inherited = payload?.promptPolicyVersion;
       if (inherited !== undefined && inherited !== 'legacy-v1' && inherited !== 'optimized-v1') throw new RuntimeError('PROMPT_POLICY_INVALID', 'Unsupported inherited prompt policy', 409);
-      const selected: { version: 'legacy-v1' | 'optimized-v1'; diagnosticReason?: string } = inherited ? { version: inherited } : await this.mutations.wait(() => this.options.selectPromptPolicy?.(session, request) ?? Promise.resolve({ version: 'legacy-v1' as const }));
       const sources = promptParts ?? (Array.isArray(payload?.promptParts) ? payload.promptParts as PromptPart[] : undefined);
-      const prepared = await this.mutations.wait(() => this.prepareTask(session, agentPrompt, skillRequests, { promptPolicyVersion: selected.version, ...(sources ? { promptParts: sources } : {}) }));
-      const context: TaskExecutionContext = { ...this.executionContext(prepared.agentPrompt, riskPolicy, actorId, prepared.skillDeliveries, idleCompactHours), promptPolicyVersion: selected.version,
-        ...(prepared.promptParts ? { promptParts: prepared.promptParts } : {}), ...(prepared.promptDiagnostics ? { promptDiagnostics: { ...prepared.promptDiagnostics, ...(selected.diagnosticReason ? { fallbackReason: selected.diagnosticReason } : {}) } }
-          : selected.diagnosticReason ? { promptDiagnostics: { templateVersion: selected.version, beforeChars: prepared.agentPrompt.length, afterChars: prepared.agentPrompt.length, deduplicatedParts: 0, fallbackReason: selected.diagnosticReason, parts: [] } } : {}) };
+      const prepared = await this.mutations.wait(() => this.options.prompts.atAccept(session, request,
+        { agentPrompt, inheritedVersion: inherited, promptParts: sources }, () => this.mutations.check()));
+      const context: TaskExecutionContext = { ...this.executionContext(prepared.agentPrompt, riskPolicy, actorId, prepared.skillDeliveries, idleCompactHours), promptPolicyVersion: prepared.version,
+        ...(prepared.promptParts ? { promptParts: prepared.promptParts } : {}), ...(prepared.promptDiagnostics ? { promptDiagnostics: { ...prepared.promptDiagnostics, ...(prepared.diagnosticReason ? { fallbackReason: prepared.diagnosticReason } : {}) } }
+          : prepared.diagnosticReason ? { promptDiagnostics: { templateVersion: prepared.version, beforeChars: prepared.agentPrompt.length, afterChars: prepared.agentPrompt.length, deduplicatedParts: 0, fallbackReason: prepared.diagnosticReason, parts: [] } } : {}) };
       const content = { version: 2 as const, prompt, executionContext: context, contentSources: [], executionOptions };
       const accepted = await this.mutations.write(id, async () => {
         const committed = this.wake(this.bound().acceptTask(this.fence(session), request, { ...content, digest: digest(content) }, mode === 'interrupt' ? 'front' : 'back'));
@@ -2134,7 +2134,7 @@ export class DutydeckRuntime {
       });
       if (!accepted.task) throw new RuntimeError('TASK_ACCEPTANCE_MISSING', 'The committed task is missing', 500);
       if (!accepted.replayed) await this.clearSessionTaskReports(id);
-      try { await this.options.matterTracking?.accepted(session, accepted.task); } catch { console.warn('MATTER_LINK_FAILED'); }
+      try { await this.options.events.publish({ type: 'task.accepted', session, task: accepted.task }); } catch { console.warn('MATTER_LINK_FAILED'); }
       this.verificationDeferredTasks.get(id)?.add(accepted.task.id);
       if (!accepted.replayed && accepted.task.id !== executionTaskId(request.namespace, id, request.key)) throw new RuntimeError('TASK_ID_MISMATCH', 'Accepted task identity differs from its request', 500);
       this.scheduler.unblockQueue(id);
@@ -2296,8 +2296,7 @@ export class DutydeckRuntime {
     if (actor && actor.kind !== 'unspecified') {
       this.bound().authorizeNativeContextControl(this.fence(session), actor);
       if (actor.kind !== 'installation_owner') {
-        if (this.options.authorizeControl) await this.options.authorizeControl(id, actor, 'stop');
-        else await this.options.authorizeExecution?.(id, actor.id);
+        await this.options.policy.authorize({ phase: 'control', sessionId: id, actor, action: 'stop' });
       }
     }
     await this.supervisor.revokeSession(id, reason, true, 'stopped', false, false, undefined, actor);
@@ -2447,6 +2446,7 @@ export class DutydeckRuntime {
       while (this.cleaningRuns.size) await Promise.allSettled([...this.cleaningRuns.values()]);
       while (this.supervisor.factoryCleanups.size) await Promise.allSettled([...this.supervisor.factoryCleanups.values()]);
       await this.mutations.barrier();
+      this.options.unsubscribeLegacy?.();
       await this.publisher.close();
       this.supervisor.clearDrivers(); this.scheduler.clearQueues();
       this.cleaningDirs.clear(); this.preparingWorkspaces.clear();

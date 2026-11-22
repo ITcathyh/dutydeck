@@ -21,9 +21,11 @@ it('advertises a single full list and optional direct discovery with the current
     const port = await new Promise<number>((resolve, reject) => { const server = createServer(); server.once('error', reject); server.listen(0, '127.0.0.1', () => { const address = server.address() as { port: number }; server.close(error => error ? reject(error) : resolve(address.port)); }); });
     service = await startLocalServer({ webRoot: root, env: { PATH: process.env.PATH, HOME: root, NODE_ENV: 'test', DUTYDECK_HOST: '127.0.0.1', DUTYDECK_PORT: String(port), DUTYDECK_DEFAULT_CWD: root, DUTYDECK_DATABASE_URL: database, DUTYDECK_AUTH: 'false', DUTYDECK_DISABLE_LARK_LISTENER: 'true', DUTYDECK_AGENTS_JSON: '[]' } });
     const options = runtimeInputs(service.runtime).options;
-    vi.spyOn(service.runtime, 'getActiveTaskContext').mockReturnValue({ taskId: 'task', attemptId: 'attempt', actorId: 'installation_owner' });
+    const active = { taskId: 'task', attemptId: 'attempt', actorId: 'installation_owner' };
+    const reentry = vi.spyOn(service.runtime, 'getActiveTaskContext');
     const session = { id: 'fixture', agentId: 'fake', cwd: root, state: 'idle', runId: 'r', createdAt: '', updatedAt: '', source: 'web' } as Session;
-    const result = await options.sessionPrompt!(session, 'request'); const prompt = typeof result === 'string' ? result : result.prompt;
+    const result = await options.promptAssembler!.atExecute(session, 'request', undefined, active); const prompt = typeof result === 'string' ? result : result.prompt;
+    expect(reentry).not.toHaveBeenCalled();
     expect(prompt).toMatch(/tool list --turn \S+/);
     expect(prompt).toContain('tool list --summary --turn <本轮凭证>');
     expect(prompt).toContain('tool describe <工具> --turn <本轮凭证>');

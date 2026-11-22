@@ -1,6 +1,6 @@
 import type { AgentDriver, AttemptRef, BoundExecutionRepository, CommitResult, ExecutionActor, PublicTaskRecord, RepositoryBundle, ResourceCheckRef, Session, SessionFence, TaskAttempt, TaskRecord } from '@dutydeck/shared';
-import { backgroundSource, executionActorSchema, RuntimeError } from '@dutydeck/shared';
-import type { RuntimeOptions } from '../index.js';
+import { backgroundKindFor, executionActorSchema, RuntimeError } from '@dutydeck/shared';
+import type { RuntimeHost } from './host-ports.js';
 import { digest, LocalDriverLedger } from '../ledger.js';
 import { RuntimeSessionMutations, type Owner } from '../ownership.js';
 import { SessionGate } from '../session-gate.js';
@@ -24,7 +24,7 @@ interface SchedulerDependencies {
   interruptOwnedAttempt(ref: AttemptRef & SessionFence, operationId: string): Promise<void>;
   localResources: LocalDriverLedger;
   notices: Notices;
-  options: Pick<RuntimeOptions, 'log'>;
+  options: Pick<RuntimeHost, 'log'>;
   recoveryActor: ExecutionActor;
   repos: RepositoryBundle;
   runTask(id: string, task: TaskRecord, attempt: TaskAttempt): Promise<PublicTaskRecord>;
@@ -213,7 +213,7 @@ export class Scheduler {
    */
   private async expireStaleQueued(session: Session, task: TaskRecord) {
     // 记忆管线管理自己的超时与重试；通用取消会被它当作失败并重新建作业。
-    if (session.source === backgroundSource.memory) return false;
+    if (backgroundKindFor(session.source)?.managesQueueExpiry) return false;
     const now = Date.now();
     if (now - Date.parse(task.createdAt) <= QUEUED_TASK_EXPIRE_MS) return false;
     const current = this.deps.repos.execution.getTaskExecution(task.id);
@@ -226,8 +226,7 @@ export class Scheduler {
       { decisionId: `queue_expired:${task.id}`, actor: this.deps.recoveryActor, action: 'cancel', evidenceRefs: ['runtime:queue-expired', `task_created:${task.createdAt}`], resourceChecks: [] })));
     await this.projectQueue(session.id);
     this.deps.options.log?.warn({ sessionId: session.id, taskId: task.id, createdAt: task.createdAt }, 'Cancelled a queued task that waited over 24 hours without starting');
-    await this.deps.notices.sessionNotice(session, { id: `notice_${digest(['queue_expired', task.id])}`, kind: 'queue_expired', taskId: task.id, sessionIds: [session.id],
-      message: '排队超过 24 小时仍未开始，已取消、不会执行；需要的话请重发。' });
+    await this.deps.notices.sessionNotice(session, { id: `notice_${digest(['queue_expired', task.id])}`, taskId: task.id, sessionIds: [session.id] }, { kind: 'queue_expired' });
     return true;
   }
   async applyQueueActions(session: Session) {

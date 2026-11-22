@@ -34,8 +34,8 @@ async function fixture(mode: 'local' | 'token') {
   let bound!: ReturnType<typeof captureBoundExecution>;
   configureRuntime.mockImplementationOnce((options, repos) => {
     bound = captureBoundExecution(repos);
-    options.probe = () => ({ protocol: 'acp', available: true, pause: false, resume: true });
-    options.driverFactory = () => ({ resume: async () => {}, start: async () => {}, stop: async () => {}, isStopped: async () => true, isIdle: () => true, hasBackgroundWork: () => false, send, interrupt: async () => {} });
+    options.launchContext!.probe = () => ({ protocol: 'acp', available: true, pause: false, resume: true });
+    options.launchContext!.driverFactory = () => ({ resume: async () => {}, start: async () => {}, stop: async () => {}, isStopped: async () => true, isIdle: () => true, hasBackgroundWork: () => false, send, interrupt: async () => {} });
   });
   const service = await startLocalServer({ webRoot: directory, env: { PATH: process.env.PATH, HOME: directory, NODE_ENV: 'test',
     DUTYDECK_HOST: mode === 'local' ? '127.0.0.1' : '0.0.0.0', DUTYDECK_PORT: String(port), DUTYDECK_DEFAULT_CWD: directory,
