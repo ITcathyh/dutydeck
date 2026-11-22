@@ -192,7 +192,7 @@ it('cancels send while a metadata reply is delayed and invalidates the stamp aft
   let release!: () => void;
   const delayed = new Promise<void>(resolve => { release = resolve; });
   const writes: [string, string][] = [];
-  const persistent = { setDutydeckMetadata(key: string, value: string) { writes.push([key, value]); return key === 'first_prompt_sent' ? delayed : Promise.resolve(); } };
+  const persistent = { setMetadata(key: string, value: string) { writes.push([key, value]); return key === 'first_prompt_sent' ? delayed : Promise.resolve(); } };
   const access = driver as unknown as { persistentBackend(): unknown; preparedTurnId: string; firstPromptSent: boolean };
   vi.spyOn(access, 'persistentBackend').mockReturnValue(persistent);
   access.preparedTurnId = 'native-turn';
@@ -258,7 +258,7 @@ it('keeps the native input ancestry after an empty final-screen check, then fail
 it('does not let delayed persistent metadata postpone a proven native failure', async () => {
   let release!: () => void;
   const delayed = new Promise<void>(resolve => { release = resolve; });
-  const persistent = { setDutydeckMetadata() { return delayed; } };
+  const persistent = { setMetadata() { return delayed; } };
   const access = driver as unknown as { persistentBackend(): unknown; firstPromptSent: boolean };
   vi.spyOn(access, 'persistentBackend').mockReturnValue(persistent);
   const { pending } = await arm(); let done = false; void pending.then(() => { done = true; }, () => {});
@@ -303,7 +303,7 @@ it('serializes a late old metadata stamp before the next turn stamp after native
   let release!: () => void;
   const delayed = new Promise<void>(resolve => { release = resolve; });
   const writes: string[] = [];
-  const persistent = { setDutydeckMetadata(_key: string, value: string) { writes.push(value); return value === 'old-stamp' ? delayed : Promise.resolve(); } };
+  const persistent = { setMetadata(_key: string, value: string) { writes.push(value); return value === 'old-stamp' ? delayed : Promise.resolve(); } };
   const access = driver as unknown as { persistentBackend(): unknown; firstPromptSent: boolean; preparedTurnId: string };
   vi.spyOn(access, 'persistentBackend').mockReturnValue(persistent);
   access.firstPromptSent = true; access.preparedTurnId = 'old-stamp';
@@ -481,7 +481,7 @@ it('refuses a recovered compact draft at the real writer without appending busin
   const real = createCliAdapter('claude-code');
   (driver as any).adapter = { ...real, prepareInput: undefined,
     writeInput(backend: any, prompt: string) { prompts.push(prompt); return real.writeInput(backend, prompt); } };
-  await (driver as any).markTmuxReattached();
+  await (driver as any).markReattached();
   const pending = driver.send('business body'); void pending.catch(() => {});
   await vi.advanceTimersByTimeAsync(15_000);
   await expect(pending).rejects.toBeInstanceOf(PromptNotWrittenError);
@@ -547,7 +547,7 @@ it.each(['stop', 'detach'] as const)('cancels a pending pre-write screen read on
   await vi.advanceTimersByTimeAsync(1_000); await read;
   if (action === 'detach') {
     await driver.prepareForDaemonShutdown();
-    vi.spyOn((driver as any), 'persistentBackend').mockReturnValue({ detach() {}, setDutydeckMetadata() {} });
+    vi.spyOn((driver as any), 'persistentBackend').mockReturnValue({ detach() {}, setMetadata() {} });
   }
   const stopping = driver.stop(); release();
   await expect(pending).rejects.toThrow(action === 'detach' ? 'Driver detached' : 'Driver stopped');

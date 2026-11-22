@@ -9,7 +9,7 @@ import { createConnection } from 'node:net';
 import { createInterface } from 'node:readline';
 import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute } from 'node:path';
-import type { SessionBackend, SpawnOptions } from './types.js';
+import type { PersistentSessionBackend, TerminalMetadataKey, SpawnOptions } from './types.js';
 import { exitedWithin, type PhysicalProcessIdentity, type ProcessProbe } from './owned-tmux.js';
 import { parseProcStat, procStatExited, warnCaught, type DiagnosticLog, type ProcStat } from '@dutydeck/shared';
 
@@ -43,7 +43,31 @@ function processVerdictKey(pid: string, stat: ProcStat): string | undefined {
 /** A process in the owned scope could not be classified yet; stopOwnedIdentity retries these until its deadline. */
 export class HerdrCensusUnknownError extends Error {}
 
-export class HerdrBackend implements SessionBackend {
+export class HerdrBackend implements PersistentSessionBackend {
+  get persistent(): PersistentSessionBackend { return this; }
+  getMetadata(key: TerminalMetadataKey) { return this.getDutydeckMetadata(key); }
+  setMetadata(key: TerminalMetadataKey, value: string) { return this.setDutydeckMetadata(key, value); }
+  reattach(size: { cols: number; rows: number }) { return this.attach(size); }
+  readonly preserveOnShutdown = true;
+  async canAttach(purpose: 'start' | 'resume' | 'view') {
+    return this.hasState() && (purpose === 'view' || !await this.isStopped());
+  }
+  attachmentTarget() { return this; }
+  replacement() { return this.fork(); }
+  async prepareReplacement() { await this.stopOwnedIdentity(); }
+  exitedAfterDisconnect() { return this.isStopped(); }
+  async stopAttached() {
+    try { await this.stopOwned(this.state); } catch { /* A subsequent exit check must prove the stop. */ }
+  }
+  attachedExitVerified() { return this.isStopped(); }
+  adoptionIdentity() { return this.captureOwnedIdentity(); }
+  verifyAdoption(snapshot: unknown) { return this.assertOwnedIdentity(snapshot); }
+  captureIdentity() { return this.captureOwnedIdentity(); }
+  async captureAbsence() { return undefined; }
+  stopOwned(snapshot: unknown, _probe?: ProcessProbe, beforeKill?: (snapshot: unknown) => Promise<void>) {
+    return this.stopOwnedIdentity(snapshot, beforeKill);
+  }
+  verifyExit(snapshot: unknown) { return this.verifyOwnedIdentity(snapshot); }
   readonly kind = 'herdr' as const;
   readonly ownerId: string;
   initialScreen?: { data: string; cols: number; rows: number };
@@ -764,7 +788,7 @@ export class HerdrBackend implements SessionBackend {
       && this.options.processProbe.observe(state.server) === 'alive') (await this.cli(['session', 'stop', this.sessionName, '--json']));
   }
   async isStopped(): Promise<boolean> {
-    return !!this.state && (await this.verifyOwnedIdentity(this.state))
+    return !!this.state && (await this.verifyExit(this.state))
       && this.captures.every(identity => this.options.processProbe.observe(identity) === 'dead');
   }
 }

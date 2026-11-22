@@ -1,3 +1,4 @@
+import type { CliProfile } from '../profile.js';
 import type { AdapterSessionContext, CliAdapter, PtyLike } from '../types.js';
 import { submitPrompt } from './input-settle.js';
 
@@ -26,3 +27,11 @@ export function createGeminiAdapter(): CliAdapter {
     },
   };
 }
+
+export const geminiProfile = {
+  createAdapter: createGeminiAdapter,
+  discoveryOrder: 3,
+  contributions: [
+    { id: 'gemini', name: 'Gemini', command: 'gemini', adapterId: 'gemini', capabilities: { pause: false, resume: false } },
+  ],
+} satisfies CliProfile;

@@ -1,3 +1,4 @@
+import type { CliProfile } from '../profile.js';
 import type { AdapterSessionContext, CliAdapter, PtyLike } from '../types.js';
 import { writeRunnerInput } from '../runner-input.js';
 import { pushOpt } from '../runner-args.js';
@@ -43,3 +44,7 @@ export function createCodexAppAdapter(): CliAdapter {
     readyPattern: /›/,
   };
 }
+
+export const codexAppProfile = {
+  createAdapter: createCodexAppAdapter,
+} satisfies CliProfile;

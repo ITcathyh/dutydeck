@@ -1,24 +1,6 @@
 import type { NormalizedDriverEvent } from '@dutydeck/shared';
-import type { CliPathEnv } from '../cli-paths.js';
-
-/** Everything a resolver may use to identify the session on disk. */
-export interface SessionIdLookupContext {
-  /** dutydeck's session id — also the fingerprint injected into prompt #1. */
-  sessionId: string;
-  /** Claude-family automatic reconnect requires a durable prompt marker, not only a matching filename. */
-  requireMarker?: boolean;
-  /** The working directory the CLI was spawned in. */
-  cwd: string;
-  /**
-   * The environment the CLI child was spawned with (`PtyCliDriver.spawnEnv()`),
-   * NOT the daemon's `process.env`. The CLI wrote its records under the data
-   * root ITS env named — the driver strips `CLAUDE_*` from the child, and
-   * `agent.env` may relocate `CODEX_HOME` / `CLAUDE_CONFIG_DIR` / `HOME`.
-   * Optional: defaults to `process.env`, which is correct whenever the two
-   * environments agree.
-   */
-  env?: CliPathEnv;
-}
+import type { SessionIdLookupContext } from '@dutydeck/cli-adapters';
+export type { SessionIdLookupContext } from '@dutydeck/cli-adapters';
 
 /** One CLI's reverse lookup: dutydeck session id → the CLI's own session id. */
 export interface SessionIdLookup {

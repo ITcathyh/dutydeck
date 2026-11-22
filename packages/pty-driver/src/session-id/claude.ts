@@ -17,10 +17,10 @@
  * on recency: several dutydeck sessions can share a cwd, and picking the
  * newest jsonl among them would resume a sibling's conversation.
  */
-import { existsSync, lstatSync } from 'node:fs';
+import { existsSync } from 'node:fs';
 import { join } from 'node:path';
-import { pinnedSessionUuid } from '@dutydeck/cli-adapters';
-import { claudeFamilyCliAdapterIds, isClaudeFamilyCli } from '@dutydeck/shared';
+import { getCliProfile, pinnedSessionUuid } from '@dutydeck/cli-adapters';
+import { claudeFamilyCliAdapterIds } from '@dutydeck/shared';
 import { claudeProjectDirCandidates } from '../cli-paths.js';
 import { byMtimeDesc, parseJsonlObjects, readHead, nativeTranscriptObjects, walkFiles } from './fs-scan.js';
 import { buildSessionMarker, isUsableMarker } from './marker.js';
@@ -54,15 +54,8 @@ function markedSession(path: string, sessionId: string, exactPinned = false): st
   return undefined;
 }
 
-/** A pinned native id may not be reused for a fresh launch, even when its marker
- *  is unreadable. A name the filesystem cannot hold (ENAMETOOLONG: an
- *  untruncated legacy key) cannot hold a session either. */
-export function hasPinnedClaudeSession(adapterId: string, { sessionId, cwd, env }: SessionIdLookupContext): boolean {
-  if (!isClaudeFamilyCli(adapterId)) return false;
-  return claudeProjectDirCandidates(cwd, env).some(dir => {
-    try { lstatSync(join(dir, `${bareId(sessionId)}.jsonl`)); return true; }
-    catch (error) { return !['ENOENT', 'ENAMETOOLONG'].includes((error as NodeJS.ErrnoException).code ?? ''); }
-  });
+export function hasPinnedClaudeSession(adapterId: string, context: SessionIdLookupContext): boolean {
+  return getCliProfile(adapterId)?.extensions?.nativeSession?.pinned(context) ?? false;
 }
 
 export const claudeSessionIdLookup: SessionIdLookup = {

@@ -1,3 +1,6 @@
+import type { DiagnosticLog } from '@dutydeck/shared';
+import type { ProcessProbe } from './owned-tmux.js';
+
 /**
  * Session backend contract — PTY and terminal multiplexer implementations.
  * Third-party attribution: see THIRD_PARTY_NOTICES.md.
@@ -17,6 +20,7 @@ export interface SpawnOptions {
 }
 
 export interface SessionBackend {
+  readonly persistent?: PersistentSessionBackend;
   readonly kind: 'pty' | 'tmux' | 'herdr';
   /**
    * The multiplexer session this backend is bound to (tmux/Herdr session
@@ -61,3 +65,40 @@ export interface SessionBackend {
 
 /** Tri-state tmux session probe (command failure ≠ session missing). */
 export type SessionProbe = 'exists' | 'missing' | 'unknown';
+
+export type TerminalMetadataKey = 'first_prompt_sent' | 'turn_id';
+export interface PersistentSessionBackend extends SessionBackend {
+  readonly ownerId?: string;
+  readonly initialScreen?: { data: string; cols: number; rows: number };
+  canAttach(purpose: 'start' | 'resume' | 'view', check?: () => void): Promise<boolean>;
+  attachmentTarget(log?: DiagnosticLog): PersistentSessionBackend;
+  replacement(sessionId: string, log?: DiagnosticLog): PersistentSessionBackend;
+  recoveryOwnerError?(): Promise<string | undefined>;
+  prepareReplacement?(): Promise<void>;
+  readonly preserveOnShutdown?: boolean;
+  assertOwnedIdentity?(snapshot: unknown): Promise<void>;
+  onDisconnect?(callback: (error: Error) => void): void;
+  exitedAfterDisconnect(): Promise<boolean>;
+  rememberIdentity?(probe?: ProcessProbe): Promise<void>;
+  stopAttached(probe?: ProcessProbe): Promise<void>;
+  attachedExitVerified(probe: ProcessProbe | undefined, pid: number | undefined, preserve: boolean): Promise<boolean>;
+  idleProcessesVerified?(identity: string, probe: ProcessProbe): boolean;
+  adoptionIdentity(allowIdle: boolean, probe?: ProcessProbe, pid?: number): Promise<unknown>;
+  verifyAdoption(snapshot: unknown, idle: () => boolean, probe?: ProcessProbe, pid?: number): Promise<void>;
+  captureIdentity(probe?: ProcessProbe): Promise<unknown>;
+  captureAbsence(probe?: ProcessProbe): Promise<unknown>;
+  stopOwned(snapshot: unknown, probe: ProcessProbe, beforeKill?: (snapshot: unknown) => Promise<void>): Promise<unknown>;
+  verifyExit(snapshot: unknown, probe: ProcessProbe): Promise<boolean>;
+  getMetadata(key: TerminalMetadataKey): Promise<string | undefined>;
+  setMetadata(key: TerminalMetadataKey, value: string): Promise<void>;
+  reattach(size: { cols: number; rows: number }): Promise<void>;
+  detach(): Promise<void>;
+  cancelPending(): Promise<void>;
+}
+
+/** Screen encoding and cursor semantics also apply to externally supplied SessionBackend implementations. */
+export const terminalScreens = {
+  pty: { renderedFrames: false, paneGeometry: false },
+  tmux: { renderedFrames: false, paneGeometry: true },
+  herdr: { renderedFrames: true, paneGeometry: false },
+} as const;

@@ -1,13 +1,14 @@
+import { hostname } from 'node:os';
 import { expect, it, vi } from 'vitest';
 import { TmuxBackend } from '@dutydeck/session-backends';
 import type { AgentConfig } from '@dutydeck/shared';
 
 // Process 1 is the pane root seen at wiring; process 2 is a child the agent started later, which survives kill-session.
 const state = vi.hoisted(() => ({ dead: new Set<number>(), stops: [] as number[][] }));
-vi.mock('@dutydeck/session-backends', async importOriginal => {
+vi.mock('../../session-backends/src/owned-tmux.js', async importOriginal => {
   const proven = (proof: { identities: Array<{ pid: number }> }) => proof.identities.every(item => state.dead.has(item.pid));
   return {
-    ...await importOriginal<typeof import('@dutydeck/session-backends')>(),
+    ...await importOriginal<typeof import('../../session-backends/src/owned-tmux.js')>(),
     stopOwnedTmux: vi.fn(async (identity: { identities: Array<{ pid: number }> }) => {
       state.stops.push(identity.identities.map(item => item.pid));
       if (proven(identity)) return { ...identity, stoppedAt: new Date().toISOString() };
@@ -32,7 +33,8 @@ it('a repeated stop keeps the processes an earlier stop recorded instead of prov
     agent, adapter: { id: 'fixture', capabilities: {}, buildArgs: () => [], writeInput() {} }, backend, sessionId: 'ses_stop_merge',
     processProbe: { identify() { throw new Error('unused'); }, observe: () => 'alive' }, onEvent() {}, onExit() {},
   });
-  (driver as unknown as { tmuxIdentity: object }).tmuxIdentity = { targetId: '$1', identities: [{ pid: 1 }] };
+  vi.spyOn(backend, 'getSocketPath').mockReturnValue('/tmp/test.sock');
+  (backend as unknown as { liveIdentity: object }).liveIdentity = { scope: { socketPath: '/tmp/test.sock', ownerId: backend.ownerId, sessionName: backend.sessionName, hostname: hostname(), uid: process.getuid!() }, targetId: '$1', identities: [{ pid: 1 }] };
   await driver.stop();
   expect(await driver.isStopped()).toBe(false);
   // The pane root ends after kill-session; the child it started keeps running.

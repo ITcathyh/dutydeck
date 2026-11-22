@@ -28,21 +28,17 @@ import { existsSync, lstatSync, realpathSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { setImmediate } from 'node:timers/promises';
 import {
-  transcriptClientForAdapter,
   type DriverTranscriptSourceObservation,
   type InsightClient,
   type StreamIdentity,
 } from '@dutydeck/shared';
-import { pinnedSessionUuid } from '@dutydeck/cli-adapters';
+import { getCliProfile, pinnedSessionUuid } from '@dutydeck/cli-adapters';
 import {
-  claudeDataDir,
   claudeProjectDirCandidates,
   codexHistoryPath,
-  codexHome,
   codexSessionsRoot,
   realCwd,
   traeHistoryPath,
-  traeHome,
   traeSessionsRoot,
   type CliPathEnv,
 } from './cli-paths.js';
@@ -67,12 +63,9 @@ export function freezeTranscriptSource(
   adapterId: string,
   env: CliPathEnv,
 ): TranscriptSourceBinding | undefined {
-  const client = transcriptClientForAdapter(adapterId);
-  if (!client) return undefined;
-  const dataRoot = client === 'codex' ? codexHome(env)
-    : client === 'traex' ? traeHome(env)
-      : claudeDataDir(env);
-  return { client, dataRoot };
+  const profile = getCliProfile(adapterId);
+  if (!profile?.insightClient || !profile.dataRoot) return undefined;
+  return { client: profile.insightClient, dataRoot: profile.dataRoot(env) };
 }
 
 export interface VerifiedTranscriptIdentity {

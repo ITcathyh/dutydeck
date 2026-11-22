@@ -1,3 +1,4 @@
+import type { CliProfile } from '../profile.js';
 import type { AdapterSessionContext, CliAdapter, PtyLike } from '../types.js';
 import { submitPrompt } from './input-settle.js';
 
@@ -62,3 +63,11 @@ export function createPiAdapter(): CliAdapter {
     screenBusyPattern: /^[ \t]*Working\.\.\.[ \t]*$/m,
   };
 }
+
+export const piProfile = {
+  createAdapter: createPiAdapter,
+  discoveryOrder: 13,
+  contributions: [
+    { id: 'pi', name: 'Pi', command: 'pi', adapterId: 'pi', capabilities: { pause: false, resume: true } },
+  ],
+} satisfies CliProfile;

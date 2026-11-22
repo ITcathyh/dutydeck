@@ -4,7 +4,7 @@ import { childProcessIdentity, observeProcess } from '@dutydeck/shared/execution
 import type { HerdrBackend } from '@dutydeck/session-backends';
 import { createPtyCliDriver, type PtyCliDriverOptions } from './driver.js';
 import { createDutydeckPersistentBackend } from './persistent-backend.js';
-import { createPtyRetirementControl } from './pty-recovery.js';
+import { createPtyRetirementControl } from '@dutydeck/session-backends';
 
 export interface PtyProviderOptions {
   herdrBackend(sessionId: string): HerdrBackend;

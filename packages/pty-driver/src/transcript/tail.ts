@@ -21,80 +21,8 @@ import { createHash } from 'node:crypto';
 import type { NormalizedDriverEvent } from '@dutydeck/shared';
 import { normalizeInputText } from './input-receipt.js';
 
-/** A durable position immediately after the last complete JSONL record.
- * Without a path there is no file identity, so the only valid offset is 0. */
-export interface TranscriptCursor {
-  path?: string;
-  offset: number;
-}
-
-/** A physical file position; offsets are comparable only within the same file epoch. */
-export interface TranscriptPosition {
-  path: string;
-  offset: number;
-  dev: number;
-  ino: number;
-  epoch: number;
-}
-
-export interface TranscriptCompactionObservation {
-  nativeSessionId: string;
-  position: TranscriptPosition | undefined;
-  generation: number;
-  signal: AbortSignal;
-  /** Final Enter was attempted, so records can still arrive after this wait retires. */
-  submitted?(): boolean;
-}
-
-/** A live source of normalized driver events, backed by a CLI transcript. */
-export interface TranscriptEventSource {
-  start(): void;
-  stop(): void;
-  flush(): Promise<void>;
-  checkpoint(): TranscriptCursor;
-  restore(cursor: TranscriptCursor): void;
-  onEvent(cb: (e: NormalizedDriverEvent) => void): void;
-  /** New complete records, including held errors that publish no event. */
-  onProgress?(cb: () => void): void;
-  /** Arm after flush(), before writing. Only a new authorized user record in
-   * this session can confirm input; abort/stop never converts unknown into accepted. */
-  waitForInput?(prompt: string, signal: AbortSignal): Promise<void>;
-  /** Maintenance-only /compact evidence; never creates or completes a business turn. */
-  compactionNativeSession?(): string | undefined;
-  waitForCompaction?(observation: TranscriptCompactionObservation): Promise<'completed' | 'failed'>;
-  /** Background sub-agents the CLI reported still running when its latest
-   *  turn ended. Only sources whose transcript records it (Claude) implement this. */
-  pendingBackgroundWork?(): number;
-  hasIndependentBackgroundWork?(): boolean;
-  /** Forget that report at a new prompt; the new turn's own end record decides. */
-  resetBackgroundWork?(): void;
-  /** Why the turn ends without an answer, when the CLI recorded it (Claude's
-   *  API-error lines). Held back until the turn ends because later model output
-   *  supersedes it. Taking it starts a clean slate for the next turn. */
-  takeTurnError?(): NormalizedDriverEvent | undefined;
-  /** A native terminal error whose ancestry is bound to the exact input
-   * receipt. It may finish the submitted turn without terminal screen evidence. */
-  takeInputError?(): NormalizedDriverEvent | undefined;
-  /** Native terminal marker belonging to the current exact input receipt or
-   * recovery cursor. Output text alone is not terminal evidence. */
-  hasTurnTerminal?(): boolean;
-  /** Advances only for fresh terminals bound to this input, not metadata or
-   * replayed terminal identities. Detects continuations read in a single poll. */
-  turnTerminalRevision?(): number;
-  /** Synchronous disk waterline, including bytes not yet polled. */
-  captureWatermark?(): TranscriptPosition | undefined;
-  /** True only for a bound terminal starting after that physical waterline. */
-  hasTurnTerminalAfter?(watermark: TranscriptPosition): boolean;
-  /** A native business input was bound after restoring the durable cursor. */
-  hasRecoveredInput?(): boolean;
-  /** This dialect always records native terminals; screen silence cannot replace one. */
-  readonly requiresTurnTerminal?: boolean;
-  /** A native cancellation bound to the same exact input as takeInputError. */
-  takeInputCancellation?(): boolean;
-  /** Token usage of the model calls recorded since the last call, as a status/turn_usage event. Only
-   *  transcripts that record usage (Claude, Codex) implement it; undefined means the turn's usage is unknown. */
-  takeTurnUsage?(): NormalizedDriverEvent | undefined;
-}
+import type { TranscriptCursor, TranscriptEventSource, TranscriptPosition } from '@dutydeck/cli-adapters';
+export type { TranscriptCursor, TranscriptEventSource, TranscriptPosition, TranscriptCompactionObservation } from '@dutydeck/cli-adapters';
 
 /** Loose shape of a parsed JSONL entry — mappers narrow per CLI schema. */
 export type TranscriptEntry = any;

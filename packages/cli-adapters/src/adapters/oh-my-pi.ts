@@ -1,3 +1,4 @@
+import type { CliProfile } from '../profile.js';
 import type { AdapterSessionContext, CliAdapter, PtyLike } from '../types.js';
 import { isDutydeckSessionId, usableResumeId } from '../resume-id.js';
 import { delay } from './input-settle.js';
@@ -160,3 +161,11 @@ export function createOhMyPiAdapter(): CliAdapter {
     busyPattern: /Working(?:\.\.\.|…)/,
   };
 }
+
+export const ohMyPiProfile = {
+  createAdapter: createOhMyPiAdapter,
+  discoveryOrder: 14,
+  contributions: [
+    { id: 'oh-my-pi', name: 'Oh My Pi', command: 'omp', adapterId: 'oh-my-pi', capabilities: { pause: false, resume: true } },
+  ],
+} satisfies CliProfile;

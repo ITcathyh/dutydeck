@@ -13,4 +13,4 @@ export { readCodexSessionUsage } from './transcript/codex.js';
 export { readNativeTranscriptUsage, type NativeUsageSource } from './transcript/session-usage.js';
 export { verifyTranscriptCheckpoint } from './transcript-source.js';
 export { createPtyCliProvider, type PtyProviderOptions } from './provider.js';
-export { createPtyRetirementControl } from './pty-recovery.js';
+export { createPtyRetirementControl } from '@dutydeck/session-backends';

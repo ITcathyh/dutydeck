@@ -1,3 +1,6 @@
+import { claudeExtensions } from './claude-extensions.js';
+import type { CliProfile } from '../profile.js';
+import { claudeDataDir } from '../cli-paths.js';
 import type { CliAdapter } from '../types.js';
 import { createClaudeFamilyAdapter } from './claude-family.js';
 
@@ -10,3 +13,18 @@ import { createClaudeFamilyAdapter } from './claude-family.js';
 export function createSeedAdapter(): CliAdapter {
   return createClaudeFamilyAdapter('seed');
 }
+
+export const seedProfile = {
+  extensions: claudeExtensions,
+  createAdapter: createSeedAdapter,
+  discoveryOrder: 19,
+  contributions: [
+    { id: 'seed', name: 'Seed', command: 'seed', adapterId: 'seed', capabilities: { pause: false, resume: true } },
+  ],
+  nativeOrder: 1,
+  sessionId: (context, readers) => readers.claude.resolve(context),
+  transcript: (options, readers) => new readers.claude(options),
+  dataRoot: claudeDataDir,
+  insightClient: 'claude',
+  automaticResume: true,
+} satisfies CliProfile;

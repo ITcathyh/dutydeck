@@ -1,3 +1,4 @@
+import type { CliProfile } from '../profile.js';
 import type { AdapterSessionContext, CliAdapter, PtyLike } from '../types.js';
 import { isDutydeckSessionId, usableResumeId } from '../resume-id.js';
 import { writeRunnerInput } from '../runner-input.js';
@@ -45,3 +46,7 @@ export function createMiraAdapter(): CliAdapter {
     readyPattern: /›/,
   };
 }
+
+export const miraProfile = {
+  createAdapter: createMiraAdapter,
+} satisfies CliProfile;

@@ -1,3 +1,4 @@
+import type { CliProfile } from '../profile.js';
 import type { AdapterSessionContext, CliAdapter, PtyLike } from '../types.js';
 import { pasteAndSubmit } from './input-settle.js';
 
@@ -55,3 +56,11 @@ export function createCocoAdapter(): CliAdapter {
     readyPattern: /⏵⏵|⬡/,
   };
 }
+
+export const cocoProfile = {
+  createAdapter: createCocoAdapter,
+  discoveryOrder: 10,
+  contributions: [
+    { id: 'coco', name: 'CoCo', command: 'coco', adapterId: 'coco', capabilities: { pause: false, resume: true } },
+  ],
+} satisfies CliProfile;

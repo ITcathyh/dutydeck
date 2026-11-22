@@ -1,4 +1,4 @@
-export type { SessionBackend, SpawnOptions, SessionProbe } from './types.js';
+export type { SessionBackend, PersistentSessionBackend, SpawnOptions, SessionProbe } from './types.js';
 export { PtyBackend } from './pty-backend.js';
 export {
   TmuxBackend,
@@ -23,3 +23,5 @@ export { HerdrBackend, HerdrCensusUnknownError, herdrControlEnvironment, type He
 export { ProgramStatusFramingStream, type ProgramStatusEvent } from './program-status-parser.js';
 export { descendantPids } from './descendant-pids.js';
 export { spawnPty } from './spawn-pty.js';
+export { createPtyRetirementControl } from './pty-recovery.js';
+export { terminalScreens } from './types.js';

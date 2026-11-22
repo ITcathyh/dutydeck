@@ -1,3 +1,4 @@
+import type { CliProfile } from '../profile.js';
 import type { AdapterSessionContext, CliAdapter, PtyLike } from '../types.js';
 import { submitPrompt } from './input-settle.js';
 
@@ -47,3 +48,11 @@ export function createDshTuiAdapter(): CliAdapter {
     readyPattern: /❯/,
   };
 }
+
+export const dshTuiProfile = {
+  createAdapter: createDshTuiAdapter,
+  discoveryOrder: 18,
+  contributions: [
+    { id: 'dsh-tui', name: 'DeepSeek Harness TUI', command: 'dsh-tui', adapterId: 'dsh-tui', capabilities: { pause: false, resume: false } },
+  ],
+} satisfies CliProfile;

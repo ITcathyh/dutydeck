@@ -1,3 +1,4 @@
+import type { CliProfile } from '../profile.js';
 import type { CliAdapter, PtyLike } from '../types.js';
 
 /**
@@ -40,3 +41,7 @@ export function createMojoAdapter(): CliAdapter {
     // 设计路由/身份块另行跟进，不能照抄本地 CLI 的措辞。
   };
 }
+
+export const mojoProfile = {
+  createAdapter: createMojoAdapter,
+} satisfies CliProfile;

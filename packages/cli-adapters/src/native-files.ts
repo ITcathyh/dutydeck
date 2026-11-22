@@ -1,0 +1,233 @@
+/**
+ * Bounded filesystem helpers shared by the session-id resolvers.
+ *
+ * Every helper is best-effort: a missing/unreadable/hostile path yields an
+ * empty result rather than an exception. Resume must never fail because a
+ * CLI's data directory looks unexpected — the driver degrades to treating
+ * the dutydeck session id as the CLI session id.
+ */
+import { closeSync, existsSync, fstatSync, openSync, opendirSync, readSync, statSync } from 'node:fs';
+import type { Dirent } from 'node:fs';
+import { StringDecoder } from 'node:string_decoder';
+import { join } from 'node:path';
+
+/** Read at most `maxBytes` from the START of a file. Session metadata and the
+ *  first user prompt both live near the head, so a head window keeps the scan
+ *  O(window) on multi-MB rollout files. */
+export function readHead(path: string, maxBytes: number): string {
+  return readHeadBytes(path, maxBytes)?.bytes.toString('utf8') ?? '';
+}
+
+/** The bytes readHead decodes, plus the inode they were read from. */
+export function readHeadBytes(path: string, maxBytes: number): { bytes: Buffer; dev: number; ino: number } | undefined {
+  let size: number;
+  try {
+    const st = statSync(path);
+    if (!st.isFile()) return undefined;
+    size = st.size;
+  } catch {
+    return undefined;
+  }
+  const len = Math.min(size, Math.max(0, maxBytes));
+  if (len === 0) return undefined;
+  const buf = Buffer.alloc(len);
+  let fd: number | undefined;
+  try {
+    fd = openSync(path, 'r');
+    const { dev, ino } = fstatSync(fd);
+    return { bytes: buf.subarray(0, readSync(fd, buf, 0, len, 0)), dev, ino };
+  } catch {
+    return undefined;
+  } finally {
+    if (fd !== undefined) {
+      try { closeSync(fd); } catch { /* already closed */ }
+    }
+  }
+}
+
+/** Read the first complete line, retaining the same byte cap as a head read. */
+export function readFirstLine(path: string, maxBytes: number): string {
+  let fd: number | undefined;
+  try {
+    const st = statSync(path);
+    if (!st.isFile()) return '';
+    const limit = Math.min(st.size, Math.max(0, maxBytes));
+    if (!limit) return '';
+    fd = openSync(path, 'r');
+    const buffer = Buffer.alloc(limit);
+    let total = 0;
+    while (total < limit) {
+      const count = readSync(fd, buffer, total, Math.min(total ? 64 * 1024 : 4096, limit - total), null);
+      if (!count) break;
+      const newline = buffer.subarray(total, total + count).indexOf(10);
+      if (newline >= 0) return buffer.subarray(0, total + newline).toString('utf8');
+      total += count;
+    }
+    return '';
+  } catch { return ''; }
+  finally { if (fd !== undefined) { try { closeSync(fd); } catch { /* Already closed. */ } } }
+}
+
+/** Read at most `maxBytes` from the END of a file, dropping the (almost
+ *  certainly partial) first line when the window did not start at byte 0.
+ *  Append-only index files (history.jsonl) put recent sessions at the end. */
+export function readTail(path: string, maxBytes: number): string {
+  let size: number;
+  try {
+    const st = statSync(path);
+    if (!st.isFile()) return '';
+    size = st.size;
+  } catch {
+    return '';
+  }
+  const start = Math.max(0, size - Math.max(1, maxBytes));
+  const len = size - start;
+  if (len <= 0) return '';
+  const buf = Buffer.alloc(len);
+  let fd: number | undefined;
+  try {
+    fd = openSync(path, 'r');
+    const read = readSync(fd, buf, 0, len, start);
+    let text = buf.subarray(0, read).toString('utf8');
+    if (start > 0) {
+      const nl = text.indexOf('\n');
+      text = nl === -1 ? '' : text.slice(nl + 1);
+    }
+    return text;
+  } catch {
+    return '';
+  } finally {
+    if (fd !== undefined) {
+      try { closeSync(fd); } catch { /* already closed */ }
+    }
+  }
+}
+
+export interface ScannedFile {
+  path: string;
+  mtimeMs: number;
+  size: number;
+}
+
+export interface WalkOptions {
+  /** Max directory depth below the root (root itself is depth 0). */
+  maxDepth: number;
+  /** Stop after visiting this many directory entries (hostile-tree guard). */
+  maxEntries?: number;
+  /** Accept a file by its basename. */
+  accept: (name: string) => boolean;
+}
+
+const DEFAULT_MAX_ENTRIES = 20_000;
+
+/**
+ * Iterative, depth-limited walk listing plain files whose basename is accepted.
+ * Symlinked directories are not followed (Dirent.isDirectory() is false for a
+ * symlink), so a link loop cannot hang the scan. `truncated` reports that the
+ * entry budget was hit, or that more than `maxFiles` files matched (the walk
+ * stops right after the first one past it), so callers that need an
+ * exhaustive answer never treat a partial list as complete.
+ */
+export function listFiles(root: string, opts: WalkOptions & { maxFiles?: number }): { paths: string[]; truncated: boolean } {
+  const paths: string[] = [];
+  try {
+    if (!existsSync(root) || !statSync(root).isDirectory()) return { paths, truncated: false };
+  } catch {
+    return { paths, truncated: false };
+  }
+  const maxEntries = opts.maxEntries ?? DEFAULT_MAX_ENTRIES;
+  const maxFiles = opts.maxFiles ?? Infinity;
+  let visited = 0;
+  const stack: Array<{ dir: string; depth: number }> = [{ dir: root, depth: 0 }];
+  while (stack.length > 0) {
+    const { dir, depth } = stack.pop()!;
+    let directory: ReturnType<typeof opendirSync>;
+    try {
+      directory = opendirSync(dir);
+    } catch {
+      continue;
+    }
+    try {
+      let entry: Dirent | null;
+      while ((entry = directory.readSync()) !== null) {
+        if (++visited > maxEntries) return { paths, truncated: true };
+        const full = join(dir, entry.name);
+        if (entry.isDirectory()) {
+          if (depth < opts.maxDepth) stack.push({ dir: full, depth: depth + 1 });
+        } else if (entry.isFile() && opts.accept(entry.name)) {
+          paths.push(full);
+          if (paths.length > maxFiles) return { paths, truncated: true };
+        }
+      }
+    } finally {
+      try { directory.closeSync(); } catch { /* already closed */ }
+    }
+  }
+  return { paths, truncated: false };
+}
+
+/** listFiles plus each file's mtime/size; a file that vanished before stat is dropped. */
+export function walkFiles(root: string, opts: WalkOptions): ScannedFile[] {
+  const out: ScannedFile[] = [];
+  for (const path of listFiles(root, opts).paths) {
+    try {
+      const st = statSync(path);
+      if (st.isFile()) out.push({ path, mtimeMs: st.mtimeMs, size: st.size });
+    } catch {
+      // Vanished between readdir and stat — ignore.
+    }
+  }
+  return out;
+}
+
+/** Newest first. */
+export function byMtimeDesc(a: ScannedFile, b: ScannedFile): number {
+  return b.mtimeMs - a.mtimeMs;
+}
+
+/** Parse a JSONL blob, yielding successfully parsed objects in file order.
+ *  Malformed lines (including a truncated tail) are skipped. */
+export function parseJsonlObjects(text: string): any[] {
+  const out: any[] = [];
+  for (const line of text.split('\n')) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    try {
+      const parsed = JSON.parse(trimmed);
+      if (parsed && typeof parsed === 'object') out.push(parsed);
+    } catch {
+      // Partial or malformed line — skip.
+    }
+  }
+  return out;
+}
+
+/** Scan a selected native transcript without a head/tail window: a fork's
+ * ownership marker can be between inherited history and later output. */
+export function* nativeTranscriptObjects(path: string): Generator<any> {
+  for (const entry of nativeTranscriptScan(path)) if (entry !== undefined) yield entry;
+}
+
+/** Same complete scan, with an undefined checkpoint after each 64 KiB read so
+ * diagnostic callers can yield without dropping records or ownership checks. */
+export function* nativeTranscriptScan(path: string): Generator<any> {
+  let fd: number | undefined;
+  try {
+    if (!statSync(path).isFile()) return;
+    fd = openSync(path, 'r');
+    const buffer = Buffer.alloc(64 * 1024), decoder = new StringDecoder('utf8');
+    let pending = '';
+    for (;;) {
+      const count = readSync(fd, buffer, 0, buffer.length, null);
+      pending += count ? decoder.write(buffer.subarray(0, count)) : decoder.end();
+      let newline: number;
+      while ((newline = pending.indexOf('\n')) >= 0) {
+        const line = pending.slice(0, newline); pending = pending.slice(newline + 1);
+        try { yield JSON.parse(line); } catch { /* Partial or malformed native record. */ }
+      }
+      if (!count) { if (pending.trim()) { try { yield JSON.parse(pending); } catch { /* Incomplete last record. */ } } break; }
+      yield undefined;
+    }
+  } catch { /* Missing or unreadable native history is not a match. */ }
+  finally { if (fd !== undefined) { try { closeSync(fd); } catch { /* Already closed. */ } } }
+}

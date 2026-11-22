@@ -1,3 +1,4 @@
+import { getCliProfile, nativeProfiles } from '@dutydeck/cli-adapters';
 /**
  * Session-id reverse lookup: given dutydeck's own session id, recover the
  * session id the CLI generated for itself.
@@ -30,7 +31,7 @@
  * hostile file, no match — all return undefined, and the driver degrades to
  * the previous behavior (dutydeck session id used as the CLI session id).
  */
-import type { SessionIdLookup, SessionIdLookupContext } from './types.js';
+import type { SessionIdLookupContext } from './types.js';
 import { claudeSessionIdLookup } from './claude.js';
 import { codexSessionIdLookup, traexSessionIdLookup } from './codex.js';
 import { grokSessionIdLookup } from './grok.js';
@@ -52,29 +53,11 @@ export {
   type OpenCodeDbKind,
 } from './opencode.js';
 
-const LOOKUPS: SessionIdLookup[] = [
-  claudeSessionIdLookup,       // claude-code + its seed/relay forks
-  codexSessionIdLookup,
-  traexSessionIdLookup,
-  grokSessionIdLookup,
-  opencodeSessionIdLookup,     // V1 table space
-  opencode2SessionIdLookup,    // V2 table space, same database file
-];
+const lookups = { claude: claudeSessionIdLookup, codex: codexSessionIdLookup, traex: traexSessionIdLookup,
+  grok: grokSessionIdLookup, opencode: opencodeSessionIdLookup, opencode2: opencode2SessionIdLookup };
 
-/** adapter id → lookup. One lookup may claim several ids (same CLI on disk);
- *  a duplicate registration is a programming error, so it throws at load
- *  rather than letting one resolver silently shadow another. */
-const BY_ADAPTER = new Map<string, SessionIdLookup>();
-for (const lookup of LOOKUPS) {
-  for (const id of lookup.adapterIds) {
-    if (BY_ADAPTER.has(id)) throw new Error(`duplicate session-id lookup for adapter "${id}"`);
-    BY_ADAPTER.set(id, lookup);
-  }
-}
-
-/** Adapter ids that have a native session-id lookup. */
 export function adapterIdsWithSessionIdLookup(): string[] {
-  return [...BY_ADAPTER.keys()];
+  return nativeProfiles.filter(id => getCliProfile(id)?.sessionId);
 }
 
 /**
@@ -87,10 +70,10 @@ export function resolveCliSessionId(
   adapterId: string,
   ctx: SessionIdLookupContext,
 ): string | undefined {
-  const lookup = BY_ADAPTER.get(adapterId);
+  const lookup = getCliProfile(adapterId)?.sessionId;
   if (!lookup) return undefined;
   try {
-    const found = lookup.resolve(ctx);
+    const found = lookup(ctx, lookups);
     return typeof found === 'string' && found.length > 0 ? found : undefined;
   } catch {
     // A resolver must never break resume — degrade instead.

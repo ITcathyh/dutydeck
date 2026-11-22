@@ -106,8 +106,8 @@ describe('driver cancellation across a real transcript drain', () => {
   it.each([false, true])('does not revive after stop while resume drains (tmux=%s)', async tmux => {
     const f = await fixture(tmux);
     vi.spyOn(TmuxBackend, 'probeSession').mockReturnValue('exists');
-    const operations = f.driver as unknown as { reattachTmux(): void; respawn(): void };
-    const attach = vi.spyOn(operations, 'reattachTmux').mockImplementation(() => {});
+    const operations = f.driver as unknown as { reattach(): void; respawn(): void };
+    const attach = vi.spyOn(operations, 'reattach').mockImplementation(() => {});
     const spawn = vi.spyOn(operations, 'respawn').mockImplementation(() => {});
     f.backlog();
     const resuming = f.driver.resume();

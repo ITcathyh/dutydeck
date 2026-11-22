@@ -1,3 +1,5 @@
+import type { CliProfile } from '../profile.js';
+import { grokHome } from '../cli-paths.js';
 import type { AdapterSessionContext, CliAdapter, PtyLike } from '../types.js';
 import { submitPrompt } from './input-settle.js';
 
@@ -56,3 +58,16 @@ export function createGrokAdapter(): CliAdapter {
     busyPattern: /Waiting for response|Ctrl\+c:\s*cancel/i,
   };
 }
+
+export const grokProfile = {
+  createAdapter: createGrokAdapter,
+  discoveryOrder: 5,
+  contributions: [
+    { id: 'grok-build', name: 'Grok Build', command: 'grok', adapterId: 'grok', capabilities: { pause: false, resume: true } },
+    { id: 'grok', name: 'Grok Build', command: 'grok', adapterId: 'grok', capabilities: { pause: false, resume: true } },
+  ],
+  nativeOrder: 5,
+  sessionId: (context, readers) => readers.grok.resolve(context),
+  transcript: (options, readers) => new readers.grok(options),
+  dataRoot: grokHome,
+} satisfies CliProfile;
