@@ -56,8 +56,8 @@ type LarkResultActionTarget = {
   task: LarkTask; operator: string; scopeId: string; resultMessageId: string;
 };
 
-export abstract class LarkCoordinatorCards {
-  constructor(protected readonly state: CoordinatorState, protected readonly parts: Pick<CoordinatorParts, 'core'>) {}
+export class LarkCoordinatorCards {
+  constructor(private readonly state: CoordinatorState, private readonly parts: Pick<CoordinatorParts, 'core' | 'intake'>) {}
 
   async observeLiveWaiters(task: LarkTask) {
     const context = this.parts.core.interactionContext(task);
@@ -512,7 +512,7 @@ export abstract class LarkCoordinatorCards {
       await store.compareAndSet!(key, JSON.stringify(claim), JSON.stringify({ ...claim, phase: 'submitted' }))
         .catch(error => this.state.log.warn({ error, key }, '续问已登记，去重记录未更新'));
       if (!seeded) return duplicate;
-      void this.handle(event, current).catch(error => this.state.log.error({ error, messageId: event.messageId }, '处理结果卡续问失败'));
+      void this.parts.intake.handle(event, current).catch(error => this.state.log.error({ error, messageId: event.messageId }, '处理结果卡续问失败'));
       return { type: 'success', content: `已提交「${label}」，新一轮结果稍后发在下方。` };
     } catch (error) {
       this.state.log.warn({ error, taskId: parsed.taskId, action: parsed.action }, '提交结果卡续问失败');
@@ -550,7 +550,7 @@ export abstract class LarkCoordinatorCards {
         };
         // 按确认卡的消息 ID 登记：同一张卡只会登记一次，重复点击由确认单的状态挡住，这里再兜一层。
         if (await this.parts.core.inbox.seed(config.appId, event, { prompt, scopeId: saved.scope_id, resources: [] })) {
-          void this.handle(event, current).catch(error => this.state.log.error({ error, messageId: event.messageId }, '处理评审意见失败'));
+          void this.parts.intake.handle(event, current).catch(error => this.state.log.error({ error, messageId: event.messageId }, '处理评审意见失败'));
         }
         return '已交给 Agent 修改，新一轮的进度和结果会发在这张卡下面。';
       }
@@ -592,7 +592,7 @@ export abstract class LarkCoordinatorCards {
       mentions: [{ key: '@_user_1', name: config.name || 'Dutydeck', ...(this.state.botOpenId ? { openId: this.state.botOpenId } : {}), mentionedType: 'bot' }] };
     if (!await this.parts.core.inbox.seed(record.appId, event, { prompt, scopeId: snapshot.scopeId, resources: [] },
       { sessionId: record.sessionId, workflowRequestId: record.id })) return;
-    void this.handle(event, config).catch(error => this.state.log.error({ error, requestId: record.id }, '提交持久确认的下一轮失败'));
+    void this.parts.intake.handle(event, config).catch(error => this.state.log.error({ error, requestId: record.id }, '提交持久确认的下一轮失败'));
   }
 
   async submitPlanDecision(record: LarkInteraction) {
@@ -605,7 +605,7 @@ export abstract class LarkCoordinatorCards {
       { name: config.name?.trim() || 'Dutydeck', openId: this.state.botOpenId });
     event.authorization = { strength: 'explicit', via: 'answer_reply' };
     if (!await this.parts.core.inbox.seed(record.appId, event, { prompt, scopeId: saved.scope_id, resources: [] }, { workflowRequestId: record.id })) return;
-    void this.handle(event, config).catch(error => this.state.log.error({ error, messageId: event.messageId }, '提交计划的下一轮失败'));
+    void this.parts.intake.handle(event, config).catch(error => this.state.log.error({ error, messageId: event.messageId }, '提交计划的下一轮失败'));
   }
 
   /**
@@ -951,10 +951,7 @@ export abstract class LarkCoordinatorCards {
       mentions: [{ key: '@_user_1', name: task.config.name?.trim() || 'Dutydeck', ...(this.state.botOpenId ? { openId: this.state.botOpenId } : {}), mentionedType: 'bot' }]
     };
     if (!await this.parts.core.inbox.seed(task.config.appId, event, { prompt: larkVerificationRepairPrompt(record, round), scopeId: task.scopeId, resources: [] })) return false;
-    void this.handle(event, task.config).catch(error => this.state.log.error({ error, messageId: event.messageId }, '处理验证返修失败'));
+    void this.parts.intake.handle(event, task.config).catch(error => this.state.log.error({ error, messageId: event.messageId }, '处理验证返修失败'));
     return true;
   }
-
-  // 由上层实现、在本层调用。
-  abstract handle(event: LarkMessageEvent, config: StoredLarkConfig, recovering?: boolean, adopted?: boolean): Promise<void>;
 }

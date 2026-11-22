@@ -2,16 +2,17 @@ import type { ReplyPolish } from './reply-polish.js';
 import type { LarkGroupParticipation } from './group-participation.js';
 import { randomUUID } from 'node:crypto';
 import type { RelayAskBroker } from '@dutydeck/relay';
-import { LarkMemoryStore } from './memory.js';
+import type { LarkMemoryStore } from './memory.js';
 import type { LarkMemoryPipeline } from './memory-pipeline.js';
 import type { LarkGroupManager } from './group-management.js';
 import type { ChannelMappingRepository, ConfigRepository, PolicyAction, PolicyDecision } from '@dutydeck/shared';
-import { type StoredLarkConfig } from './config.js';
-import { type LarkCardService } from './service.js';
+import type { StoredLarkConfig } from './config.js';
+import type { LarkCardService } from './service.js';
 import type { LoginLinkStore } from '../auth/auth.js';
-import { type LarkChatModeResolver } from './session-resolver.js';
+import type { LarkChatModeResolver } from './session-resolver.js';
 import type { ListenerLog, LarkRuntime } from './listener.js';
 import type { LarkGroup, LarkTask } from './coordinator.js';
+
 export class CoordinatorState {
   readonly groups = new Map<string, LarkGroup>();
   readonly tasks = new Map<string, LarkTask>();

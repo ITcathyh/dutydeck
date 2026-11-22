@@ -1,3 +1,5 @@
+import type { CoordinatorState } from './coordinator-state.js';
+import type { CoordinatorParts } from './coordinator-parts.js';
 import { turnDecisionKey, TurnRecoveryDecisions, type TurnDecisionKey } from './recovery-decision.js';
 import { recordEvent } from './turn-record.js';
 import { clearTaskReportSafely } from '@dutydeck/shared';
@@ -41,7 +43,6 @@ import type { LarkMessageEvent } from './listener.js';
 import type { LarkGroup, LarkTask, PersistedLarkCardTask } from './coordinator.js';
 import { parseCardTask, parseOptionalCardTask, persistedReplyTarget } from './persisted-card-task.js';
 import { larkCardChannel, type LarkRelaunchAction, type LarkRelaunchClaim, relaunchRetainedKey, larkScopeContinuesFor, sendTaskCard } from './coordinator-core.js';
-import { LarkCoordinatorCards } from './coordinator-cards.js';
 // 飞书消息协调器 · 恢复与对账：卡片终态对账、重启后收尾自动验证、从持久化的卡片映射恢复卡上操作、
 // 「在新会话中执行」的转交，以及服务重启切断那一轮的重投。
 
@@ -55,8 +56,12 @@ const larkRecoveryOwner = { kind: 'installation_owner', id: 'installation_owner'
  */
 const larkReconcileMaxIntervalMs = 60_000;
 
-export abstract class LarkCoordinatorRecovery extends LarkCoordinatorCards {
-  readonly decisions = new TurnRecoveryDecisions(this.state.workflowOptions.store, this.state.cardMappings, this.state.log);
+export abstract class LarkCoordinatorRecovery {
+  constructor(protected readonly state: CoordinatorState, protected readonly parts: Pick<CoordinatorParts, 'cards' | 'core' | 'intake'>) {
+    this.decisions = new TurnRecoveryDecisions(state.workflowOptions.store, state.cardMappings, state.log);
+  }
+
+  readonly decisions: TurnRecoveryDecisions;
   /** 连续没收敛又没有新事件的轮数，决定下一轮的间隔。 */
   private reconcileBackoff = 0;
   private reconcileDueAt = 0;
@@ -132,8 +137,8 @@ export abstract class LarkCoordinatorRecovery extends LarkCoordinatorCards {
       },
       resultElements: (mapping, saved, cardId, created) => this.reconciledResult(mapping, saved, cardId, created),
       terminalDecoration: async (mapping, saved, effective) => {
-        const restored = this.restoredCardTask(effective, mapping, saved);
-        const verification = await this.verificationView(restored, effective, saved.state as LarkCardActionState);
+        const restored = this.parts.cards.restoredCardTask(effective, mapping, saved);
+        const verification = await this.parts.cards.verificationView(restored, effective, saved.state as LarkCardActionState);
         const events = saved.state === 'failed' && saved.runtime_task_id
           ? await this.runtimeTaskEvents(mapping.sessionId, saved.runtime_task_id) : [];
         // 旧对话启动器版本变化在旧会话重试必败：重启重建的任务没有内存里的 retryable 标记，
@@ -141,7 +146,7 @@ export abstract class LarkCoordinatorRecovery extends LarkCoordinatorCards {
         if (isLarkLauncherVersionChanged(events)) restored.retryable = false;
         const cause = await this.continueCause(config.appId, mapping.externalId, saved.turn ?? 0, saved.scope_id, saved.state, events);
         return { elements: [...cause?.settled ? [{ tag: 'markdown', element_id: 'recovery_note', content: larkQuietSettledNote(cause) }] : [], ...verification.element ? [verification.element] : []],
-          cardInput: { ...(effective.adhdMode === true ? { adhdMode: true } : {}), capabilities: { ...this.capabilitiesForTask(restored), ...verification.capabilities, ...await this.resultActionCapabilities(restored, effective, saved.state),
+          cardInput: { ...(effective.adhdMode === true ? { adhdMode: true } : {}), capabilities: { ...this.parts.cards.capabilitiesForTask(restored), ...verification.capabilities, ...await this.parts.cards.resultActionCapabilities(restored, effective, saved.state),
             ...cause ? { canContinueInPlace: true } : {} } } };
       }
     }), undefined, config.appId);
@@ -171,7 +176,7 @@ export abstract class LarkCoordinatorRecovery extends LarkCoordinatorCards {
       if (record.kind !== 'result' || !['accepted', 'needs_changes'].includes(record.state)) continue;
       try {
         textReceiptReader ??= await explicitFinalTextReceiptReader(this.state.workflowOptions.store);
-        await this.refreshResultFeedback(config, record.id, textReceiptReader);
+        await this.parts.cards.refreshResultFeedback(config, record.id, textReceiptReader);
       }
       catch (error) { unresolved++; this.state.log.warn({ error, requestId: record.id }, '验收状态刷新待重试'); }
     }
@@ -257,17 +262,17 @@ export abstract class LarkCoordinatorRecovery extends LarkCoordinatorCards {
         if (mapping && saved?.final_card_input && (saved.turn ?? 0) === running.turn) {
           const effective = saved.chat_type === 'group' && this.state.groupManager
             ? await this.state.groupManager.resolved(config, saved.chat_id).catch(() => config) : config;
-          const task = this.restoredCardTask(effective, mapping, saved);
+          const task = this.parts.cards.restoredCardTask(effective, mapping, saved);
           const finished = latest && latest.id !== running.record_id && latest.status !== 'interrupted';
           task.autoVerification = finished ? undefined : { turn: running.turn, phase: 'interrupted', ...(latest ? { record_id: latest.id } : {}) };
-          await this.refreshResultVerification(task, effective);
+          await this.parts.cards.refreshResultVerification(task, effective);
         }
         settled.add(entry.task_id);
       } catch (error) {
         this.state.log.warn({ error, taskId: entry.task_id }, '重启后收尾自动验证失败，结果卡等下次重绘');
       }
     }
-    if (settled.size) await this.mutatePendingVerifications(config.appId, entries => entries.filter(item => !settled.has(item.task_id)));
+    if (settled.size) await this.parts.cards.mutatePendingVerifications(config.appId, entries => entries.filter(item => !settled.has(item.task_id)));
   }
 
   async restoreQueuedCardAction(taskId: string, turn: number | undefined, context?: { messageId?: string; chatId?: string }): Promise<LarkTask | undefined> {
@@ -280,7 +285,7 @@ export abstract class LarkCoordinatorRecovery extends LarkCoordinatorCards {
       || !saved.sender_open_id || !saved.runtime_task_id || (turn !== undefined && turn !== (saved.turn ?? 0))) return;
     const target = (await this.state.runtime.getTasks?.(mapping.sessionId))?.find(task => task.id === saved.runtime_task_id);
     if (target?.status !== 'queued') return;
-    return { ...this.restoredCardTask(config, mapping, saved), state: 'queued',
+    return { ...this.parts.cards.restoredCardTask(config, mapping, saved), state: 'queued',
       requestUpdate: async () => { await this.performReconcile(config); } };
   }
 
@@ -297,7 +302,7 @@ export abstract class LarkCoordinatorRecovery extends LarkCoordinatorCards {
     const saved = parseCardTask(mapping.extra);
     if (saved.app_id !== config.appId || saved.chat_id !== context.chatId || saved.final_message_id !== context.messageId
       || !saved.final_card_input || (turn !== undefined && turn !== (saved.turn ?? 0))) return;
-    return this.restoredCardTask(config, { externalId: taskId, sessionId: mapping.sessionId }, saved);
+    return this.parts.cards.restoredCardTask(config, { externalId: taskId, sessionId: mapping.sessionId }, saved);
   }
 
   /**
@@ -977,7 +982,7 @@ export abstract class LarkCoordinatorRecovery extends LarkCoordinatorCards {
       mentions: [{ key: '@_user_1', name: config.name?.trim() || 'Dutydeck', ...(this.state.botOpenId ? { openId: this.state.botOpenId } : {}), mentionedType: 'bot' }]
     };
     if (!await this.parts.core.inbox.seed(config.appId, event, { prompt, scopeId: saved.scope_id!, resources: [], materialPrompt: larkContinuePrompt(cause) }, { lineage: { sessionId: sourceSessionId, relation: 'retry' } })) return;
-    void this.handle(event, config).catch(error => this.state.log.error({ error, messageId: event.messageId }, '在原对话继续失败'));
+    void this.parts.intake.handle(event, config).catch(error => this.state.log.error({ error, messageId: event.messageId }, '在原对话继续失败'));
   }
 
   /** 原会话时间线上的说明，Web 上能看到重投次数与原因。写不进去只留日志，不影响重投本身。 */

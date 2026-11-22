@@ -123,7 +123,7 @@ export class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
   async initializeWorkflows(config: StoredLarkConfig) {
     this.state.reconcileConfig = config;
     this.parts.core.applyReminderSettings(config);
-    this.registerTurnDiffReview(config.appId);
+    this.parts.cards.registerTurnDiffReview(config.appId);
     this.registerAgentCommandConfirm(config.appId);
     this.registerAgentSettingsConfirm(config.appId);
     this.registerReactionTaskConfirm(config.appId);
@@ -211,7 +211,7 @@ export class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
       this.state.log.warn({ appId: config.appId, messageId: id, turn, taskId, mismatch: accepted.mismatch }, '飞书入站记录与执行归属不符，等待核对');
       return false;
     }
-    if (live) return (await this.saveCardTask(live)).saved;
+    if (live) return (await this.parts.cards.saveCardTask(live)).saved;
     const effective = event.chatType === 'group' && this.state.groupManager ? await this.state.groupManager.resolved(config, event.chatId) : config;
     const adopted = await this.parts.core.inbox.adoptAccepted(record);
     if (!adopted || this.state.stopped || this.state.tasks.has(id)) return;
@@ -482,7 +482,7 @@ export class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
       }
       if (quoted?.kind === 'result' && prompt.trim() === '验收通过') {
         const result = await this.parts.core.workflows.respond({ appId: config.appId, chatId: event.chatId, actorId: event.senderOpenId, requestId: quoted.id, action: 'accept' });
-        await this.refreshResultFeedback(config, quoted.id).catch(error => this.state.log.warn({ error }, '验收已记录，卡片刷新失败'));
+        await this.parts.cards.refreshResultFeedback(config, quoted.id).catch(error => this.state.log.warn({ error }, '验收已记录，卡片刷新失败'));
         await this.workflowReply(event, config, result);
         return true;
       }
@@ -493,7 +493,7 @@ export class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
         if (!saved.scope_id) throw new LarkServiceError('LARK_CONTEXT_MISSING', '原任务上下文不可恢复，请发送新的任务目标。', 409);
         if (quoted.state === 'pending') {
           await this.parts.core.workflows.respond({ appId: config.appId, chatId: event.chatId, actorId: event.senderOpenId, requestId: quoted.id, action: 'changes' });
-          await this.refreshResultFeedback(config, quoted.id).catch(error => this.state.log.warn({ error }, '修改要求已记录，卡片刷新失败'));
+          await this.parts.cards.refreshResultFeedback(config, quoted.id).catch(error => this.state.log.warn({ error }, '修改要求已记录，卡片刷新失败'));
         }
         // A follow-up after acceptance is a new task in the same context; the
         // accepted result remains an accurate record of the previous version.
@@ -2239,7 +2239,7 @@ export class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
   private buttonDependencies(): ButtonServices {
     const state = this.state;
     return {
-      capabilitiesForTask: this.capabilitiesForTask.bind(this),
+      capabilitiesForTask: this.parts.cards.capabilitiesForTask.bind(this.parts.cards),
       continueInPlaceAction: this.continueInPlaceAction.bind(this),
       currentTurnInterruptDenial: this.currentTurnInterruptDenial.bind(this),
       handleDetailLogin: this.handleDetailLogin.bind(this),
@@ -2248,15 +2248,15 @@ export class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
       isDeferredTask: this.parts.core.isDeferredTask.bind(this.parts.core),
       pushTaskError: this.parts.core.pushTaskError.bind(this.parts.core),
       queuedSteerCapabilities: this.queuedSteerCapabilities.bind(this),
-      refreshResultVerification: this.refreshResultVerification.bind(this),
+      refreshResultVerification: this.parts.cards.refreshResultVerification.bind(this.parts.cards),
       relaunchCardAction: this.relaunchCardAction.bind(this),
       retryInFlight: this.retryInFlight,
       runTurn: this.runTurn.bind(this),
-      scheduleResultDaily: this.scheduleResultDaily.bind(this),
+      scheduleResultDaily: this.parts.cards.scheduleResultDaily.bind(this.parts.cards),
       steerQueuedTurn: this.steerQueuedTurn.bind(this),
-      submitResultFollowUp: this.submitResultFollowUp.bind(this),
+      submitResultFollowUp: this.parts.cards.submitResultFollowUp.bind(this.parts.cards),
       unknownTaskAction: this.unknownTaskAction.bind(this),
-      verificationView: this.verificationView.bind(this),
+      verificationView: this.parts.cards.verificationView.bind(this.parts.cards),
       verifyInFlight: this.state.verifyInFlight,
       cardMappings: this.state.cardMappings,
       commandAllowlisted: this.commandAllowlisted.bind(this),
@@ -2270,8 +2270,8 @@ export class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
       log: this.state.log,
       memory: this.parts.core.memory,
       get reconcileConfig() { return state.reconcileConfig; },
-      refreshResultFeedback: this.refreshResultFeedback.bind(this),
-      refreshResultMemory: this.refreshResultMemory.bind(this),
+      refreshResultFeedback: this.parts.cards.refreshResultFeedback.bind(this.parts.cards),
+      refreshResultMemory: this.parts.cards.refreshResultMemory.bind(this.parts.cards),
       repairInFlight: this.state.repairInFlight,
       respondFromQueuedCard: this.respondFromQueuedCard.bind(this),
       runtime: this.state.runtime,
