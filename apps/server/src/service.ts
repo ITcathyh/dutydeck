@@ -1,6 +1,8 @@
+import { composeAgentTools,composeCapabilities } from './compose/agent-tools.js';
+import { composeAuth,sessionAuthorization } from './compose/auth.js';
 import { ServerLifecycle } from './compose/lifecycle.js';
 import { composeInsight } from './compose/insight.js';
-import { accessMode,listenOptions,unauthenticatedListenRefusal } from './access-policy.js';
+import { listenOptions,unauthenticatedListenRefusal } from './access-policy.js';
 import { LarkReplyPolisher,type ReplyPolish } from './lark/reply-polish.js';
 import { createRelayContinuationChecker,createRelayAskLifecycleWatcher } from './relay-routes.js';
 import { inheritedListenOptions,inheritedSocketMismatch,takeInheritedListenSocket } from './socket-activation.js';
@@ -49,7 +51,7 @@ import { loadConfigWithDiagnosticsAsync,resolveDatabaseUrl,type AppConfig } from
 import { logDroppedAgents } from './agent-config-log.js';
 import { assertBotProcessStartup,childProcessIdentity,createRepositories,observeProcess } from '@dutydeck/storage';
 import { defaultDriverProviders } from './driver-providers.js';
-import { channelExecutionAppId,dutydeckSessionKinds,renderSessionNotice,backgroundKindFor,COLLABORATION_LIST_LIMIT,installationOwnerTaskActor,parseLarkSourceId,RuntimeError,timeLoop,workPlanConfirmationRequired,type PolicyAction,type PolicyDecision,type Session } from '@dutydeck/shared';
+import { channelExecutionAppId,dutydeckSessionKinds,renderSessionNotice,backgroundKindFor,COLLABORATION_LIST_LIMIT,installationOwnerTaskActor,parseLarkSourceId,RuntimeError,timeLoop,workPlanConfirmationRequired,type Session } from '@dutydeck/shared';
 import { tmpdir } from 'node:os';
 import { dirname,join,resolve } from 'node:path';
 import { larkResourceRoot,pruneLarkResourceDirectories,readLarkResourceReferences } from './resource-retention.js';
@@ -75,14 +77,11 @@ import { createSessionPrompt } from './prompt/session.js';
 import { isFrozenCollaborationSession,promptTemplateVersion } from './prompt-context.js';
 import { createRelayAskStore } from './relay-ask-store.js';
 import { LarkAgentToolsService } from './lark/agent-tools.js';
-import { TurnAuthority } from './agent-host/turn-authority.js';
-import { loadOrCreateGroupToolsSigningSecret } from './agent-host/turn-token.js';
 import { larkMemoryScope,LarkMemoryStore } from './lark/memory.js';
 import { LarkMemoryProjection } from './lark/memory-view.js';
 import { LarkMemoryPipeline } from './lark/memory-pipeline.js';
-import { getAuthToken,getPasswordHash,getShareLinkSecret,loadOrCreateAuthToken,loadOrCreateShareLinkSecret,SHARE_TOKEN_QUERY_KEY,signSessionShareToken,signTurnDiffToken,tokensEqual,verifyBrowserSession } from './auth/auth.js';
 import { setLarkSessionShareSigner,setLarkTurnDiffSigner } from './lark/detail-link.js';
-import { createTurnDiffObserver,TURN_DIFF_LINK_TTL_MS } from './turn-diff.js';
+import { createTurnDiffObserver } from './turn-diff.js';
 import { requestLarkTurnDiffReview } from './lark/turn-diff.js';
 import type { TerminalStreamProvider } from './terminal/terminal-ws.js';
 import {
@@ -90,18 +89,12 @@ createDutydeckPersistentBackend,
 createPtyCliProvider,
 PTY_AGENT_CONTRIBUTIONS,
 } from '@dutydeck/pty-driver';
-import { RelayAskBroker,RelayCapabilityRegistry,loadOrCreateRelaySigningSecret } from '@dutydeck/relay';
+import { RelayAskBroker } from '@dutydeck/relay';
 import { LocalFileSecretProvider,localFileSecretProviderName,secretDirectoryForDatabase } from '@dutydeck/secret-provider';
 import { LarkIdentityPreflightProbe } from './lark/identity-preflight.js';
-import {
-createFoundationExecutionAuthorizer,
-createFoundationManagementAuthorizer,
-createInstallationPrincipalResolver,
-} from './foundation-policy.js';
 import { WorkspaceOrganizationService } from './workspace-organization.js';
 import { parseUsageBackgroundLimits,parseUsagePricing,UsageLedger,withExtraPricing } from './usage-ledger.js';
 import { loadDaemonPlugins,wirePlugins } from './plugins/service-wiring.js';
-import { createPluginManagementAuthorizer } from './plugins/management-auth.js';
 import { sessionHookContext } from './plugins/integration.js';
 import type { StoredLarkConfig } from './lark/config.js';
 import type { ShutdownPhases } from './shutdown-phases.js';
@@ -200,7 +193,8 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
     return localSecretProvider?.inspect(metadata.referenceKey).availability ?? 'unreadable' as const;
   };
   const agentModelSettings = new AgentModelSettings(repos, config.agents, localSecretProvider);
-  const env = options.env ?? process.env;
+  const env = startupEnvironment;
+  const context = { config, env, repos, log, lifecycle, options };
   const identityPreflightProbe = localSecretProvider ? new LarkIdentityPreflightProbe({
     secretProvider: localSecretProvider,
     fetcher: options.identityPreflight?.fetcher,
@@ -209,81 +203,11 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
     now: options.identityPreflight?.now,
     evidenceTtlMs: options.identityPreflight?.evidenceTtlMs,
   }) : undefined;
-  let groupToolsSigningSecret: string;
-  try { groupToolsSigningSecret = await loadOrCreateGroupToolsSigningSecret(repos.config); }
-  catch (error) { throw error; }
-  let relaySigningSecret: string;
-  try { relaySigningSecret = await loadOrCreateRelaySigningSecret(repos.config); }
-  catch (error) { throw error; }
-  const capabilities = new TurnAuthority(repos.sessions, localApiBaseUrl(config), groupToolsSigningSecret, options.groupToolsCommand ?? 'dutydeck');
-  lifecycle.register('capabilities', () => capabilities.close());
-  // 通用回传通道：与飞书无关，任何来源的会话（含 Web 工作台创建的 pty-cli）都注入凭证。
-  // command 前缀复用 groupToolsCommand 算出的运行期绝对路径——静态文案拿不到它，
-  // 经 env 下发后由 @dutydeck/relay 的 relayHintLines() 在提示块里读回。
-  const relayCapabilities = new RelayCapabilityRegistry(
-    repos.sessions,
-    localApiBaseUrl(config),
-    relaySigningSecret,
-    options.groupToolsCommand
-  );
+  const { capabilities, relayCapabilities, relaySigningSecret } = await composeCapabilities(context);
   const herdr = new HerdrSessions({ database: config.databaseUrl, signingSecret: relaySigningSecret, botAppId: env.DUTYDECK_BOT_APP_ID, env,
     command: options.groupToolsCommand ?? dutydeckGroupToolsCommand(fileURLToPath(new URL(import.meta.url.endsWith('.ts') ? './internal-agent-cli.ts' : './internal-agent-cli.js', import.meta.url)), process.execPath, import.meta.url.endsWith('.ts') ? createRequire(import.meta.url).resolve('tsx') : undefined) });
-  // 访问认证：默认启动时确保 token 存在。首次生成时只提示查看命令，token 本身不进日志。
-  // 走 stderr 而非 stdout——daemon 子进程的 stdout 承载 daemon 协议的 JSON 输出，不能污染；
-  // daemon 模式下 stderr 与 stdout 一起重定向到 dutydeck.log，前台模式下直接可见。
-  const mode = accessMode(config);
-  let activeToken = '';
-  let activePasswordHash: string | null = null;
-  let tokenRefresh: ReturnType<typeof setInterval> | undefined;
-  if (config.authEnabled) {
-    const { token: accessToken, created: tokenCreated } = await loadOrCreateAuthToken(repos.config);
-    activeToken = accessToken;
-    activePasswordHash = await getPasswordHash(repos.config);
-    if (tokenCreated) {
-      process.stderr.write(`[dutydeck] Generated an access token for remote access. Run 'dutydeck auth token' to view it, or 'dutydeck auth token --rotate' to rotate it.\n`);
-    }
-    // WS 升级认证是同步钩子，token 和访问密码又可能在另一个进程里被轮换、重设，
-    // 所以维护一份短周期刷新的缓存（HTTP 中间件每次请求直读 DB，不受此缓存影响）。
-    tokenRefresh = setInterval(() => {
-      getAuthToken(repos.config).then(current => { if (current) activeToken = current; }).catch(() => {});
-      getPasswordHash(repos.config).then(current => { activePasswordHash = current; }).catch(() => {});
-    }, 5_000);
-    tokenRefresh.unref();
-    lifecycle.onSetupFailure(() => { if (tokenRefresh) clearInterval(tokenRefresh); });
-  } else {
-    process.stderr.write('[dutydeck] WARNING: authentication is disabled. Everyone who can reach this address can view tasks, control Agents, and access terminals. Use only on a trusted network or behind upstream authentication.\n');
-  }
-  // 飞书卡片的「查看详情」指向只读分享页，链接带绑定会话的签名（lark/detail-link.ts）。
-  // 签名密钥可能被 `dutydeck auth share-key rotate` 在另一个进程轮换，卡片签名用短周期刷新的缓存，校验每次直读 DB。
-  let activeShareSecret = await loadOrCreateShareLinkSecret(repos.config);
-  const shareSecretRefresh = setInterval(() => {
-    getShareLinkSecret(repos.config).then(current => { if (current) activeShareSecret = current; }).catch(() => {});
-  }, 5_000);
-  shareSecretRefresh.unref();
-  const disposeShareSigner = setLarkSessionShareSigner(sessionId => signSessionShareToken(activeShareSecret, sessionId));
-  const disposeTurnDiffSigner = setLarkTurnDiffSigner((sessionId, taskId) => signTurnDiffToken(activeShareSecret, sessionId, taskId, Date.now() + TURN_DIFF_LINK_TTL_MS));
-  lifecycle.onSetupFailure(() => { clearInterval(shareSecretRefresh); disposeShareSigner(); disposeTurnDiffSigner(); });
-  const resolveInstallationPrincipal = createInstallationPrincipalResolver({
-    authEnabled: config.authEnabled,
-    mode,
-    getToken: () => config.authEnabled ? getAuthToken(repos.config) : Promise.resolve(null),
-    getPasswordHash: () => getPasswordHash(repos.config),
-  });
-  const authorizeInstallationManagement = createPluginManagementAuthorizer({
-    authEnabled: config.authEnabled, mode,
-    getToken: () => config.authEnabled ? getAuthToken(repos.config) : Promise.resolve(null),
-    getPasswordHash: () => getPasswordHash(repos.config),
-  });
-  const foundationManagementAuthorizer = createFoundationManagementAuthorizer(resolveInstallationPrincipal);
-  const foundationExecution = createFoundationExecutionAuthorizer(repos, resolveInstallationPrincipal);
-  const legacyExecutionPolicy = {
-    integrationMode: 'legacy_unmanaged' as const,
-    authorize: (boundary: 'listener' | 'session' | 'high_risk' | 'group_tools', action: PolicyAction) => foundationExecution.authorize({
-      integration: 'legacy_lark',
-      boundary,
-      action,
-    }),
-  };
+  const auth = await composeAuth(context, { setLarkSessionShareSigner, setLarkTurnDiffSigner });
+  const { resolveInstallationPrincipal, authorizeInstallationManagement, foundationManagementAuthorizer, foundationExecution, legacyExecutionPolicy } = auth;
   const workbenchHttp = createWorkbenchFetch();
   lifecycle.register('workbenchHttp', () => workbenchHttp.close());
   const groupManager: LarkGroupManager = new LarkGroupManager(repos, { env, fetcher: workbenchHttp.fetch, onPolicyChanged: (): Promise<void> => groupManager.refreshPolicies(runtime) });
@@ -291,24 +215,14 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
   let collaboration: ReturnType<typeof createCollaborationIntegration> | undefined;
   const isAutomatedTask = (taskId: string) => isAutomatedRequest(repos.execution.getAcceptedTask(taskId)?.request);
   const polishReply: ReplyPolish = (...args) => replyPolisher.polish(...args);
-  const agentTools = new LarkAgentToolsService(capabilities, repos.config, {
-    env,
-    groupToolsCommand: options.groupToolsCommand,
-    artifactPrivatePaths: instancePrivatePaths(config.databaseUrl),
-    workbenchTask: sessionId => runtime.getActiveTaskContext(sessionId),
-    scheduleRequests: true,
-    automatedTask: taskId => isAutomatedTask(taskId),
-    polishReply,
-    finalTaskContext: async (binding, task) => resolveExplicitFinalContext(await repos.channelMappings.list(`lark-card:${binding.appId}`), binding, task),
-    authorizeTool: (sessionId, action) => collaboration?.background.authorizeTool(sessionId, action) ?? Promise.resolve(),
-    previewTool: (sessionId, action) => collaboration?.background.authorizeTool(sessionId, action, true) ?? Promise.resolve(),
-    previewWork: (sessionId, actorId) => automationIntegration.previewAuthorize(sessionId, actorId),
-    previewCollaboration: (binding, actorId) => collaboration?.previewAuthorize(binding, actorId, 'write') ?? Promise.resolve(false),
-    executionPolicy: legacyExecutionPolicy,
-    groupManager,
-    history: repos,
-    teamSearch: () => collaboration?.teamSearch,
-  });
+  const agentTools = composeAgentTools(context, capabilities, groupManager, legacyExecutionPolicy, isAutomatedTask,
+    { ChannelTools: LarkAgentToolsService, privatePaths: instancePrivatePaths, resolveFinal: resolveExplicitFinalContext }, {
+      polishReply, activeTask: id => runtime.getActiveTaskContext(id),
+      authorizeTool: (id, action, preview) => collaboration!.background.authorizeTool(id, action, preview),
+      previewWork: (id, actor) => automationIntegration.previewAuthorize(id, actor),
+      previewCollaboration: (binding, actor) => collaboration!.previewAuthorize(binding, actor, 'write'),
+      teamSearch: () => collaboration!.teamSearch,
+    });
   const primaryHerdrBackend = (sessionId: string) => new HerdrBackend(herdr.nameFor(`primary:${sessionId}`), {
     binary: primaryHerdrBinary(env), stateFile: join(dirname(config.databaseUrl), 'terminal-sessions', `${herdr.nameFor(`primary:${sessionId}`)}.json`),
     ownerId: `dutydeck:${sessionId}`, processProbe: { identify: childProcessIdentity, observe: observeProcess }, env, log,
@@ -535,27 +449,7 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
     prepareDelivery: (sessionId, id, key) => workbench.prepareDelivery(sessionId, id, key), notice: (workId, text, key) => workbench.notice(workId, text, key),
     log: { warn: (details, message) => log.warn(details, message) } });
   lifecycle.register('delegations', () => delegations.close());
-  const authorizeSessionRequest = async (request: import('fastify').FastifyRequest | import('node:http').IncomingMessage, sessionId: string, boundary: 'session' | 'high_risk' | 'terminal', action: PolicyAction): Promise<PolicyDecision> =>
-    authorizeLoadedSession(request, sessionId, await runtime.getSession(sessionId), boundary, action);
-  /** List routes check every session per poll; one listSessions replaces a getSession per id. */
-  const authorizeSessionRequests = async (request: import('fastify').FastifyRequest, sessionIds: string[], boundary: 'session' | 'high_risk', action: PolicyAction, listed?: Session[]): Promise<PolicyDecision[]> => {
-    // A route that already listed sessions passes them in, so the list is read once per request.
-    const sessions = new Map((listed ?? await runtime.listSessions()).map(session => [session.id, session]));
-    return Promise.all(sessionIds.map(sessionId => authorizeLoadedSession(request, sessionId, sessions.get(sessionId), boundary, action)));
-  };
-  const authorizeLoadedSession = async (request: import('fastify').FastifyRequest | import('node:http').IncomingMessage, sessionId: string, session: Session | undefined, boundary: 'session' | 'high_risk' | 'terminal', action: PolicyAction): Promise<PolicyDecision> => {
-    if (session?.source === 'work_item') {
-      const binding = await workItems.parentForSession(sessionId);
-      if (!binding || !['task.view_result', 'terminal.read'].includes(action)) return { allowed: false, action, code: 'WORK_ITEM_MANAGED_SESSION', reason: '此会话由目标编排管理，请在目标中操作步骤', source: 'integration' };
-      sessionId = binding.parentSessionId;
-    }
-    const decision = await groupManager.authorizeSession(sessionId, action, true) ?? await foundationExecution.authorizeSessionId(sessionId, { boundary, action, request });
-    if (!decision.allowed) return decision;
-    // A policy's origin does not authenticate the HTTP caller, including legacy integrations.
-    const owner = !new URL(request.url ?? '', 'http://dutydeck.local').searchParams.has(SHARE_TOKEN_QUERY_KEY)
-      && await authorizeInstallationManagement(request);
-    return { ...decision, source: owner ? 'owner' : decision.source === 'owner' ? 'integration' : decision.source };
-  };
+  const { authorizeSessionRequest, authorizeSessionRequests } = sessionAuthorization(runtime, workItems, groupManager, auth);
   let automationTimer: NodeJS.Timeout | undefined;
   let collaborationTimer: NodeJS.Timeout | undefined;
   let resourceRetentionTimer: NodeJS.Timeout | undefined;
@@ -603,10 +497,7 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
     workspaceRoot: join(tmpdir(), 'dutydeck-leader', sha256Hex(resolve(config.databaseUrl)).slice(0, 16)), log: { warn: (details, message) => log.warn(details, message) } });
   lifecycle.register('leaderMode', () => leaderMode.close());
   lifecycle.register('historyRetention', () => {
-    if (tokenRefresh) clearInterval(tokenRefresh);
-    clearInterval(shareSecretRefresh);
-    disposeShareSigner();
-    disposeTurnDiffSigner();
+    auth.stop();
     if (automationTimer) clearInterval(automationTimer);
     if (collaborationTimer) clearInterval(collaborationTimer);
     if (resourceRetentionTimer) clearInterval(resourceRetentionTimer);
@@ -737,16 +628,10 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
         },
         listeningDisabled: env.DUTYDECK_DISABLE_LARK_LISTENER === 'true',
       },
-      auth: {
-        mode,
-        getToken: () => config.authEnabled ? getAuthToken(repos.config) : Promise.resolve(null),
-        getPasswordHash: () => getPasswordHash(repos.config),
-        getShareSecret: () => getShareLinkSecret(repos.config),
-        localOnly: mode === 'local'
-      },
+      auth: auth.httpAuth,
       terminal: {
         provider: terminalProvider,
-        auth: { mode, allowUnauthenticated: mode === 'local', check: presented => !!presented && (tokensEqual(presented, activeToken) || verifyBrowserSession(presented, activePasswordHash)) },
+        auth: auth.terminalAuth,
         authorize: (request, sessionId, action) => authorizeSessionRequest(request, sessionId, 'terminal', action),
       },
       instances: parsePeerInstances(env.DUTYDECK_INSTANCES_JSON),
