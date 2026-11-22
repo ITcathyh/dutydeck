@@ -1,3 +1,4 @@
+import { defaultDriverProviders } from './driver-providers.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createRepositories } from '@dutydeck/storage';
 import { DutydeckRuntime, type AgentDriver } from '@dutydeck/runtime';
@@ -13,6 +14,7 @@ async function harness(agent: Partial<AgentConfig> = {}) {
   const repos = createRepositories(':memory:', { newDatabaseAuthority: 'ledger_v1' });
   const turns: Array<{ prompt: string; mode: PermissionMode }> = [];
   const runtime = new DutydeckRuntime(repos, {
+    providers: defaultDriverProviders(),
     probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }),
     driverFactory: (config, _protocol, emit) => {
       let mode = config.permissionMode;

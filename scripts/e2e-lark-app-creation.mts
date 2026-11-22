@@ -1,3 +1,4 @@
+import { defaultDriverProviders } from '../apps/server/src/driver-providers.js';
 import assert from 'node:assert/strict';
 import { mkdtemp, rm, writeFile, mkdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -128,7 +129,7 @@ async function runTest() {
   await mkdir(workspacesRoot, { recursive: true });
 
   repositories = createRepositories(join(directory, 'state.sqlite'), { mode: 'runtime', newDatabaseAuthority: 'ledger_v1' });
-  runtime = new DutydeckRuntime(repositories, { workspaceRoot: workspacesRoot });
+  runtime = new DutydeckRuntime(repositories, { providers: defaultDriverProviders(), workspaceRoot: workspacesRoot });
   const agent = agentConfigSchema.parse({
     id: 'ccflash',
     name: 'CCFlash (Claude Code / CPA)',

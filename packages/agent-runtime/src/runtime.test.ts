@@ -1,3 +1,4 @@
+import { defaultDriverProviders } from '../../../apps/server/src/driver-providers.js';
 import { runtimeComponents } from '../test-support/components.js';
 import { createHash } from 'node:crypto';
 import { describe, expect, it, vi } from 'vitest';
@@ -18,7 +19,7 @@ function harness(options: { onSend?: (emit: (event: any) => void) => void | 'man
   const bindExecution = repos.execution.bind.bind(repos.execution);
   vi.spyOn(repos.execution, 'bind').mockImplementation(claim => { boundExecution = bindExecution(claim); return boundExecution; });
   const driver: AgentDriver = { start: vi.fn(async () => {}), send: vi.fn(async () => { const mode = options.onSend?.(emit); if (mode !== 'manual') emit({ type: 'completed', data: { stopReason: 'end_turn' } }); if (options.exitOnSend) exit(options.exitOnSend); }), interrupt: vi.fn(async () => {}), resume: vi.fn(async () => {}), isStopped: async () => true, stop: vi.fn(async () => {}), resolvePermission: vi.fn(options.resolvePermission ?? (async () => true)), setModel: vi.fn(async () => {}), setReasoningEffort: vi.fn(async () => {}), setPermissionMode: vi.fn() };
-  const runtime = new DutydeckRuntime(repos, { probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }), driverFactory: (configuredAgent, _p, onEvent, onExit) => { configuredAgents.push(configuredAgent); emit = onEvent; exit = onExit; return driver; }, driverIdleTimeoutMs: options.driverIdleTimeoutMs, sessionEnvironment: options.sessionEnvironment, sessionPrompt: options.sessionPrompt, authorizeTask: options.authorizeTask });
+  const runtime = new DutydeckRuntime(repos, { providers: defaultDriverProviders(), probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }), driverFactory: (configuredAgent, _p, onEvent, onExit) => { configuredAgents.push(configuredAgent); emit = onEvent; exit = onExit; return driver; }, driverIdleTimeoutMs: options.driverIdleTimeoutMs, sessionEnvironment: options.sessionEnvironment, sessionPrompt: options.sessionPrompt, authorizeTask: options.authorizeTask });
   return { repos, runtime, driver, configuredAgents, bound: () => boundExecution!, emit: (event: any) => emit(event), exit: (code: number | null) => exit(code) };
 }
 
@@ -264,6 +265,7 @@ describe('runtime lifecycle acceptance', () => {
     const path = join(dir, 'state.sqlite');
     const firstRepos = createRepositories(path, { newDatabaseAuthority: 'ledger_v1' });
     const firstRuntime = new DutydeckRuntime(firstRepos, {
+      providers: defaultDriverProviders(),
       driverIdleTimeoutMs: 0,
       probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }),
       driverFactory: () => ({ start: vi.fn(async () => {}), send: vi.fn(async () => {}), interrupt: vi.fn(async () => {}), resume: vi.fn(async () => {}), isStopped: async () => true, stop: vi.fn(async () => {}) })
@@ -277,6 +279,7 @@ describe('runtime lifecycle acceptance', () => {
     // Reopen with a full-trust Agent default; the existing Session must preserve its ask posture.
     const secondRepos = createRepositories(path, { newDatabaseAuthority: 'ledger_v1' });
     const secondRuntime = new DutydeckRuntime(secondRepos, {
+      providers: defaultDriverProviders(),
       driverIdleTimeoutMs: 0,
       probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }),
       driverFactory: () => ({ start: vi.fn(async () => {}), send: vi.fn(async () => {}), interrupt: vi.fn(async () => {}), resume: vi.fn(async () => {}), isStopped: async () => true, stop: vi.fn(async () => {}) })
@@ -321,7 +324,7 @@ describe('runtime lifecycle acceptance', () => {
     legacy.close();
 
     const repos = createRepositories(path, { newDatabaseAuthority: 'ledger_v1' });
-    const runtime = new DutydeckRuntime(repos, { driverIdleTimeoutMs: 0, probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }), driverFactory: () => ({ start: async () => {}, send: async () => {}, interrupt: async () => {}, resume: async () => {}, isStopped: async () => true, stop: async () => {} }) });
+    const runtime = new DutydeckRuntime(repos, { providers: defaultDriverProviders(), driverIdleTimeoutMs: 0, probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }), driverFactory: () => ({ start: async () => {}, send: async () => {}, interrupt: async () => {}, resume: async () => {}, isStopped: async () => true, stop: async () => {} }) });
     try {
       await runtime.initialize([agent]);
       // A single ambiguous running turn converts to reconcile_required; its
@@ -343,7 +346,7 @@ describe('runtime lifecycle acceptance', () => {
 
     const repos = createRepositories(path, { newDatabaseAuthority: 'ledger_v1' });
     let sent = 0;
-    const runtime = new DutydeckRuntime(repos, { driverIdleTimeoutMs: 0, probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }), driverFactory: () => ({ start: async () => {}, send: async () => { sent++; }, interrupt: async () => {}, resume: async () => {}, isStopped: async () => true, stop: async () => {} }) });
+    const runtime = new DutydeckRuntime(repos, { providers: defaultDriverProviders(), driverIdleTimeoutMs: 0, probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }), driverFactory: () => ({ start: async () => {}, send: async () => { sent++; }, interrupt: async () => {}, resume: async () => {}, isStopped: async () => true, stop: async () => {} }) });
     try {
       await runtime.initialize([agent]);
       // No frozen execution options => the queued Task is blocked and the
@@ -370,7 +373,7 @@ describe('runtime lifecycle acceptance', () => {
 
     const repos = createRepositories(path, { newDatabaseAuthority: 'ledger_v1' });
     let factoryCalls = 0;
-    const runtime = new DutydeckRuntime(repos, { driverIdleTimeoutMs: 0, probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }), driverFactory: () => { factoryCalls++; return { start: async () => {}, send: async () => {}, interrupt: async () => {}, resume: async () => {}, isStopped: async () => true, stop: async () => {} }; } });
+    const runtime = new DutydeckRuntime(repos, { providers: defaultDriverProviders(), driverIdleTimeoutMs: 0, probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }), driverFactory: () => { factoryCalls++; return { start: async () => {}, send: async () => {}, interrupt: async () => {}, resume: async () => {}, isStopped: async () => true, stop: async () => {} }; } });
     try {
       await runtime.initialize([agent]);
       // The legacy Session is not auto-archived; it carries an unresolved
@@ -544,6 +547,7 @@ describe('runtime lifecycle acceptance', () => {
       isStopped: async () => true, stop: vi.fn(async () => {}), setRiskPolicy: vi.fn()
     };
     const restored = new DutydeckRuntime(repos, {
+      providers: defaultDriverProviders(),
       driverIdleTimeoutMs: 0,
       driverFactory: () => driver
     });
@@ -770,7 +774,7 @@ describe('runtime lifecycle acceptance', () => {
     const first = harness({ onSend: emit => emit({ type: 'text', data: { text: 'answer' } }) }); await first.runtime.initialize([agent]); const session = await first.runtime.start({ agentId: 'mock' }); await first.runtime.send(session.id, 'before restart');
     const driver: AgentDriver = { start: vi.fn(async () => {}), send: vi.fn(async () => {}), interrupt: vi.fn(async () => {}), resume: vi.fn(async () => {}), isStopped: async () => true, stop: vi.fn(async () => {}) };
     await first.runtime.shutdown();
-    const restored = new DutydeckRuntime(first.repos, { probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }), driverFactory: () => driver });
+    const restored = new DutydeckRuntime(first.repos, { providers: defaultDriverProviders(), probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }), driverFactory: () => driver });
     await restored.initialize([agent]);
     await restored.send(session.id, 'after restart');
     expect(driver.start).toHaveBeenCalledOnce(); expect(driver.send).toHaveBeenCalledWith('after restart');
@@ -786,7 +790,7 @@ describe('runtime lifecycle acceptance', () => {
     let configured: AgentConfig | undefined;
     const driver: AgentDriver = { start: vi.fn(async () => {}), send: vi.fn(async () => {}), interrupt: vi.fn(async () => {}), resume: vi.fn(async () => {}), isStopped: async () => true, stop: vi.fn(async () => {}) };
     await first.runtime.shutdown();
-    const restored = new DutydeckRuntime(first.repos, { driverFactory: current => { configured = current; return driver; } });
+    const restored = new DutydeckRuntime(first.repos, { providers: defaultDriverProviders(), driverFactory: current => { configured = current; return driver; } });
     await restored.initialize([{ ...agent, systemPrompt: 'new global prompt' }]);
     await restored.send(session.id, 'after restart');
     expect(configured?.systemPrompt).toBe('session prompt');
@@ -1341,6 +1345,7 @@ describe('runtime lifecycle acceptance', () => {
     const drivers: AgentDriver[] = [];
     let turn2Gate = deferred();
     const runtime = new DutydeckRuntime(repos, {
+      providers: defaultDriverProviders(),
       probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }),
       driverFactory: (_configured, _protocol, onEvent) => {
         callbacks.push(onEvent);
@@ -1412,7 +1417,7 @@ describe('runtime lifecycle acceptance', () => {
   });
 
   it('returns an explicit error for unsupported pause/resume', async () => { const h = harness(); await h.runtime.initialize([agent]); const s = await h.runtime.start({ agentId: 'mock' }); await expect(h.runtime.pause(s.id)).rejects.toMatchObject({ code: 'UNSUPPORTED_CAPABILITY', statusCode: 422 }); await h.runtime.shutdown(); h.repos.close(); });
-  it('returns a clear dependency error when a scanned Agent becomes unavailable', async () => { const h = harness(); const unavailable = { ...agent, id: 'trae', name: 'Trae', command: 'missing-trae' }; const runtime = new DutydeckRuntime(h.repos, { probe: () => ({ protocol: 'acp', available: false, detail: 'command disappeared after scan', pause: false, resume: true }) }); await runtime.initialize([unavailable]); await expect(runtime.start({ agentId: 'trae' })).rejects.toMatchObject({ code: 'AGENT_UNAVAILABLE' }); await runtime.shutdown(); h.repos.close(); });
+  it('returns a clear dependency error when a scanned Agent becomes unavailable', async () => { const h = harness(); const unavailable = { ...agent, id: 'trae', name: 'Trae', command: 'missing-trae' }; const runtime = new DutydeckRuntime(h.repos, { providers: defaultDriverProviders(), probe: () => ({ protocol: 'acp', available: false, detail: 'command disappeared after scan', pause: false, resume: true }) }); await runtime.initialize([unavailable]); await expect(runtime.start({ agentId: 'trae' })).rejects.toMatchObject({ code: 'AGENT_UNAVAILABLE' }); await runtime.shutdown(); h.repos.close(); });
 
   it('marks a turn failed when tools finish but the agent never returns final text', async () => {
     const h = harness({ onSend: emit => { emit({ type: 'tool_call', data: { id: 't', name: 'read', input: '.', status: 'running' } }); emit({ type: 'tool_result', data: { id: 't', name: 'read', output: 'ok', status: 'completed' } }); emit({ type: 'completed', data: { stopReason: 'end_turn' } }); return 'manual'; } });
@@ -1582,7 +1587,7 @@ describe('multi-driver routing', () => {
     const repos = createRepositories(':memory:', { newDatabaseAuthority: 'ledger_v1' });
     const legacy: AgentConfig = { ...ptyAgent, id: 'legacy-pty', protocol: 'pty', permissionMode: 'ask' };
     const factory = vi.fn();
-    const runtime = new DutydeckRuntime(repos, { probe: () => ({ protocol: 'pty' as const, available: true, pause: false, resume: true }), driverFactory: factory });
+    const runtime = new DutydeckRuntime(repos, { providers: defaultDriverProviders(), probe: () => ({ protocol: 'pty' as const, available: true, pause: false, resume: true }), driverFactory: factory });
     await repos.agents.save(legacy);
     await runtime.initialize([legacy]);
     await expect(runtime.start({ agentId: legacy.id })).rejects.toMatchObject({ code: 'PERMISSION_MODE_UNSUPPORTED', statusCode: 422 });
@@ -1598,6 +1603,7 @@ describe('multi-driver routing', () => {
     let routedProtocol: string | undefined;
     let routedAgent: AgentConfig | undefined;
     const runtime = new DutydeckRuntime(repos, {
+      providers: defaultDriverProviders(),
       probe: ptyProbe,
       ptyDriverFactory: ptyDriverFactory ?? ((agent, protocol, onEvent) => { routedAgent = agent; routedProtocol = protocol; emit = onEvent; return driver; })
     });
@@ -1667,7 +1673,7 @@ describe('multi-driver routing', () => {
 
   it('rejects pty-cli sessions when no ptyDriverFactory is injected', async () => {
     const repos = createRepositories(':memory:', { newDatabaseAuthority: 'ledger_v1' });
-    const runtime = new DutydeckRuntime(repos, { probe: ptyProbe });
+    const runtime = new DutydeckRuntime(repos, { providers: defaultDriverProviders(), probe: ptyProbe });
     await repos.agents.save(ptyAgent);
     await runtime.initialize([ptyAgent]);
     await expect(runtime.start({ agentId: 'mock-pty' })).rejects.toMatchObject({ code: 'DRIVER_UNAVAILABLE', statusCode: 503 });
@@ -1679,7 +1685,7 @@ describe('multi-driver routing', () => {
     const driver: AgentDriver = { start: vi.fn(async () => {}), send: vi.fn(async () => {}), interrupt: vi.fn(async () => {}), resume: vi.fn(async () => {}), isStopped: async () => true, stop: vi.fn(async () => {}) };
     const custom = vi.fn(() => driver);
     const ptyFallback = vi.fn(() => driver);
-    const runtime = new DutydeckRuntime(repos, { probe: ptyProbe, driverFactory: custom, ptyDriverFactory: ptyFallback });
+    const runtime = new DutydeckRuntime(repos, { providers: defaultDriverProviders(), probe: ptyProbe, driverFactory: custom, ptyDriverFactory: ptyFallback });
     await repos.agents.save(ptyAgent);
     await runtime.initialize([ptyAgent]);
     await runtime.start({ agentId: 'mock-pty' });
@@ -1755,7 +1761,7 @@ describe('CLI self-update window', () => {
     const directory = await mkdtemp(join(tmpdir(), 'dutydeck-cli-swap-'));
     const command = join(directory, 'cli');
     const h = harness();
-    const runtime = new DutydeckRuntime(h.repos, { driverFactory: () => h.driver });
+    const runtime = new DutydeckRuntime(h.repos, { providers: defaultDriverProviders(), driverFactory: () => h.driver });
     try {
       await runtime.initialize([terminal(command)]);
       fakeTimers();
@@ -1777,7 +1783,7 @@ describe('CLI self-update window', () => {
     const directory = await mkdtemp(join(tmpdir(), 'dutydeck-cli-swap-'));
     const command = join(directory, 'cli');
     const h = harness();
-    const runtime = new DutydeckRuntime(h.repos, { driverFactory: () => h.driver });
+    const runtime = new DutydeckRuntime(h.repos, { providers: defaultDriverProviders(), driverFactory: () => h.driver });
     try {
       await runtime.initialize([terminal(command)]);
       fakeTimers();
@@ -1798,7 +1804,7 @@ describe('CLI self-update window', () => {
 
   it('reports a missing acpx at once because the Agent command itself exists', async () => {
     const h = harness();
-    const runtime = new DutydeckRuntime(h.repos, { acpxCommand: join(tmpdir(), 'dutydeck-missing-acpx', 'acpx'), driverFactory: () => h.driver });
+    const runtime = new DutydeckRuntime(h.repos, { providers: defaultDriverProviders(), acpxCommand: join(tmpdir(), 'dutydeck-missing-acpx', 'acpx'), driverFactory: () => h.driver });
     try {
       await runtime.initialize([agent]);
       fakeTimers();
@@ -1837,7 +1843,7 @@ describe('CLI self-update window', () => {
     const first: AgentDriver = { start: vi.fn(async () => {}), resume: vi.fn(async () => {}), interrupt: vi.fn(async () => {}), isStopped: async () => true, stop: vi.fn(async () => {}),
       send: vi.fn(async () => { emit({ type: 'text', data: { text: 'done' } }); emit({ type: 'completed', data: { stopReason: 'end_turn' } }); }) };
     const firstRepos = createRepositories(file, { newDatabaseAuthority: 'ledger_v1' });
-    const firstRuntime = new DutydeckRuntime(firstRepos, { driverFactory: (_agent, _protocol, onEvent) => { emit = onEvent; return first; } });
+    const firstRuntime = new DutydeckRuntime(firstRepos, { providers: defaultDriverProviders(), driverFactory: (_agent, _protocol, onEvent) => { emit = onEvent; return first; } });
     const attached: AgentDriver = { start: vi.fn(async () => {}), resume: vi.fn(async () => {}), send: vi.fn(async () => {}), interrupt: vi.fn(async () => {}), isStopped: async () => true, stop: vi.fn(async () => {}), attachTerminal: vi.fn(() => true) };
     let repos: ReturnType<typeof createRepositories> | undefined, runtime: DutydeckRuntime | undefined;
     try {
@@ -1848,7 +1854,7 @@ describe('CLI self-update window', () => {
       await rm(command);
 
       repos = createRepositories(file, { newDatabaseAuthority: 'ledger_v1' });
-      runtime = new DutydeckRuntime(repos, { driverFactory: () => attached });
+      runtime = new DutydeckRuntime(repos, { providers: defaultDriverProviders(), driverFactory: () => attached });
       await runtime.initialize([terminal(command)]);
       fakeTimers();
       await expect(runtime.getTerminalDriver(session.id)).resolves.toBe(attached);
@@ -2028,7 +2034,7 @@ it('exposes only the matching active attempt and preserves currentAttemptId thro
     expect(h.runtime.getActiveTaskContext(session.id)?.attemptId).toBeUndefined();
   } finally { task.id = active.taskId; }
   gate.resolve(); await sending; await h.runtime.shutdown();
-  const restarted = new DutydeckRuntime(h.repos);
+  const restarted = new DutydeckRuntime(h.repos, { providers: defaultDriverProviders() });
   try {
     await restarted.initialize([agent]);
     expect((await restarted.getTasks(session.id))[0]).toMatchObject({ id: active.taskId, currentAttemptId: active.attemptId, status: 'completed' });

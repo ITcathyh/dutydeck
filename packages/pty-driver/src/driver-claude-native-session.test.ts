@@ -1,3 +1,4 @@
+import { defaultDriverProviders } from '../../../apps/server/src/driver-providers.js';
 import { describe, expect, it, vi } from 'vitest';
 import { appendFileSync, mkdtempSync, readFileSync, realpathSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -98,7 +99,7 @@ describe.skipIf(process.platform !== 'linux')('Claude native process integration
     });
     let runtime: DutydeckRuntime | undefined;
     let backend: TmuxBackend | undefined;
-    const makeRuntime = () => new DutydeckRuntime(repos, { cleanupIntervalMs: 0,
+    const makeRuntime = () => new DutydeckRuntime(repos, { providers: defaultDriverProviders(), cleanupIntervalMs: 0,
       probe: () => ({ available: true, protocol: 'pty-cli', resume: true }),
       ptyDriverFactory: (configured, _protocol, onEvent, onExit, sessionId) => {
         backend = new TmuxBackend(`native-${sessionId}`, { ownerId: `dutydeck:${sessionId}` });

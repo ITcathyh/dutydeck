@@ -3,6 +3,7 @@
 // 两个模块此前都已实现却零接线：加急管理器因为 coordinator 不传第 6 个参数而恒不构造，
 // 置顶管理器全仓没有实例化点。本文件锁住的是「配置能打开它、默认必须是关的」，
 // 以及置顶的生命周期：跑够长才置顶、终态撤销、启动对账撤掉僵尸置顶。
+import { defaultDriverProviders } from '../driver-providers.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -29,6 +30,7 @@ async function harness(patch: Partial<StoredLarkConfig> = {}) {
   const repos = createRepositories(join(cwd, 'state.db'), { newDatabaseAuthority: 'ledger_v1' });
   let release: (() => void) | undefined;
   const runtime = new DutydeckRuntime(repos, {
+    providers: defaultDriverProviders(),
     probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }),
     driverFactory: (_config, _protocol, emit) => ({
       start: async () => {}, resume: async () => {}, stop: async () => {}, interrupt: async () => {},

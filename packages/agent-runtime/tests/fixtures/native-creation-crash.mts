@@ -1,3 +1,4 @@
+import { defaultDriverProviders } from '../../../../apps/server/src/driver-providers.js';
 import { resolve,join } from 'node:path';
 import { createRepositories } from '@dutydeck/storage';
 import { agentConfigSchema } from '@dutydeck/shared';
@@ -14,6 +15,6 @@ repositories.execution.bind=claim=>{
  return bound;
 };
 const agent=agentConfigSchema.parse({id:'strict',name:'Strict',protocol:'acp',command:process.execPath,args:[resolve('tests/fixtures/acp-strict-native-agent.mjs')],cwd:directory,env:{native_directory:directory},permissionMode:'full-trust',timeout:10,capabilities:{pause:false,resume:true}});
-const runtime=new DutydeckRuntime(repositories,{cleanupIntervalMs:0});
+const runtime=new DutydeckRuntime(repositories,{ providers: defaultDriverProviders(),cleanupIntervalMs:0});
 await runtime.initialize([agent]);
 await runtime.start({agentId:agent.id}).catch(()=>{});

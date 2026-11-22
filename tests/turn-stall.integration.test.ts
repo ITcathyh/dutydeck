@@ -1,5 +1,6 @@
 // 一轮可能卡住的判定：真实 DutydeckRuntime + 真实 PtyCliDriver/PtyBackend + 假 CLI。
 // 假 CLI 收到输入后既不打印完成标记也不再输出，像卡在适配器不认识的界面上；工作目录里出现 resume 文件时打印一行。
+import { defaultDriverProviders } from '../apps/server/src/driver-providers.js';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -30,6 +31,7 @@ async function harness() {
   const adapter: CliAdapter = { id: 'mock-cli', capabilities: {}, buildArgs: () => [fixture], writeInput: (backend, prompt) => { backend.write(`${prompt}\n`); }, completionPattern: /MOCK DONE/ };
   const drivers: PtyCliDriver[] = [];
   const runtime = new DutydeckRuntime(repos, {
+    providers: defaultDriverProviders(),
     probe: () => ({ protocol: 'pty-cli', available: true, pause: false, resume: true }),
     ptyDriverFactory: (agent, _protocol, onEvent, onExit, sessionId) => {
       const driver = new PtyCliDriver({ agent, adapter, backend: new PtyBackend(), onEvent, onExit, sessionId });

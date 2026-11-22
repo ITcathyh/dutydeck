@@ -1,3 +1,4 @@
+import { defaultDriverProviders } from '../../../apps/server/src/driver-providers.js';
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
@@ -53,7 +54,7 @@ tmuxDescribe('restart with a live fixture CLI in isolated tmux', () => {
       env: { CLAUDE_CONFIG_DIR: cwd }, permissionMode, timeout: 60, capabilities: { pause: false, resume: true }, builtin: false };
     async function open() {
       const repos = createRepositories(database, { newDatabaseAuthority: 'ledger_v1' });
-      const options: RuntimeOptions = { driverFactory: factory, probe: () => ({ available: true, protocol: 'pty-cli', pause: false, resume: true }) };
+      const options: RuntimeOptions = { providers: defaultDriverProviders(), driverFactory: factory, probe: () => ({ available: true, protocol: 'pty-cli', pause: false, resume: true }) };
       const runtime = new DutydeckRuntime(repos, options);
       let closed = false;
       const close = async () => { if (closed) return; closed = true; await runtime.shutdown(); repos.close(); };

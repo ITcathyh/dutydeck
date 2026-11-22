@@ -1,3 +1,4 @@
+import { defaultDriverProviders } from '../../../../apps/server/src/driver-providers.js';
 import { createRepositories } from '../../src/index.js';
 import { openDatabaseControl } from '../../src/database-control.js';
 import { DutydeckRuntime } from '../../../agent-runtime/src/index.js';
@@ -17,7 +18,7 @@ process.on('message', async (message: { id: number; action: string; path?: strin
     if (message.action === 'open') repos = createRepositories(path, { mode: message.mode, newDatabaseAuthority: 'ledger_v1' });
     if (message.action === 'maintenance') { maintenance = openDatabaseControl(path, {}); maintenance.beginUpgrade(); }
     if (message.action === 'initialize' || message.action === 'start' || message.action === 'verification') {
-      runtime ??= new DutydeckRuntime(repos!, { driverIdleTimeoutMs: 0, probe: () => ({ available: true, protocol: 'acp', pause: false, resume: true }), driverFactory: () => ({ start: async () => {}, stop: async () => { releaseSend?.(); }, interrupt: async () => {}, resume: async () => {}, isStopped: async () => true, send: async () => { markSent(); process.send?.({ event: 'sending' }); await new Promise<void>(resolve => { releaseSend = resolve; }); } }) });
+      runtime ??= new DutydeckRuntime(repos!, { providers: defaultDriverProviders(), driverIdleTimeoutMs: 0, probe: () => ({ available: true, protocol: 'acp', pause: false, resume: true }), driverFactory: () => ({ start: async () => {}, stop: async () => { releaseSend?.(); }, interrupt: async () => {}, resume: async () => {}, isStopped: async () => true, send: async () => { markSent(); process.send?.({ event: 'sending' }); await new Promise<void>(resolve => { releaseSend = resolve; }); } }) });
       await runtime.initialize([agent]);
       if (message.action === 'verification') {
         const session = await runtime.start({ agentId: agent.id });

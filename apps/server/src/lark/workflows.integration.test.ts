@@ -1,3 +1,4 @@
+import { defaultDriverProviders } from '../driver-providers.js';
 import { installLarkHook } from './security-hooks.js';
 import { executionTaskId } from '@dutydeck/storage/helpers';
 import { LarkGroupParticipation } from './group-participation.js';
@@ -33,6 +34,7 @@ async function harness(kind: 'normal' | 'ask' | 'permission' = 'normal', options
   let release: (() => void) | undefined;
   const send = vi.fn(); const resolvePermission = vi.fn(); const resolveReasons: string[] = []; const compact = vi.fn();
   const runtime = new DutydeckRuntime(repos, {
+    providers: defaultDriverProviders(),
     probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }),
     driverFactory: (_config, _protocol, emit, _exit, sessionId) => {
       let currentRelease: (() => void) | undefined;

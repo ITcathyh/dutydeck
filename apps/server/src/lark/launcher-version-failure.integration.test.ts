@@ -1,3 +1,4 @@
+import { defaultDriverProviders } from '../driver-providers.js';
 import { MattersService } from '../matters.js';
 import { afterEach, expect, it, vi } from 'vitest';
 import { mkdtemp, rm } from 'node:fs/promises';
@@ -117,6 +118,7 @@ async function setup(prepareError: Error | ((sessionId: string) => Promise<void>
   }, sent);
   let groupManager: LarkGroupManager | undefined;
   const runtime = new DutydeckRuntime(repos, {
+    providers: defaultDriverProviders(),
     matterTracking: new MattersService(repos),
     driverIdleTimeoutMs: 0,
     probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }),
@@ -511,7 +513,7 @@ it.each(['retire', 'start'] as const)('换会话的 %s 阶段重启：只恢复�
   await h.until(() => tasks.every((task: any) => !task.launcherRecoveryPending));
   expect(h.log.info).toHaveBeenCalledWith(expect.objectContaining({ taskId: `om_restart_${stage}`, reason: 'coordinator_stopped' }), '未自动更换旧启动器会话');
   await h.runtime.shutdown();
-  const runtime = new DutydeckRuntime(h.repos, { driverIdleTimeoutMs: 0,
+  const runtime = new DutydeckRuntime(h.repos, { providers: defaultDriverProviders(), driverIdleTimeoutMs: 0,
     probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }), driverFactory: h.factory });
   const recovered = new LarkMessageCoordinator(runtime, h.service as any, { info: vi.fn(), warn: vi.fn(), error: vi.fn() } as any,
     Math.random, 'ou_bot', undefined, h.repos.channelMappings, undefined, undefined, undefined, { store: h.repos.config });

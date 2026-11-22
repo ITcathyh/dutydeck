@@ -1,3 +1,4 @@
+import { defaultDriverProviders } from '../apps/server/src/driver-providers.js';
 import { captureBoundExecution } from './support/bound-execution.js';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { once } from 'node:events';
@@ -46,6 +47,7 @@ describe('JSONL/Pipe runtime turn integration', () => {
       const preparing = new Promise<void>(resolve => { release = resolve; });
       let transport!: JsonlTransport;
       const runtime = new DutydeckRuntime(repos, {
+        providers: defaultDriverProviders(),
         driverIdleTimeoutMs: 0,
         sessionPrompt: async (_session, prompt) => {
           if (prompt === 'second') { entered(); await preparing; }
@@ -107,6 +109,7 @@ describe('JSONL/Pipe runtime turn integration', () => {
       dirs.push(dir);
       const repos = createTestRepos(join(dir, 'test.sqlite'));
       const runtime = new DutydeckRuntime(repos, {
+        providers: defaultDriverProviders(),
         driverIdleTimeoutMs: 0,
         driverFactory: (agent, _proto, onEvent, onExit) => {
           const transport = new (protocol === 'jsonl' ? JsonlTransport : PipeTransport)(agent, { onEvent, onExit });
@@ -156,6 +159,7 @@ describe('JSONL/Pipe runtime turn integration', () => {
     const repos = createTestRepos(join(dir, 'test.sqlite'));
     let transportInstance: JsonlTransport | undefined;
     const runtime = new DutydeckRuntime(repos, {
+      providers: defaultDriverProviders(),
       driverIdleTimeoutMs: 0,
       driverFactory: (agent, _proto, onEvent, onExit) => {
         transportInstance = new JsonlTransport(agent, { onEvent, onExit });
@@ -201,6 +205,7 @@ describe('JSONL/Pipe runtime turn integration', () => {
     const repos = createTestRepos(join(dir, 'test.sqlite'));
     const promptsSubmitted: string[] = [];
     const runtime = new DutydeckRuntime(repos, {
+      providers: defaultDriverProviders(),
       driverIdleTimeoutMs: 0,
       driverFactory: (agent, _proto, onEvent, onExit) => {
         const transport = new JsonlTransport(agent, { onEvent, onExit });
@@ -263,6 +268,7 @@ describe('JSONL/Pipe runtime turn integration', () => {
     const repos = createTestRepos(join(dir, 'test.sqlite'));
     const bound = captureBoundExecution(repos);
     const runtime = new DutydeckRuntime(repos, {
+      providers: defaultDriverProviders(),
       driverIdleTimeoutMs: 0,
       driverFactory: (agent, _proto, onEvent, onExit) => {
         const transport = new JsonlTransport(agent, { onEvent, onExit });
@@ -330,6 +336,7 @@ describe('JSONL/Pipe runtime turn integration', () => {
 
     let transport!: JsonlTransport;
     const runtime = new DutydeckRuntime(repos, {
+      providers: defaultDriverProviders(),
       driverIdleTimeoutMs: 0,
       sessionPrompt: async (_session, prompt) => {
         if (prompt === 'second-task') {

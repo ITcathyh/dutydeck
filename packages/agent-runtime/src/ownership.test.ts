@@ -1,3 +1,4 @@
+import { defaultDriverProviders } from '../../../apps/server/src/driver-providers.js';
 import { runtimeComponents } from '../test-support/components.js';
 import { captureBoundExecution } from '../../../tests/support/bound-execution.js';
 import { afterEach, expect, it, vi } from 'vitest';
@@ -29,7 +30,7 @@ async function fixture(options: ConstructorParameters<typeof DutydeckRuntime>[1]
     };
     run.driver = driver; runs.push(run); return driver;
   });
-  const runtime = new DutydeckRuntime(repos, { driverIdleTimeoutMs: 0, probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }), driverFactory: factory, ...options });
+  const runtime = new DutydeckRuntime(repos, { providers: defaultDriverProviders(), driverIdleTimeoutMs: 0, probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }), driverFactory: factory, ...options });
   let closed = false;
   const close = async () => { if (closed) return; closed = true; try { await runtime.shutdown(); } finally { repos.close(); } };
   cleanup.push(close);
@@ -336,7 +337,7 @@ it('restores promoted and successive front queue positions after SQLite is close
   expect((await h.repos.tasks.listQueued!(h.session.id)).map(t => t.prompt)).toEqual(['E', 'D', 'C', 'A', 'B']);
   await h.close();
   const repos = createRepositories(file, { newDatabaseAuthority: 'ledger_v1' }); const submitted: string[] = [];
-  const runtime = new DutydeckRuntime(repos, { driverIdleTimeoutMs: 0, driverFactory: (_a, _p, emit) => ({
+  const runtime = new DutydeckRuntime(repos, { providers: defaultDriverProviders(), driverIdleTimeoutMs: 0, driverFactory: (_a, _p, emit) => ({
     start: async () => {}, resume: async () => {}, interrupt: async () => {}, stop: async () => {}, isStopped: async () => true,
     send: async (prompt: string | { prompt: string }) => { submitted.push(typeof prompt === 'string' ? prompt : prompt.prompt); emit({ type: 'text', data: { text: 'answer' } }); emit({ type: 'completed', data: { stopReason: 'end_turn' } }); }
   }) });
@@ -462,7 +463,7 @@ it('retains unverified resource identity across SQLite reopen without calling a 
   expect(persisted).toMatchObject({ sessionId: first.session.id, runId: first.session.runId });
   await first.close();
   const repos = createRepositories(file, { newDatabaseAuthority: 'ledger_v1' }); const factory = vi.fn(() => first.runs[0]!.driver);
-  const runtime = new DutydeckRuntime(repos, { driverIdleTimeoutMs: 0, driverFactory: factory });
+  const runtime = new DutydeckRuntime(repos, { providers: defaultDriverProviders(), driverIdleTimeoutMs: 0, driverFactory: factory });
   try {
     await runtime.initialize([agent]);
     expect(runtime.getDriverStopBlock(first.session.id)).toBeTruthy();

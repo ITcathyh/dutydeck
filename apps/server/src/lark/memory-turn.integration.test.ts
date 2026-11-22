@@ -1,6 +1,7 @@
 // 本轮记忆的协调器级回归：真实 DutydeckRuntime + SQLite + 真实 LarkMessageCoordinator，service 为内存 mock。
 // 锁定「派发时记下注入了哪些记忆 → 结果卡不展示记忆 → 旧卡按钮仍走 /forget 同一道门」，
 // 以及 /memory ignore 的增删查。
+import { defaultDriverProviders } from '../driver-providers.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -29,6 +30,7 @@ async function harness(patch: Partial<StoredLarkConfig> = {}) {
   const repos = createRepositories(join(cwd, 'state.db'), { newDatabaseAuthority: 'ledger_v1' });
   const prompts: string[] = [];
   const runtime = new DutydeckRuntime(repos, {
+    providers: defaultDriverProviders(),
     probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }),
     driverFactory: (_config, _protocol, emit) => {
       const driver: AgentDriver = {

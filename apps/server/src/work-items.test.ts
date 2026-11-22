@@ -1,3 +1,4 @@
+import { defaultDriverProviders } from './driver-providers.js';
 import Database from 'better-sqlite3';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -133,6 +134,7 @@ async function fixture(stopProof: 'confirmed' | 'missing' | 'unproven' = 'confir
   const deliveries = vi.fn(async (_item: WorkItem) => {});
   const notifications = vi.fn(async (_item: WorkItem, _actorId: string) => {});
   const makeRuntime = () => new DutydeckRuntime(repos, {
+    providers: defaultDriverProviders(),
     workspaceRoot: join(directory, 'workspaces'), cleanupIntervalMs: 0,
     selectPromptPolicy: async () => ({ version: promptPolicy }),
     probe: (() => ({ available: true, protocol: 'acp', acp: true, jsonl: false, pipe: false, pty: false })) as any,

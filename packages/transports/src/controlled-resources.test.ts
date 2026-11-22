@@ -1,3 +1,4 @@
+import { defaultDriverProviders } from '../../../apps/server/src/driver-providers.js';
 import { captureBoundExecution } from '../../../tests/support/bound-execution.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { mkdtemp, readFile, rm, writeFile, symlink, chmod, mkdir } from 'node:fs/promises';
@@ -74,7 +75,7 @@ async function setup(
   };
   driverFactory.controlledResources = proto => proto === 'jsonl' || proto === 'pipe';
 
-  const runtime = new DutydeckRuntime(repos, { driverFactory, cleanupIntervalMs: 0 });
+  const runtime = new DutydeckRuntime(repos, { providers: defaultDriverProviders(), driverFactory, cleanupIntervalMs: 0 });
   cleanup.push(async () => {
     await runtime.shutdown();
     repos.close();
@@ -267,7 +268,7 @@ describe('controlled resources and fixed submission protocol', () => {
     };
     driverFactory.controlledResources = () => true;
 
-    const runtime = new DutydeckRuntime(repos, { driverFactory, cleanupIntervalMs: 0 });
+    const runtime = new DutydeckRuntime(repos, { providers: defaultDriverProviders(), driverFactory, cleanupIntervalMs: 0 });
     cleanup.push(async () => {
       await runtime.shutdown();
       repos.close();
@@ -330,7 +331,7 @@ describe('controlled resources and fixed submission protocol', () => {
     };
     driverFactory.controlledResources = () => true;
 
-    const runtime = new DutydeckRuntime(repos, { driverFactory, cleanupIntervalMs: 0 });
+    const runtime = new DutydeckRuntime(repos, { providers: defaultDriverProviders(), driverFactory, cleanupIntervalMs: 0 });
     cleanup.push(async () => {
       await runtime.shutdown();
       repos.close();
@@ -579,7 +580,7 @@ describe('controlled resources and fixed submission protocol', () => {
     };
     driverFactory.controlledResources = () => true;
 
-    const runtime = new DutydeckRuntime(repos, { driverFactory, cleanupIntervalMs: 0 });
+    const runtime = new DutydeckRuntime(repos, { providers: defaultDriverProviders(), driverFactory, cleanupIntervalMs: 0 });
     cleanup.push(async () => {
       await runtime.shutdown();
       repos.close();
@@ -718,7 +719,7 @@ describe('controlled resources and fixed submission protocol', () => {
 
     // 步骤 1：首次打开库并注册清理，执行并完成任务
     const repos1 = createRepositories(dbPath, { newDatabaseAuthority: 'ledger_v1' });
-    const runtime1 = new DutydeckRuntime(repos1, { driverFactory, cleanupIntervalMs: 0 });
+    const runtime1 = new DutydeckRuntime(repos1, { providers: defaultDriverProviders(), driverFactory, cleanupIntervalMs: 0 });
     let runtime1Closed = false;
     cleanup.push(async () => {
       if (!runtime1Closed) {
@@ -749,7 +750,7 @@ describe('controlled resources and fixed submission protocol', () => {
 
     // 步骤 3：重新打开同一个磁盘 SQLite 库并注册清理，使用新 Runtime 实例接管
     const repos2 = createRepositories(dbPath, { newDatabaseAuthority: 'ledger_v1' });
-    const runtime2 = new DutydeckRuntime(repos2, { driverFactory, cleanupIntervalMs: 0 });
+    const runtime2 = new DutydeckRuntime(repos2, { providers: defaultDriverProviders(), driverFactory, cleanupIntervalMs: 0 });
     let runtime2Closed = false;
     cleanup.push(async () => {
       if (!runtime2Closed) {
@@ -801,7 +802,7 @@ describe('controlled resources and fixed submission protocol', () => {
     };
     driverFactory.controlledResources = () => true;
 
-    const runtime = new DutydeckRuntime(repos, { driverFactory, cleanupIntervalMs: 0 });
+    const runtime = new DutydeckRuntime(repos, { providers: defaultDriverProviders(), driverFactory, cleanupIntervalMs: 0 });
     cleanup.push(async () => {
       await runtime.shutdown();
       repos.close();

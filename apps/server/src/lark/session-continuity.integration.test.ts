@@ -1,5 +1,6 @@
 // F2-7 会话连续性：普通群里改在话题里回复时沿用发起人的顶层会话；意外新建会话时首卡说明原因。
 // 真实 DutydeckRuntime + SQLite + RelayAskBroker，飞书 service 为内存 mock。
+import { defaultDriverProviders } from '../driver-providers.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -38,6 +39,7 @@ async function harness(options: { configPatch?: Partial<StoredLarkConfig>; parti
   const exits = new Map<string, (code: number | null) => void>();
   const send = vi.fn((_sessionId: string, _prompt: string) => {});
   const runtime = new DutydeckRuntime(repos, {
+    providers: defaultDriverProviders(),
     probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }),
     driverFactory: (_config, _protocol, emit, exit, sessionId) => {
       exits.set(sessionId!, exit);

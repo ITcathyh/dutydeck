@@ -1,3 +1,4 @@
+import { defaultDriverProviders } from '../../../apps/server/src/driver-providers.js';
 import { afterEach, expect, it, vi } from 'vitest';
 import { createRepositories } from '@dutydeck/storage';
 import type { AgentConfig } from '@dutydeck/shared';
@@ -13,6 +14,7 @@ async function fixture(exitedAfterFailedStart: boolean) {
   cleanup.push(() => repos.close());
   const log = { warn: vi.fn(), info: vi.fn() }, notices: SessionNotice[] = [], drivers: AgentDriver[] = [];
   const runtime = new DutydeckRuntime(repos, {
+    providers: defaultDriverProviders(),
     cleanupIntervalMs: 0, driverIdleTimeoutMs: 10, log, onSessionNotice: (_session, notice) => { notices.push(notice); },
     probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }),
     driverFactory: (_agent, _protocol, emit) => {

@@ -1,3 +1,4 @@
+import { defaultDriverProviders } from '../../../apps/server/src/driver-providers.js';
 import { afterEach, expect, it, vi } from 'vitest';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -13,6 +14,7 @@ it('admits one stable background session, checks immutable scope and never resta
   const repos = createRepositories(join(directory, 'state.db'), { newDatabaseAuthority: 'ledger_v1' });
   const start = vi.fn(async () => {}), stop = vi.fn(async () => {}), authorize = vi.fn(async () => {});
   const runtime = new DutydeckRuntime(repos, {
+    providers: defaultDriverProviders(),
     workspaceRoot: join(directory, 'workspaces'), cleanupIntervalMs: 0,
     probe: (() => ({ available: true, protocol: 'acp', acp: true })) as any,
     driverFactory: () => ({ start, stop, isStopped: async () => true, send: async () => {}, interrupt: async () => {} })
@@ -38,7 +40,7 @@ it.each(['acp','pty-cli'] as const)('resolves auto to %s before freezing memory 
   const repos = createRepositories(join(directory,'state.db'),{ newDatabaseAuthority:'ledger_v1' });
   const probe = vi.fn(() => ({ available:true,protocol,acp:protocol === 'acp' }));
   const start = vi.fn(async () => {});
-  const runtime = new DutydeckRuntime(repos,{ workspaceRoot:join(directory,'work'),cleanupIntervalMs:0,probe:probe as any,driverFactory:() => ({ start,stop:async () => {},isStopped:async () => true,send:async () => {},interrupt:async () => {} }) });
+  const runtime = new DutydeckRuntime(repos,{ providers: defaultDriverProviders(), workspaceRoot:join(directory,'work'),cleanupIntervalMs:0,probe:probe as any,driverFactory:() => ({ start,stop:async () => {},isStopped:async () => true,send:async () => {},interrupt:async () => {} }) });
   cleanups.push(async () => { await runtime.shutdown();repos.close();await rm(directory,{ recursive:true,force:true }); });
   await runtime.initialize([agentConfigSchema.parse({ id:'agent',name:'Agent',command:'fake',protocol:'auto',cwd:directory,model:'fixed',reasoningEffort:'high' })]);
   const resolved = await runtime.resolveMemorySessionInput({ agentId:'agent',source:'lark-memory',sourceId:'app:groups:memory' });

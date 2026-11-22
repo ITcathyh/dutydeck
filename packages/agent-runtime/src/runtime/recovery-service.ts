@@ -1,9 +1,10 @@
-import type { AgentConfig, AgentDriver, AgentEvent, DriverFactory, DriverResource, NormalizedDriverEvent, AttemptFence, AttemptRef, BoundExecutionRepository, CommitResult, ExecutionActor, ExecutionBlocker, ExecutionRecoveryDecision, PtyRetirementRecovery, PublicTaskRecord, RepositoryBundle, ResourceCheckRef, RuntimeControlClaim, Session, SessionFence, TaskAttempt, TaskExecutionProjection, TaskRecord, UnknownTaskFacts, UnknownTaskResolution } from '@dutydeck/shared';
+import type { DriverRegistry } from './driver-registry.js';
+import type { AgentConfig, AgentDriver, AgentEvent, DriverResource, NormalizedDriverEvent, AttemptFence, AttemptRef, BoundExecutionRepository, CommitResult, ExecutionActor, ExecutionBlocker, ExecutionRecoveryDecision, PtyRetirementRecovery, PublicTaskRecord, RepositoryBundle, ResourceCheckRef, RuntimeControlClaim, Session, SessionFence, TaskAttempt, TaskExecutionProjection, TaskRecord, UnknownTaskFacts, UnknownTaskResolution } from '@dutydeck/shared';
 import { RuntimeError, canonicalExecutionJson, clearTaskReportSafely, errorMessage, executionActorSchema, executionRecoveryDecisionSchema, makeId, now, ptyRetirementRecoverySchema, runtimeStateKeys, unknownTaskResolutionSchema } from '@dutydeck/shared';
 import type { HumanWaits } from './human-waits.js';
 import type { WorkspaceManager } from '../workspace.js';
 import { localOnlyDriverContext } from '../driver-context.js';
-import { readNativeCreationRecord } from '@dutydeck/acp-client';
+import type { NativeContextIdentity } from '@dutydeck/shared';
 import type { RuntimeHost } from './host-ports.js';
 import { digest, executionOptionsOf, nativeTargetOf, type DriverConfigurationLedger, type ExecutionOptions, type LocalDriverLedger } from '../ledger.js';
 import { RevokedOperation, type RevocationReason, type RuntimeSessionMutations } from '../ownership.js';
@@ -22,7 +23,7 @@ export interface RecoveredTurn {
 }
 
 interface RecoveryDependencies {
-  factory: DriverFactory;
+  registry: DriverRegistry;
   workspaces: Pick<WorkspaceManager, 'get' | 'validate'>;
   humanWaits: Pick<HumanWaits, 'pendingPermissionCount'>;
   sessionGenerations: ReadonlyMap<string, number>;
@@ -87,7 +88,7 @@ export class RecoveryService {
 
   async persistTerminalReceipt(session: Session, driver: AgentDriver): Promise<void> {
     if (!['herdr', 'tmux'].includes(session.terminalBackend ?? '')) return;
-    const identity = await driver.persistentTerminalIdentity?.(), record = this.deps.localResources.get(driver);
+    const identity = await this.deps.registry.method(driver, 'persistentTerminalIdentity')?.(), record = this.deps.localResources.get(driver);
     const resource = record && this.deps.repos.execution.getResources(session.id).find(row => row.resourceId === record.resourceId);
     if (identity === undefined || !record?.creationSettled || record.controlled || resource?.stage !== 'created'
       || resource.identity?.identityId !== record.identityId) return;
@@ -95,7 +96,7 @@ export class RecoveryService {
       resourceId: resource.resourceId, identityId: record.identityId, options: record.options, identity }));
   }
   private async restoreIdlePersistentTerminal(session: Session): Promise<boolean> {
-    if (!['herdr', 'tmux'].includes(session.terminalBackend ?? '') || session.protocol !== 'pty-cli' || session.archivedAt
+    if (!['herdr', 'tmux'].includes(session.terminalBackend ?? '') || !this.deps.registry.capabilities(session.protocol)?.persistentTerminal || session.archivedAt
       || !['idle', 'completed', 'interrupted'].includes(session.state) || this.deps.gate.stops.block(session.id) || this.deps.drivers.has(session.id)
       || this.deps.repos.execution.getUnresolvedTasks(session.id).length) return false;
     const raw = await this.mutations.wait(() => this.deps.repos.config.get(runtimeStateKeys.idleTerminal.key(session.id)));
@@ -116,13 +117,13 @@ export class RecoveryService {
       const workspace = await this.mutations.wait(() => this.deps.workspaces.get(session.id));
       if (workspace) await this.mutations.wait(() => this.deps.workspaces.validate(workspace));
       generation = this.deps.nextSessionGeneration(session.id); const lifecycle = this.mutations.owners.lifecycle(session.id);
-      driver = this.deps.factory(configured, session.protocol, this.deps.onDriverEvent(session, generation),
+      driver = this.deps.registry.create(configured, session, this.deps.onDriverEvent(session, generation),
         code => { if (this.mutations.valid(lifecycle) && this.deps.sessionGenerations.get(session.id) === generation) this.deps.notifyDriverExit(session.id, code); },
-        session.id, localOnlyDriverContext(this.deps.fence(session), resource.resourceId));
+        localOnlyDriverContext(this.deps.fence(session), resource.resourceId));
       // attach 前订阅；attach 失败 / 未采纳时由 finally 取消。
       // local-only anchor 是子资源行 id（= resource.resourceId），不是 identity.identityId。
       this.mutations.run(lifecycle, () => this.deps.subscribeInsightSources(session, driver!, generation!, resource.resourceId));
-      attached = await this.deps.driverOperation(driver, () => Promise.resolve(driver!.attachTerminal?.(receipt.identity) ?? false));
+      attached = await this.deps.driverOperation(driver, () => Promise.resolve(this.deps.registry.method(driver, 'attachTerminal')?.(receipt.identity) ?? false));
       if (!attached) return false;
       this.mutations.check();
       await this.mutations.write(session.id, async () => {
@@ -130,7 +131,7 @@ export class RecoveryService {
         if (!current || current.revision !== resource.revision || current.identity?.identityId !== receipt.identityId) throw new RuntimeError('RESOURCE_IDENTITY_CONFLICT', 'Original idle terminal resource changed', 409);
         const observation = { observationId: makeId('observation'), identityId: current.identity?.identityId,
           state: 'live' as const, observedAt: now(), evidenceRef: `idle-terminal:${digest(receipt)}` };
-        if (session.terminalBackend === 'tmux' && (driver!.isIdle?.() !== true || driver!.hasBackgroundWork?.() !== false || this.deps.humanWaits.pendingPermissionCount(session.id))) {
+        if (session.terminalBackend === 'tmux' && (this.deps.registry.method(driver, 'isIdle')?.() !== true || this.deps.registry.method(driver, 'hasBackgroundWork')?.() !== false || this.deps.humanWaits.pendingPermissionCount(session.id))) {
           throw new RuntimeError('IDLE_TERMINAL_ADOPTION_UNSAFE', 'Original tmux terminal is no longer idle', 409);
         }
         const observed = session.terminalBackend === 'tmux'
@@ -154,7 +155,7 @@ export class RecoveryService {
         this.deps.unsubscribeInsightSources(driver);
         // 未采纳的临时 driver 不代表会话；放不掉时，它迟到的事件和退出回调也不能记到会话上。
         if (this.deps.sessionGenerations.get(session.id) === generation) this.deps.nextSessionGeneration(session.id);
-        try { await driver.prepareForDaemonShutdown?.(true); await driver.stop(); }
+        try { await this.deps.registry.method(driver, 'prepareForDaemonShutdown')?.(true); await driver.stop(); }
         catch (error) { this.deps.options.log?.warn({ sessionId: session.id, error }, 'Unadopted idle terminal driver could not be released; resource remains blocked'); }
       }
     }
@@ -163,7 +164,7 @@ export class RecoveryService {
   private async recoverPersistentTurn(session: Session, task: TaskRecord): Promise<boolean> {
     const attempt = this.deps.repos.execution.getTaskExecution(task.id)?.currentAttempt;
     const submission = attempt?.submission, recovery = submission?.recovery;
-    if (session.protocol !== 'pty-cli' || !attempt || !submission || !recovery || task.interruptedByActor
+    if (!this.deps.registry.capabilities(session.protocol)?.persistentTerminal || !attempt || !submission || !recovery || task.interruptedByActor
       || !['active', 'reconcile_required'].includes(attempt.state)
       || attempt.reconcileReason && !['PREVIOUS_RUNTIME_RESULT_UNKNOWN', 'DAEMON_SHUTDOWN'].includes(attempt.reconcileReason.code)
       || this.deps.gate.stops.block(session.id) || this.deps.drivers.has(session.id)
@@ -183,7 +184,7 @@ export class RecoveryService {
   inspectAgentQuiescence(id: string): 'idle' | 'busy' | 'unknown' {
     if (this.mutations.attempts.get(id) || this.deps.hasActiveTurn(id) || this.deps.hasDrain(id)) return 'busy';
     const driver = this.deps.drivers.get(id);
-    if (driver) return !driver.isDetachedForShutdown?.() && driver.isIdle?.() ? 'idle' : 'unknown';
+    if (driver) return !this.deps.registry.method(driver, 'isDetachedForShutdown')?.() && this.deps.registry.method(driver, 'isIdle')?.() ? 'idle' : 'unknown';
     if (this.deps.gate.stops.driver(id)) return 'unknown';
     return this.deps.repos.execution.getResources(id).every(resource => resource.kind === 'operation' || resource.purpose === 'acp_native_context'
       || resource.stage === 'not_created' || resource.observations.at(-1)?.state === 'gone') ? 'idle' : 'unknown';
@@ -335,10 +336,11 @@ export class RecoveryService {
   }
   async retirePtyExecution(id: string, raw: PtyRetirementRecovery, actor: ExecutionActor) {
     this.deps.assertReady(); this.requireRecoveryOwner(actor);
-    const input = ptyRetirementRecoverySchema.parse(raw), control = this.deps.options.launch.ptyRetirement;
-    if (!control) throw new RuntimeError('PTY_RETIREMENT_UNAVAILABLE', 'Trusted PTY recovery is not configured', 503);
+    const input = ptyRetirementRecoverySchema.parse(raw);
     return this.mutations.run(this.mutations.owners.ownerOf(id), async () => {
       const { session } = await this.deps.active(id);
+      const control = this.deps.options.launch.ptyRetirement ?? this.deps.registry.for(session.protocol)?.retirement;
+      if (!control) throw new RuntimeError('PTY_RETIREMENT_UNAVAILABLE', 'Trusted PTY recovery is not configured', 503);
       if (session.runId !== input.runId) throw new RuntimeError('SESSION_RUN_CONFLICT', 'Session run changed', 409);
       const key = runtimeStateKeys.ptyRetirement.key(id, input.decisionId);
       const observationId = `pty_retirement_${digest({ sessionId: id, ...input })}`;
@@ -452,7 +454,7 @@ export class RecoveryService {
       if (!attempt || attempt.sessionId !== id) throw new RuntimeError('TASK_NOT_FOUND', 'Task not found in this session', 404);
       if (attempt.state === 'settled' && attempt.settlement?.kind === 'manual' && attempt.settlement.decision.decisionId === input.decisionId) return { replayed: true };
       if (attempt.state !== 'reconcile_required') throw new RuntimeError('ATTEMPT_NOT_RECONCILE_REQUIRED', 'Only a result-unknown attempt can be settled here', 409);
-      if (this.deps.recoveryInFlight(id) || !driver || driver.isDetachedForShutdown?.() || !driver.isIdle?.()) throw new RuntimeError('RECOVERY_EXECUTION_ACTIVE', 'The agent has not confirmed it is idle', 409);
+      if (this.deps.recoveryInFlight(id) || !driver || this.deps.registry.method(driver, 'isDetachedForShutdown')?.() || !this.deps.registry.method(driver, 'isIdle')?.()) throw new RuntimeError('RECOVERY_EXECUTION_ACTIVE', 'The agent has not confirmed it is idle', 409);
       this.deps.assertResources(id, true);
       const f = this.deps.attemptFence({ sessionId: id, runId: session.runId, taskId: input.taskId, attemptId: attempt.attemptId });
       await this.mutations.write(id, async () => this.deps.wake(this.deps.bound().settleAttempt(f, `recovery:${input.decisionId}`, { kind: 'manual', outcome: input.outcome,
@@ -512,10 +514,10 @@ export class RecoveryService {
       if (input.action === 'completed' && facts.kind === 'attempt' && input.verifiedOutputText === undefined) throw new RuntimeError('RECOVERY_OUTPUT_REQUIRED', 'Completed recovery requires verified output', 400);
       this.mutations.check(decisionOwner);
       if (this.deps.driverRetiring(id) || this.deps.recoveryInFlight(id)) throw new RuntimeError('RECOVERY_EXECUTION_ACTIVE', 'Original execution still has an in-flight owner', 409);
-      const state = driver?.quiescence?.().state ?? (driver?.isIdle?.() ? 'idle' : 'busy');
+      const state = this.deps.registry.method(driver, 'quiescence')?.().state ?? (this.deps.registry.method(driver, 'isIdle')?.() ? 'idle' : 'busy');
       const reuseOwned = !!driver && state === 'idle';
       const stoppedOriginal = !!driver && state === 'unknown';
-      if (driver && (driver.isDetachedForShutdown?.() || state === 'busy')) throw new RuntimeError('RECOVERY_EXECUTION_ACTIVE', 'The agent is still active', 409);
+      if (driver && (this.deps.registry.method(driver, 'isDetachedForShutdown')?.() || state === 'busy')) throw new RuntimeError('RECOVERY_EXECUTION_ACTIVE', 'The agent is still active', 409);
       if (reuseOwned) this.deps.assertResources(id, true);
       else {
         if (driver) {
@@ -562,7 +564,9 @@ export class RecoveryService {
     }
     for(const resource of this.deps.repos.execution.getResources(session.id)) {
       if(resource.runId!==f.runId||resource.purpose!=='acp_native_context'||resource.stage!=='pending'||resource.nativeReplacement||!resource.nativeExpected)continue;
-      let identity:Awaited<ReturnType<typeof readNativeCreationRecord>>;
+      const readNativeCreationRecord = this.deps.registry.readNativeCreationRecord(session);
+      if (!readNativeCreationRecord) continue;
+      let identity: NativeContextIdentity | undefined;
       try{identity=await this.mutations.wait(()=>readNativeCreationRecord(resource.nativeExpected!));}
       catch(error){if(error instanceof RevokedOperation)throw error;await this.deps.emit(session.id,'error',{code:'NATIVE_CONTEXT_RECEIPT_UNVERIFIABLE',resourceId:resource.resourceId,message:'The original native creation receipt cannot be verified; its pending resource is retained'});continue;}
       if(identity){try{this.deps.bound().confirmRecoveredNativeContext(f,resource.resourceId,resource.revision,identity);}catch(error){if(!(error instanceof RuntimeError&&error.code==='SESSION_RESOURCE_BLOCKED'))throw error;}}
@@ -573,8 +577,8 @@ export class RecoveryService {
    * 记为已消失（不存在证明写进账本），不结束任何进程。终端还在、查不准或所有者还在，都原样保留。返回写入的证据引用。
    */
   async retireDetachedPty(session: Session): Promise<string[]> {
-    const control = this.deps.options.launch.ptyRetirement, id = session.id;
-    if (!control?.captureAbsence || session.protocol !== 'pty-cli' || this.deps.drivers.has(id) || this.deps.gate.stops.driver(id) || this.deps.recoveryInFlight(id)) return [];
+    const control = this.deps.options.launch.ptyRetirement ?? this.deps.registry.for(session.protocol)?.retirement, id = session.id;
+    if (!control?.captureAbsence || !this.deps.registry.capabilities(session.protocol)?.persistentTerminal || this.deps.drivers.has(id) || this.deps.gate.stops.driver(id) || this.deps.recoveryInFlight(id)) return [];
     const candidates = this.deps.repos.execution.getResources(id).filter(r => r.runId === session.runId && r.kind === 'local_only' && r.stage === 'created'
       && r.identity && r.observations.at(-1)?.state !== 'gone');
     if (!candidates.length) return [];
@@ -642,7 +646,7 @@ export class RecoveryService {
         driver=await this.deps.reconnect(session,true,target,Boolean(expected));
         if(!expected){if(!unresolved)await this.deps.saveState(session,'idle');return session;}
         const owned=this.deps.localResources.get(driver)!;
-        if(!owned.controlled||!driver.configureNative)throw new RuntimeError('NATIVE_CONFIGURATION_REPAIR_UNSUPPORTED','Driver cannot prove original-context configuration',422);
+        if(!owned.controlled||!this.deps.registry.supports(driver, 'configureNative'))throw new RuntimeError('NATIVE_CONFIGURATION_REPAIR_UNSUPPORTED','Driver cannot prove original-context configuration',422);
         operation=await this.mutations.write(id,()=>this.deps.configurations.beginRepair(id,owned.identityId,target,expected,actor));
         const nativeTarget=nativeTargetOf(target);
         const proof=await this.deps.driverOperation(driver,()=>driver!.configureNative!({operationId:operation!.operationId,target:nativeTarget}));
@@ -656,7 +660,7 @@ export class RecoveryService {
         if(operation)await this.mutations.run(undefined,()=>this.mutations.write(id,()=>this.deps.configurations.finish(operation!,false))).catch(failure=>this.deps.warnCaught('prepareNativeContext.finishConfiguration',id,failure));
         if(driver)await this.mutations.run(undefined,()=>this.deps.stopDriver(id,driver!)).catch(failure=>this.deps.warnCaught('prepareNativeContext.stopDriver',id,failure));
         const code=(error as {code?:unknown}|null)?.code;
-        if(!replacement&&session.protocol==='acp'&&error instanceof Error&&!(error instanceof RuntimeError)
+        if(!replacement&&this.deps.registry.for(session.protocol)?.readNativeCreationRecord&&error instanceof Error&&!(error instanceof RuntimeError)
           &&(typeof code==='number'||/^(ACP_NATIVE_CONTEXT_|ACP_LAUNCHER_VERSION_CHANGED:|NATIVE_CONTEXT_PROTOCOL_UNSUPPORTED)/.test(error.message))) {
           const failure=new RuntimeError('NATIVE_CONFIGURATION_RESTORE_FAILED',`Original native configuration could not be verified (${code ?? 'ACP'}): ${error.message}. Configuration remains unknown; restore the original native context or inspect recovery and explicitly replace it. No prompt was sent.`,409);
           throw Object.assign(failure,{cause:error});

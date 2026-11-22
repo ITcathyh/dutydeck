@@ -1,3 +1,4 @@
+import { defaultDriverProviders } from '../../../apps/server/src/driver-providers.js';
 import { runtimeComponents } from '../test-support/components.js';
 import { expect, it, vi } from 'vitest';
 import type { RepositoryBundle, TaskRecord } from '@dutydeck/shared';
@@ -16,7 +17,7 @@ function fixture() {
     resume: unexpectedOperation, stop: unexpectedOperation,
     isIdle: vi.fn(() => true), hasBackgroundWork: vi.fn(() => false), isDetachedForShutdown: vi.fn(() => false)
   };
-  const r = new DutydeckRuntime({ execution } as unknown as RepositoryBundle, { cleanupIntervalMs: 0 }) as any;
+  const r = new DutydeckRuntime({ execution } as unknown as RepositoryBundle, { providers: defaultDriverProviders(), cleanupIntervalMs: 0 }) as any;
   runtimeComponents(r).supervisor.connectedDrivers.set(id, driver);
   runtimeComponents(r).scheduler.queues.set(id, [{ id: 'task' } as TaskRecord]);
   // Observe admission without starting a second turn or finishing the drain.

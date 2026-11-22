@@ -1,3 +1,4 @@
+import { defaultDriverProviders } from './driver-providers.js';
 import { afterEach, describe, expect, it } from 'vitest';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -18,7 +19,7 @@ async function fixture() {
   let ledger = new UsageLedger({ repositories: repos, backgroundLimits: { bots: { cli_a: 1 } } });
   const sent: string[] = [];
   const agent: AgentConfig = { id: 'local', name: 'Local fixture', command: process.execPath, args: [], cwd: directory, env: {}, protocol: 'acp', model: 'unknown-model', permissionMode: 'ask', timeout: 10, capabilities: { pause: false, resume: true }, builtin: false };
-  const runtime = () => new DutydeckRuntime(repos, { cleanupIntervalMs: 0, probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }), admitTask: (session, input) => ledger.admit(session, input), recordUsage: (session, attempt, data) => ledger.record(session, attempt, data),
+  const runtime = () => new DutydeckRuntime(repos, { providers: defaultDriverProviders(), cleanupIntervalMs: 0, probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }), admitTask: (session, input) => ledger.admit(session, input), recordUsage: (session, attempt, data) => ledger.record(session, attempt, data),
     driverFactory: (_agent, _protocol, emit) => ({ start: async () => {}, resume: async () => {}, stop: async () => {}, isStopped: async () => true, interrupt: async () => {}, send: async prompt => {
       sent.push(prompt); emit({ type: 'text', data: { text: 'local fixture' } }); emit({ type: 'completed', data: { stopReason: 'end_turn' } });
     } }) });

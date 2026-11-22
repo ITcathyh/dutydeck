@@ -1,3 +1,4 @@
+import { defaultDriverProviders } from '../../../apps/server/src/driver-providers.js';
 import { describe, expect, it, vi } from 'vitest';
 import { createRepositories } from '@dutydeck/storage';
 import type { AgentConfig, AgentEvent } from '@dutydeck/shared';
@@ -51,6 +52,7 @@ function harness(options: {
     setPermissionMode: vi.fn()
   };
   const runtime = new DutydeckRuntime(repos, {
+    providers: defaultDriverProviders(),
     probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }),
     driverFactory: (_configuredAgent, _p, onEvent, onExit) => {
       emit = onEvent;
@@ -137,6 +139,7 @@ describe('session event sequence & concurrency regression', () => {
 
     // 用同一个真实 SQLite 仓库创建全新的 runtime 实例，模拟重启或冷缓存命中
     const coldRuntime = new DutydeckRuntime(h.repos, {
+      providers: defaultDriverProviders(),
       probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }),
       driverFactory: () => h.driver
     });

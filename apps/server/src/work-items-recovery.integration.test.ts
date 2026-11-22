@@ -1,3 +1,4 @@
+import { defaultDriverProviders } from './driver-providers.js';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -21,6 +22,7 @@ async function fixture(mode: 'capacity' | 'exhausted' | 'unknown' = 'unknown', w
   let permitted = true, agentsPermitted = true;
   let service!: WorkItemService;
   const runtime = new DutydeckRuntime(repos, {
+    providers: defaultDriverProviders(),
     cleanupIntervalMs: 0, workspaceRoot: join(directory, 'workspaces'),
     probe: () => ({ available: true, protocol: mode === 'unknown' ? 'jsonl' : 'pty-cli', pause: false, resume: true }),
     authorizeExecution: async (id, actor) => { await service.authorizeExecution(id, actor); },

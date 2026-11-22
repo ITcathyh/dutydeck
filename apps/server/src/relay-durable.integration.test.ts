@@ -1,3 +1,4 @@
+import { defaultDriverProviders } from './driver-providers.js';
 import { request } from 'node:http';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -21,6 +22,7 @@ async function fixture(recoverable?: boolean) {
   const sends: string[] = [];
   let finish: (() => void) | undefined;
   const makeRuntime = () => new DutydeckRuntime(repos, {
+    providers: defaultDriverProviders(),
     probe: () => ({ protocol: recoverable === undefined ? 'acp' : 'pty-cli', available: true, pause: false, resume: true }),
     driverFactory: (_agent, _protocol, emit) => {
       let detached = false, preserve = false;

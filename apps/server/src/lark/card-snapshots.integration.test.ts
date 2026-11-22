@@ -8,6 +8,7 @@
 //
 // 快照只在静止点取样：每条消息记创建时的请求体，再加上到这个静止点为止的最后一次 PATCH。中间帧受心跳与
 // 并发时序影响，不进快照。临时目录、执行身份、随机编号、时间与耗时在序列化后统一换成占位符。
+import { defaultDriverProviders } from '../driver-providers.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import '../../../../tests/support/fast-wait-for.js';
 import { execFileSync } from 'node:child_process';
@@ -248,6 +249,7 @@ async function harness(options: { config?: Partial<StoredLarkConfig>; turns?: Tu
     const ledger = new UsageLedger({ repositories: repos });
     let broker!: RelayAskBroker;
     const runtime = new DutydeckRuntime(repos, {
+      providers: defaultDriverProviders(),
       driverIdleTimeoutMs: 0,
       probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }),
       admitTask: (session, request) => ledger.admit(session, request),

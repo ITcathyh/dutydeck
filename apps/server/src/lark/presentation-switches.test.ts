@@ -3,6 +3,7 @@
 // 这两个开关改变的是「发不发消息」，所以断言一律打在 service 的 send/reply/addReaction 上，
 // 而不是内部状态：真实 DutydeckRuntime + SQLite 持久化 + 真实 LarkWorkflowInteractions，
 // 只有飞书 service 是内存 mock。默认（两个都关）的既有行为必须逐条保持不变。
+import { defaultDriverProviders } from '../driver-providers.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -42,6 +43,7 @@ async function harness(mode: HarnessMode = 'normal', configPatch: Partial<Stored
   let markSendEntered!: () => void;
   const sendEntered = new Promise<void>(resolve => { markSendEntered = resolve; });
   const runtime = new DutydeckRuntime(repos, {
+    providers: defaultDriverProviders(),
     probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }),
     driverFactory: (_config, _protocol, emit) => {
       const driver: AgentDriver = {

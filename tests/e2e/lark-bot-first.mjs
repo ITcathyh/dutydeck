@@ -307,6 +307,7 @@ async function main() {
   onCleanup('恢复 globalThis.fetch', () => { globalThis.fetch = realFetch; });
 
   // ── 产品模块 ──
+  const { defaultDriverProviders } = await import(pathToFileURL(join(REPO, 'apps/server/src/driver-providers.ts')).href);
   const [{ createRepositories }, { DutydeckRuntime }, { createPtyCliDriver }, { createCliAdapter }, backends, coordinatorMod, serviceMod, rendererMod, configMod] = await Promise.all([
     import(pathToFileURL(join(REPO, 'packages/storage/src/index.ts')).href),
     import(pathToFileURL(join(REPO, 'packages/agent-runtime/src/index.ts')).href),
@@ -358,7 +359,7 @@ async function main() {
     livePtyDrivers.clear();
   });
 
-  const runtime = new DutydeckRuntime(repos, { ptyDriverFactory });
+  const runtime = new DutydeckRuntime(repos, { providers: defaultDriverProviders(), ptyDriverFactory });
   onCleanup('runtime.shutdown', () => runtime.shutdown?.());
   // 真实 agent 注册走 runtime.initialize（agent-runtime/src/index.ts:176），它自己写 repos.agents。
   await runtime.initialize(agents);

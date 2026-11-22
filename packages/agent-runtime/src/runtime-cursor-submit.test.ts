@@ -1,3 +1,4 @@
+import { defaultDriverProviders } from '../../../apps/server/src/driver-providers.js';
 import { afterEach, expect, it, vi } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -24,7 +25,7 @@ it('keeps ordinary Cursor input queued until the real previous driver turn compl
   const directory = mkdtempSync(join(tmpdir(), 'dd-cursor-queue-'));
   const repos = createRepositories(':memory:', { newDatabaseAuthority: 'ledger_v1' });
   let output!: (data: string) => void; const writes: string[] = [], submits: string[] = []; let draft = '';
-  const runtime = new DutydeckRuntime(repos, { probe: () => ({ protocol: 'pty-cli', available: true, pause: false, resume: true }),
+  const runtime = new DutydeckRuntime(repos, { providers: defaultDriverProviders(), probe: () => ({ protocol: 'pty-cli', available: true, pause: false, resume: true }),
     driverFactory: (agent, _protocol, onEvent, onExit, sessionId) => {
       const backend: SessionBackend & Partial<PtyLike> = { kind: 'pty', spawn() {}, resize() {}, kill() {}, interrupt() {}, onExit() {}, onData(cb) { output = cb; },
         write(data) { writes.push(data); }, sendText(data) { writes.push(data); draft += data; }, sendSpecialKeys(...keys) {

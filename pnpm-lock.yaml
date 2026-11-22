@@ -120,6 +120,9 @@ importers:
       '@dutydeck/session-backends':
         specifier: workspace:*
         version: link:../../packages/session-backends
+      '@dutydeck/transports':
+        specifier: workspace:*
+        version: link:../../packages/transports
       '@types/better-sqlite3':
         specifier: 9.6.0
         version: 9.6.0
@@ -248,18 +251,9 @@ importers:
 
   packages/agent-runtime:
     dependencies:
-      '@dutydeck/acp-client':
-        specifier: workspace:*
-        version: link:../acp-client
       '@dutydeck/shared':
         specifier: workspace:*
         version: link:../shared
-      '@dutydeck/storage':
-        specifier: workspace:*
-        version: link:../storage
-      '@dutydeck/transports':
-        specifier: workspace:*
-        version: link:../transports
     devDependencies:
       acpx:
         specifier: 0.13.0

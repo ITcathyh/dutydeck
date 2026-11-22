@@ -1,3 +1,4 @@
+import { defaultDriverProviders } from '../../../apps/server/src/driver-providers.js';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -19,7 +20,7 @@ it.each(['override', 'path'])('registers and versions the executable Codex used 
   vi.resetModules();
   const { loadConfigWithDiagnostics, agentProbeTarget } = await import('./index.js');
   const repos = createRepositories(':memory:', { newDatabaseAuthority: 'ledger_v1' });
-  const runtime = new DutydeckRuntime(repos);
+  const runtime = new DutydeckRuntime(repos, { providers: defaultDriverProviders() });
   try {
     expect(commandExists('codex')).toBe(source === 'path');
     const { config } = loadConfigWithDiagnostics({ DUTYDECK_DEFAULT_CWD: cwd });

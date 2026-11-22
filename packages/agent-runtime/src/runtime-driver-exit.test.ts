@@ -1,3 +1,4 @@
+import { defaultDriverProviders } from '../../../apps/server/src/driver-providers.js';
 import { afterEach, expect, it, vi } from 'vitest';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -36,6 +37,7 @@ process.stdin.on('data', data => {
   const drivers: AgentDriver[] = [];
   const exits: Array<(code: number | null) => void> = [];
   const runtime = new DutydeckRuntime(repos, {
+    providers: defaultDriverProviders(),
     cleanupIntervalMs: 0,
     authorizeTask: options.authorizeTask,
     probe: () => ({ protocol: 'pty-cli', available: true, pause: false, resume: true }),

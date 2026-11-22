@@ -1,3 +1,4 @@
+import { defaultDriverProviders } from '../../../apps/server/src/driver-providers.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -26,10 +27,10 @@ async function setup(mode: 'complete' | 'active' | 'unknown') {
     };
   };
   const agent: AgentConfig = { id: 'fake', name: 'fake', command: process.execPath, args: [], cwd, env: {}, protocol: 'acp', permissionMode: 'ask', timeout: 10, capabilities: { pause: false, resume: true }, builtin: false };
-  let runtime = new DutydeckRuntime(repos, { driverFactory: factory, cleanupIntervalMs: 0 });
+  let runtime = new DutydeckRuntime(repos, { providers: defaultDriverProviders(), driverFactory: factory, cleanupIntervalMs: 0 });
   cleanup.push(async () => { await runtime.shutdown(); repos.close(); await rm(cwd, { recursive: true, force: true }); });
   await runtime.initialize([agent]); const session = await runtime.start({ agentId: agent.id });
-  return { repos, session, prepares, prompts, get runtime() { return runtime; }, reopen: async () => { mode = 'complete'; runtime = new DutydeckRuntime(repos, { driverFactory: factory, cleanupIntervalMs: 0 }); await runtime.initialize([agent]); } };
+  return { repos, session, prepares, prompts, get runtime() { return runtime; }, reopen: async () => { mode = 'complete'; runtime = new DutydeckRuntime(repos, { providers: defaultDriverProviders(), driverFactory: factory, cleanupIntervalMs: 0 }); await runtime.initialize([agent]); } };
 }
 describe('runtime shutdown persistent PTY policy', () => {
   it('stops a safe idle driver, retains queued input, and executes it once after restart', async () => {

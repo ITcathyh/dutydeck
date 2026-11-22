@@ -1,3 +1,4 @@
+import { defaultDriverProviders } from '../driver-providers.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -32,6 +33,7 @@ async function fixture(options: { physical?: boolean } = {}) {
   let submissions = 0, interrupts = 0, stopped = false;
   const agent: AgentConfig = { id: 'control-fixture', name: 'Fixture', command: options.physical ? process.execPath : 'unused', args: [], protocol: 'pty-cli', cwd, env: {}, permissionMode: 'full-trust', timeout: 60, capabilities: { pause: false, resume: true }, builtin: false };
   const runtime = new DutydeckRuntime(repos, {
+    providers: defaultDriverProviders(),
     driverIdleTimeoutMs: 0,
     probe: () => ({ protocol: 'pty-cli', available: true, pause: false, resume: true }),
     driverFactory: (config, _protocol, onEvent, onExit, sessionId) => new PtyCliDriver({ agent: config, timings: { quiescenceMs: 30, spinnerGuardMs: 40 },
@@ -96,7 +98,7 @@ describe('Feishu controls with real Runtime, SQLite and PTY driver', () => {
     await h.close();
     const repos = createRepositories(h.path, { newDatabaseAuthority: 'ledger_v1' });
     const factory = vi.fn(() => { throw new Error('unknown execution must not be replayed'); });
-    const runtime = new DutydeckRuntime(repos, { driverIdleTimeoutMs: 0, driverFactory: factory,
+    const runtime = new DutydeckRuntime(repos, { providers: defaultDriverProviders(), driverIdleTimeoutMs: 0, driverFactory: factory,
       probe: () => ({ protocol: 'pty-cli', available: true, pause: false, resume: true }) });
     cleanups.push(async () => { await runtime.shutdown(); repos.close(); });
     await runtime.initialize([h.agent]);

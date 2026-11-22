@@ -1,3 +1,4 @@
+import { defaultDriverProviders } from '../driver-providers.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { mkdtemp, mkdir, rm } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -29,6 +30,7 @@ async function harness(options: { beforeSubmit?: (agentId: string) => Promise<vo
   const repos = createRepositories(join(directory, 'state.db'), { newDatabaseAuthority: 'ledger_v1' });
   const sends: Array<{ agentId: string; prompt: string; release: () => void }> = [];
   const runtime = new DutydeckRuntime(repos, {
+    providers: defaultDriverProviders(),
     probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }),
     authorizeTask: async (session, _task, phase) => {
       if (phase === 'submit') await options.beforeSubmit?.(session.agentId);

@@ -1,3 +1,4 @@
+import { defaultDriverProviders } from '../driver-providers.js';
 import { runtimeComponents } from '../../../../packages/agent-runtime/test-support/components.js';
 import { MattersService } from '../matters.js';
 // 聊天内指挥命令的协调器级回归：/agents、/queue、/steer、/grant、/revoke，
@@ -60,6 +61,7 @@ async function harness(options: { native?: boolean; answer?: boolean; managedGro
   const forks: Array<string | undefined> = [];
   const switched: string[] = [];
   const runtime = new DutydeckRuntime(repos, {
+    providers: defaultDriverProviders(),
     matterTracking: new MattersService(repos),
     ...(options.workspaceRoot ? { workspaceRoot: options.workspaceRoot } : {}),
     probe: () => ({ protocol: options.native ? 'pty-cli' : 'acp', available: true, pause: false, resume: true }),

@@ -77,3 +77,17 @@ it('keeps direct server dependencies within the remaining baseline', () => {
   expect(added, '改依赖方向，不要往基线里加').toEqual([]);
   expect(removed, '旧依赖已不存在，请从基线删除').toEqual([]);
 });
+
+it('keeps concrete drivers and storage out of the runtime package', () => {
+  const root = fileURLToPath(new URL('../../../packages/agent-runtime/', import.meta.url));
+  const implementations = /^@dutydeck\/(acp-client|pty-driver|transports|storage)(\/|$)/;
+  const manifest = JSON.parse(readFileSync(root + 'package.json', 'utf8'));
+  expect(Object.keys(manifest.dependencies).filter(name => implementations.test(name))).toEqual([]);
+  const edges: string[] = [];
+  for (const file of ts.sys.readDirectory(root + 'src', ['.ts'], ['**/*.test.ts', '**/*.spec.ts'])) {
+    for (const target of valueImports(file, readFileSync(file, 'utf8'))) {
+      if (implementations.test(target)) edges.push(`${relative(root, file)} -> ${target}`);
+    }
+  }
+  expect(edges).toEqual([]);
+});

@@ -1,3 +1,4 @@
+import { defaultDriverProviders } from '../driver-providers.js';
 import { afterEach, expect, it, vi } from 'vitest';
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -19,6 +20,7 @@ it('settles the real Claude native authentication rejection as failed and shows 
   const project = join(cwd, 'projects', realpathSync(cwd).replace(/[^A-Za-z0-9-]/g, '-')); mkdirSync(project, { recursive: true });
   const repos = createRepositories(join(cwd, 'state.db'), { newDatabaseAuthority: 'ledger_v1' });
   const runtime = new DutydeckRuntime(repos, {
+    providers: defaultDriverProviders(),
     driverIdleTimeoutMs: 0,
     probe: () => ({ protocol: 'pty-cli', available: true, pause: false, resume: true }),
     ptyDriverFactory: (agent, _protocol, onEvent, onExit, sessionId) => {

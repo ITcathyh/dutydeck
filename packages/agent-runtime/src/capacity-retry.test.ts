@@ -1,3 +1,4 @@
+import { defaultDriverProviders } from '../../../apps/server/src/driver-providers.js';
 import { afterEach, expect, it, vi } from 'vitest';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -27,10 +28,10 @@ async function fixture(options: RuntimeOptions = {}, alwaysCapacity = false, too
       emit({ type: 'completed', data: { stopReason: 'end_turn' } });
     } });
   const agent: AgentConfig = { id: 'codex', name: 'Codex', protocol: 'pty-cli', command: process.execPath, args: [], cwd: root, env: {}, permissionMode: 'ask', timeout: 10, capabilities: { pause: false, resume: true }, builtin: false };
-  let runtime = new DutydeckRuntime(repos, { ...options, driverFactory: factory, cleanupIntervalMs: 0 });
+  let runtime = new DutydeckRuntime(repos, { providers: defaultDriverProviders(), ...options, driverFactory: factory, cleanupIntervalMs: 0 });
   cleanup.push(async () => { await runtime.shutdown(); repos.close(); await rm(root, { recursive: true, force: true }); });
   await runtime.initialize([agent]); const session = await runtime.start({ agentId: agent.id });
-  return { repos, session, prompts, get runtime() { return runtime; }, reopen: async () => { await runtime.shutdown(); runtime = new DutydeckRuntime(repos, { ...options, driverFactory: factory, cleanupIntervalMs: 0 }); await runtime.initialize([agent]); } };
+  return { repos, session, prompts, get runtime() { return runtime; }, reopen: async () => { await runtime.shutdown(); runtime = new DutydeckRuntime(repos, { providers: defaultDriverProviders(), ...options, driverFactory: factory, cleanupIntervalMs: 0 }); await runtime.initialize([agent]); } };
 }
 const waitRetry = async (h: Awaited<ReturnType<typeof fixture>>, taskId: string) => vi.waitFor(() => expect(h.repos.execution.getTaskExecution(taskId)?.currentAttempt?.automaticRetry).toBeDefined());
 it('send waits through one durable automatic successor and returns only its completed result', async () => {

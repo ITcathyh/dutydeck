@@ -1,3 +1,4 @@
+import { defaultDriverProviders } from '../driver-providers.js';
 import { readTaskReport, writeTaskReport } from '@dutydeck/shared';
 import { createHash } from 'node:crypto';
 import { mkdtemp, realpath, rm } from 'node:fs/promises';
@@ -2381,7 +2382,7 @@ describe('indexed permission receipts through the real runtime and SQLite', () =
       return true;
     });
     const { runtime } = makeRuntime([runningTask()], permissions, resolvePermission);
-    const eventRuntime = new DutydeckRuntime(repositories);
+    const eventRuntime = new DutydeckRuntime(repositories, { providers: defaultDriverProviders() });
     runtime.getLatestPermissionRequest = eventRuntime.getLatestPermissionRequest.bind(eventRuntime);
     runtime.getEvents = vi.fn(async () => { throw new Error('Unexpected full timeline read'); });
     workflow = new LarkWorkflowInteractions(repositories.config, runtime, service, undefined, async () => true);
@@ -2408,7 +2409,7 @@ describe('indexed permission receipts through the real runtime and SQLite', () =
 
   it.each(['approved', 'rejected'] as const)('repairs expired cards after a late %s and preserves genuine timeouts', async status => {
     const { directory, repositories } = await openDatabase();
-    const runtime = new DutydeckRuntime(repositories);
+    const runtime = new DutydeckRuntime(repositories, { providers: defaultDriverProviders() });
     const fullRead = vi.spyOn(runtime, 'getEvents');
     const lookup = vi.spyOn(runtime, 'getLatestPermissionRequest');
     const { service } = makeService();

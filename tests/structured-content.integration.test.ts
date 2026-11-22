@@ -1,3 +1,4 @@
+import { defaultDriverProviders } from '../apps/server/src/driver-providers.js';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -12,7 +13,7 @@ it('preserves ACP non-text parts from the real adapter through ledger settlement
   const directory = await mkdtemp(join(tmpdir(), 'dutydeck-content-chain-'));
   const path = join(directory, 'state.sqlite');
   const repos = createRepositories(path, { newDatabaseAuthority: 'ledger_v1' });
-  const runtime = new DutydeckRuntime(repos, { driverIdleTimeoutMs: 0, cleanupIntervalMs: 0, probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }) });
+  const runtime = new DutydeckRuntime(repos, { providers: defaultDriverProviders(), driverIdleTimeoutMs: 0, cleanupIntervalMs: 0, probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }) });
   const agent: AgentConfig = { id: 'mock-content', name: 'Mock ACP', command: process.execPath, args: [resolve(process.cwd(), 'tests/fixtures/mock-acp-agent.mjs')], protocol: 'acp', cwd: directory, env: {}, permissionMode: 'deny-all', timeout: 10, capabilities: { pause: false, resume: true }, builtin: false };
   try {
     await runtime.initialize([agent]);
@@ -44,7 +45,7 @@ it('preserves a single pure text reply larger than 256 KiB through the real ACP 
   const directory = await mkdtemp(join(tmpdir(), 'dutydeck-large-text-chain-'));
   const path = join(directory, 'state.sqlite');
   const repos = createRepositories(path, { newDatabaseAuthority: 'ledger_v1' });
-  const runtime = new DutydeckRuntime(repos, { driverIdleTimeoutMs: 0, cleanupIntervalMs: 0, probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }) });
+  const runtime = new DutydeckRuntime(repos, { providers: defaultDriverProviders(), driverIdleTimeoutMs: 0, cleanupIntervalMs: 0, probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }) });
   const agent: AgentConfig = { id: 'mock-large-text', name: 'Mock ACP', command: process.execPath, args: [resolve(process.cwd(), 'tests/fixtures/mock-acp-agent.mjs')], protocol: 'acp', cwd: directory, env: {}, permissionMode: 'deny-all', timeout: 10, capabilities: { pause: false, resume: true }, builtin: false };
   try {
     await runtime.initialize([agent]);

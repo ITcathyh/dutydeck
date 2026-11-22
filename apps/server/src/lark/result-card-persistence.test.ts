@@ -6,6 +6,7 @@
 // 2) 验收刷新时 service.update 不传 capabilities，回落默认能力表后只读卡上 0 个按钮，
 //    但 elements 里「可点『运行验证』执行。」这句是渲染时写死进 markdown 的，于是按钮
 //    没了、文字还在指路。文案与按钮必须同源。
+import { defaultDriverProviders } from '../driver-providers.js';
 import { persistedReplyTarget } from './persisted-card-task.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { mkdtemp, rm } from 'node:fs/promises';
@@ -42,6 +43,7 @@ async function harness(options: { verificationCommand?: string; verifications?: 
   const cwd = await mkdtemp(join(tmpdir(), 'dutydeck-lark-resultcard-'));
   const repos = createRepositories(join(cwd, 'state.db'), { newDatabaseAuthority: 'ledger_v1' });
   const runtime = new DutydeckRuntime(repos, {
+    providers: defaultDriverProviders(),
     probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }),
     driverFactory: (_config, _protocol, emit) => ({
       start: async () => {}, resume: async () => {}, stop: async () => {}, interrupt: async () => {},

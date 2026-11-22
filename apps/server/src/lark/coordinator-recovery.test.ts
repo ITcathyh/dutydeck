@@ -1,3 +1,4 @@
+import { defaultDriverProviders } from '../driver-providers.js';
 import { createTestLarkCoordinator, createTestLarkStorage, expectFirstLarkTurnCard } from './coordinator-test-fixture.js';
 import { readTestAcceptanceByKey } from './runtime-test-fixture.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -1191,6 +1192,7 @@ describe('SQLite + DutydeckRuntime 的命令恢复集成', () => {
     const integrationConfig = { ...config, workspace };
     const { driver, bind } = stalledDriver();
     const runtime = new DutydeckRuntime(repos, {
+      providers: defaultDriverProviders(),
       probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }),
       driverFactory: (_agent, _protocol, emit) => { bind(emit); return driver; }
     });
@@ -1317,6 +1319,7 @@ describe('SQLite + DutydeckRuntime 的命令恢复集成', () => {
         interrupt: vi.fn(async () => {}), resume: vi.fn(async () => {}), stop: vi.fn(async () => {})
       };
       runtime = new DutydeckRuntime(repos, {
+        providers: defaultDriverProviders(),
         probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }),
         driverFactory: (_agent, _protocol, emit) => { emitEvent = emit; return driver; }
       });

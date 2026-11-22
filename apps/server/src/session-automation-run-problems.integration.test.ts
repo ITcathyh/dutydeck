@@ -1,3 +1,4 @@
+import { defaultDriverProviders } from './driver-providers.js';
 import { SessionMutations } from '../../../packages/agent-runtime/src/ownership.js';
 import { existsSync } from 'node:fs';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
@@ -42,6 +43,7 @@ async function fixture(origin: 'lark' | 'web' = 'lark') {
   const report: { value?: { status: 'blocked'; summary: string } | { status: 'waiting'; question: string } } = {};
   let service!: SessionAutomationService;
   const runtime = new DutydeckRuntime(repos, {
+    providers: defaultDriverProviders(),
     matterTracking: new MattersService(repos),
     workspaceRoot: join(directory, 'workspaces'), cleanupIntervalMs: 0,
     probe: () => ({ available: true, protocol: 'jsonl', pause: false, resume: true }),

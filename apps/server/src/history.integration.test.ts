@@ -1,3 +1,4 @@
+import { defaultDriverProviders } from './driver-providers.js';
 import { afterEach, expect, it } from 'vitest';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -25,7 +26,7 @@ it('projects real Runtime prefixes, queued successor events, canonical identity 
       for (const text of ['final ', 'text ', 'fragments']) emit({ type: 'text', data: { text } });
       emit({ type: 'completed', data: { stopReason: 'end_turn' } });
     } });
-  const runtime = new DutydeckRuntime(repos, { driverFactory, cleanupIntervalMs: 0 });
+  const runtime = new DutydeckRuntime(repos, { providers: defaultDriverProviders(), driverFactory, cleanupIntervalMs: 0 });
   cleanup.push(async () => { release(); await runtime.shutdown(); repos.close(); await rm(directory, { recursive: true, force: true }); });
   const agent: AgentConfig = { id: 'sample', name: 'Sample', protocol: 'acp', command: process.execPath, args: [], cwd: directory, env: {}, permissionMode: 'ask', timeout: 60, capabilities: { pause: false, resume: true }, builtin: false };
   await runtime.initialize([agent]); const session = await runtime.start({ agentId: agent.id });

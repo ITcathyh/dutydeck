@@ -1,3 +1,4 @@
+import { defaultDriverProviders } from '../../../apps/server/src/driver-providers.js';
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
@@ -57,7 +58,7 @@ tmuxDescribe('restart drain with native background work in isolated tmux', () =>
     const agent: AgentConfig = { id: 'claude-code', name: 'Fixture', command: '/bin/sh', args: ['-c', 'exec /bin/sh'], protocol: 'pty-cli', cwd,
       env: { CLAUDE_CONFIG_DIR: cwd }, permissionMode: 'full-trust', timeout: 60, capabilities: { pause: false, resume: true }, builtin: false };
     const repos = createRepositories(join(cwd, 'dutydeck.db'), { newDatabaseAuthority: 'ledger_v1' });
-    const runtime = new DutydeckRuntime(repos, { driverFactory: factory, probe: () => ({ available: true, protocol: 'pty-cli', pause: false, resume: true }) });
+    const runtime = new DutydeckRuntime(repos, { providers: defaultDriverProviders(), driverFactory: factory, probe: () => ({ available: true, protocol: 'pty-cli', pause: false, resume: true }) });
     cleanup.push(() => { if (name) { try { execFileSync('tmux', ['kill-session', '-t', name], { stdio: 'ignore' }); } catch { /* gone */ } } });
     cleanup.push(async () => { await runtime.shutdown(); repos.close(); });
     await runtime.initialize([agent]);

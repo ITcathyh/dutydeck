@@ -1,3 +1,4 @@
+import { defaultDriverProviders } from '../../../apps/server/src/driver-providers.js';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -33,7 +34,7 @@ it.each(['claude', 'gemini'])('continues a persisted %s ACP native session and r
       stop: async () => {}, interrupt: async () => {}, resume: async () => {}, isStopped: async () => true };
   }, { controlledResources: (protocol: string) => protocol === 'acp' });
   const open = async (agent: AgentConfig) => {
-    const runtime = new DutydeckRuntime(repos, { driverIdleTimeoutMs: 0, driverFactory: factory,
+    const runtime = new DutydeckRuntime(repos, { providers: defaultDriverProviders(), driverIdleTimeoutMs: 0, driverFactory: factory,
       probe: candidate => ({ protocol: candidate.protocol === 'pty-cli' ? 'pty-cli' : 'acp', available: true, pause: false, resume: true }),
       configureAgent: async candidate => { callbackProtocols.push(candidate.protocol); return candidate; } });
     cleanup.push(() => runtime.shutdown());
@@ -75,7 +76,7 @@ it('keeps an explicitly configured ACP launcher for the same built-in id', async
   const factory: DriverFactory = Object.assign((candidate, _protocol, onEvent, onExit, sessionId, context) => {
     configured.push(candidate); return new AcpxAdapter(candidate, { onEvent, onExit, sessionKey: sessionId, context });
   }, { controlledResources: () => true });
-  const runtime = new DutydeckRuntime(repos, { driverFactory: factory, probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }) });
+  const runtime = new DutydeckRuntime(repos, { providers: defaultDriverProviders(), driverFactory: factory, probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }) });
   cleanup.push(() => runtime.shutdown());
   await runtime.initialize([agent]);
   const session = await runtime.start({ agentId: agent.id });

@@ -1,3 +1,4 @@
+import { defaultDriverProviders } from '../driver-providers.js';
 import type { ReplyPolish } from './reply-polish.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import '../../../../tests/support/fast-wait-for.js';
@@ -38,6 +39,7 @@ async function harness(options: { polish?: ReplyPolish; verificationCommand?: st
   let release!: () => void;
   const gate = new Promise<void>(resolve => { release = resolve; });
   const runtime = new DutydeckRuntime(repos, {
+    providers: defaultDriverProviders(),
     probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }),
     driverFactory: (_config, _protocol, emit) => ({
       start: async () => {}, resume: async () => {}, stop: async () => {}, interrupt: async () => {},

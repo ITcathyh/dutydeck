@@ -29,10 +29,7 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@dutydeck/shared": "workspace:*",
-    "@dutydeck/acp-client": "workspace:*",
-    "@dutydeck/transports": "workspace:*",
-    "@dutydeck/storage": "workspace:*"
+    "@dutydeck/shared": "workspace:*"
   },
   "devDependencies": {
     "acpx": "0.13.0",

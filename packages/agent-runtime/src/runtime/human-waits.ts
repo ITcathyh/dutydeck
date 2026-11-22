@@ -1,6 +1,7 @@
+import type { DriverRegistry } from './driver-registry.js';
 import type { AsyncLocalStorage } from 'node:async_hooks';
 import { RuntimeError, agentCommandApprovalReason, errorMessage, freeTextInputMaxBytes, isAgentCommandAutoApproval, makeId, permissionDisplayText, type AgentDriver, type AgentEvent, type AttemptRef, type NormalizedDriverEvent, type PermissionRequestData, type RepositoryBundle, type Session, type SessionFence, type TaskRecord } from '@dutydeck/shared';
-import { testRegexWithTimeout } from '@dutydeck/acp-client';
+import { testRegexWithTimeout } from '@dutydeck/shared/execution';
 import type { RuntimeHost } from './host-ports.js';
 import { RevokedOperation, type RuntimeSessionMutations } from '../ownership.js';
 import { isAttemptRef } from './attempt-ref.js';
@@ -10,6 +11,7 @@ const TURN_ENDED_PERMISSION_REASON = '本轮任务已结束，这次操作没有
 export type PendingPermission = { request: PermissionRequestData; nativeId: string; fence: AttemptRef & SessionFence; generation: number };
 
 interface HumanWaitDependencies {
+  registry: DriverRegistry;
   repos: Pick<RepositoryBundle, 'sessions' | 'execution' | 'events'>;
   options: Pick<RuntimeHost, 'log' | 'awaitingAnswer' | 'launch' | 'policy'>;
   drivers: ReadonlyMap<string, AgentDriver>;
@@ -173,11 +175,11 @@ export class HumanWaits {
    */
   requestDriverPermission(sessionId: string, request: Omit<PermissionRequestData, 'id' | 'status'>) {
     if (this.deps.shuttingDown() || !this.mutations.attempts.get(sessionId) || !this.mutations.valid(this.mutations.owners.lifecycle(sessionId))) return undefined;
-    return this.deps.drivers.get(sessionId)?.requestPermission?.(request);
+    return this.deps.registry.method(this.deps.drivers.get(sessionId), 'requestPermission')?.(request);
   }
 
   getPendingPermissions(sessionId: string): PermissionRequestData[] {
-    if (!this.mutations.valid(this.mutations.owners.lifecycle(sessionId)) || !this.deps.drivers.get(sessionId)?.resolvePermission) return [];
+    if (!this.mutations.valid(this.mutations.owners.lifecycle(sessionId)) || !this.deps.registry.supports(this.deps.drivers.get(sessionId), 'resolvePermission')) return [];
     return [...this.permissions.entries()].filter(([key, pending]) => key.startsWith(sessionId + ':') && this.mutations.validCaptured(pending) && !this.permissionResolutions.has(key)).map(([, value]) => ({ ...value.request }));
   }
 
@@ -189,7 +191,7 @@ export class HumanWaits {
     const pending = this.permissions.get(key);
     if (!pending) throw new RuntimeError('PERMISSION_NOT_FOUND', 'Permission request is no longer active', 404);
     if (this.permissionResolutions.has(key)) throw new RuntimeError('PERMISSION_RESOLVING', 'Permission decision is already being submitted', 409);
-    if (!driver?.resolvePermission) throw new RuntimeError('PERMISSION_EXPIRED', 'The original approval driver is unavailable', 409);
+    if (!this.deps.registry.supports(driver, 'resolvePermission')) throw new RuntimeError('PERMISSION_EXPIRED', 'The original approval driver is unavailable', 409);
     const claim = makeId('permission_claim'); this.permissionResolutions.set(key, claim);
     try {
       if (!this.mutations.validCaptured(pending) || pending.generation !== (this.deps.sessionGenerations.get(sessionId) ?? 0) || this.permissions.get(key) !== pending) {

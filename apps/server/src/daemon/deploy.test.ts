@@ -1,3 +1,4 @@
+import { defaultDriverProviders } from '../driver-providers.js';
 import { backupSqlite, createRepositories, latestSchemaVersion, type SqliteDriverCheck, type SqliteDriverCheckOptions } from '@dutydeck/storage';
 import { DutydeckRuntime } from '@dutydeck/runtime';
 import type { AgentConfig } from '@dutydeck/shared';
@@ -1227,6 +1228,7 @@ describe('dutydeck deploy', () => {
     const open = () => {
       const repos = createRepositories(database, { mode: 'runtime', newDatabaseAuthority: 'ledger_v1' });
       const runtime = new DutydeckRuntime(repos, {
+        providers: defaultDriverProviders(),
         driverIdleTimeoutMs: 0,
         driverFactory: (_config, _protocol, emit, _exit, sessionId) => ({
           start: async () => {},

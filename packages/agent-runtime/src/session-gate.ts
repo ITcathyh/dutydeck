@@ -1,3 +1,4 @@
+import type { DriverRegistry } from './runtime/driver-registry.js';
 import type { AgentDriver, ExecutionBlocker, runtimeStateKeys, TaskRecord } from '@dutydeck/shared';
 
 type StopBlock = ReturnType<typeof runtimeStateKeys.driverStopBlock.read>;
@@ -6,6 +7,7 @@ type Recheck = { timer: ReturnType<typeof setTimeout>; since: string };
 type StopRecord = { block?: StopBlock; driver?: BlockedDriver; recheck?: Recheck };
 
 export class DriverStopState {
+  constructor(private readonly method: DriverRegistry['method']) {}
   private readonly records = new Map<string, StopRecord>();
   // A clear must invalidate reads already in flight, even after removing the last fact.
   private readonly versions = new Map<string, number>();
@@ -15,7 +17,7 @@ export class DriverStopState {
   recheck(id: string) { return this.records.get(id)?.recheck; }
   reason(id: string) { return this.block(id)?.reason ?? this.driver(id)?.reason; }
   recheckingReason(id: string) {
-    return this.recheck(id) && this.driver(id)?.driver.stopUnverifiable?.() !== true ? this.reason(id) : undefined;
+    return this.recheck(id) && this.method(this.driver(id)?.driver, 'stopUnverifiable')?.() !== true ? this.reason(id) : undefined;
   }
 
   private update(id: string, change: Partial<StopRecord>) {
@@ -58,6 +60,7 @@ export class SessionGate {
   get stops() { return this.stopFacts(); }
   constructor(private readonly facts: ExternalFacts, private readonly hasDriver: (id: string) => boolean,
     private readonly taskStatus: (id: string) => TaskRecord['status'] | undefined,
+    private readonly method: DriverRegistry['method'],
     private readonly stopFacts: () => Pick<DriverStopState, 'block' | 'driver' | 'reason' | 'recheckingReason'>) {}
 
   reasons(id: string, purpose: Purpose, options: { driver?: AgentDriver; firstOnly?: boolean } = {}): GateReason[] {
@@ -69,9 +72,9 @@ export class SessionGate {
       } else {
         let blocked: boolean;
         switch (code) {
-          case 'background_work': blocked = options.driver?.hasBackgroundWork?.() === true; break;
-          case 'driver_detached': blocked = options.driver?.isDetachedForShutdown?.() === true; break;
-          case 'driver_not_idle': blocked = options.driver?.isIdle?.() !== true; break;
+          case 'background_work': blocked = this.method(options.driver, 'hasBackgroundWork')?.() === true; break;
+          case 'driver_detached': blocked = this.method(options.driver, 'isDetachedForShutdown')?.() === true; break;
+          case 'driver_not_idle': blocked = this.method(options.driver, 'isIdle')?.() !== true; break;
           default: blocked = this.facts[code](id, options.driver);
         }
         if (blocked) result.push({ code });

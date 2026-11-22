@@ -1,3 +1,4 @@
+import { defaultDriverProviders } from '../../../apps/server/src/driver-providers.js';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createRepositories } from '@dutydeck/storage';
@@ -13,6 +14,7 @@ describe('default runtime child environment', () => {
     vi.stubEnv('TMUX', '/nonexistent/sentinel-daemon-tmux,1,0'); vi.stubEnv('TMUX_PANE', '%999');
     const repos = createRepositories(':memory:', { newDatabaseAuthority: 'ledger_v1' });
     const runtime = new DutydeckRuntime(repos, {
+      providers: defaultDriverProviders(),
       sessionEnvironment: () => ({ dutydeck_session_id: 'current-session', dutydeck_relay_token: 'fake-current-capability' })
     });
     const agent: AgentConfig = {

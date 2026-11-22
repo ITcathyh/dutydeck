@@ -1,6 +1,7 @@
 // 提取与整理管线的端到端回归：真实 DutydeckRuntime + SQLite + 真实 LarkMessageCoordinator。
 // mock driver 按会话 source 分流：用户会话回普通答案，lark-memory 会话按 prompt 回 facts / actions
 // 的 ```json，从而在不起真实 Agent 的前提下跑通「完成轮次 → 记账 → 提取 → 门禁 → 落账本 → 下一轮索引」。
+import { defaultDriverProviders } from '../driver-providers.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import '../../../../tests/support/fast-wait-for.js';
 import { mkdtemp, rm } from 'node:fs/promises';
@@ -47,6 +48,7 @@ async function harness(options: { now?: () => Date; timeoutMs?: number; agentMod
   });
 
   const runtime = new DutydeckRuntime(repos, {
+    providers: defaultDriverProviders(),
     probe: configured => ({ protocol: configured.id === 'memory' ? options.protocol ?? 'acp' : 'acp', available: true, pause: false, resume: true }),
     driverFactory: (_config, _protocol, emit, _onExit, sessionId) => {
       let busy = false;
@@ -996,6 +998,7 @@ describe('stuck memory session after a daemon restart', () => {
     const open = async (timeoutMs?: number) => {
       const repos = createRepositories(file, { newDatabaseAuthority: 'ledger_v1' });
       const runtime = new DutydeckRuntime(repos, {
+        providers: defaultDriverProviders(),
         probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }),
         driverFactory: (_config, _protocol, emit) => {
           let release: (() => void) | undefined;

@@ -5,6 +5,7 @@
 // 不会产生任何验证记录。此前这件事在飞书侧一个字都没有。
 //
 // 最容易写错的一点是 stale：代码在验证之后变过的记录必须显示为已过期，绝不能显示成验证通过。
+import { defaultDriverProviders } from '../driver-providers.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -196,6 +197,7 @@ async function harness(options: { verificationCommand?: string; verifications?: 
   const cwd = await mkdtemp(join(tmpdir(), 'dutydeck-lark-verify-'));
   const repos = createRepositories(join(cwd, 'state.db'), { newDatabaseAuthority: 'ledger_v1' });
   const runtime = new DutydeckRuntime(repos, {
+    providers: defaultDriverProviders(),
     probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }),
     driverFactory: (_config, _protocol, emit) => {
       const driver: AgentDriver = {

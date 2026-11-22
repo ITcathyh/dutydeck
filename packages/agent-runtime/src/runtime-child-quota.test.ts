@@ -1,3 +1,4 @@
+import { defaultDriverProviders } from '../../../apps/server/src/driver-providers.js';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { appendFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -33,6 +34,7 @@ async function fixture() {
   let currentTurn = '';
   const repos = createRepositories(':memory:', { newDatabaseAuthority: 'ledger_v1' });
   const runtime = new DutydeckRuntime(repos, {
+    providers: defaultDriverProviders(),
     probe: () => ({ protocol: 'pty-cli', available: true, pause: false, resume: true }),
     driverFactory: (agent, _protocol, onEvent, onExit, sessionId) => {
       const backend: SessionBackend = { kind: 'pty', spawn() {}, write() {}, resize() {}, kill() {}, interrupt() {}, onData(cb) { paint = cb; }, onExit() {} };

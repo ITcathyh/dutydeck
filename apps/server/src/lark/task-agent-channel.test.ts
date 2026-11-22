@@ -5,6 +5,7 @@
 // 「合成事件不去给一条不存在的消息贴表情」。
 //
 // 真实 Runtime + 真实 SQLite 持久化；只有飞书出网是替身，任何用例都不触达真实接口。
+import { defaultDriverProviders } from '../driver-providers.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -30,6 +31,7 @@ async function harness(options: { tasks?: unknown[]; completionReactionOnly?: bo
   const cwd = await mkdtemp(join(tmpdir(), 'dutydeck-lark-taskagent-'));
   const repos = createRepositories(join(cwd, 'state.db'), { newDatabaseAuthority: 'ledger_v1' });
   const runtime = new DutydeckRuntime(repos, {
+    providers: defaultDriverProviders(),
     probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }),
     driverFactory: (_config, _protocol, emit) => ({
       start: async () => {}, resume: async () => {}, stop: async () => {}, interrupt: async () => {},

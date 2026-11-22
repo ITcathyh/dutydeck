@@ -1,3 +1,4 @@
+import { defaultDriverProviders } from '../../../apps/server/src/driver-providers.js';
 import { describe, expect, it, vi } from 'vitest';
 import { appendFileSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
@@ -24,7 +25,7 @@ describe.skipIf(process.platform !== 'linux')('legacy Claude workspace admission
     const agents = ['claude-code', 'ccflash'].map(id => agentConfigSchema.parse({ id, name: id, command: process.execPath, args: [], cwd,
       env: { HOME: cwd, CLAUDE_CONFIG_DIR: cwd, FIXTURE_DEFER_NATIVE_STATE: '1' }, permissionMode: 'full-trust', timeout: 20,
       protocol: 'pty-cli', capabilities: { resume: true } }));
-    const runtime = new DutydeckRuntime(repos, { cleanupIntervalMs: 0,
+    const runtime = new DutydeckRuntime(repos, { providers: defaultDriverProviders(), cleanupIntervalMs: 0,
       probe: () => ({ available: true, protocol: 'pty-cli', resume: true }),
       ptyDriverFactory: (agent, _protocol, onEvent, onExit, sessionId) => {
         const backend = new TmuxBackend(`legacy-${sessionId}`, { ownerId: `dutydeck:${sessionId}` });

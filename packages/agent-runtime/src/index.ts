@@ -9,14 +9,14 @@ import { sessionConfigOf, type SessionKinds, type SessionKindSpec, type NoticeFa
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { randomUUID } from 'node:crypto';
 import type { AgentCapabilities, AgentConfig, AttemptActivity, AgentDriver, AgentEvent, DriverFactory, DriverTranscriptSourceObservation, EventType, EventWindowOptions, HistoryOutlineQuery, NormalizedDriverEvent, PermissionMode, PermissionRequestData, PromptPart, PromptSourceDiagnostics, PublicTaskRecord, RepositoryBundle, RuntimeControlClaim, Session, SkillDeliveryMetadata, StartSessionInput, TaskExecutionContext, TaskRecord, ToolRiskPolicy, TranscriptSourceObservation, VerificationCommandInput, VerificationResponse, WorkspaceCleanupBlocker, WorkspaceCleanupPreview, WorkspaceCleanupResult, WorkspaceResponse } from '@dutydeck/shared';
-import { canonicalExecutionJson, taskRequestV1Schema, makeId, now, errorMessage, RuntimeError, workspaceModes, sessionNameConfigKey, normalizeSessionName, supportsRemoteApproval, supportsNativeFork, redactCredentialText } from '@dutydeck/shared';
+import { canonicalExecutionJson, taskRequestV1Schema, makeId, now, errorMessage, RuntimeError, workspaceModes, sessionNameConfigKey, normalizeSessionName, redactCredentialText } from '@dutydeck/shared';
 import { warnCaught, type DiagnosticLog } from '@dutydeck/shared';
-import { listAcpxBuiltinAgents, AcpxAdapter, ProcessTreeCpu } from '@dutydeck/acp-client';
-import { commandExists, JsonlTransport, PipeTransport, probeAgent, PtyTransport } from '@dutydeck/transports';
+import { ProcessTreeCpu, commandExists, probeAgent, executionTaskId } from '@dutydeck/shared/execution';
+import { DriverRegistry } from './runtime/driver-registry.js';
+import type { DriverProvider, PtyRetirementControl } from '@dutydeck/shared';
 import { realpath } from 'node:fs/promises';
 import { join, sep } from 'node:path';
 import type { UnknownTaskFacts, UnknownTaskResolution, SteeringRecoveryDecision, PtyRetirementRecovery, ExecutionRecoveryDecision, AcceptedTask, AcceptedTaskInputV2, AttemptFence, AttemptRef, BoundExecutionRepository, CommitResult, DriverSteeringOutcome, ExecutionActor, ResourceCheckRef, SessionFence, TaskRequestV1 } from '@dutydeck/shared';
-import { executionTaskId } from '@dutydeck/storage/helpers';
 import { PersistentEventPublisher, type SubscribeOptions, type EventListener } from './persistent-event-publisher.js';
 import { digest, eventJson, executionOptionsOf, DriverConfigurationLedger, LocalDriverLedger, type ExecutionOptions } from './ledger.js';
 import { agentAuthFailure, agentLoginProblem, defaultAgentStatusCheck, type AgentStatusCheck, type AgentUnavailable } from './agent-availability.js';
@@ -79,16 +79,7 @@ export {
   INSIGHT_INSTANCE_ID_CONFIG_KEY
 } from './session-insight-source.js';
 
-export interface PtyRetirementControl {
-  capture(session: Session): unknown | Promise<unknown>;
-  stop(session: Session, snapshot: unknown, beforeKill: (snapshot: unknown) => Promise<void>): Promise<unknown>;
-  verify(session: Session, snapshot: unknown): boolean | Promise<boolean>;
-  /**
-   * 原终端已不存在时给出可复核的不存在证明（verify 能复查），终端还在时返回 undefined。只凭它不算退出证明：
-   * 运行时还要求终端记录的所有者运行时已退出（见 retireDetachedPty）。
-   */
-  captureAbsence?(session: Session): Promise<unknown | undefined>;
-}
+export type { PtyRetirementControl } from '@dutydeck/shared';
 export interface TaskRequestMaterial {
   agentPrompt?: string;
   riskPolicy?: ToolRiskPolicy;
@@ -97,6 +88,7 @@ export interface TaskRequestMaterial {
 }
 
 export interface RuntimeOptions {
+  providers?: readonly DriverProvider[];
   executionPolicy?: ExecutionPolicy;
   launchContext?: LaunchContext;
   promptAssembler?: PromptAssembler;
@@ -266,7 +258,7 @@ export class DutydeckRuntime {
   private readonly sessionGenerations = new Map<string, number>();
   private readonly exitedDriverGenerations = new Map<string, number>();
   private readonly exitListeners = new Map<string, Set<(code: number | null) => void>>();
-  private readonly factory: DriverFactory;
+  private readonly registry: DriverRegistry;
   /** 当前一轮的开始时间，之后每个驱动事件（含 raw_terminal）刷新一次。 */
   private readonly turnProgressAt = new Map<string, number>();
   private readonly turnCpu = new Map<string, ProcessTreeCpu>();
@@ -310,7 +302,7 @@ export class DutydeckRuntime {
     answer_pending: id => this.humanWaits.awaitingAnswer(id),
     unresolved_tasks: id => this.repos.execution.getUnresolvedTasks(id).length > 0,
     queued_or_running: id => this.repos.execution.hasQueuedOrRunningTasks(id)
-  }, id => this.supervisor.drivers.has(id), id => this.repos.execution.getTaskExecution(id)?.task.status, () => this.supervisor.stopFacts);
+  }, id => this.supervisor.drivers.has(id), id => this.repos.execution.getTaskExecution(id)?.task.status, (driver, key) => this.registry.method(driver, key), () => this.supervisor.stopFacts);
 
   private readonly steering: SteeringService;
   private readonly supervisor: DriverSupervisor;
@@ -325,6 +317,7 @@ export class DutydeckRuntime {
   private readonly options: RuntimeHost;
   constructor(private readonly repos: RepositoryBundle, input: RuntimeOptions = {}) {
     const options = this.options = runtimeHost(input);
+    this.registry = new DriverRegistry(input.providers, options);
     const interval = options.cleanupIntervalMs ?? 5 * 60_000;
     if (!Number.isInteger(interval) || interval < 0 || interval > 2_147_483_647) {
       throw new RuntimeError('INVALID_CLEANUP_INTERVAL', 'cleanupIntervalMs must be 0 (disabled) or an integer between 1 and 2147483647', 400);
@@ -339,19 +332,6 @@ export class DutydeckRuntime {
       return this.mutations.write(id, commit);
     });
     this.verifications = new VerificationManager(repos.config, (id, commit) => this.mutations.run(undefined, () => this.mutations.write(id, commit)));
-    const ptyDriverFactory = options.launch.ptyDriverFactory;
-    this.factory = options.launch.driverFactory ?? ((agent, protocol, onEvent, onExit, sessionId, context) => {
-      if (protocol === 'acp') return new AcpxAdapter({ ...agent, env: { ...agent.env, dutydeck_session_id: sessionId } }, { sessionKey: sessionId, context, onEvent, log: this.options.log, ...(this.options.policy.riskPolicy ? { resolveRiskPolicy: (fallback?: ToolRiskPolicy) => this.options.policy.riskPolicy!(sessionId, fallback) } : {}), ...(this.options.awaitingAnswer ? { awaitingAnswer: () => this.humanWaits.awaitingAnswer(sessionId) } : {}) });
-      if (protocol === 'pty-cli') {
-        if (!ptyDriverFactory) throw new RuntimeError('DRIVER_UNAVAILABLE', 'protocol 为 pty-cli 的 agent 需要注入 ptyDriverFactory（@dutydeck/pty-driver）', 503);
-        // 高风险拦截钩子按 dutydeck_session_id 找会话策略，和 ACP 一样由宿主注入。
-        return ptyDriverFactory({ ...agent, env: { ...agent.env, dutydeck_session_id: sessionId } }, protocol, onEvent, onExit, sessionId, context);
-      }
-      if (protocol === 'pty') return new PtyTransport(agent, { onEvent, onExit });
-      if (protocol === 'pipe') return new PipeTransport(agent, { onEvent, onExit, context });
-      return new JsonlTransport(agent, { onEvent, onExit, context });
-    });
-    if (!options.launch.driverFactory) this.factory.controlledResources = protocol => protocol === 'acp' || protocol === 'jsonl' || protocol === 'pipe';
     this.supervisor = new DriverSupervisor(this.mutations, {
       assertResources: (...args) => this.assertResources(...args),
       assertVerificationRecoverySafe: (...args) => this.assertVerificationRecoverySafe(...args),
@@ -368,7 +348,7 @@ export class DutydeckRuntime {
       configureAgentForSession: (...args) => this.configureAgentForSession(...args),
       drainSessionEvents: id => this.events.drainSession(id),
       exitedDriverGenerations: this.exitedDriverGenerations,
-      factory: this.factory,
+      registry: this.registry,
       fence: (...args) => this.fence(...args),
       flushInsightSources: (...args) => this.flushInsightSources(...args),
       gate: this.gate,
@@ -397,6 +377,7 @@ export class DutydeckRuntime {
       workspaces: this.workspaces,
     });
     this.humanWaits = new HumanWaits(this.mutations, {
+      registry: this.registry,
       repos, options, drivers: this.supervisor.drivers, activeTasks: this.activeTasks, sessionGenerations: this.sessionGenerations,
       eventScope: this.eventScope, shuttingDown: () => this.shuttingDown,
       driverEventData: (scope, event) => this.events.driverEventData(scope, event),
@@ -407,6 +388,7 @@ export class DutydeckRuntime {
       driverOperation: (driver, operation) => this.supervisor.driverOperation(driver, operation), touch: id => this.supervisor.touch(id),
     });
     this.scheduler = new Scheduler(this.mutations, {
+      registry: this.registry,
       activeTasks: this.activeTasks,
       attachedTerminals: this.attachedTerminals,
       bound: (...args) => this.bound(...args),
@@ -429,6 +411,7 @@ export class DutydeckRuntime {
       warnCaught: (...args) => this.warnCaught(...args),
     });
     this.events = new EventIngest(this.mutations, {
+      registry: this.registry,
       artifact: (method, ...args) => this.artifact(method, ...args),
       currentRef: (...args) => this.currentRef(...args),
       emit: (...args) => this.emit(...args),
@@ -462,7 +445,7 @@ export class DutydeckRuntime {
       emit: (...args) => this.emit(...args),
       events: this.events,
       exitedDriverGenerations: this.exitedDriverGenerations,
-      factory: this.factory,
+      registry: this.registry,
       fence: (...args) => this.fence(...args),
       flushInsightSources: (...args) => this.flushInsightSources(...args),
       humanWaits: this.humanWaits,
@@ -486,7 +469,7 @@ export class DutydeckRuntime {
     });
     this.recovery = new RecoveryService(this.mutations, {
       adoptDriver: (id, driver) => this.supervisor.adopt(id, driver), clearRecoveredStop: id => this.supervisor.clearRecoveredStop(id),
-      factory: (...args) => this.factory(...args), workspaces: this.workspaces, humanWaits: this.humanWaits,
+      registry: this.registry, workspaces: this.workspaces, humanWaits: this.humanWaits,
       sessionGenerations: this.sessionGenerations, attachedTerminals: this.attachedTerminals,
       hasDrain: id => this.mutations.drains.has(id), hasActiveTurn: id => this.activeTurns.has(id),
       onDriverEvent: (...args) => this.events.onDriverEvent(...args),
@@ -542,6 +525,7 @@ export class DutydeckRuntime {
       confirmExecutionRecovery: (...args) => this.confirmExecutionRecovery(...args),
     });
     this.steering = new SteeringService(this.mutations, {
+      registry: this.registry,
       acceptedInput: (...args) => this.acceptedInput(...args),
       active: (...args) => this.active(...args),
       actor: (...args) => this.actor(...args),
@@ -621,7 +605,7 @@ export class DutydeckRuntime {
     let lifecycleOwnsParent = false;
     for (let token = this.lifecycles.get(id); token; token = token.parent) if (token === previous) { lifecycleOwnsParent = true; break; }
     const driver = this.supervisor.drivers.get(id) ?? this.gate.stops.driver(id)?.driver;
-    const source = lifecycleOwnsParent ? driver?.drainExitedOutput?.() : undefined;
+    const source = lifecycleOwnsParent ? this.registry.method(driver, 'drainExitedOutput')?.() : undefined;
     if (!source) { previous.revoke(reason); return; }
     // Only the current lifecycle's parent survives, and only until this exact
     // exit drain has persisted or exhausted its budget. Other tokens stay fenced.
@@ -705,12 +689,7 @@ export class DutydeckRuntime {
     }
   }
   private agentForSessionProtocol(agent: AgentConfig, session: Session): AgentConfig {
-    // Existing ACP sessions keep their launcher when discovery now prefers a terminal adapter.
-    if (agent.builtin && agent.protocol === 'pty-cli' && session.protocol === 'acp') {
-      const builtin = listAcpxBuiltinAgents().find(candidate => candidate.id === agent.id);
-      if (builtin) agent = { ...agent, command: builtin.argv[0]!, args: builtin.argv.slice(1), protocol: 'acp', adapterId: undefined, capabilities: { pause: false, resume: true } };
-    }
-    return agent;
+    return this.registry.for(session.protocol)?.restoreAgent?.(agent) ?? agent;
   }
   private async configureAgentForSession(agent: AgentConfig, session: Session): Promise<AgentConfig> {
     agent = this.agentForSessionProtocol(agent, session);
@@ -725,7 +704,7 @@ export class DutydeckRuntime {
       permissionMode: session.permissionMode ?? agent.permissionMode,
       // 终端模式的适配器据会话来源决定启动参数（飞书会话固定 CLI 的权限模式），只注入 pty-cli，不进 ACPX session。
       // dutydeck_session_permission_mode：任务以 deny-all（先出计划）运行时，终端仍按会话本身的模式启动 CLI。
-      env: { ...agent.env, ...this.options.launch.environment?.(session), ...(session.protocol === 'pty-cli' ? { dutydeck_terminal_backend: session.terminalBackend ?? 'tmux', dutydeck_session_permission_mode: session.permissionMode ?? agent.permissionMode, ...(session.source ? { dutydeck_session_source: session.source } : {}) } : {}) }
+      env: { ...agent.env, ...this.options.launch.environment?.(session), ...(this.registry.capabilities(session.protocol)?.persistentTerminal ? { dutydeck_session_permission_mode: session.permissionMode ?? agent.permissionMode, ...(session.source ? { dutydeck_session_source: session.source } : {}) } : {}) }
     };
   }
 
@@ -774,7 +753,7 @@ export class DutydeckRuntime {
     const configuredIds = new Set(agents.map(agent => agent.id));
     const removed = (await this.mutations.wait(() => this.repos.agents.list())).filter(existing => (existing.builtin || existing.origin) && !configuredIds.has(existing.id));
     // A built-in terminal CLI that is replacing itself drops out of the boot scan; keep its record when the command is back.
-    const swapping = new Set(removed.filter(existing => existing.builtin && existing.protocol === 'pty-cli' && !commandExists(existing.command)));
+    const swapping = new Set(removed.filter(existing => existing.builtin && this.registry.capabilities(existing.protocol)?.persistentTerminal && !commandExists(existing.command)));
     if (swapping.size) await this.commandSwapWindow();
     for (const existing of removed) if (!swapping.has(existing) || !commandExists(existing.command)) await this.mutations.write('runtime_initialize', () => this.repos.agents.delete(existing.id));
     for (const agent of agents) await this.mutations.write('runtime_initialize', () => this.repos.agents.save(agent));
@@ -1321,7 +1300,7 @@ export class DutydeckRuntime {
     if (this.repos.execution.getUnresolvedTasks(session.id).length) {
       throw new RuntimeError('SESSION_BUSY', 'The previous Agent execution result is unknown; resolve it before verification', 409);
     }
-    if (this.supervisor.drivers.get(session.id)?.hasBackgroundWork?.()) {
+    if (this.registry.method(this.supervisor.drivers.get(session.id), 'hasBackgroundWork')?.()) {
       throw new RuntimeError('SESSION_BUSY', 'Native background work of this Session is still running; wait for it before verification', 409);
     }
     const idleChecks = this.scheduler.idleResourceChecks();
@@ -1331,7 +1310,7 @@ export class DutydeckRuntime {
     }
     const verifying = (id: string) => new RuntimeError('SESSION_BUSY', `Another verification is running in this workspace: ${id}`, 409);
     for (const id of shared) {
-      if (this.repos.execution.getUnresolvedTasks(id).length || this.supervisor.drivers.get(id)?.hasBackgroundWork?.()) {
+      if (this.repos.execution.getUnresolvedTasks(id).length || this.registry.method(this.supervisor.drivers.get(id), 'hasBackgroundWork')?.()) {
         throw new RuntimeError('SESSION_BUSY', `Another Session is executing in this workspace: ${id}`, 409);
       }
       const resourceBlock = this.verificationResourceBlock(id, false, idleChecks);
@@ -1509,7 +1488,7 @@ export class DutydeckRuntime {
     if (!task || !queued || this.activeTasks.get(id) !== task) { this.turnCpu.delete(id); return undefined; }
     let sampler = this.turnCpu.get(id);
     if (!sampler) { sampler = new ProcessTreeCpu(TURN_STALL_CPU_WINDOW_MS); this.turnCpu.set(id, sampler); }
-    const cpu = sampler.sample(this.supervisor.drivers.get(id)?.processIds?.() ?? []);
+    const cpu = sampler.sample(this.registry.method(this.supervisor.drivers.get(id), 'processIds')?.() ?? []);
     if (cpu === undefined || cpu === 'active' || cpu === 'unknown' && silentMs < TURN_STALL_UNKNOWN_CPU_SILENCE_MS) return undefined;
     return { taskId: task.id, silentMs, queued, cpu };
   }
@@ -1522,7 +1501,7 @@ export class DutydeckRuntime {
     }
     // An unanswered steering request may already be inside the agent's turn, so the restart drain waits for it too.
     for (const sessionId of this.steering.activeSessions()) if (sessionId !== excludeSessionId) running.add(sessionId);
-    for (const [sessionId, driver] of this.supervisor.drivers) if (sessionId !== excludeSessionId && driver.hasBackgroundWork?.()) running.add(sessionId);
+    for (const [sessionId, driver] of this.supervisor.drivers) if (sessionId !== excludeSessionId && this.registry.method(driver, 'hasBackgroundWork')?.()) running.add(sessionId);
     return running.size;
   }
 
@@ -1535,8 +1514,8 @@ export class DutydeckRuntime {
         const session = await this.repos.sessions.get(id), driver = this.supervisor.drivers.get(id);
         const attempt = this.repos.execution.getTaskExecution(task.id)?.currentAttempt;
         const submission = attempt?.submission, recovery = submission?.recovery;
-        if (!session || session.protocol !== 'pty-cli' || session.terminalBackend !== 'tmux'
-          || !driver?.canRecoverTurn || !attempt || attempt.state !== 'active' || !submission || !recovery
+        if (!session || !this.registry.capabilities(session.protocol)?.persistentTerminal || session.terminalBackend !== 'tmux'
+          || !this.registry.supports(driver, 'canRecoverTurn') || !attempt || attempt.state !== 'active' || !submission || !recovery
           || task.interruptedByActor || this.acceptedInput(task).executionOptions.permissionMode !== 'full-trust') continue;
         const resource = this.recovery.recoverableResource(id, session.runId, submission.resourceRefs);
         if (!resource) continue;
@@ -1627,7 +1606,7 @@ export class DutydeckRuntime {
   }
 
   private probe(agent: AgentConfig) {
-    return (this.options.launch.probe ?? probeAgent)(agent, this.options.launch.acpxCommand);
+    return this.registry.probe(agent);
   }
 
   private sessionCapability(agent: AgentConfig, input: StartSessionInput) {
@@ -1656,8 +1635,8 @@ export class DutydeckRuntime {
     if (!agent) throw new RuntimeError('AGENT_NOT_FOUND', 'Memory Agent not found', 404);
     const { configured, capability } = await this.newSessionCapability(agent, input);
     if (!capability.available) throw new RuntimeError('AGENT_UNAVAILABLE', capability.detail ?? 'Agent unavailable', 503);
-    if (capability.protocol === 'pty') throw new RuntimeError('MEMORY_AGENT_UNSUPPORTED', 'Legacy PTY cannot enforce memory permissions', 422);
-    return { ...input, protocol: capability.protocol, cwd: configured.cwd, model: configured.model, reasoningEffort: configured.reasoningEffort, permissionMode: capability.protocol === 'pty-cli' ? 'ask' : 'deny-all' };
+    if (this.registry.capabilities(capability.protocol)?.permissionPosture === false) throw new RuntimeError('MEMORY_AGENT_UNSUPPORTED', 'Legacy PTY cannot enforce memory permissions', 422);
+    return { ...input, protocol: capability.protocol, cwd: configured.cwd, model: configured.model, reasoningEffort: configured.reasoningEffort, permissionMode: this.registry.capabilities(capability.protocol)?.persistentTerminal ? 'ask' : 'deny-all' };
   }
 
   async startMemorySession(input: StartSessionInput, stableSessionId: string, beforeStart: () => Promise<void>): Promise<Session> {
@@ -1757,21 +1736,23 @@ export class DutydeckRuntime {
     const sourceCwd = input.cwd ?? agent.cwd ?? process.cwd();
     const { configured: initialConfigured, capability } = await this.newSessionCapability(agent, input);
     if (!capability.available) throw new RuntimeError('AGENT_UNAVAILABLE', capability.detail ?? 'Agent unavailable', 503);
-    if (capability.protocol === 'pty') {
+    const capabilities = this.registry.capabilities(capability.protocol, initialConfigured);
+    if (!capabilities) throw new RuntimeError('DRIVER_UNAVAILABLE', `No driver provider for ${capability.protocol}`, 503);
+    if (!capabilities.permissionPosture) {
       throw new RuntimeError('PERMISSION_MODE_UNSUPPORTED', 'Legacy PTY transport cannot enforce a permission posture or expose interactive approval; use an ACP or PTY CLI Agent', 422);
     }
-    if (capability.protocol === 'pty-cli' && initialConfigured.permissionMode !== 'ask' && initialConfigured.permissionMode !== 'full-trust'
-      && !(initialConfigured.permissionMode === 'approve-reads' && supportsRemoteApproval({ ...initialConfigured, protocol: 'pty-cli' }))) {
+    if (capabilities.persistentTerminal && initialConfigured.permissionMode !== 'ask' && initialConfigured.permissionMode !== 'full-trust'
+      && !(initialConfigured.permissionMode === 'approve-reads' && capabilities.remoteApproval)) {
       throw new RuntimeError('PERMISSION_MODE_UNSUPPORTED', 'PTY Agent only supports ask (approve in the terminal) or explicit full-trust mode; approve-reads requires a Claude Code family CLI', 422);
     }
-    if (input.nativeForkSessionId && (capability.protocol !== 'pty-cli' || !supportsNativeFork(agent))) {
+    if (input.nativeForkSessionId && !capabilities.nativeFork) {
       throw new RuntimeError('FORK_UNSUPPORTED', 'This Agent does not support native session copying', 422);
     }
     // Decide before writing the session or workspace intent so fallback uses a single identity.
     const requestedMode = input.workspaceMode ?? 'shared';
     const workspaceMode = !owned && requestedMode === 'worktree' && input.fallbackToShared === true && await isNonGitWorkspace(sourceCwd)
       ? 'shared' : requestedMode;
-    const terminalBackend = capability.protocol === 'pty-cli' ? await this.options.launch.terminalBackend?.() ?? 'tmux' : undefined;
+    const terminalBackend = capabilities.persistentTerminal ? await this.options.launch.terminalBackend?.() ?? 'tmux' : undefined;
     const session: Session = { terminalBackend, id: owned?.id ?? makeId('ses'), agentId: agent.id, state: 'created', cwd: sourceCwd, workspaceMode, model: initialConfigured.model, codexProfile: initialConfigured.codexProfile, reasoningEffort: initialConfigured.reasoningEffort, permissionMode: initialConfigured.permissionMode, source: input.source, sourceId: input.sourceId, protocol: capability.protocol, runId: makeId('run'), createdAt: now(), updatedAt: now(), systemPrompt: agent.systemPrompt };
     return this.scoped(session.id, async () => {
     await this.mutations.write(session.id, async () => this.bound().createSession(eventJson(session) as unknown as Session));
@@ -1868,7 +1849,7 @@ export class DutydeckRuntime {
     generation: number,
     driverInstanceId: string
   ): void {
-    if (!driver.subscribeTranscriptSource) return;
+    if (!this.registry.supports(driver, 'subscribeTranscriptSource')) return;
     // 同 driver 重复订阅（不应发生）时先取消旧的，避免重复回调。
     this.insightSourceSubs.get(driver)?.unsubscribe?.();
     const sub: InsightSourceSubscription = {
@@ -1981,7 +1962,7 @@ export class DutydeckRuntime {
       ).catch((error: unknown) => {
         this.logInsightSourceDiagnostic(error, raw.observationId, sub.sessionId);
       });
-      if (persisted && this.insightFenceLive(sub)) sub.driver.confirmTranscriptSource?.(raw.observationId);
+      if (persisted && this.insightFenceLive(sub)) this.registry.method(sub.driver, 'confirmTranscriptSource')?.(raw.observationId);
     } catch (error) {
       this.logInsightSourceDiagnostic(error, raw.observationId, sub.sessionId);
     }
@@ -2226,7 +2207,7 @@ export class DutydeckRuntime {
     const { session } = await this.active(id);
     if (this.activeTurns.has(id)) throw new RuntimeError('TURN_IN_PROGRESS', 'Wait for the current response before switching models', 409);
     const driver = await this.supervisor.reconnect(session);
-    if (!driver.setModel) throw new RuntimeError('MODEL_SWITCH_UNSUPPORTED', `Agent ${session.agentId} does not support runtime model switching`, 422);
+    if (!this.registry.supports(driver, 'setModel')) throw new RuntimeError('MODEL_SWITCH_UNSUPPORTED', `Agent ${session.agentId} does not support runtime model switching`, 422);
     try { await this.runner.changeDriverConfiguration(session, driver, current => ({ ...current, model: normalized }), { model: normalized }); }
     catch (error) { throw switchRejection(error) ?? new RuntimeError('MODEL_SWITCH_FAILED', errorMessage(error), 422); }
     await this.emit(id, 'status', { state: session.state, model: normalized });
@@ -2240,7 +2221,7 @@ export class DutydeckRuntime {
     const { session } = await this.active(id);
     if (this.activeTurns.has(id)) throw new RuntimeError('TURN_IN_PROGRESS', 'Wait for the current response before changing reasoning effort', 409);
     const driver = await this.supervisor.reconnect(session);
-    if (!driver.setReasoningEffort) throw new RuntimeError('REASONING_SWITCH_UNSUPPORTED', `Agent ${session.agentId} does not support runtime reasoning effort switching`, 422);
+    if (!this.registry.supports(driver, 'setReasoningEffort')) throw new RuntimeError('REASONING_SWITCH_UNSUPPORTED', `Agent ${session.agentId} does not support runtime reasoning effort switching`, 422);
     try { await this.runner.changeDriverConfiguration(session, driver, current => ({ ...current, reasoningEffort: normalized }), { reasoningEffort: normalized }); }
     catch (error) { throw switchRejection(error) ?? new RuntimeError('REASONING_SWITCH_FAILED', errorMessage(error), 422); }
     await this.emit(id, 'status', { state: session.state, reasoningEffort: normalized });
@@ -2281,7 +2262,7 @@ export class DutydeckRuntime {
       // resume 复用既有 native 资源，ready 后 flush 启动期 pending 观察。
       this.flushInsightSources(driver);
       const target=owned?.options;
-      if(owned?.controlled&&target&&driver.nativeConfiguration){owned.options={permissionMode:target.permissionMode,...driver.nativeConfiguration()};await this.runner.changeDriverConfiguration(session,driver,()=>target,undefined,true);}
+      if(owned?.controlled&&target&&this.registry.supports(driver, 'nativeConfiguration')){owned.options={permissionMode:target.permissionMode,...driver.nativeConfiguration()};await this.runner.changeDriverConfiguration(session,driver,()=>target,undefined,true);}
       await this.saveState(session, 'idle');
       await this.scheduler.projectQueue(id); this.scheduler.unblockQueue(id); this.scheduler.scheduleQueue(id);
       return this.withSessionMetadata(session);
@@ -2375,7 +2356,7 @@ export class DutydeckRuntime {
     // 已启动驱动不支持热切换时，不得只改数据库却让子进程继续沿用
     // 旧 argv；未连接会话可以先持久化，下次 reconnect 会按新姿态启动。
     // 终端驱动的 setPermissionMode 只服务任务级的先出计划，不能换掉已启动 CLI 的会话姿态。
-    if (driver && (!driver.setPermissionMode || session.protocol === 'pty-cli')) throw new RuntimeError('PERMISSION_MODE_SWITCH_UNSUPPORTED', `Agent ${session.agentId} does not support runtime permission switching`, 422);
+    if (driver && (!this.registry.supports(driver, 'setPermissionMode') || this.registry.capabilities(session.protocol)?.persistentTerminal)) throw new RuntimeError('PERMISSION_MODE_SWITCH_UNSUPPORTED', `Agent ${session.agentId} does not support runtime permission switching`, 422);
     if (driver) await this.runner.changeDriverConfiguration(session, driver, current => ({ ...current, permissionMode: mode }), { permissionMode: mode });
     else await this.mutations.write(id, async () => { await this.configurations.assertClear(id); Object.assign(session, await this.patchSession(id, { permissionMode: mode })); });
     return this.withSessionMetadata(session);
@@ -2406,7 +2387,7 @@ export class DutydeckRuntime {
   private async shutdownOnce() {
     // Admission closes below, but a current driver's already observed exit may
     // still finish its exact task/attempt persistence before that fence applies.
-    for (const [id, driver] of this.supervisor.drivers) if (driver.drainExitedOutput?.()) this.events.settleExitedDriver(id, driver);
+    for (const [id, driver] of this.supervisor.drivers) if (this.registry.method(driver, 'drainExitedOutput')?.()) this.events.settleExitedDriver(id, driver);
     this.shuttingDown = true;
     for (const inspect of [...this.sendWaiters]) inspect();
     this.releaseInitializationCleanup?.();
@@ -2419,7 +2400,7 @@ export class DutydeckRuntime {
     const ids = new Set([...this.lifecycles.keys(), ...this.supervisor.drivers.keys()]);
     try {
       for (const [id, driver] of this.supervisor.drivers) {
-        if (!driver.prepareForDaemonShutdown) continue;
+        if (!this.registry.supports(driver, 'prepareForDaemonShutdown')) continue;
         const unresolved = this.repos.execution.getUnresolvedTasks(id).length > 0;
         const pendingCreation = this.repos.execution.getResources(id).some(resource => resource.kind === 'operation' && ['pending', 'unknown'].includes(resource.stage) && !resource.creationClosure);
         // Admission is closed and transitions revoked; an unclaimed queue drain cannot start a new turn.

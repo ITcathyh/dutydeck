@@ -1,3 +1,4 @@
+import { defaultDriverProviders } from '../../../apps/server/src/driver-providers.js';
 import { afterEach, expect, it, vi } from 'vitest';
 import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
@@ -59,7 +60,7 @@ it.each([false, true, 'exited'] as const)('Codex continues the same verified nat
   });
   const repos = createRepositories(join(cwd, 'state.sqlite'), { newDatabaseAuthority: 'ledger_v1' });
   const drivers: PtyCliDriver[] = [], events: NormalizedDriverEvent[] = [];
-  const runtime = new DutydeckRuntime(repos, { cleanupIntervalMs: 0,
+  const runtime = new DutydeckRuntime(repos, { providers: defaultDriverProviders(), cleanupIntervalMs: 0,
     probe: () => ({ available: true, protocol: 'pty-cli', resume: true }),
     ptyDriverFactory: (agent, _protocol, emit, onExit, sessionId) => {
       const backend = new TmuxBackend(`idle-${sessionId}`, { ownerId: `dutydeck:${sessionId}` });

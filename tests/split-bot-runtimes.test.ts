@@ -1,3 +1,4 @@
+import { defaultDriverProviders } from '../apps/server/src/driver-providers.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { parseEnv } from 'node:util';
 import { spawnSync } from 'node:child_process';
@@ -452,7 +453,7 @@ describe('offline bot partitions', () => {
     split({ ...f, apply: true });
     const repos = createRepositories(join(f.output, 'cli_aaa/dutydeck.db'));
     const factory = vi.fn(() => { throw new Error('must not start any driver'); });
-    const runtime = new DutydeckRuntime(repos, { driverIdleTimeoutMs: 0, driverFactory: factory });
+    const runtime = new DutydeckRuntime(repos, { providers: defaultDriverProviders(), driverIdleTimeoutMs: 0, driverFactory: factory });
     try {
       await runtime.initialize([{ id: 'agent', name: 'Agent', command: 'unused', args: [], protocol: 'acp', cwd: '/tmp', env: {}, permissionMode: 'ask', timeout: 10, capabilities: { pause: false, resume: true }, builtin: false }]);
       await expect(runtime.restart('blocked')).rejects.toMatchObject({ code: 'SESSION_RESOURCE_BLOCKED' });

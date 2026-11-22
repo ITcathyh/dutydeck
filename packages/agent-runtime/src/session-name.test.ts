@@ -1,3 +1,4 @@
+import { defaultDriverProviders } from '../../../apps/server/src/driver-providers.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createRepositories } from '@dutydeck/storage';
 import type { AgentConfig, Session } from '@dutydeck/shared';
@@ -55,6 +56,7 @@ function createHarness(dbPathOrOptions: string | HarnessOptions = ':memory:', ma
     setPermissionMode: vi.fn()
   };
   const runtime = new DutydeckRuntime(repos, {
+    providers: defaultDriverProviders(),
     probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }),
     driverFactory: (_agent, _p, onEvent) => {
       emit = onEvent;

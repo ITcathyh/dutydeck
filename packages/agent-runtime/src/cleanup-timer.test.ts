@@ -1,3 +1,4 @@
+import { defaultDriverProviders } from '../../../apps/server/src/driver-providers.js';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -11,7 +12,7 @@ describe('Runtime cleanup timer boundary', () => {
     const repos = createRepositories(join(directory, 'state.db'));
     const timers = vi.spyOn(globalThis, 'setInterval'); let runtime: DutydeckRuntime | undefined;
     try {
-      expect(() => { runtime = new DutydeckRuntime(repos, { cleanupIntervalMs }); }).toThrow(/cleanupIntervalMs/);
+      expect(() => { runtime = new DutydeckRuntime(repos, { providers: defaultDriverProviders(), cleanupIntervalMs }); }).toThrow(/cleanupIntervalMs/);
       expect(timers).not.toHaveBeenCalled();
     } finally { if (runtime) await runtime.shutdown(); timers.mockRestore(); repos.close(); await rm(directory, { recursive: true, force: true }); }
   });
@@ -20,7 +21,7 @@ describe('Runtime cleanup timer boundary', () => {
     const repos = createRepositories(join(directory, 'state.db'));
     const timers = vi.spyOn(globalThis, 'setInterval'); let runtime: DutydeckRuntime | undefined;
     try {
-      runtime = new DutydeckRuntime(repos, { cleanupIntervalMs });
+      runtime = new DutydeckRuntime(repos, { providers: defaultDriverProviders(), cleanupIntervalMs });
       if (cleanupIntervalMs) expect(timers).toHaveBeenCalledWith(expect.any(Function), cleanupIntervalMs);
       else expect(timers).not.toHaveBeenCalled();
     } finally { if (runtime) await runtime.shutdown(); timers.mockRestore(); repos.close(); await rm(directory, { recursive: true, force: true }); }

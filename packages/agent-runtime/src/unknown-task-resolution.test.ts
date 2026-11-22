@@ -1,3 +1,4 @@
+import { defaultDriverProviders } from '../../../apps/server/src/driver-providers.js';
 import { captureBoundExecution } from '../../../tests/support/bound-execution.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { mkdtemp, rm } from 'node:fs/promises';
@@ -34,7 +35,7 @@ async function fixture(options: { idle?: boolean | (() => boolean); deferFailure
       emit({ type: 'text', data: { text: `done ${prompt}` } }); emit({ type: 'completed', data: { stopReason: 'end_turn' } });
     } });
   const agent: AgentConfig = { id: 'fixture', name: 'fixture', command: process.execPath, args: [], cwd, env: {}, protocol: 'acp', permissionMode: 'ask', timeout: 10, capabilities: { pause: false, resume: true }, builtin: false };
-  let runtime = new DutydeckRuntime(repos, { driverFactory: factory, cleanupIntervalMs: 0 });
+  let runtime = new DutydeckRuntime(repos, { providers: defaultDriverProviders(), driverFactory: factory, cleanupIntervalMs: 0 });
   cleanups.push(async () => { await runtime.shutdown(); repos.close(); await rm(cwd, { recursive: true, force: true }); });
   await runtime.initialize([agent]);
   const session = await runtime.start({ agentId: agent.id });
@@ -49,7 +50,7 @@ async function fixture(options: { idle?: boolean | (() => boolean); deferFailure
   };
   const status = async (taskId: string) => (await runtime.getTasks(session.id)).find(task => task.id === taskId)?.status;
   return { repos, bound, session, first, second, prompts, emitters, resolution, status, releaseFailure, succeed: () => { fail = false; }, get runtime() { return runtime; },
-    reopen: async () => { await runtime.shutdown(); fail = false; runtime = new DutydeckRuntime(repos, { driverFactory: factory, cleanupIntervalMs: 0 }); await runtime.initialize([agent]); } };
+    reopen: async () => { await runtime.shutdown(); fail = false; runtime = new DutydeckRuntime(repos, { providers: defaultDriverProviders(), driverFactory: factory, cleanupIntervalMs: 0 }); await runtime.initialize([agent]); } };
 }
 
 describe('resolving result-unknown tasks', () => {

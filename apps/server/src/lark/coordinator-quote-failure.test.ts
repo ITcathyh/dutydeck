@@ -1,3 +1,4 @@
+import { defaultDriverProviders } from '../driver-providers.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -32,6 +33,7 @@ describe('coordinator quote failure card notes', () => {
 
     let receivedAgentPrompt = '';
     const runtime = new DutydeckRuntime(repos, {
+      providers: defaultDriverProviders(),
       probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }),
       driverFactory: (_config, _protocol, emit) => {
         const driver: AgentDriver = {

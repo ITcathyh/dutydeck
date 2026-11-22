@@ -1,5 +1,6 @@
 // 「可能卡住」提示在飞书卡上的呈现：真实 DutydeckRuntime + SQLite，驱动是一轮永远不结束的假驱动，
 // 它的进程号指向一个空闲的真实子进程，CPU 判定走真实的 /proc 读取。
+import { defaultDriverProviders } from '../driver-providers.js';
 import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { mkdtemp, rm } from 'node:fs/promises';
@@ -43,6 +44,7 @@ async function harness() {
   const interrupt = vi.fn();
   let emit!: (event: NormalizedDriverEvent) => void;
   const runtime = new DutydeckRuntime(repos, {
+    providers: defaultDriverProviders(),
     probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }),
     awaitingAnswer: id => broker.listPending(id).length > 0,
     driverFactory: (_config, _protocol, onEvent) => {

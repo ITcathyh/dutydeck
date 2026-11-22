@@ -25,6 +25,11 @@
       "types": "./dist/index.d.ts",
       "development": "./src/index.ts",
       "import": "./dist/index.js"
+    },
+    "./execution": {
+      "types": "./dist/execution.d.ts",
+      "development": "./src/execution.ts",
+      "import": "./dist/execution.js"
     }
   },
   "files": [

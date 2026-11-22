@@ -1,6 +1,7 @@
-import type { AgentCapabilities, AgentConfig, AttemptFence, AttemptRef, BoundExecutionRepository, CommitResult, DriverFactory, NormalizedDriverEvent, RuntimeControlClaim, SessionFence } from '@dutydeck/shared';
+import type { DriverRegistry } from './driver-registry.js';
+import type { AgentCapabilities, AgentConfig, AttemptFence, AttemptRef, BoundExecutionRepository, CommitResult, NormalizedDriverEvent, RuntimeControlClaim, SessionFence } from '@dutydeck/shared';
 import { RuntimeError, runtimeStateKeys, sameIdleCpuProof, withTimeout, type AgentDriver, type ExecutionActor, type RepositoryBundle, type Session } from '@dutydeck/shared';
-import { commandExists } from '@dutydeck/transports';
+import { commandExists } from '@dutydeck/shared/execution';
 import { digest } from '../digest.js';
 import { IDLE_CPU_MIN_IDLE_MS, IdleCpuWindow } from '../idle-cpu.js';
 import type { RuntimeHost } from './host-ports.js';
@@ -38,7 +39,7 @@ interface DriverSupervisorDependencies {
   configureAgentForSession: (agent: AgentConfig, session: Session) => Promise<AgentConfig>;
   drainSessionEvents(id: string): Promise<void>;
   exitedDriverGenerations: Map<string, number>;
-  factory: DriverFactory;
+  registry: DriverRegistry;
   fence: (session: Session) => SessionFence;
   flushInsightSources: (driver: AgentDriver) => void;
   gate: SessionGate;
@@ -99,12 +100,12 @@ export class DriverSupervisor {
       // The terminal tab retries while open; each rebuild would add two closed ledger rows.
       if (this.missingTerminals.has(id)) return undefined;
       const session = await this.mutations.wait(() => this.deps.repos.sessions.get(id));
-      if (!session || session.archivedAt || session.protocol !== 'pty-cli' || !['idle', 'completed', 'interrupted'].includes(session.state)) return undefined;
+      if (!session || session.archivedAt || !this.deps.registry.capabilities(session.protocol)?.persistentTerminal || !['idle', 'completed', 'interrupted'].includes(session.state)) return undefined;
       const driver = await this.reconnect(session, false);
       this.mutations.check();
       if (this.deps.attachedTerminals.has(driver)) return driver;
       let attached: boolean;
-      try { attached = await driver.attachTerminal?.() ?? false; }
+      try { attached = await this.deps.registry.method(driver, 'attachTerminal')?.() ?? false; }
       catch (error) { await this.discardUnattachedTerminal(id, driver); throw error; }
       if (attached) { this.deps.localResources.ready(driver); await this.deps.persistTerminalReceipt(session, driver); this.deps.attachedTerminals.add(driver); this.deps.flushInsightSources(driver); return driver; }
       await this.discardUnattachedTerminal(id, driver); this.missingTerminals.add(id); return undefined;
@@ -138,22 +139,22 @@ export class DriverSupervisor {
     const configured = await this.deps.configureAgentForSession(agent, session);
     this.assertReplaceable(session.id); this.deps.assertResources(session.id, true);
     const resolved = this.drivers.get(session.id); if (resolved) return resolved;
-    if (start && session.protocol === 'pty-cli' && !this.deps.probe(configured).available) {
+    if (start && this.deps.registry.capabilities(session.protocol)?.persistentTerminal && !this.deps.probe(configured).available) {
       if (!commandExists(configured.command)) await this.deps.commandSwapWindow();
       this.assertReplaceable(session.id); this.deps.assertResources(session.id, true);
       const raced = this.drivers.get(session.id); if (raced) return raced;
     }
     const options: ExecutionOptions = executionOptions ?? executionOptionsOf(configured);
     const generation = this.nextSessionGeneration(session.id), lifecycle = this.mutations.owners.lifecycle(session.id),startupOwner=this.mutations.current();
-    const resource = this.deps.localResources.begin(this.deps.fence(session), options, this.deps.factory.controlledResources?.(session.protocol!) ? {startupValid:()=>this.mutations.valid(startupOwner),valid:()=>this.mutations.valid(lifecycle)&&this.deps.sessionGenerations.get(session.id)===generation,repairConfiguration,executionDomain:`${session.source ?? 'local'}:${session.sourceId ?? ''}`} : undefined);
+    const resource = this.deps.localResources.begin(this.deps.fence(session), options, this.deps.registry.controlled(session.protocol) ? {startupValid:()=>this.mutations.valid(startupOwner),valid:()=>this.mutations.valid(lifecycle)&&this.deps.sessionGenerations.get(session.id)===generation,repairConfiguration,executionDomain:`${session.source ?? 'local'}:${session.sourceId ?? ''}`} : undefined);
     let driver:AgentDriver;
-    try {driver = this.deps.factory({ ...configured, model: options.model, reasoningEffort: options.reasoningEffort, permissionMode: options.permissionMode }, session.protocol!, this.deps.onDriverEvent(session, generation), code => {
+    try {driver = this.deps.registry.create({ ...configured, model: options.model, reasoningEffort: options.reasoningEffort, permissionMode: options.permissionMode }, session, this.deps.onDriverEvent(session, generation), code => {
       if (!this.mutations.valid(lifecycle) || this.deps.sessionGenerations.get(session.id) !== generation) return;
-      if (session.protocol === 'pty-cli') this.deps.exitedDriverGenerations.set(session.id, generation);
+      if (this.deps.registry.capabilities(session.protocol)?.persistentTerminal) this.deps.exitedDriverGenerations.set(session.id, generation);
       this.deps.notifyDriverExit(session.id, code);
       // An executing turn owns its result. A lifecycle exit never overwrites it.
       if (code && !this.mutations.attempts.has(session.id)) void this.mutations.run(lifecycle, () => this.deps.saveState(session, 'failed', `Agent exited with code ${code}`)).catch(error => this.deps.warnCaught('reconnect.saveExitState', session.id, error));
-    }, session.id, nativeForkSessionId ? { ...resource.context, nativeForkSessionId } : resource.context);} catch(error) {
+    }, nativeForkSessionId ? { ...resource.context, nativeForkSessionId } : resource.context);} catch(error) {
       if(resource.controlled){
         const cleanup=resource.controlled.abortFactory();this.factoryCleanups.set(session.id,cleanup);
         const release=()=>{if(this.factoryCleanups.get(session.id)===cleanup)this.factoryCleanups.delete(session.id);};
@@ -183,7 +184,7 @@ export class DriverSupervisor {
         await this.driverOperation(driver, () => settled);
       } else this.deps.localResources.settled(driver);
       if(resource.controlled&&start&&!repairConfiguration) {
-        const actual=driver.nativeConfiguration?.();
+        const actual=this.deps.registry.method(driver, 'nativeConfiguration')?.();
         if(actual)resource.options={permissionMode:options.permissionMode,...actual};
         await this.deps.changeDriverConfiguration(session,driver,()=>options,undefined,true);
       }
@@ -271,12 +272,12 @@ export class DriverSupervisor {
     let stopError: unknown;
     try { await driver.stop(discardSession ? { discardSession: true } : undefined); } catch (error) { stopError = error; }
     while (this.driverOperations.get(driver)?.size) await Promise.allSettled([...this.driverOperations.get(driver)!]);
-    if (shutdown && driver.isDetachedForShutdown?.()) {
+    if (shutdown && this.deps.registry.method(driver, 'isDetachedForShutdown')?.()) {
       if (this.drivers.get(id) === driver) this.connectedDrivers.delete(id);
       return;
     }
     let proven = false;
-    try { proven = await driver.isStopped?.() === true; } catch (error) { stopError ??= error; }
+    try { proven = await this.deps.registry.method(driver, 'isStopped')?.() === true; } catch (error) { stopError ??= error; }
     if (!proven) {
       const reason = stopError instanceof Error ? stopError.message : 'Driver physical resource exit is unverified';
       this.stops.setDriver(id, { driver, reason }); await this.retainStopBlock(id, reason);
@@ -300,7 +301,7 @@ export class DriverSupervisor {
     const intent = { cancelQueue, actor };  this.stopIntents.set(id, intent);
     const token = this.mutations.attempts.get(id), ref = token && this.mutations.attemptRefs.get(token);
     const driver = this.drivers.get(id) ?? this.stops.driver(id)?.driver;
-    const exitDrain = driver?.drainExitedOutput?.();
+    const exitDrain = this.deps.registry.method(driver, 'drainExitedOutput')?.();
     const run = this.mutations.run(undefined, async () => {
       const drainError = exitDrain ? await this.deps.settleExitedDriver(id, driver, exitDrain) : undefined;
       this.mutations.owners.lifecycle(id).revoke(reason); token?.revoke(reason); this.mutations.drains.get(id)?.revoke(reason);
@@ -360,7 +361,7 @@ export class DriverSupervisor {
 
   private async inspectIdleCpu(id: string, driver: AgentDriver, at: number): Promise<void> {
     const reset = () => { this.idleCpuWindows.delete(id); };
-    if (!driver.idleCpuProof || !driver.beginIdleCpuRetirement || this.idleCpuBlocked(id, driver)
+    if (!this.deps.registry.supports(driver, 'idleCpuProof') || !this.deps.registry.supports(driver, 'beginIdleCpuRetirement') || this.idleCpuBlocked(id, driver)
       || at - (this.lastActivity.get(id) ?? at) < IDLE_CPU_MIN_IDLE_MS) { reset(); return; }
     const session = await this.deps.repos.sessions.get(id);
     if (!session || session.archivedAt || !['idle', 'completed', 'interrupted'].includes(session.state)
@@ -375,7 +376,7 @@ export class DriverSupervisor {
     if (high.report) this.deps.options.log?.warn({ sessionId: id, code: 'IDLE_CPU_HIGH', action, ratio: high.ratio },
       'An idle, resumable CLI is continuously using CPU');
     if (action !== 'retire') return;
-    if (!driver.prepareForIdleRetirement || !await driver.prepareForIdleRetirement()) {
+    if (!this.deps.registry.supports(driver, 'prepareForIdleRetirement') || !await driver.prepareForIdleRetirement()) {
       this.deps.options.log?.info?.({ sessionId: id, code: 'IDLE_CPU_SKIPPED', reason: 'native-recovery-unprepared' }, 'Idle CPU retirement skipped');
       reset(); return;
     }
@@ -406,17 +407,17 @@ export class DriverSupervisor {
   private async retireIdleDriver(sessionId: string, driver: AgentDriver, at: number, timeout: number) {
     // Native background work counts as running for the restart drain too; it may stay silent past the timeout.
     // A stop-blocked driver belongs to its background recheck.
-    if (this.mutations.attempts.has(sessionId) || this.stops.driver(sessionId) || driver.hasBackgroundWork?.() || at - (this.lastActivity.get(sessionId) ?? at) < timeout) return;
+    if (this.mutations.attempts.has(sessionId) || this.stops.driver(sessionId) || this.deps.registry.method(driver, 'hasBackgroundWork')?.() || at - (this.lastActivity.get(sessionId) ?? at) < timeout) return;
     const lifecycle = this.mutations.owners.lifecycle(sessionId);
     const session = await this.deps.repos.sessions.get(sessionId);
-    if (!session || this.drivers.get(sessionId) !== driver || this.mutations.owners.lifecycle(sessionId) !== lifecycle || this.mutations.attempts.has(sessionId) || driver.hasBackgroundWork?.() || !['idle', 'completed', 'interrupted'].includes(session.state)) return;
-    if (driver.prepareForIdleRetirement && !await driver.prepareForIdleRetirement()) {
+    if (!session || this.drivers.get(sessionId) !== driver || this.mutations.owners.lifecycle(sessionId) !== lifecycle || this.mutations.attempts.has(sessionId) || this.deps.registry.method(driver, 'hasBackgroundWork')?.() || !['idle', 'completed', 'interrupted'].includes(session.state)) return;
+    if (this.deps.registry.supports(driver, 'prepareForIdleRetirement') && !await driver.prepareForIdleRetirement()) {
       // 一直确认不了原生会话的多半卡在启动阶段，没有可续的上下文；原生记录留在磁盘上，回收只结束进程。
       const idleMs = at - (this.lastActivity.get(sessionId) ?? at);
       if (idleMs < timeout + IDLE_RETIREMENT_UNPREPARED_MS) return;
       this.deps.options.log?.warn({ sessionId, code: 'IDLE_RETIREMENT_UNPREPARED', idleMs }, 'Retiring an idle driver whose native session could not be confirmed');
     }
-    if (this.drivers.get(sessionId) !== driver || this.mutations.attempts.has(sessionId) || driver.hasBackgroundWork?.() || this.mutations.owners.lifecycle(sessionId) !== lifecycle) return;
+    if (this.drivers.get(sessionId) !== driver || this.mutations.attempts.has(sessionId) || this.deps.registry.method(driver, 'hasBackgroundWork')?.() || this.mutations.owners.lifecycle(sessionId) !== lifecycle) return;
     await this.finishIdleRetirement(sessionId, driver, lifecycle);
   }
   private async finishIdleRetirement(sessionId: string, driver: AgentDriver, lifecycle: Owner) {
@@ -467,7 +468,7 @@ export class DriverSupervisor {
     let error: unknown;
     try {
       // 探测在停止流程外：挂起时不占用 stopRuns，显式停止或重启不会排在它后面。
-      const proven = await bounded(async () => await driver.isStopped?.() === true).catch(failure => { this.deps.warnCaught('recheckStop.probeExit', id, failure); return false; });
+      const proven = await bounded(async () => await this.deps.registry.method(driver, 'isStopped')?.() === true).catch(failure => { this.deps.warnCaught('recheckStop.probeExit', id, failure); return false; });
       if (current()) {
         // 再停一次时驱动合并已有的退出证明，不会退回启动时的进程身份。
         await this.mutations.run(token, () => proven ? this.retireStoppedDriver(id, driver) : bounded(() => this.stopDriver(id, driver)));
@@ -482,7 +483,7 @@ export class DriverSupervisor {
     } catch (failure) { error = failure; }
     if (this.deps.shuttingDown() || this.stops.driver(id)?.driver !== driver) return;
     // 退出永远无法核实（例如看不到进程表）：不再承诺自动恢复。新消息照常排队，等恢复流程解除停止受阻后执行。
-    const unverifiable = driver.stopUnverifiable?.() === true;
+    const unverifiable = this.deps.registry.method(driver, 'stopUnverifiable')?.() === true;
     if (delay === STOP_RECHECK_MS || unverifiable) {
       this.deps.options.log?.warn({ sessionId: id, code: error instanceof RuntimeError ? error.code : 'DRIVER_STOP_UNVERIFIED', cause, blockedSince: since, unverifiable }, 'Driver exit is still unverified');
       const session = await this.deps.repos.sessions.get(id);
@@ -495,7 +496,7 @@ export class DriverSupervisor {
   }
 
 
-  private readonly stops = new DriverStopState();
+  private readonly stops = new DriverStopState((driver, key) => this.deps.registry.method(driver, key));
   get stopFacts(): Pick<DriverStopState, 'block' | 'driver' | 'reason' | 'recheckingReason'> { return this.stops; }
   clearStopRechecks() { this.stops.clearRechecks(); }
   holdInterruptedDriver(id: string, driver: AgentDriver) {

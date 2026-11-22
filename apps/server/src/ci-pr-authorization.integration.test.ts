@@ -1,3 +1,4 @@
+import { defaultDriverProviders } from './driver-providers.js';
 import { execFile } from 'node:child_process';
 import { cp, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -52,6 +53,7 @@ describe.each(['CI', 'PR'] as const)('%s 最终提交授权', kind => {
     let phaseNow = '';
     let service!: CiWebhookService | PullRequestService;
     const runtime = new DutydeckRuntime(repos, {
+      providers: defaultDriverProviders(),
       workspaceRoot: join(root, 'workspaces'), cleanupIntervalMs: 0, driverIdleTimeoutMs: 0,
       probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }),
       driverFactory: (_config, _protocol, onEvent) => { emit = onEvent; return driver; },

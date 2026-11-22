@@ -25,6 +25,7 @@ vi.mock('@dutydeck/runtime', async importOriginal => {
   return { ...original, DutydeckRuntime: class extends original.DutydeckRuntime {
     constructor(repos: ConstructorParameters<typeof original.DutydeckRuntime>[0], options: RuntimeOptions) {
       super(repos, {
+        providers: options.providers,
         promptAssembler: {
           atExecute: options.promptAssembler!.atExecute,
           atAccept: (session, request, input, check) => options.promptAssembler!.atAccept(session, request,

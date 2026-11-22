@@ -1,3 +1,4 @@
+import { defaultDriverProviders } from '../driver-providers.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -100,7 +101,7 @@ async function unknownTopic(patch: Partial<StoredLarkConfig> = {}) {
   const boot = async (): Promise<Daemon> => {
     const repos = createRepositories(path, { newDatabaseAuthority: 'ledger_v1' });
     if (!boots) await repos.config.set(larkBotsConfigKey, JSON.stringify([config]));
-    const runtime = new DutydeckRuntime(repos, { driverIdleTimeoutMs: 0, probe, driverFactory: factory });
+    const runtime = new DutydeckRuntime(repos, { providers: defaultDriverProviders(), driverIdleTimeoutMs: 0, probe, driverFactory: factory });
     await runtime.initialize([agent]);
     const service = cardService(`p${++boots}`);
     const coordinator = new LarkMessageCoordinator(runtime, service as any, silentLog(), Math.random, 'ou_bot',

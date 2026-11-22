@@ -1,3 +1,4 @@
+import { defaultDriverProviders } from './driver-providers.js';
 import { readTaskAuthorization } from './task-authorization.js';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -35,6 +36,7 @@ async function fixture() {
   const clock = { value: new Date('2026-09-12T00:00:30.000Z') };
   let service!: SessionAutomationService; let runtime!: DutydeckRuntime;
   const makeRuntime = (targetRepos = repos) => new DutydeckRuntime(targetRepos, {
+    providers: defaultDriverProviders(),
     workspaceRoot: join(directory, 'workspaces'), cleanupIntervalMs: 0,
     probe: () => ({ available: true, protocol: 'jsonl', pause: false, resume: true }),
     authorizeExecution: async () => {},

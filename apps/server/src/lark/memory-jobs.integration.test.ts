@@ -1,3 +1,4 @@
+import { defaultDriverProviders } from '../driver-providers.js';
 import { createHash } from 'node:crypto';
 import { afterEach, expect, it, vi } from 'vitest';
 import { mkdir, mkdtemp, rm } from 'node:fs/promises';
@@ -43,6 +44,7 @@ async function harness(mode: 'legacy' | 'optimized' = 'optimized', maxInputChars
   // 这些会话的 driver 一启动就报启动器版本变化，模拟部署后旧 ACP 会话起不来。
   const staleSessions = new Set<string>();
   const createRuntime = () => new DutydeckRuntime(repos, {
+    providers: defaultDriverProviders(),
     cleanupIntervalMs: 0, workspaceRoot: join(dir, 'work'),
     probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }),
     driverFactory: (_config, _protocol, emit, _exit, sessionId) => {

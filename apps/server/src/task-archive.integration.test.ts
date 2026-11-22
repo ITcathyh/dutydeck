@@ -1,3 +1,4 @@
+import { defaultDriverProviders } from './driver-providers.js';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -16,7 +17,7 @@ it('archives through the CLI and HTTP route, stopping the active turn and cancel
   const pending = new Promise<void>(resolve => { finish = resolve; });
   let stopped = false;
   const send = vi.fn(async () => { entered(); await pending; });
-  const runtime = new DutydeckRuntime(repos, { driverIdleTimeoutMs: 0,
+  const runtime = new DutydeckRuntime(repos, { providers: defaultDriverProviders(), driverIdleTimeoutMs: 0,
     probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }),
     driverFactory: (_config, _protocol, emit): AgentDriver => ({
       start: async () => {}, resume: async () => {}, interrupt: async () => {}, send,

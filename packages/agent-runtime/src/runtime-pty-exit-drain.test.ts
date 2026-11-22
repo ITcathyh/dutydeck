@@ -1,3 +1,4 @@
+import { defaultDriverProviders } from '../../../apps/server/src/driver-providers.js';
 import { runtimeComponents } from '../test-support/components.js';
 import { describe, expect, it, vi } from 'vitest';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
@@ -34,6 +35,7 @@ async function runCase(mode: 'natural' | 'stop_during_drain' | 'hold_attempt_con
   let terminal = '', killCalls = 0, disposeCalls = 0;
   const runtimeExits: Array<number | null> = [];
   const runtime = new DutydeckRuntime(repos, {
+    providers: defaultDriverProviders(),
     cleanupIntervalMs: 0, driverIdleTimeoutMs: 0,
     probe: () => ({ protocol: 'pty-cli', available: true, pause: false, resume: true }),
     observeTurn: async (_session, _taskId, phase) => {

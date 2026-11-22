@@ -1,3 +1,4 @@
+import { defaultDriverProviders } from './driver-providers.js';
 import Database from 'better-sqlite3';
 import { execFileSync } from 'node:child_process';
 import { secretGuardScriptPath } from '@dutydeck/shared/secret-guard';
@@ -70,6 +71,7 @@ async function fixture(options: { realAcp?: boolean; scenarios?: ScenarioRegistr
   const calls: Array<{ sessionId: string; prompt: string; finish(text: string): void; capacity(): void }> = [];
   const stopped: string[] = [];
   const runtime = new DutydeckRuntime(repos, {
+    providers: defaultDriverProviders(),
     workspaceRoot: join(directory, 'workspaces'), cleanupIntervalMs: 0,
     probe: (() => ({ available: true, protocol: 'acp', acp: true })) as any,
     authorizeExecution: async (id, actor) => { await collaboration.background.authorizeExecution(id, actor); },

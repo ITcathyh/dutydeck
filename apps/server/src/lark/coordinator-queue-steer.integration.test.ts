@@ -3,6 +3,7 @@
 //
 // 与 chat-commands.test.ts 同样接真实 DutydeckRuntime + SQLite，只把飞书网络层换成内存桩：
 // 这些行为的价值全在「真的改了队列、真的中断了那一轮」，只 mock runtime 的测试证明不了。
+import { defaultDriverProviders } from '../driver-providers.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import '../../../../tests/support/fast-wait-for.js';
 import { mkdtemp, rm } from 'node:fs/promises';
@@ -38,6 +39,7 @@ async function harness(options: { configPatch?: Partial<StoredLarkConfig>; steer
   const prompts: string[] = [];
   const resolvePermission = vi.fn();
   const runtime = new DutydeckRuntime(repos, {
+    providers: defaultDriverProviders(),
     probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }),
     driverFactory: (_config, _protocol, emit) => {
       // 每一轮一个序号：被中断的那一轮不能再替后面的轮次报完成。中断时立刻结束这一轮的 send。

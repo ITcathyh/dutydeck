@@ -1,3 +1,4 @@
+import { defaultDriverProviders } from './driver-providers.js';
 import Fastify from 'fastify';
 import { afterEach, expect, it, vi } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
@@ -74,7 +75,7 @@ it('rereads explicit bindings for each warm runtime turn and after runtime recov
   const { root, repos, service, concurrent } = harness();
   const prompts: string[] = []; let starts = 0;
   const agent = agentConfigSchema.parse({ id: 'fake', name: 'Fake', command: 'fake', protocol: 'acp', cwd: root });
-  const makeRuntime = () => new DutydeckRuntime(repos, { cleanupIntervalMs: 0, driverIdleTimeoutMs: 0,
+  const makeRuntime = () => new DutydeckRuntime(repos, { providers: defaultDriverProviders(), cleanupIntervalMs: 0, driverIdleTimeoutMs: 0,
     probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }),
     sessionPrompt: async (session, prompt) => `${await service.prompt(session)}${prompt}`,
     driverFactory: (_agent, _protocol, emit) => ({ isIdle: () => true, hasBackgroundWork: () => false, start: async () => { starts++; }, stop: async () => {}, isStopped: async () => true, interrupt: async () => {}, send: async prompt => { prompts.push(prompt); emit({ type: 'text', data: { text: '完成' } }); emit({ type: 'completed', data: { stopReason: 'end_turn' } }); } }) });

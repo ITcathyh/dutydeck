@@ -1,3 +1,4 @@
+import { defaultDriverProviders } from '../../../apps/server/src/driver-providers.js';
 import { captureBoundExecution } from '../../../tests/support/bound-execution.js';
 import { expect, it, vi } from 'vitest';
 import { createRepositories } from '@dutydeck/storage';
@@ -11,6 +12,7 @@ it('an event that fails to record after the turn was flushed does not fail the n
   let emit!: (event: NormalizedDriverEvent) => void, late = true;
   const log = { warn: vi.fn(), info: vi.fn() };
   const runtime = new DutydeckRuntime(repos, {
+    providers: defaultDriverProviders(),
     cleanupIntervalMs: 0, log,
     probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }),
     // Between the turn's last event flush and its settlement, the driver delivers one more event.

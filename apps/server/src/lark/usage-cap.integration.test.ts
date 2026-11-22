@@ -1,5 +1,6 @@
 // 月度成本上限在飞书里的两处可见行为：用满后新任务在派发前被拒绝、在话题里写明是哪个上限；/status 显示本月用量。
 // 接真实 DutydeckRuntime + SQLite + UsageLedger，只把飞书网络层换成内存桩。
+import { defaultDriverProviders } from '../driver-providers.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -30,6 +31,7 @@ async function harness() {
   const ledger = new UsageLedger({ repositories: repos });
   const prompts: string[] = [];
   const runtime = new DutydeckRuntime(repos, {
+    providers: defaultDriverProviders(),
     probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }),
     admitTask: (session, request) => ledger.admit(session, request),
     recordUsage: (session, attempt, reading) => ledger.record(session, attempt, reading),
@@ -113,6 +115,7 @@ async function participationHarness(turnCostUsd: number) {
   const ledger = new UsageLedger({ repositories: repos, notify });
   const prompts: string[] = [];
   const runtime = new DutydeckRuntime(repos, {
+    providers: defaultDriverProviders(),
     probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }),
     admitTask: (session, request) => ledger.admit(session, request),
     recordUsage: (session, attempt, reading) => ledger.record(session, attempt, reading),
@@ -187,6 +190,7 @@ describe('定时任务遇到月度成本上限', () => {
     const clock = { value: new Date('2026-09-12T00:00:30.000Z') };
     let service!: SessionAutomationService;
     const runtime = new DutydeckRuntime(repos, {
+      providers: defaultDriverProviders(),
       cleanupIntervalMs: 0,
       probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }),
       authorizeExecution: async () => {},

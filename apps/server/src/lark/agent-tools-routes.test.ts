@@ -1,3 +1,4 @@
+import { defaultDriverProviders } from '../driver-providers.js';
 import Fastify from 'fastify';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { AgentGroupToolError, LarkAgentToolCapabilityRegistry, LarkAgentToolsService } from './agent-tools.js';
@@ -99,6 +100,7 @@ describe('Agent group tool HTTP boundary', () => {
     const cwd = await mkdtemp(join(tmpdir(), 'dutydeck-thread-tools-'));
     const repos = createRepositories(':memory:', { newDatabaseAuthority: 'ledger_v1' });
     const runtime = new DutydeckRuntime(repos, {
+      providers: defaultDriverProviders(),
       driverIdleTimeoutMs: 0,
       probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }),
       driverFactory: (_agent, _proto, emit) => ({ start: async () => {}, stop: async () => {}, send: async () => { emit({ type: 'text', data: { text: 'done' } }); emit({ type: 'completed', data: { stopReason: 'end_turn' } }); }, resume: async () => {}, interrupt: async () => {} })

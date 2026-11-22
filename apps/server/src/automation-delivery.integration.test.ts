@@ -1,3 +1,4 @@
+import { defaultDriverProviders } from './driver-providers.js';
 import { createServer, type ServerResponse } from 'node:http';
 import { once } from 'node:events';
 import { mkdtemp, rm } from 'node:fs/promises';
@@ -59,7 +60,7 @@ async function fixture() {
   async function open() {
     const repos = createRepositories(join(directory, 'state.db'), { newDatabaseAuthority: 'ledger_v1' });
     let automation!: SessionAutomationService;
-    const runtime = new DutydeckRuntime(repos, { driverIdleTimeoutMs: 0,
+    const runtime = new DutydeckRuntime(repos, { providers: defaultDriverProviders(), driverIdleTimeoutMs: 0,
       authorizeTask: (session, task, phase) => automation.authorizeTask(task, phase),
       probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }),
       driverFactory: (_agent, _protocol, emit) => ({ start: async () => {}, send: async () => {

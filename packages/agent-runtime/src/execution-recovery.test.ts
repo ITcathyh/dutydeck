@@ -1,3 +1,4 @@
+import { defaultDriverProviders } from '../../../apps/server/src/driver-providers.js';
 import { captureBoundExecution } from '../../../tests/support/bound-execution.js';
 import { readTaskReport, writeTaskReport } from '@dutydeck/shared';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -24,7 +25,7 @@ async function fixture(options: RuntimeOptions = {}, isStopped = true, deferFail
       emit({ type: 'text', data: { text: 'done' } }); emit({ type: 'completed', data: { stopReason: 'end_turn' } });
     } });
   const agent: AgentConfig = { id: 'fixture', name: 'fixture', command: process.execPath, args: [], cwd, env: {}, protocol: 'acp', permissionMode: 'ask', timeout: 10, capabilities: { pause: false, resume: true }, builtin: false };
-  let runtime = new DutydeckRuntime(repos, { ...options, driverFactory: factory, cleanupIntervalMs: 0 });
+  let runtime = new DutydeckRuntime(repos, { providers: defaultDriverProviders(), ...options, driverFactory: factory, cleanupIntervalMs: 0 });
   cleanups.push(async () => { await runtime.shutdown(); repos.close(); await rm(cwd, { recursive: true, force: true }); });
   await runtime.initialize([agent]);
   const session = await runtime.start({ agentId: agent.id });
@@ -39,7 +40,7 @@ async function fixture(options: RuntimeOptions = {}, isStopped = true, deferFail
       decisionId, action: 'confirm_result', outcome: 'unknown', evidenceRefs: ['operator:original-result-unknown'], resourceChecks: snapshot.resourceChecks };
   };
   return { repos, bound, session, first, second, prompts, decision, releaseFailure, get runtime() { return runtime; },
-    reopen: async () => { await runtime.shutdown(); fail = false; runtime = new DutydeckRuntime(repos, { ...options, driverFactory: factory, cleanupIntervalMs: 0 }); await runtime.initialize([agent]); } };
+    reopen: async () => { await runtime.shutdown(); fail = false; runtime = new DutydeckRuntime(repos, { providers: defaultDriverProviders(), ...options, driverFactory: factory, cleanupIntervalMs: 0 }); await runtime.initialize([agent]); } };
 }
 describe('owner execution recovery', () => {
   it('keeps own and foreign blockers with the same code distinct without exposing foreign session IDs', async () => {

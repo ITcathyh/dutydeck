@@ -11,6 +11,7 @@
       "development": "./src/index.ts",
       "import": "./dist/index.js"
     },
+    "./provider": { "types": "./dist/provider.d.ts", "development": "./src/provider.ts", "import": "./dist/provider.js" },
     "./regex-timeout": {
       "types": "./dist/regex-timeout.d.ts",
       "development": "./src/regex-timeout.ts",
@@ -26,6 +27,14 @@
   },
   "files": [
     "src/index.ts",
+    "src/native-session-store.ts",
+    "dist/native-session-store.js",
+    "dist/native-session-store.js.map",
+    "dist/native-session-store.d.ts",
+    "src/provider.ts",
+    "dist/provider.js",
+    "dist/provider.js.map",
+    "dist/provider.d.ts",
     "dist/index.js",
     "dist/index.js.map",
     "dist/index.d.ts",

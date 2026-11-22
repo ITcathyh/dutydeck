@@ -1,5 +1,6 @@
 // 场景包关联（H6′）：在卡片映射里找同一个群里更早、同一件事的一轮，把上一轮结论带给 Agent、在过程卡顶部挂一行。
 // 用例由升级前的 alert-recall.test.ts 迁来，通过注册表加载内置告警包运行；名字换成了合成值。
+import { defaultDriverProviders } from '../driver-providers.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -170,6 +171,7 @@ describe('scenario recall in a Lark turn', () => {
     const repos = createRepositories(join(cwd, 'state.db'), { newDatabaseAuthority: 'ledger_v1' });
     let receivedAgentPrompt = '';
     const runtime = new DutydeckRuntime(repos, {
+      providers: defaultDriverProviders(),
       probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }),
       driverFactory: (_config, _protocol, emit) => {
         const driver: AgentDriver = {

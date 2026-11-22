@@ -1,3 +1,4 @@
+import { defaultDriverProviders } from './driver-providers.js';
 import { afterEach, describe, expect, it } from 'vitest';
 import { createRepositories } from '@dutydeck/storage';
 import { DutydeckRuntime, type AgentDriver } from '@dutydeck/runtime';
@@ -12,6 +13,7 @@ async function harness(skillRequests?: string[], legacy = false) {
   const repos = createRepositories(':memory:', { newDatabaseAuthority: legacy ? 'legacy' : 'ledger_v1' });
   const prompts: string[] = [];
   const runtime = new DutydeckRuntime(repos, {
+    providers: defaultDriverProviders(),
     prepareTaskPrompt: async (_session, prompt) => ({
       agentPrompt: prompt,
       skillDeliveries: [{ name: 'auto-skill', path: '/skills/auto/SKILL.md', source: 'plugin', digest: 'digest', mode: 'prompt', required: true }]

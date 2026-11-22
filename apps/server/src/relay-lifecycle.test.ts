@@ -1,3 +1,4 @@
+import { defaultDriverProviders } from './driver-providers.js';
 import { afterEach, expect, it, vi } from 'vitest';
 import { DutydeckRuntime } from '@dutydeck/runtime';
 import { createRepositories } from '@dutydeck/storage';
@@ -20,6 +21,7 @@ async function fixture() {
     isStopped: async () => true, resume: async () => {}
   };
   const runtime = new DutydeckRuntime(repos, {
+    providers: defaultDriverProviders(),
     probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }),
     driverFactory: (_agent, _protocol, onEvent) => { emit = onEvent; return driver; }
   });

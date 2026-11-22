@@ -4,6 +4,7 @@
 //    重复点击、回调重投、服务重启后再点，都只提交一轮。
 // 2) 重复请求提议定时：同一人、同一聊天、14 天内发过同一句话才给「每天 HH:MM 自动执行」，
 //    点击后建出 cron 计划、回报位置是原话题，重复点击不重复建。
+import { defaultDriverProviders } from '../driver-providers.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -33,6 +34,7 @@ async function harness(options: { fail?: boolean; automation?: boolean; config?:
   const repos = createRepositories(join(cwd, 'state.db'), { newDatabaseAuthority: 'ledger_v1' });
   const prompts: string[] = [];
   const runtime = new DutydeckRuntime(repos, {
+    providers: defaultDriverProviders(),
     probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }),
     driverFactory: (_config, _protocol, emit) => ({
       start: async () => {}, resume: async () => {}, stop: async () => {}, interrupt: async () => {}, isStopped: async () => true,

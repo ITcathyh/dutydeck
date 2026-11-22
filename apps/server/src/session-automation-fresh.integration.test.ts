@@ -1,3 +1,4 @@
+import { defaultDriverProviders } from './driver-providers.js';
 import { collectWatchScopes } from './watch-signals.js';
 import { MattersService } from './matters.js';
 import { existsSync } from 'node:fs';
@@ -44,6 +45,7 @@ async function fixture(origin: 'lark' | 'web' = 'lark') {
   const allowed = { value: true };
   let service!: SessionAutomationService;
   const runtime = new DutydeckRuntime(repos, {
+    providers: defaultDriverProviders(),
     matterTracking: new MattersService(repos),
     workspaceRoot: join(directory, 'workspaces'), cleanupIntervalMs: 0,
     probe: () => ({ available: true, protocol: 'jsonl', pause: false, resume: true }),

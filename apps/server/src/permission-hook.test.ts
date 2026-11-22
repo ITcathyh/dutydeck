@@ -1,3 +1,4 @@
+import { defaultDriverProviders } from './driver-providers.js';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -106,7 +107,7 @@ describe('Claude PermissionRequest hook over the session relay', () => {
     let enabled = true;
     let pattern = 'never_matches';
     const info = vi.fn();
-    const runtime = new DutydeckRuntime(repos, { driverFactory: () => driver,
+    const runtime = new DutydeckRuntime(repos, { providers: defaultDriverProviders(), driverFactory: () => driver,
       probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }),
       sessionEnvironment: current => enabled && current.source === 'lark' ? toolsEnv : {},
       resolveRiskPolicy: async () => ({ enabled: true, authorized: false, pattern }), log: { warn: vi.fn(), info } });

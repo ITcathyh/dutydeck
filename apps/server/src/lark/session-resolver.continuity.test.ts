@@ -1,3 +1,4 @@
+import { defaultDriverProviders } from '../driver-providers.js';
 import { createTestLarkStorage } from './coordinator-test-fixture.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { execFileSync } from 'node:child_process';
@@ -157,6 +158,7 @@ describe('重启后按配置的工作区续接会话', () => {
     execFileSync('git', ['init', '-q', repo]);
     const repos = createRepositories(join(root, 'state.db'), { newDatabaseAuthority: 'ledger_v1' });
     const runtime = new DutydeckRuntime(repos, {
+      providers: defaultDriverProviders(),
       probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }),
       driverFactory: (_config, _protocol, emit) => ({
         start: async () => {}, resume: async () => {}, stop: async () => {}, isStopped: async () => true, interrupt: async () => {},

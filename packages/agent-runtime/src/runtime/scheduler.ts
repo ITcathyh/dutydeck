@@ -1,3 +1,4 @@
+import type { DriverRegistry } from './driver-registry.js';
 import type { AgentDriver, AttemptRef, BoundExecutionRepository, CommitResult, ExecutionActor, PublicTaskRecord, RepositoryBundle, ResourceCheckRef, Session, SessionFence, TaskAttempt, TaskRecord } from '@dutydeck/shared';
 import { backgroundKindFor, executionActorSchema, RuntimeError } from '@dutydeck/shared';
 import type { RuntimeHost } from './host-ports.js';
@@ -14,6 +15,7 @@ const QUEUED_TASK_EXPIRE_MS = 24 * 60 * 60_000;
 const QUEUE_HANDOFF_MS = 15 * 60_000;
 
 interface SchedulerDependencies {
+  registry: DriverRegistry;
   activeTasks: Map<string, TaskRecord>;
   attachedTerminals: WeakSet<AgentDriver>;
   bound: () => BoundExecutionRepository;
@@ -94,8 +96,8 @@ export class Scheduler {
     const checks: ResourceCheckRef[] = [];
     for (const [id, driver] of this.deps.supervisor.drivers) {
       if (this.sessionHeld(id) || this.deps.supervisor.driverOperations.get(driver)?.size
-        || this.deps.humanWaits.pendingPermissionCount(id) || driver.isDetachedForShutdown?.() || driver.hasBackgroundWork?.() !== false) continue;
-      if (driver.isIdle?.() !== true) {
+        || this.deps.humanWaits.pendingPermissionCount(id) || this.deps.registry.method(driver, 'isDetachedForShutdown')?.() || this.deps.registry.method(driver, 'hasBackgroundWork')?.() !== false) continue;
+      if (this.deps.registry.method(driver, 'isIdle')?.() !== true) {
         const original = this.deps.localResources.get(driver);
         // A new control channel may not have a screen snapshot yet. Preserve its native
         // context only if this original ready driver has never received any submission.
@@ -120,7 +122,7 @@ export class Scheduler {
       if (otherId === id || this.deps.repos.execution.getUnresolvedTasks(otherId).length || this.sessionHeld(otherId)
         || blockers.some(value => value.sessionId === otherId && value.code !== 'WORKSPACE_PHYSICAL_RESOURCE_UNSAFE')) continue;
       const driver = this.deps.supervisor.drivers.get(otherId);
-      if (!driver || driver.hasBackgroundWork?.() === true || this.deps.supervisor.driverOperations.get(driver)?.size || this.deps.humanWaits.pendingPermissionCount(otherId)) continue;
+      if (!driver || this.deps.registry.method(driver, 'hasBackgroundWork')?.() === true || this.deps.supervisor.driverOperations.get(driver)?.size || this.deps.humanWaits.pendingPermissionCount(otherId)) continue;
       const proof = fresh ??= this.idleResourceChecks();
       const resources = this.deps.repos.execution.getResources(otherId);
       const disputed = blockers.filter(value => value.sessionId === otherId && value.code === 'WORKSPACE_PHYSICAL_RESOURCE_UNSAFE');
@@ -132,7 +134,7 @@ export class Scheduler {
       })) { if (allowProofRetry) closed = true; continue; }
       fresh = undefined;
       // Adapters without a reliable background-empty proof must prove physical stop on contention.
-      if (driver.prepareForIdleRetirement && !await driver.prepareForIdleRetirement()) continue;
+      if (this.deps.registry.supports(driver, 'prepareForIdleRetirement') && !await driver.prepareForIdleRetirement()) continue;
       try { await this.mutations.run(undefined, () => this.deps.supervisor.stopDriver(otherId,driver)); closed = true; }
       catch (error) { this.deps.warnCaught('closeUnprovenIdleCompetitors.stopDriver', otherId, error); }
     }

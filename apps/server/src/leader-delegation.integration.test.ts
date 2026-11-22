@@ -1,3 +1,4 @@
+import { defaultDriverProviders } from './driver-providers.js';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -59,6 +60,7 @@ async function fixture(executionMode: StoredLarkConfig['executionMode'] = 'layer
   let work!: WorkItemService;
   let tools!: LarkAgentToolsService;
   const runtime = new DutydeckRuntime(repos, {
+    providers: defaultDriverProviders(),
     cleanupIntervalMs: 0,
     resolveRiskPolicy: options.resolveRiskPolicy,
     probe: agent => ({ protocol: agent.protocol === 'pty-cli' ? 'pty-cli' : 'acp', available: true, pause: false, resume: true }),

@@ -671,3 +671,5 @@ export * from './plan.js';
 export * from './browser-auth.js';
 export * from './skills.js';
 export * from './turn-diff.js';
+
+export type * from './driver-provider.js';

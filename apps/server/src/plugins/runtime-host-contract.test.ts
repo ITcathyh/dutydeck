@@ -1,3 +1,4 @@
+import { defaultDriverProviders } from '../driver-providers.js';
 import { execFileSync } from 'node:child_process';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -20,6 +21,7 @@ it.each(['normal', 'approval', 'unknown'] as const)('preserves the host callback
   let release!: () => void;
   const approved = new Promise<void>(resolve => { release = resolve; });
   const runtime = new DutydeckRuntime(repos, {
+    providers: defaultDriverProviders(),
     admitTask: async (session, request) => { trace.push(['admit', session.id, request.prompt]); },
     authorizeTask: async (session, task, phase) => { trace.push([phase, session.id, task.id]); },
     observeTurn: async (session, id, phase) => { trace.push([phase, session.id, id, repos.execution.getTaskExecution(id)?.task.status]); },

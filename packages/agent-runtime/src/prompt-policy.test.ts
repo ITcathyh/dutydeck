@@ -1,3 +1,4 @@
+import { defaultDriverProviders } from '../../../apps/server/src/driver-providers.js';
 import { afterEach, describe, expect, it } from 'vitest';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -19,7 +20,7 @@ async function fixture() {
   let policy: 'legacy-v1' | 'optimized-v1' = 'optimized-v1';
   let authority = 'current-authority-one';
   let assemblies = 0;
-  const options: RuntimeOptions = {
+  const options: RuntimeOptions = { providers: defaultDriverProviders(),
     driverIdleTimeoutMs: 0, probe: (() => ({ available: true, protocol: 'acp', acp: true })) as any,
     selectPromptPolicy: async () => ({ version: policy }),
     prepareTaskPrompt: (session, prompt, skills, context) => prepareSkillPrompt(session.cwd, prompt, skills, { ...context, homeDirectory: directory }),
