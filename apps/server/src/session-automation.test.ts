@@ -1814,14 +1814,14 @@ it('rejects independent creation outside Git before creating an execution sessio
 
 it('drains an event queued between tick loop exit and promise cleanup', async () => {
   const h = await fixture();
-  const runTick = vi.spyOn(h.service as any, 'runTick').mockResolvedValue(undefined);
+  const runTick = vi.spyOn(h.service['scheduler'] as any, 'runTick').mockResolvedValue(undefined);
   const first = h.service.tick();
   queueMicrotask(() => { void h.service.tick(); });
   await first;
   await Promise.resolve();
   expect(runTick).toHaveBeenCalledTimes(2);
-  expect((h.service as any).tickRequested).toBe(false);
-  expect((h.service as any).currentTick).toBeUndefined();
+  expect(h.service['scheduler']['tickRequested']).toBe(false);
+  expect(h.service['scheduler']['currentTick']).toBeUndefined();
 });
 
 it('name-only edit at submit CAS preserves the pending occurrence and new display name', async () => {
@@ -2081,7 +2081,7 @@ describe('fresh-session schedules', () => {
     let crashed = false;
     let service!: SessionAutomationService;
     const crashing = { ...fresh.runtime, dispatchRequest: async (request: TaskRequestV1) => {
-      if (!crashed) { crashed = true; (service as unknown as { closed: boolean }).closed = true; throw new Error('process exited before acceptance'); }
+      if (!crashed) { crashed = true; service['scheduler'].closed = true; throw new Error('process exited before acceptance'); }
       return fresh.runtime.dispatchRequest(request);
     } };
     service = new SessionAutomationService({ repositories: h.repositories, runtime: crashing, authorize: async () => true, clock: () => h.now.value });
@@ -2991,7 +2991,7 @@ describe('schedule pre-check command', () => {
   // 前置命令停在这里，直到测试放行：不用固定时长的 sleep 判断「命令还在跑」。
   const untilExists = (file: string) => `until [ -e ${file} ]; do sleep 0.01; done`;
   const settle = async (service: SessionAutomationService) => {
-    const runs = (service as unknown as { preconditionRuns: Map<string, Promise<void>> }).preconditionRuns;
+    const runs = service['scheduler'].preconditions.preconditionRuns;
     while (runs.size) await Promise.allSettled([...runs.values()]);
   };
   const tick = async (h: Awaited<ReturnType<typeof fixture>>) => { await h.service.tick(); await settle(h.service); };

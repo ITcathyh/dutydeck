@@ -43,7 +43,7 @@ describe.skipIf(process.platform !== 'linux')('schedule pre-check main-process e
     const first = new SessionAutomationService(options);
     let second: SessionAutomationService | undefined;
     const settle = async (service: SessionAutomationService) => {
-      const runs = (service as unknown as { preconditionRuns: Map<string, Promise<void>> }).preconditionRuns;
+      const runs = service['scheduler'].preconditions.preconditionRuns;
       while (runs.size) await Promise.allSettled([...runs.values()]);
     };
     try {
