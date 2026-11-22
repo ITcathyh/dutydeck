@@ -1,4 +1,5 @@
 import { defaultDriverProviders } from '../driver-providers.js';
+import { TestLarkCoordinator } from './coordinator-test-fixture.js';
 import { MattersService } from '../matters.js';
 import { afterEach, expect, it, vi } from 'vitest';
 import { mkdtemp, rm } from 'node:fs/promises';
@@ -8,7 +9,6 @@ import { join } from 'node:path';
 import { createRepositories } from '@dutydeck/storage';
 import { DutydeckRuntime } from '@dutydeck/runtime';
 import type { AgentConfig, DriverContext, DriverFactory } from '@dutydeck/shared';
-import { LarkMessageCoordinator } from './coordinator.js';
 import { LarkGroupManager } from './group-management.js';
 import { larkBotsConfigKey, type StoredLarkConfig } from './config.js';
 import type { LarkMessageEvent } from './listener.js';
@@ -142,7 +142,7 @@ async function setup(prepareError: Error | ((sessionId: string) => Promise<void>
     await groupManager.save(config.appId, 'oc_group', { expectedRevision: 0, patch: { accessOverride: { mode: 'all_chat_members' } } });
   }
   const log = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
-  const coordinator = new LarkMessageCoordinator(runtime, service as any, log,
+  const coordinator = new TestLarkCoordinator(runtime, service as any, log,
     Math.random, 'ou_bot', undefined, repos.channelMappings, undefined, undefined, groupManager, { store: repos.config });
   await coordinator.initializeWorkflows(config);
 
@@ -507,7 +507,7 @@ it.each(['retire', 'start'] as const)('换会话的 %s 阶段重启：只恢复�
   await h.until(() => entered);
   await h.coordinator.reconcile(h.config);
   expect(h.issued.filter(input => input.cardKind === 'result')).toHaveLength(0);
-  const tasks = [...(h.coordinator as any).tasks.values()];
+  const tasks = [...h.coordinator.parts.state.tasks.values()];
   h.coordinator.stop();
   release();
   await h.until(() => tasks.every((task: any) => !task.launcherRecoveryPending));
@@ -515,7 +515,7 @@ it.each(['retire', 'start'] as const)('换会话的 %s 阶段重启：只恢复�
   await h.runtime.shutdown();
   const runtime = new DutydeckRuntime(h.repos, { providers: defaultDriverProviders(), driverIdleTimeoutMs: 0,
     probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }), driverFactory: h.factory });
-  const recovered = new LarkMessageCoordinator(runtime, h.service as any, { info: vi.fn(), warn: vi.fn(), error: vi.fn() } as any,
+  const recovered = new TestLarkCoordinator(runtime, h.service as any, { info: vi.fn(), warn: vi.fn(), error: vi.fn() } as any,
     Math.random, 'ou_bot', undefined, h.repos.channelMappings, undefined, undefined, undefined, { store: h.repos.config });
   cleanups.push(async () => { recovered.stop(); await runtime.shutdown(); });
   await runtime.initialize([h.agent]);
@@ -721,8 +721,8 @@ it('换新会话的请求在派发前被 /new 作废时，原过程卡收到终�
   });
   await h.coordinator.handle(groupMessage('om_replaced'), h.config);
   await h.until(() => entered);
-  const group = (h.coordinator as any).tasks.get('om_replaced').group;
-  const epoch = group.epoch;
+  const group = h.coordinator.parts.state.tasks.get('om_replaced')!.group;
+  const epoch = group.epoch!;
   // 换新会话还在建会话时，有人发了 /new。
   void h.coordinator.handle({ ...groupMessage('om_replaced_new'), content: JSON.stringify({ text: '@_user_1 /new' }) }, h.config);
   await h.until(() => group.epoch === epoch + 1);
@@ -749,12 +749,12 @@ it('重启后接回的轮次遇到启动器失败时不自动换新，并记录�
   await h.until(async () => JSON.parse(await h.repos.config.get('lark.inbox.app.om_resumed') ?? '{}').state === 'accepted');
   h.coordinator.stop();
   const log = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
-  const resumed = new LarkMessageCoordinator(h.runtime, h.service as any, log as any,
+  const resumed = new TestLarkCoordinator(h.runtime, h.service as any, log as any,
     Math.random, 'ou_bot', undefined, h.repos.channelMappings, undefined, undefined, undefined, { store: h.repos.config });
   cleanups.push(async () => { resumed.stop(); });
   await resumed.initializeWorkflows(h.config);
   await resumed.reconcile(h.config);
-  await h.until(() => (resumed as any).tasks.has('om_resumed'));
+  await h.until(() => resumed.parts.state.tasks.has('om_resumed'));
   release();
   await h.until(() => h.issued.some(input => input.cardKind === 'result' && input.taskId === 'om_resumed'));
   expect(log.info).toHaveBeenCalledWith(expect.objectContaining({ taskId: 'om_resumed', reason: 'restored_turn' }), '未自动更换旧启动器会话');
@@ -778,7 +778,7 @@ it('restores administrator-configured fallback for a managed-group member with t
     request: { prompt: '恢复尚未执行的原请求', scopeId: 'chat:oc_group', resources: [], materialPrompt: '恢复尚未执行的原请求',
       launchOptions: { agentId: 'spare', cwd: h.cwd, useAgentDefaults: true, automaticFallback: true } }
   }));
-  const restarted = new LarkMessageCoordinator(h.runtime, h.service as any, h.log, Math.random, 'ou_bot',
+  const restarted = new TestLarkCoordinator(h.runtime, h.service as any, h.log, Math.random, 'ou_bot',
     undefined, h.repos.channelMappings, undefined, undefined, h.groupManager, { store: h.repos.config });
   cleanups.push(async () => restarted.stop());
   const authorize = vi.spyOn(h.groupManager!, 'authorize');

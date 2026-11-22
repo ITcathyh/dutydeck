@@ -1,3 +1,4 @@
+import { TestLarkCoordinator } from './coordinator-test-fixture.js';
 // 飞书任务智能体通道的接线回归。
 //
 // 模块本身（task-agent.ts）有 28 条测试，但此前在生产代码里零调用方：配好 env 重启，
@@ -13,7 +14,6 @@ import { tmpdir } from 'node:os';
 import { createRepositories } from '@dutydeck/storage';
 import { DutydeckRuntime, type AgentDriver } from '@dutydeck/runtime';
 import type { AgentConfig } from '@dutydeck/shared';
-import { LarkMessageCoordinator } from './coordinator.js';
 import { larkBotsConfigKey, type StoredLarkConfig } from './config.js';
 import { claimLarkTaskDispatches, __testOnly_resetLarkTaskAgentNotices, larkTaskAgentLedgerKey, larkTaskAgentMessageId, larkTaskAgentPaths } from './task-agent.js';
 
@@ -79,7 +79,7 @@ async function harness(options: { tasks?: unknown[]; completionReactionOnly?: bo
     })
   };
   const log = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
-  const createCoordinator = () => new LarkMessageCoordinator(runtime, service as any, log, Math.random, 'ou_bot',
+  const createCoordinator = () => new TestLarkCoordinator(runtime, service as any, log, Math.random, 'ou_bot',
     undefined, repos.channelMappings, async () => 'p2p', undefined, undefined, { store: repos.config });
   const coordinator = createCoordinator();
   await coordinator.initializeWorkflows(config);
@@ -146,8 +146,8 @@ describe('飞书任务智能体通道接线', () => {
   it('stopping after A releases unhanded B and a fresh coordinator handles only B', async () => {
     const h = await harness({ tasks: [assignedTask('guid_a'), assignedTask('guid_b')] });
     h.enable();
-    const handle = h.coordinator.handle.bind(h.coordinator);
-    vi.spyOn(h.coordinator, 'handle').mockImplementation(async (...args) => {
+    const handle = h.coordinator.parts.intake.handle.bind(h.coordinator.parts.intake);
+    vi.spyOn(h.coordinator.parts.intake, 'handle').mockImplementation(async (...args) => {
       await handle(...args);
       await vi.waitFor(async () => expect(JSON.parse((await h.repos.config.get(`lark.inbox.${h.config.appId}.${args[0].messageId}`))!).state).toBe('accepted'));
       h.coordinator.stop();
@@ -155,7 +155,7 @@ describe('飞书任务智能体通道接线', () => {
     expect(await h.coordinator.pollLarkTaskDispatches(h.config)).toBe(1);
     expect(await h.repos.config.get(larkTaskAgentLedgerKey(h.config.appId, 'guid_b'))).toBe('');
     const restarted = h.createCoordinator();
-    const nextHandle = vi.spyOn(restarted, 'handle');
+    const nextHandle = vi.spyOn(restarted.parts.intake, 'handle');
     try {
       expect(await restarted.pollLarkTaskDispatches(h.config)).toBe(1);
       expect(nextHandle).toHaveBeenCalledTimes(1);
@@ -181,7 +181,7 @@ describe('飞书任务智能体通道接线', () => {
     expect(JSON.parse((await h.repos.config.get(intake.dispatches[1]!.ledgerKey))!).claimedAt).toBeTruthy();
     h.coordinator.stop();
     const restarted = h.createCoordinator();
-    const handle = vi.spyOn(restarted, 'handle');
+    const handle = vi.spyOn(restarted.parts.intake, 'handle');
     try {
       expect(await restarted.pollLarkTaskDispatches(h.config)).toBe(1);
       expect(handle).toHaveBeenCalledTimes(1);
@@ -195,12 +195,12 @@ describe('飞书任务智能体通道接线', () => {
     h.enable();
     let resume!: () => void;
     const gate = new Promise<void>(resolve => { resume = resolve; });
-    const handle = h.coordinator.handle.bind(h.coordinator);
-    const firstHandle = vi.spyOn(h.coordinator, 'handle').mockImplementation(async (...args) => { await gate; await handle(...args); });
+    const handle = h.coordinator.parts.intake.handle.bind(h.coordinator.parts.intake);
+    const firstHandle = vi.spyOn(h.coordinator.parts.intake, 'handle').mockImplementation(async (...args) => { await gate; await handle(...args); });
     const first = h.coordinator.pollLarkTaskDispatches(h.config);
     await vi.waitFor(() => expect(firstHandle).toHaveBeenCalledTimes(1));
     const other = h.createCoordinator();
-    const otherHandle = vi.spyOn(other, 'handle');
+    const otherHandle = vi.spyOn(other.parts.intake, 'handle');
     try {
       expect(await other.pollLarkTaskDispatches(h.config)).toBe(0);
       expect(otherHandle).not.toHaveBeenCalled();
@@ -240,7 +240,7 @@ describe('飞书任务智能体通道接线', () => {
   it('交接失败必须退回认领，下一轮重新派发，而不是把任务永久当成已派发', async () => {
     const h = await harness({ tasks: [assignedTask('guid_handoff')] });
     h.enable();
-    const handle = vi.spyOn(h.coordinator, 'handle').mockRejectedValueOnce(new Error('交接失败'));
+    const handle = vi.spyOn(h.coordinator.parts.intake, 'handle').mockRejectedValueOnce(new Error('交接失败'));
     expect(await h.coordinator.pollLarkTaskDispatches(h.config)).toBe(0);
     expect(handle).toHaveBeenCalledWith(expect.objectContaining({ messageId: larkTaskAgentMessageId('guid_handoff') }), h.config);
 
@@ -299,7 +299,7 @@ describe('运行中修改白名单与监听后，任务通道按当前配置开�
     h.repos.config.set(larkBotsConfigKey, JSON.stringify([{ ...h.config, ...patch }]));
   const listCalls = (h: Awaited<ReturnType<typeof harness>>) => h.openApiCalls.filter(call => call.path.startsWith(larkTaskAgentPaths.listTasks));
   const pollEvery = (h: Awaited<ReturnType<typeof harness>>, ms: number) => {
-    (h.coordinator as unknown as { taskAgentIntervalMs: number }).taskAgentIntervalMs = ms;
+    Object.assign(h.coordinator.parts.state, { taskAgentIntervalMs: ms });
   };
 
   it('清空白名单后，仍带旧名单的定时轮询不再认领，名单外的人指派的任务不会执行', async () => {
@@ -339,7 +339,7 @@ describe('运行中修改白名单与监听后，任务通道按当前配置开�
     const h = await harness({ tasks: [assignedTask('guid_alice_old'), { ...assignedTask('guid_carol', 'Carol 的任务'), creator: { id: 'ou_carol', name: 'Carol', type: 'user' } }] });
     h.enable();
     await saveConfig(h, { allowedUsers: [{ openId: 'ou_carol', name: 'Carol' }] });
-    const handle = vi.spyOn(h.coordinator, 'handle');
+    const handle = vi.spyOn(h.coordinator.parts.intake, 'handle');
     // 调用方仍带旧名单（Alice）。
     await h.coordinator.pollLarkTaskDispatches(h.config);
     expect(handle).toHaveBeenCalledTimes(2);
@@ -387,8 +387,8 @@ describe('运行中修改白名单与监听后，任务通道按当前配置开�
     h.enable();
     if (boundary === 'handoff') {
       releaseList();
-      const handle = h.coordinator.handle.bind(h.coordinator);
-      vi.spyOn(h.coordinator, 'handle').mockImplementationOnce(async (...args) => { await saveConfig(h, patch); return handle(...args); });
+      const handle = h.coordinator.parts.intake.handle.bind(h.coordinator.parts.intake);
+      vi.spyOn(h.coordinator.parts.intake, 'handle').mockImplementationOnce(async (...args) => { await saveConfig(h, patch); return handle(...args); });
     }
     const poll = h.coordinator.pollLarkTaskDispatches(h.config);
     if (boundary === 'list') {
@@ -457,7 +457,7 @@ describe('飞书任务指派人变更事件触发即时认领', () => {
   it('重复事件不重复认领：同一任务只交接一次', async () => {
     const h = await harness({ tasks: [assignedTask('guid_event_repeat')] });
     h.enable();
-    const handle = vi.spyOn(h.coordinator, 'handle');
+    const handle = vi.spyOn(h.coordinator.parts.intake, 'handle');
     for (let i = 0; i < 3; i += 1) h.coordinator.handleTaskAssigneesUpdate(h.config);
     await vi.waitFor(() => expect(handle).toHaveBeenCalledTimes(1), { timeout: 10_000 });
     expect(handle).toHaveBeenNthCalledWith(1, expect.objectContaining({ messageId: larkTaskAgentMessageId('guid_event_repeat') }), h.config);

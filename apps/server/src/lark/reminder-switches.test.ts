@@ -1,3 +1,4 @@
+import { TestLarkCoordinator } from './coordinator-test-fixture.js';
 // 加急与置顶两个打扰型能力的接线回归。
 //
 // 两个模块此前都已实现却零接线：加急管理器因为 coordinator 不传第 6 个参数而恒不构造，
@@ -11,7 +12,6 @@ import { tmpdir } from 'node:os';
 import { createRepositories } from '@dutydeck/storage';
 import { DutydeckRuntime, type AgentDriver } from '@dutydeck/runtime';
 import type { AgentConfig } from '@dutydeck/shared';
-import { LarkMessageCoordinator } from './coordinator.js';
 import { larkBotsConfigKey, type StoredLarkConfig } from './config.js';
 import type { LarkMessageEvent } from './listener.js';
 import type { LarkInteraction } from './workflow-interactions.js';
@@ -71,7 +71,7 @@ async function harness(patch: Partial<StoredLarkConfig> = {}) {
     callOpenApi: vi.fn(async () => ({ code: 0, data: {} }))
   };
   const log = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
-  const createCoordinator = () => new LarkMessageCoordinator(runtime, service as any, log, Math.random, 'ou_bot',
+  const createCoordinator = () => new TestLarkCoordinator(runtime, service as any, log, Math.random, 'ou_bot',
     undefined, repos.channelMappings, async () => 'group', undefined, undefined, { store: repos.config });
   const coordinator = createCoordinator();
   await coordinator.initializeWorkflows(config);
@@ -92,7 +92,7 @@ async function seedPendingPermission(h: Awaited<ReturnType<typeof harness>>, age
 }
 
 const urgePending = (h: Awaited<ReturnType<typeof harness>>, now?: number) =>
-  (h.coordinator as any).workflows.checkAndUrgePending(h.config.appId, now === undefined ? undefined : { now });
+  h.coordinator.parts.core.workflows.checkAndUrgePending(h.config.appId, now === undefined ? undefined : { now });
 
 describe('卡片加急的配置开关', () => {
   it('默认关闭：挂了很久的审批卡也不发强提醒', async () => {
@@ -150,7 +150,7 @@ describe('免打扰时段内的加急', () => {
     await seedPendingPermission(h, 10 * 60 * 1000, at(22, 40));
     expect((await urgePending(h, at(23, 0))).urged).toEqual([]);
     // 对账启动会把没有存活等待方的挂起记录过期掉，这里只重新落一次提醒设置。
-    (h.coordinator as any).applyReminderSettings({ ...h.config, notifyQuietHours: undefined });
+    h.coordinator.parts.core.applyReminderSettings({ ...h.config, notifyQuietHours: undefined });
     expect((await urgePending(h, at(23, 0))).urged).toEqual(['req_pending']);
   });
 });

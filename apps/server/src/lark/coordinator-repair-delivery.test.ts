@@ -1,18 +1,26 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { LarkCoordinatorInbound } from './coordinator-inbound.js';
+import { createTestLarkCoordinator } from './coordinator-test-fixture.js';
+import type { StoredLarkConfig } from './config.js';
+import type { LarkRuntime } from './runtime.js';
+import type { LarkCardService } from './service.js';
 import { runOpenPlatformRepair, type OpenPlatformRepairResult } from './repair.js';
 
 vi.mock('./repair.js', async importOriginal => ({ ...await importOriginal<typeof import('./repair.js')>(), runOpenPlatformRepair: vi.fn() }));
 afterEach(() => vi.restoreAllMocks());
 
+const config = { appId: 'cli_sample', permissionMode: 'ask' } as StoredLarkConfig;
+function repairFixture(update: LarkCardService['update']) {
+  const log = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
+  const { parts } = createTestLarkCoordinator(config, {} as LarkRuntime, { update } as LarkCardService, log);
+  return { intake: parts.intake, log };
+}
+
 async function flight(result: OpenPlatformRepairResult) {
   vi.mocked(runOpenPlatformRepair).mockResolvedValue(result);
-  const coordinator = Object.create(LarkCoordinatorInbound.prototype) as any;
   const update = vi.fn().mockResolvedValueOnce({}).mockRejectedValueOnce(new Error('card PATCH temporarily unavailable')).mockResolvedValueOnce({});
-  coordinator.service = { update };
-  coordinator.log = { warn: vi.fn() };
-  await coordinator.executeRepairFlight({ appId: 'cli_sample', permissionMode: 'ask' }, 'cli_sample', 'om_card');
-  return { update, log: coordinator.log };
+  const { intake, log } = repairFixture(update);
+  await intake.executeRepairFlight(config, 'cli_sample', 'om_card');
+  return { update, log };
 }
 
 describe('/repair result delivery', () => {
@@ -36,11 +44,9 @@ describe('/repair result delivery', () => {
 
   it('retains the execution-failure receipt only when repair itself fails before returning a result', async () => {
     vi.mocked(runOpenPlatformRepair).mockRejectedValue(new Error('before publication'));
-    const coordinator = Object.create(LarkCoordinatorInbound.prototype) as any;
-    const update = vi.fn(async () => ({}));
-    coordinator.service = { update };
-    coordinator.log = { warn: vi.fn() };
-    await coordinator.executeRepairFlight({ appId: 'cli_sample', permissionMode: 'ask' }, 'cli_sample', 'om_card');
+    const update = vi.fn(async () => ({ messageId: 'om_card' }));
+    const { intake } = repairFixture(update);
+    await intake.executeRepairFlight(config, 'cli_sample', 'om_card');
     expect(update).toHaveBeenCalledTimes(2);
     expect(update.mock.calls[1]![0]).toMatchObject({ taskName: '/repair 修复失败', markdown: '修复执行失败，请稍后重试；本次未完成发布。' });
   });

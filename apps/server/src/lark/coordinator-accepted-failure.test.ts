@@ -1,4 +1,5 @@
 import { defaultDriverProviders } from '../driver-providers.js';
+import { TestLarkCoordinator } from './coordinator-test-fixture.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -8,7 +9,6 @@ import { DutydeckRuntime, type AgentDriver } from '@dutydeck/runtime';
 import { RelayAskBroker } from '@dutydeck/relay';
 import type { AgentConfig } from '@dutydeck/shared';
 import { createRelayAskStore } from '../relay-ask-store.js';
-import { LarkMessageCoordinator } from './coordinator.js';
 import { larkBotsConfigKey, type StoredLarkConfig } from './config.js';
 import type { LarkMessageEvent } from './listener.js';
 
@@ -87,7 +87,7 @@ async function harness() {
     readDocument: vi.fn(async (url: string) => ({ url, title: '文档', text: '文档正文' }))
   };
   const log = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
-  const coordinator = new LarkMessageCoordinator(runtime, service as any, log, Math.random, 'ou_bot', undefined,
+  const coordinator = new TestLarkCoordinator(runtime, service as any, log, Math.random, 'ou_bot', undefined,
     repos.channelMappings, async () => 'group', undefined, undefined, { store: repos.config, broker });
   await coordinator.initializeWorkflows(config);
   await coordinator.startReconciliation(config);
@@ -119,7 +119,7 @@ describe('runtime 已接收后的步骤失败', () => {
     expect(h.sends()).toBe(1);
     expect(h.cardStates.filter(state => state.startsWith('failed|'))).toEqual([]);
     expect(h.cardStates.filter(state => /^(failed|interrupted|cancelled)\|.*\|true$/.test(state))).toEqual([]);
-    const runtimeTasks = (await h.runtime.getTasks((h.coordinator as any).tasks.get('om_req_1').sessionId)).map(task => task.status);
+    const runtimeTasks = (await h.runtime.getTasks(h.coordinator.parts.state.tasks.get('om_req_1')!.sessionId!)).map(task => task.status);
     expect(runtimeTasks).toEqual(['completed']);
   });
 
@@ -127,7 +127,7 @@ describe('runtime 已接收后的步骤失败', () => {
     const h = await harness();
     await h.coordinator.handle(event('om_req_2', '请帮我看一下这个问题'), h.config);
     await vi.waitFor(() => expect(h.cardStates.some(state => state.startsWith('completed|result|'))).toBe(true), { timeout: 5_000 });
-    const task = (h.coordinator as any).tasks.get('om_req_2');
+    const task = h.coordinator.parts.state.tasks.get('om_req_2')!;
     expect(task.runtimeTaskId).toBeTruthy();
     // 模拟卡片侧误判成失败（例如旧版本已发出的失败卡）。
     task.state = 'failed';

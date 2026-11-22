@@ -1,3 +1,4 @@
+import { TestLarkCoordinator } from './coordinator-test-fixture.js';
 // 结果卡持久化与验收刷新的两条回归。
 //
 // 1) saveCardTask 此前是整体覆写。重启后重建出来的任务只带回字段子集，于是「重启 → 点
@@ -16,7 +17,7 @@ import { tmpdir } from 'node:os';
 import { createRepositories } from '@dutydeck/storage';
 import { DutydeckRuntime, type AgentDriver } from '@dutydeck/runtime';
 import type { AgentConfig, VerificationResponse } from '@dutydeck/shared';
-import { LarkMessageCoordinator, type PersistedLarkCardTask } from './coordinator.js';
+import { type PersistedLarkCardTask } from './coordinator.js';
 import { larkBotsConfigKey, type StoredLarkConfig } from './config.js';
 import type { LarkMessageEvent } from './listener.js';
 import type { LarkInteraction } from './workflow-interactions.js';
@@ -93,7 +94,7 @@ async function harness(options: { verificationCommand?: string; verifications?: 
     callOpenApi: vi.fn(async () => ({ code: 0, data: {} }))
   };
   const log = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
-  const createCoordinator = () => new LarkMessageCoordinator(runtime, service as any, log, Math.random, 'ou_bot',
+  const createCoordinator = () => new TestLarkCoordinator(runtime, service as any, log, Math.random, 'ou_bot',
     undefined, repos.channelMappings, async () => 'group', undefined, undefined, { store: repos.config });
   const coordinator = createCoordinator();
   await coordinator.initializeWorkflows(config);
@@ -188,11 +189,11 @@ describe('saveCardTask 的合并语义', () => {
     const note = '已切换到兜底 Agent spare。';
     await h.patchPersisted({ reply_message_id: 'om_old_reply', fallback_note: note });
     const [mapping] = await h.repos.channelMappings.list(h.channel);
-    const restored = (h.coordinator as any).restoredCardTask(h.config, mapping!, await h.persisted());
+    const restored = h.coordinator.parts.cards.restoredCardTask(h.config, mapping!, await h.persisted());
     expect(restored.event.replyMessageId).toBe('om_anchor');
     expect(restored.fallbackNote).toBe(note);
     restored.event.replyMessageId = 'om_later';
-    await (h.coordinator as any).persistCardTask(restored, 'completed');
+    await h.coordinator.parts.cards.persistCardTask(restored, 'completed');
     expect(await h.persisted()).toMatchObject({ anchor_message_id: 'om_anchor', fallback_note: note });
   });
 
@@ -202,9 +203,9 @@ describe('saveCardTask 的合并语义', () => {
     await h.resultCard();
     await h.patchPersisted({ anchor_message_id: undefined, reply_message_id: undefined, root_message_id: 'om_root' });
     const [mapping] = await h.repos.channelMappings.list(h.channel);
-    const restored = (h.coordinator as any).restoredCardTask(h.config, mapping!, await h.persisted());
+    const restored = h.coordinator.parts.cards.restoredCardTask(h.config, mapping!, await h.persisted());
     expect(restored.event).not.toHaveProperty('replyMessageId');
-    await (h.coordinator as any).persistCardTask(restored, 'completed');
+    await h.coordinator.parts.cards.persistCardTask(restored, 'completed');
     expect(persistedReplyTarget(await h.persisted())).toMatchObject({ replyMessageId: 'om_root' });
   });
 
@@ -294,8 +295,8 @@ describe('卡片映射的并发写', () => {
       return row;
     };
     try {
-      await (h.coordinator as any).persistCardTask(
-        (h.coordinator as any).restoredCardTask(h.config, mapping!, JSON.parse(mapping!.extra!)), 'completed');
+      await h.coordinator.parts.cards.persistCardTask(
+        h.coordinator.parts.cards.restoredCardTask(h.config, mapping!, JSON.parse(mapping!.extra!)), 'completed');
     } finally { h.repos.channelMappings.get = realGet; }
 
     expect(injected).toBe(true);
@@ -310,11 +311,11 @@ describe('卡片映射的并发写', () => {
     await h.resultCard();
     const [mapping] = await h.repos.channelMappings.list(h.channel);
     const saved = JSON.parse(mapping!.extra!) as PersistedLarkCardTask;
-    const stale = (h.coordinator as any).restoredCardTask(h.config, mapping!, saved);
+    const stale = h.coordinator.parts.cards.restoredCardTask(h.config, mapping!, saved);
     await h.repos.channelMappings.save({ ...mapping!, extra: JSON.stringify({ ...saved,
       runtime_task_id: 'task_newer_same_turn', recovery_status_key: 'from_newer_task' }) });
 
-    await (h.coordinator as any).persistCardTask(stale, 'cancelled');
+    await h.coordinator.parts.cards.persistCardTask(stale, 'cancelled');
 
     expect(await h.persisted()).toMatchObject({ turn: saved.turn, state: saved.state,
       runtime_task_id: 'task_newer_same_turn', recovery_status_key: 'from_newer_task' });
@@ -326,13 +327,13 @@ describe('卡片映射的并发写', () => {
     await h.resultCard();
     const [mapping] = await h.repos.channelMappings.list(h.channel);
     const saved = JSON.parse(mapping!.extra!) as PersistedLarkCardTask;
-    const stale = (h.coordinator as any).restoredCardTask(h.config, mapping!, saved);
+    const stale = h.coordinator.parts.cards.restoredCardTask(h.config, mapping!, saved);
     await h.patchPersisted({ turn: saved.turn! + 1, runtime_task_id: 'task_after_read_failure', recovery_status_key: 'newer' });
     const before = await h.persisted();
     const get = vi.spyOn(h.repos.channelMappings, 'get').mockRejectedValue(new Error('synthetic read failure'));
     const save = vi.spyOn(h.repos.channelMappings, 'save');
 
-    await (h.coordinator as any).persistCardTask(stale, 'cancelled');
+    await h.coordinator.parts.cards.persistCardTask(stale, 'cancelled');
 
     expect(save).not.toHaveBeenCalled();
     expect(await h.persisted()).toEqual(before);
@@ -345,11 +346,11 @@ describe('卡片映射的并发写', () => {
     await h.resultCard();
     const [mapping] = await h.repos.channelMappings.list(h.channel);
     const saved = JSON.parse(mapping!.extra!) as PersistedLarkCardTask;
-    const stale = (h.coordinator as any).restoredCardTask(h.config, mapping!, saved);
+    const stale = h.coordinator.parts.cards.restoredCardTask(h.config, mapping!, saved);
     const compare = vi.spyOn(h.repos.channelMappings, 'compareAndSetExtra').mockResolvedValue(false);
     const save = vi.spyOn(h.repos.channelMappings, 'save');
 
-    await (h.coordinator as any).persistCardTask(stale, 'cancelled');
+    await h.coordinator.parts.cards.persistCardTask(stale, 'cancelled');
 
     expect(compare).toHaveBeenCalledTimes(5);
     expect(save).not.toHaveBeenCalled();
@@ -362,7 +363,7 @@ describe('卡片映射的并发写', () => {
     await h.resultCard();
     const [mapping] = await h.repos.channelMappings.list(h.channel);
     const saved = JSON.parse(mapping!.extra!) as PersistedLarkCardTask;
-    const stale = (h.coordinator as any).restoredCardTask(h.config, mapping!, saved);
+    const stale = h.coordinator.parts.cards.restoredCardTask(h.config, mapping!, saved);
     const get = h.repos.channelMappings.get.bind(h.repos.channelMappings);
     const compare = h.repos.channelMappings.compareAndSetExtra;
     let release!: () => void;
@@ -373,7 +374,7 @@ describe('卡片映射的并发写', () => {
       if (!blocked) { blocked = true; await barrier; }
       return row;
     });
-    const pending = (h.coordinator as any).persistCardTask(stale, 'cancelled');
+    const pending = h.coordinator.parts.cards.persistCardTask(stale, 'cancelled');
     await vi.waitFor(() => expect(blocked).toBe(true));
     await h.repos.channelMappings.save({ ...mapping!, sessionId: 'ses_newer', extra: JSON.stringify({ ...saved,
       turn: saved.turn! + 1, runtime_task_id: 'task_newer_session' }) });
@@ -387,7 +388,7 @@ describe('卡片映射的并发写', () => {
     expect((await h.repos.channelMappings.list(h.channel))[0]?.sessionId).toBe('ses_newer');
 
     // /new 可以在同一个任务、同一轮里结束旧会话并进入新会话；作用域明确退休了当前记录里的旧会话。
-    const legitimate = (h.coordinator as any).restoredCardTask(h.config, mapping!, saved);
+    const legitimate = h.coordinator.parts.cards.restoredCardTask(h.config, mapping!, saved);
     legitimate.sessionId = 'ses_legitimate';
     legitimate.turn = saved.turn! + 1;
     legitimate.runtimeTaskId = 'task_legitimate';
@@ -395,7 +396,7 @@ describe('卡片映射的并发写', () => {
     legitimate.group.retiredSessionIds = new Set(['ses_newer']);
     legitimate.finalMessageId = 'om_legitimate_final';
     legitimate.finalDeliveryState = 'delivered';
-    await (h.coordinator as any).persistCardTask(legitimate, 'completed');
+    await h.coordinator.parts.cards.persistCardTask(legitimate, 'completed');
     expect(await h.persisted()).toMatchObject({ turn: saved.turn! + 1, state: 'completed', runtime_task_id: 'task_legitimate', final_delivery_state: 'delivered' });
     expect((await h.repos.channelMappings.list(h.channel))[0]?.sessionId).toBe('ses_legitimate');
     expect((await h.persisted()).earlier_message_ids ?? []).not.toContain(saved.final_message_id);
@@ -403,7 +404,7 @@ describe('卡片映射的并发写', () => {
     // 即使旧快照带着作用域退休证据，也不能用较旧 turn 覆盖刚保存的新会话终态。
     stale.group.sessionId = stale.sessionId;
     stale.group.retiredSessionIds = new Set(['ses_legitimate']);
-    await (h.coordinator as any).persistCardTask(stale, 'cancelled');
+    await h.coordinator.parts.cards.persistCardTask(stale, 'cancelled');
     expect(await h.persisted()).toMatchObject({ turn: saved.turn! + 1, state: 'completed', runtime_task_id: 'task_legitimate', final_delivery_state: 'delivered' });
     expect((await h.repos.channelMappings.list(h.channel))[0]?.sessionId).toBe('ses_legitimate');
   });
@@ -415,12 +416,12 @@ it.each(['read', 'invalid', 'cas', 'write'] as const)('reports an unsaved mappin
   await h.resultCard();
   const repo = h.repos.channelMappings;
   const [mapping] = await repo.list(h.channel);
-  const task = (h.coordinator as any).restoredCardTask(h.config, mapping!, JSON.parse(mapping!.extra!));
+  const task = h.coordinator.parts.cards.restoredCardTask(h.config, mapping!, JSON.parse(mapping!.extra!));
   if (failure === 'read') vi.spyOn(repo, 'get').mockRejectedValue(new Error('read failed'));
   if (failure === 'invalid') vi.spyOn(repo, 'get').mockResolvedValue({ ...mapping!, extra: '{' });
   if (failure === 'cas') vi.spyOn(repo, 'compareAndSetExtra').mockResolvedValue(false);
   if (failure === 'write') vi.spyOn(repo, 'compareAndSetExtra').mockRejectedValue(new Error('write failed'));
-  expect(await (h.coordinator as any).saveCardTask(task, 'running')).toMatchObject({ saved: false, reason: expect.any(String) });
+  expect(await h.coordinator.parts.cards.saveCardTask(task, 'running')).toMatchObject({ saved: false, reason: expect.any(String) });
   expect(h.log.warn).toHaveBeenCalledWith(expect.objectContaining({ taskId: task.id, reason: expect.any(String) }), expect.any(String));
   expect((await repo.list(h.channel))[0]).toEqual(mapping);
 });
@@ -430,8 +431,8 @@ it('clears verification after consecutive saves of one restored card', async () 
   await h.coordinator.handle(event('om_1'), h.config);
   await h.resultCard();
   const [mapping] = await h.repos.channelMappings.list(h.channel);
-  const restored = (h.coordinator as any).restoredCardTask(h.config, mapping!, await h.persisted());
-  const save = () => (h.coordinator as any).persistCardTask(restored, 'completed');
+  const restored = h.coordinator.parts.cards.restoredCardTask(h.config, mapping!, await h.persisted());
+  const save = () => h.coordinator.parts.cards.persistCardTask(restored, 'completed');
   restored.autoVerification = { phase: 'running', turn: restored.turn };
   expect(await save()).toEqual({ saved: true });
   expect((await h.persisted()).verification_auto).toEqual(restored.autoVerification);
@@ -451,7 +452,7 @@ it('persists overlapping restored-card saves in order using each captured projec
   await h.coordinator.handle(event('om_1'), h.config);
   await h.resultCard();
   const [mapping] = await h.repos.channelMappings.list(h.channel);
-  const restored = (h.coordinator as any).restoredCardTask(h.config, mapping!, await h.persisted());
+  const restored = h.coordinator.parts.cards.restoredCardTask(h.config, mapping!, await h.persisted());
   const repo = h.repos.channelMappings;
   const cas = repo.compareAndSetExtra.bind(repo);
   const writes: Array<string | undefined> = [];
@@ -460,9 +461,9 @@ it('persists overlapping restored-card saves in order using each captured projec
     return cas(id, expected, extra);
   });
   restored.autoVerification = { phase: 'running', turn: restored.turn };
-  const started = (h.coordinator as any).persistCardTask(restored, 'completed');
+  const started = h.coordinator.parts.cards.persistCardTask(restored, 'completed');
   restored.autoVerification = undefined;
-  const cleared = (h.coordinator as any).persistCardTask(restored, 'completed');
+  const cleared = h.coordinator.parts.cards.persistCardTask(restored, 'completed');
   restored.autoVerification = { phase: 'interrupted', turn: restored.turn };
   expect(await Promise.all([started, cleared])).toEqual([{ saved: true }, { saved: true }]);
   expect(writes).toEqual(['running', undefined]);

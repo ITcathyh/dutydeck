@@ -1,3 +1,4 @@
+import { TestLarkCoordinator } from './coordinator-test-fixture.js';
 // P0 飞书命令 UX 优化的协调器级端到端回归（S2/S3/S4/S6/S8/P0-1/P0-4/P0-6/P0-7）。
 //
 // 纯模块（reaction-records、queue-summary、protocol-hints、recovery-notes、repair、
@@ -186,7 +187,7 @@ async function harness(
     const value = Reflect.get(target, key, target);
     return typeof value === 'function' ? value.bind(target) : value;
   } }) : runtime;
-  const createCoordinator = () => new LarkMessageCoordinator(coordinatorRuntime, service as any, log, Math.random, 'ou_bot', undefined, repos.channelMappings, async () => 'group', options.executionPolicy, groupManager, { store: repos.config, broker, participation, deferredCloseMs: 10 });
+  const createCoordinator = () => new TestLarkCoordinator(coordinatorRuntime, service as any, log, Math.random, 'ou_bot', undefined, repos.channelMappings, async () => 'group', options.executionPolicy, groupManager, { store: repos.config, broker, participation, deferredCloseMs: 10 });
   const coordinator = createCoordinator();
   await coordinator.initializeWorkflows(config);
   await coordinator.startReconciliation(config);
@@ -266,7 +267,7 @@ describe('P0-1 他人操作二次确认 / overflow 门 / 行内审批反伪造',
       }
       await h.coordinator.handle(event('om_task', '等待批准'), h.config);
       await vi.waitFor(async () => expect((await h.interactions()).some(item => item.kind === 'permission' && item.state === 'pending')).toBe(true));
-      const task = (h.coordinator as any).tasks.get('om_task');
+      const task = h.coordinator.parts.state.tasks.get('om_task')!;
       if (kind === 'managed_missing_requester') task.event = { ...task.event, senderOpenId: undefined };
       const update = vi.spyOn(task, 'requestUpdate');
       const value = { action: 'interrupt', task_id: 'om_task', turn: '1' };
@@ -280,7 +281,7 @@ describe('P0-1 他人操作二次确认 / overflow 门 / 行内审批反伪造',
       expect(task.state).toBe('running');
       expect(task.interruptRequested).toBeFalsy();
       expect(update).not.toHaveBeenCalled();
-      expect((h.coordinator as any).foreignActionConfirmations.size).toBe(0);
+      expect(h.coordinator.parts.state.foreignActionConfirmations.size).toBe(0);
     });
 
   it('管理员中断他人任务先确认，60 秒内二点放行并落传 actor；本人首点即执行', async () => {
@@ -349,14 +350,14 @@ describe('P0-1 他人操作二次确认 / overflow 门 / 行内审批反伪造',
     expect(JSON.stringify(buildLarkCard(sent))).not.toContain('由 Alice 取消');
     expect(callbackValues(buildLarkCard(sent)).filter(item => JSON.stringify(item).includes('Bob'))).toEqual([]);
 
-    const task = (h.coordinator as any).tasks.get('om_cancel_actor');
+    const task = h.coordinator.parts.state.tasks.get('om_cancel_actor')!;
     expect(task.finalCardInput).toMatchObject({ statusLabel: '由 Bob 取消' });
-    await (h.coordinator as any).refreshResultVerification(task, h.config);
+    await h.coordinator.parts.cards.refreshResultVerification(task, h.config);
     expect(h.service.getContactUser).toHaveBeenCalledOnce();
     expect(h.service.update.mock.calls.at(-1)![0]).toMatchObject({ taskId: 'om_cancel_actor', statusLabel: '由 Bob 取消' });
 
-    const restored = await (h.coordinator as any).restoreVerifyCardAction('om_cancel_actor', 1, { messageId: task.finalMessageId, chatId: 'oc_group' });
-    await (h.coordinator as any).refreshResultVerification(restored, h.config);
+    const restored = await h.coordinator.parts.reconcile.restoreVerifyCardAction('om_cancel_actor', 1, { messageId: task.finalMessageId, chatId: 'oc_group' });
+    await h.coordinator.parts.cards.refreshResultVerification(restored!, h.config);
     expect(h.service.getContactUser).toHaveBeenCalledOnce();
     expect(h.service.update.mock.calls.at(-1)![0]).toMatchObject({ taskId: 'om_cancel_actor', statusLabel: '由 Bob 取消' });
   });
@@ -518,7 +519,7 @@ describe('S4 文件型结果验收 reaction：先查 kv 后写、重启不重复
     const mapping = (await h.repos.channelMappings.get(h.channel, record.event.messageId))!;
     for (let index = 0; index < 8; index++) await h.repos.channelMappings.save({ ...mapping, id: `history-${index}`, externalId: `om_history_${index}` });
     const list = vi.spyOn(h.repos.channelMappings, 'list'), get = vi.spyOn(h.repos.channelMappings, 'get');
-    const authorize = (target: LarkInteraction, actor = 'ou_alice') => (h.coordinator as any).authorizeInteraction(target, actor, 'run.interrupt');
+    const authorize = (target: LarkInteraction, actor = 'ou_alice') => h.coordinator.parts.core.authorizeInteraction(target, actor, 'run.interrupt');
     expect(await authorize(record)).toBe(true);
     expect(await authorize({ ...record, sessionId: 'another-session' })).toBe(false);
     expect(await authorize({ ...record, event: { ...record.event, chatId: 'another-chat' } })).toBe(false);
@@ -531,7 +532,7 @@ describe('S4 文件型结果验收 reaction：先查 kv 后写、重启不重复
     await h.repos.config.set(`lark.interaction.${h.config.appId}.${record.id}`, JSON.stringify({ ...record, state: 'accepted' }));
     get.mockClear();
     const interactionList = vi.spyOn(h.repos.config, 'list');
-    await (h.coordinator as any).refreshResultFeedback(h.config, record.id);
+    await h.coordinator.parts.cards.refreshResultFeedback(h.config, record.id);
     expect(interactionList.mock.calls.filter(([prefix]) => prefix.startsWith('lark.interaction.'))).toHaveLength(0);
     expect(get.mock.calls.filter(([channel]) => channel === h.channel)).toEqual([[h.channel, record.event.messageId], [h.channel, record.event.messageId]]);
     expect(list).not.toHaveBeenCalled();
@@ -543,7 +544,7 @@ describe('S4 文件型结果验收 reaction：先查 kv 后写、重启不重复
       await h.repos.channelMappings.save({ ...current, extra: JSON.stringify({ ...JSON.parse(current.extra!), result_feedback_state: 'concurrent-update' }) });
       return { messageId: input.messageId };
     });
-    await (h.coordinator as any).refreshResultFeedback(h.config, record.id);
+    await h.coordinator.parts.cards.refreshResultFeedback(h.config, record.id);
     expect(JSON.parse((await h.repos.channelMappings.get(h.channel, record.event.messageId))!.extra!).result_feedback_state).toBe('concurrent-update');
   });
 
@@ -562,7 +563,7 @@ describe('S4 文件型结果验收 reaction：先查 kv 后写、重启不重复
       return { messageId: input.messageId };
     });
     const save = vi.spyOn(h.repos.channelMappings, 'save');
-    await (h.coordinator as any).refreshResultFeedback(h.config, record.id);
+    await h.coordinator.parts.cards.refreshResultFeedback(h.config, record.id);
     expect(h.service.update).toHaveBeenCalled();
     expect(save).toHaveBeenCalledExactlyOnceWith(replacement);
     expect(await h.repos.channelMappings.get(h.channel, record.event.messageId)).toEqual(replacement);
@@ -577,9 +578,9 @@ describe('S4 文件型结果验收 reaction：先查 kv 后写、重启不重复
       await h.repos.config.set(`lark.interaction.${h.config.appId}.${id}`, JSON.stringify({ ...record, id, state: 'accepted' }));
     }
     // Persisted feedback already matches; recovery must still read every addressed record.
-    await (h.coordinator as any).refreshResultFeedback(h.config, 'accepted_history_0');
+    await h.coordinator.parts.cards.refreshResultFeedback(h.config, 'accepted_history_0');
     const list = vi.spyOn(h.repos.config, 'list'), get = vi.spyOn(h.repos.config, 'get');
-    for (let index = 0; index < count; index++) await (h.coordinator as any).refreshResultFeedback(h.config, `accepted_history_${index}`);
+    for (let index = 0; index < count; index++) await h.coordinator.parts.cards.refreshResultFeedback(h.config, `accepted_history_${index}`);
     expect(list.mock.calls.filter(([prefix]) => prefix.startsWith('lark.interaction.'))).toHaveLength(0);
     expect(get.mock.calls.filter(([key]) => key.startsWith(`lark.interaction.${h.config.appId}.`))).toHaveLength(count);
     expect(list.mock.calls.filter(([prefix]) => prefix === 'lark.explicit_final.')).toHaveLength(count);
@@ -1058,7 +1059,7 @@ describe('飞书输入明确反馈与提问生命周期', () => {
     const waiting = h.broker.register({ sessionId: session!.id, question: '选哪个？', choices: [{ label: '继续' }], timeoutMs: 60_000 });
     await vi.waitFor(async () => expect((await h.interactions()).some(item => item.kind === 'ask' && item.state === 'pending')).toBe(true));
     const record = (await new LarkTaskInbox(h.repos.config).capture(h.config.appId, event('om_live_answer', '继续', { mentions: [], parentId: 'om_root' })))!;
-    await (h.coordinator as any).recoverInbound(record, h.config);
+    await h.coordinator.parts.intake.recoverInbound(record, h.config);
     expect(await waiting).toMatchObject({ status: 'answered', answer: '继续' });
     expect(h.send).toHaveBeenCalledOnce();
     expect(await h.runtime.getTasks(session!.id)).toHaveLength(1);
@@ -1072,7 +1073,7 @@ describe('飞书输入明确反馈与提问生命周期', () => {
     const waiting = h.broker.register({ sessionId: session!.id, question: '选哪个？', choices: [{ label: '继续' }], timeoutMs: 1_000 });
     expect(await waiting).toMatchObject({ status: 'expired' });
     const record = (await new LarkTaskInbox(h.repos.config).capture(h.config.appId, event('om_old_answer', '继续', { mentions: [], parentId: 'om_root' })))!;
-    await (h.coordinator as any).recoverInbound(record, h.config);
+    await h.coordinator.parts.intake.recoverInbound(record, h.config);
     expect(await new LarkTaskInbox(h.repos.config).lookup(h.config.appId, 'om_old_answer')).toMatchObject({ state: 'ignored' });
     expect(h.send).toHaveBeenCalledOnce();
     expect(await h.runtime.getTasks(session!.id)).toHaveLength(1);
@@ -1461,7 +1462,7 @@ describe('群参与开启时的话题续问与转交执行', () => {
   it('unrouted recovery keeps the live own-request continuation without forcing adoption', async () => {
     const { h, handle } = await start();
     const record = (await new LarkTaskInbox(h.repos.config).capture(h.config.appId, followUp()))!;
-    await (h.coordinator as any).recoverInbound(record, h.config);
+    await h.coordinator.parts.intake.recoverInbound(record, h.config);
     await h.waitDelivered(2);
     expect(h.send).toHaveBeenCalledTimes(2);
     expect(inputFor(handle, 'om_follow')).toMatchObject({ explicit: true });
@@ -1558,7 +1559,7 @@ describe('按需、积极档识别已接手的告警话题', () => {
     }
     const handle = vi.spyOn(participation, 'handle');
     const ownsTopic = vi.spyOn(h.groupManager!, 'ownsTopic');
-    const threadContinuation = vi.spyOn(h.coordinator as any, 'threadContinuation');
+    const threadContinuation = vi.spyOn(h.coordinator.parts.intake, 'threadContinuation');
     return { h, participation, decide, replyText, dispatch, handle, ownsTopic, threadContinuation };
   };
 
@@ -1770,9 +1771,9 @@ describe('卡片标题', () => {
     const session = (await h.repos.sessions.list())[0]!;
     const task = (await h.runtime.getTasks(session.id))[0]!;
     const current = { ...h.config, name };
-    const origin = await (h.coordinator as any).larkTaskOrigin(current, 'oc_group', { id: task.id, sessionId: session.id });
+    const origin = await h.coordinator.parts.core.larkTaskOrigin(current, 'oc_group', { id: task.id, sessionId: session.id });
     const expected = name ? '原请求' : '@Old 原请求';
-    expect(origin.title).toBe(expected);
+    expect(origin!.title).toBe(expected);
     await h.repos.config.set(larkBotsConfigKey, JSON.stringify([current]));
     await h.coordinator.handle(event('om_rename_cancel', '@_user_1 /cancel'), current);
     const receipt = h.service.reply.mock.calls.at(-1)![0];
@@ -1899,7 +1900,7 @@ it('finishes late cleanup before another acknowledgement for the same platform m
     return { messageId, reactionId: 'same_platform_id' };
   }).mockImplementationOnce(async messageId => { writes.push('add new'); return { messageId, reactionId: 'same_platform_id' }; });
   h.service.deleteReaction.mockImplementation(async () => { writes.push('delete'); });
-  const owner = h.coordinator as any;
+  const owner = h.coordinator.parts.core;
   const original = event('om_same_platform_message', 'retry');
   const old = owner.beginAcknowledgementReaction(original);
   await owner.clearAcknowledgementReaction({ event: original, acknowledgement: old });

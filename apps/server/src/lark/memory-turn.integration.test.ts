@@ -1,3 +1,11 @@
+import * as scenario from './turn-contributors/scenario.js';
+import * as group from './turn-contributors/group-context.js';
+import * as memory from './turn-contributors/memory.js';
+import * as versions from './turn-contributors/prompt-versions.js';
+import * as verification from './turn-contributors/verification.js';
+import * as git from './turn-contributors/git-status.js';
+import * as diff from './turn-contributors/turn-diff.js';
+import { TestLarkCoordinator } from './coordinator-test-fixture.js';
 // 本轮记忆的协调器级回归：真实 DutydeckRuntime + SQLite + 真实 LarkMessageCoordinator，service 为内存 mock。
 // 锁定「派发时记下注入了哪些记忆 → 结果卡不展示记忆 → 旧卡按钮仍走 /forget 同一道门」，
 // 以及 /memory ignore 的增删查。
@@ -9,7 +17,6 @@ import { join } from 'node:path';
 import { createRepositories } from '@dutydeck/storage';
 import { DutydeckRuntime, type AgentDriver } from '@dutydeck/runtime';
 import type { AgentConfig } from '@dutydeck/shared';
-import { LarkMessageCoordinator } from './coordinator.js';
 import { larkBotsConfigKey, type StoredLarkConfig } from './config.js';
 import type { LarkMessageEvent } from './listener.js';
 import { larkMemoryScope, LarkMemoryStore } from './memory.js';
@@ -25,7 +32,7 @@ const event = (id: string, text: string, patch: Partial<LarkMessageEvent> = {}):
   mentions: [{ key: '@_user_1', name: 'Dock', openId: 'ou_bot' }], ...patch
 });
 
-async function harness(patch: Partial<StoredLarkConfig> = {}) {
+async function harness(patch: Partial<StoredLarkConfig> = {}, finishTurn?: Promise<void>) {
   const cwd = await mkdtemp(join(tmpdir(), 'dutydeck-lark-memory-turn-'));
   const repos = createRepositories(join(cwd, 'state.db'), { newDatabaseAuthority: 'ledger_v1' });
   const prompts: string[] = [];
@@ -37,6 +44,7 @@ async function harness(patch: Partial<StoredLarkConfig> = {}) {
         start: async () => {}, resume: async () => {}, stop: async () => {}, interrupt: async () => {},
         send: async prompt => {
           prompts.push(prompt);
+          if (finishTurn) await finishTurn;
           emit({ type: 'text', data: { text: '工作已完成' } });
           emit({ type: 'completed', data: { stopReason: 'end_turn' } });
         }
@@ -70,7 +78,7 @@ async function harness(patch: Partial<StoredLarkConfig> = {}) {
   let projection!: LarkMemoryProjection;
   const memoryStore = new LarkMemoryStore(repos.config, { onChange: scope => projection.write(scope) });
   projection = new LarkMemoryProjection(memoryStore, join(cwd, 'memory'), log);
-  const coordinator = new LarkMessageCoordinator(runtime, service as any, log, Math.random, 'ou_bot', undefined, repos.channelMappings,
+  const coordinator = new TestLarkCoordinator(runtime, service as any, log, Math.random, 'ou_bot', undefined, repos.channelMappings,
     async () => 'group', undefined, undefined, { store: repos.config, memory: { store: memoryStore } });
   await coordinator.initializeWorkflows(config);
   cleanups.push(async () => {
@@ -102,6 +110,51 @@ async function harness(patch: Partial<StoredLarkConfig> = {}) {
   return { repos, runtime, coordinator, memoryStore, config, service, cards, prompts, lastCardText, waitCards, resultCard, remember, runTask };
 }
 
+it('runs the turn contributor hooks in dispatch, receipt and delivery order', async () => {
+  let finish!: () => void;
+  const h = await harness({}, new Promise<void>(resolve => { finish = resolve; }));
+  const expected = [
+    'scenario.beforeCard', 'group.readContext', 'memory.preparePrompt', 'scenario.preparePrompt', 'versions.preparePrompt',
+    'verification.captureWorkspace', 'git.captureWorkspace', 'versions.freezeRequest', 'versions.accepted', 'group.accepted',
+    'memory.attached', 'group.settling', 'verification.planDelivery', 'git.inspectResult', 'verification.inspectResult',
+    'git.decorateResult', 'diff.decorateResult', 'verification.afterDelivery', 'memory.afterDelivery',
+  ];
+  const observed: { hook: string; calls: number[] }[] = [];
+  type Methods = Record<string, (...args: never[]) => unknown>;
+  function observe<Args extends unknown[], Hooks extends Methods>(
+    name: string, create: (...args: Args) => Hooks, install: (instrumented: typeof create) => void,
+  ) {
+    install((...args) => {
+      const hooks = create(...args);
+      const methods: Methods = hooks;
+      for (const key of Object.keys(methods)) {
+        const spy = vi.spyOn(methods, key);
+        observed.push({ hook: name + '.' + key, get calls() { return spy.mock.invocationCallOrder; } });
+      }
+      return hooks;
+    });
+  }
+  observe('scenario', scenario.scenarioContributor, fn => vi.spyOn(scenario, 'scenarioContributor').mockImplementation(fn));
+  observe('group', group.groupContextContributor, fn => vi.spyOn(group, 'groupContextContributor').mockImplementation(fn));
+  observe('memory', memory.memoryContributor, fn => vi.spyOn(memory, 'memoryContributor').mockImplementation(fn));
+  observe('versions', versions.versionsContributor, fn => vi.spyOn(versions, 'versionsContributor').mockImplementation(fn));
+  observe('verification', verification.verificationContributor, fn => vi.spyOn(verification, 'verificationContributor').mockImplementation(fn));
+  observe('git', git.gitStatusContributor, fn => vi.spyOn(git, 'gitStatusContributor').mockImplementation(fn));
+  observe('diff', diff.turnDiffContributor, fn => vi.spyOn(diff, 'turnDiffContributor').mockImplementation(fn));
+  try {
+    await h.coordinator.handle(event('om_hooks', '检查本轮顺序'), h.config);
+    await vi.waitFor(() => expect(observed.find(step => step.hook === 'memory.attached')?.calls).toHaveLength(1), { timeout: 10_000 });
+    finish();
+    await vi.waitFor(() => expect(observed.find(step => step.hook === 'memory.afterDelivery')?.calls).toHaveLength(1), { timeout: 10_000 });
+    const actual = observed.flatMap(({ hook, calls }) => calls.map(order => ({ hook, order })));
+    expect(actual.sort((a, b) => a.order - b.order).map(step => step.hook)).toEqual(expected);
+    expect(h.cards.at(-1)).toMatchObject({ taskId: 'om_hooks', cardKind: 'result' });
+  } finally {
+    finish();
+    vi.restoreAllMocks();
+  }
+});
+
 describe('memory of each turn', () => {
   it('records injected memories without listing them on the result card, and accepts old-card forget callbacks', async () => {
     const h = await harness({ allowedUsers: [{ openId: 'ou_alice', name: 'Alice' }] });
@@ -119,8 +172,8 @@ describe('memory of each turn', () => {
     const value = { dutydeck_memory_forget: first, task_id: result.runtimeTaskId, session_id: result.sessionId };
     expect(value).toEqual({ dutydeck_memory_forget: first, task_id: result.runtimeTaskId, session_id: result.sessionId });
     // Simulate an older delivered card still carrying a memory row. Its callback must clear that row.
-    const liveTask = [...(h.coordinator as any).tasks.values()].find((task: any) => task.runtimeTaskId === result.runtimeTaskId);
-    liveTask.finalElements.push({ tag: 'markdown', element_id: 'memory_turn', content: '**本轮记忆**' });
+    const liveTask = [...h.coordinator.parts.state.tasks.values()].find(task => task.runtimeTaskId === result.runtimeTaskId)!;
+    liveTask.finalElements!.push({ tag: 'markdown', element_id: 'memory_turn', content: '**本轮记忆**' });
 
     const context = { messageId: result.messageId, chatId: 'oc_group' };
     // 与 /forget 同一道门：不在白名单里的人点了不生效。

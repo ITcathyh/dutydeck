@@ -1,3 +1,4 @@
+import { TestLarkCoordinator } from './coordinator-test-fixture.js';
 import { readTestAcceptanceByKey } from './runtime-test-fixture.js';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
@@ -66,7 +67,7 @@ async function harness(firstCardFailures: number) {
   const log = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
   const coordinators: LarkMessageCoordinator[] = [];
   const createCoordinator = () => {
-    const coordinator = new LarkMessageCoordinator(runtime as any, service as any, log, Math.random, 'ou_bot',
+    const coordinator = new TestLarkCoordinator(runtime as any, service as any, log, Math.random, 'ou_bot',
       undefined, repositories.channelMappings, undefined, undefined, undefined, { store: repositories.config, resourceRoot: join(directory, 'attachments') });
     coordinators.push(coordinator);
     return coordinator;
@@ -238,7 +239,7 @@ it('drops the old request when /new arrives after the retry has reclaimed it but
     return result;
   });
   cleanups.push(async () => { scopeRead.mockRestore(); });
-  const runTurn = vi.spyOn(coordinator as any, 'runTurn');
+  const runTurn = vi.spyOn(coordinator.parts.runner, 'runTurn');
   await vi.advanceTimersByTimeAsync(30_000);
   await settle();
   expect((await h.inbox()).boot).not.toBe('');

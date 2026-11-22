@@ -133,7 +133,7 @@ it.each([503, undefined, 400, 403])('classifies the real Claude transcript mappe
 });
 
 
-it.each(['queued', 'running', 'new-turn', 'cancelled'])('rechecks %s arriving while fallback handoff is being read', async change => {
+it.each(['queued', 'running', 'new-turn', 'cancelled'] as const)('rechecks %s arriving while fallback handoff is being read', async change => {
   const h = fixture();
   const primary = { id: 'primary-session', agentId: 'primary', sourceId: 'app:chat:p2p', cwd: '/tmp' } as Session;
   const group = { tail: Promise.resolve(), sessionId: primary.id, epoch: 0 } as LarkGroup;
@@ -145,12 +145,12 @@ it.each(['queued', 'running', 'new-turn', 'cancelled'])('rechecks %s arriving wh
   let entered!: () => void, release!: () => void;
   const reading = new Promise<void>(resolve => { entered = resolve; });
   const gate = new Promise<void>(resolve => { release = resolve; });
-  vi.spyOn(coordinator as any, 'newSessionHandoff').mockImplementation(async () => { entered(); await gate; return 'handoff'; });
-  const recovering = (coordinator as any).recoverFallbackSession(task, primary, 'rate limit', false);
+  vi.spyOn(coordinator.parts.routing, 'newSessionHandoff').mockImplementation(async () => { entered(); await gate; return 'handoff'; });
+  const recovering = coordinator.parts.runner.recoverFallbackSession(task, primary, 'rate limit', false);
   await reading;
   if (change === 'new-turn') task.turn++;
   else if (change === 'cancelled') task.interruptRequested = true;
-  else (coordinator as any).tasks.set('other', { group, state: change });
+  else coordinator.parts.state.tasks.set('other', { ...task, id: 'other', group, state: change });
   release();
   expect(await recovering).toBe(false);
   expect(group.sessionId).toBe(primary.id);
@@ -168,8 +168,8 @@ it('conservatively keeps a legacy explicit launch binding pinned to its Agent', 
   const runtime = { ...h.runtime, getTasks: vi.fn(async () => []) };
   const coordinator = createTestLarkCoordinator(h.config, runtime as any, {} as any, { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
     Math.random, undefined, undefined, h.repos.channelMappings);
-  const task = { id: 'request', group, config: h.config, event: {}, turn: 1, epoch: 0 };
-  expect(await (coordinator as any).recoverFallbackSession(task, primary, 'rate limit', false)).toBe(false);
+  const task = { id: 'request', group, config: h.config, event: { messageId: 'om_request', chatId: 'chat', chatType: 'p2p' as const, messageType: 'text', content: '{}', mentions: [] }, prompt: '', resources: [], events: [], state: 'failed' as const, scopeId: 'p2p', turn: 1, epoch: 0 };
+  expect(await coordinator.parts.runner.recoverFallbackSession(task, primary, 'rate limit', false)).toBe(false);
   expect(runtime.getTasks).not.toHaveBeenCalled();
   expect(runtime.start).not.toHaveBeenCalled();
   coordinator.stop();
@@ -188,15 +188,15 @@ it.each([
   h.runtime.listAgents.mockResolvedValue([{ id: 'spare', name: 'Spare', protocol: 'pty-cli', adapterId: 'codex' }] as any);
   const origin = { id: 'origin', source: 'lark', sourceId: 'app:chat:p2p', cwd: '/tmp' } as Session;
   h.sessions.push(origin);
-  const options = { agentId: 'spare', cwd: '/tmp', ...(persisted ? { model: persisted } : {}), useAgentDefaults: true, automaticFallback: true };
+  const options = { agentId: 'spare', cwd: '/tmp', ...(persisted ? { model: persisted } : {}), useAgentDefaults: true, automaticFallback: true } as const;
   const task = { scopeId: 'p2p', event: { chatId: 'chat', chatType: 'p2p' },
     inbox: { fallbackNote: 'switched', fallbackFromSessionId: origin.id, request: { launchOptions: options } } } as any;
   const coordinator = createTestLarkCoordinator(h.config, h.runtime as any, {} as any, { info: vi.fn(), warn: vi.fn(), error: vi.fn() });
   try {
-    const result = (coordinator as any).validateFallbackRecovery(task, h.config, options);
+    const result = coordinator.parts.runner.validateFallbackRecovery(task, h.config, options);
     if (valid) {
       await expect(result).resolves.toEqual(options);
-      await expect((coordinator as any).validateFallbackRecovery(task, h.config, { ...options, model: 'tampered-model' }))
+      await expect(coordinator.parts.runner.validateFallbackRecovery(task, h.config, { ...options, model: 'tampered-model' }))
         .rejects.toMatchObject({ code: 'LARK_FALLBACK_RECOVERY_INVALID' });
     } else await expect(result).rejects.toMatchObject({ code: 'LARK_FALLBACK_RECOVERY_INVALID' });
   } finally { coordinator.stop(); }

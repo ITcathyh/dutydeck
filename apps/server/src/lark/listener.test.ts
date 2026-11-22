@@ -1,4 +1,4 @@
-import { expectFirstLarkTurnCard, createTestLarkCoordinator, createTestLarkStorage, fixtureRuntime } from './coordinator-test-fixture.js';
+import { TestLarkCoordinator, expectFirstLarkTurnCard, createTestLarkCoordinator, createTestLarkStorage, fixtureRuntime } from './coordinator-test-fixture.js';
 import { createMemoryLarkRuntime } from './runtime-test-fixture.js';
 import { afterEach, describe, expect, it, onTestFinished, vi } from 'vitest';
 import '../../../../tests/support/fast-wait-for.js';
@@ -668,7 +668,7 @@ describe('Lark message coordinator', () => {
       send: vi.fn(async () => ({ messageId: 'om_card' })),
       deleteReaction: vi.fn(async () => {}), update: vi.fn(async () => ({ messageId: 'om_card' }))
     };
-    const coordinator = new LarkMessageCoordinator(runtime, service as any, { info: vi.fn(), warn: vi.fn(), error: vi.fn() }, Math.random, 'ou_bot',
+    const coordinator = new TestLarkCoordinator(runtime, service as any, { info: vi.fn(), warn: vi.fn(), error: vi.fn() }, Math.random, 'ou_bot',
       undefined, cardMappings, undefined, undefined, undefined, { store });
     onTestFinished(async () => {
       try { await coordinator.stop(); } finally { await close(); }
@@ -687,7 +687,7 @@ describe('Lark message coordinator', () => {
       send: vi.fn(async () => ({ messageId: 'om_card' })),
       deleteReaction: vi.fn(async () => {}), update: vi.fn(async () => ({ messageId: 'om_card' }))
     };
-    const coordinator = new LarkMessageCoordinator(runtime, service as any, { info: vi.fn(), warn: vi.fn(), error: vi.fn() }, Math.random, 'ou_bot',
+    const coordinator = new TestLarkCoordinator(runtime, service as any, { info: vi.fn(), warn: vi.fn(), error: vi.fn() }, Math.random, 'ou_bot',
       undefined, cardMappings, undefined, undefined, undefined, { store });
     onTestFinished(async () => {
       try { await coordinator.stop(); } finally { await close(); }
@@ -706,7 +706,7 @@ describe('Lark message coordinator', () => {
       send: vi.fn(async () => ({ messageId: 'om_help' })),
       deleteReaction: vi.fn(async () => {}), update: vi.fn()
     };
-    const coordinator = new LarkMessageCoordinator(runtime, service as any, { info: vi.fn(), warn: vi.fn(), error: vi.fn() }, Math.random, 'ou_bot',
+    const coordinator = new TestLarkCoordinator(runtime, service as any, { info: vi.fn(), warn: vi.fn(), error: vi.fn() }, Math.random, 'ou_bot',
       undefined, cardMappings, undefined, undefined, undefined, { store });
     onTestFinished(async () => {
       try { await coordinator.stop(); } finally { await close(); }
@@ -1392,7 +1392,7 @@ describe('Lark message coordinator', () => {
         .mockResolvedValueOnce({ messageId: 'om_progress_2' }).mockResolvedValueOnce({ messageId: 'om_result_2' }),
       update: vi.fn(async (input: any) => ({ messageId: input.messageId }))
     };
-    const coordinator = new LarkMessageCoordinator(runtime, service as any, { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+    const coordinator = new TestLarkCoordinator(runtime, service as any, { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
       Math.random, 'ou_bot', undefined, cardMappings, undefined, undefined, undefined, { store });
     onTestFinished(async () => { finishInterrupt(); finishTurn(); coordinator.stop(); await close(); });
     const event = { messageId: 'om_task', chatId: 'oc_p2p', chatType: 'p2p', messageType: 'text', content: '{"text":"执行任务"}', senderOpenId: 'ou_operator', mentions: [] };
@@ -1455,8 +1455,8 @@ describe('Lark message coordinator', () => {
 
   it('受理前的运行卡中断提示稍后再试，不向运行时发出中断', async () => {
     const h = await interruptFixture();
-    (h.coordinator as any).tasks.set('om_task', { id: 'om_task', config: h.bot, event: h.event,
-      sessionId: 'ses_pending', state: 'running', turn: 1, group: { tail: Promise.resolve() } });
+    h.coordinator.parts.state.tasks.set('om_task', { id: 'om_task', config: h.bot, event: h.event,
+      prompt: '', resources: [], events: [], scopeId: 'p2p', epoch: 0, sessionId: 'ses_pending', state: 'running', turn: 1, group: { tail: Promise.resolve() } });
     await expect(h.coordinator.handleAction({ action: 'interrupt', task_id: 'om_task', turn: '1' }, 'ou_operator'))
       .resolves.toEqual({ type: 'warning', content: '任务尚未完成接收，请稍后再试' });
     expect(h.interrupt).not.toHaveBeenCalled();
@@ -1470,11 +1470,11 @@ describe('Lark message coordinator', () => {
     const service = { update: vi.fn(async () => ({ messageId: 'om_card' })) };
     const coordinator = createTestLarkCoordinator(config, runtime as any, service as any, { info: vi.fn(), warn: vi.fn(), error: vi.fn() }, () => 0, 'ou_bot');
     // 任务已经在第 2 轮：第 1 轮那张卡上的按钮属于历史。
-    (coordinator as any).tasks.set('om_turned', {
+    coordinator.parts.state.tasks.set('om_turned', {
       id: 'om_turned', group: { tail: Promise.resolve() },
       event: { messageId: 'om_turned', chatId: 'oc_p2p', chatType: 'p2p', messageType: 'text', content: '{}', senderOpenId: 'ou_operator', mentions: [] },
       prompt: '执行任务', resources: [], config, state: 'running', events: [],
-      sessionId: 'ses_1', runtimeTaskId: 'runtime-2', turn: 2
+      sessionId: 'ses_1', runtimeTaskId: 'runtime-2', turn: 2, scopeId: 'p2p', epoch: 0
     });
 
     await expect(coordinator.handleAction({ action: 'interrupt', task_id: 'om_turned', turn: '1' }, 'ou_operator'))
@@ -1704,7 +1704,7 @@ describe('Lark message coordinator', () => {
     const newCardUpdates = service.update.mock.calls.slice(updatesBefore);
     expect(JSON.stringify(newCardUpdates)).not.toContain(errorText);
     // 旧错误也不得混进新一轮的事件缓冲，否则下一次重绘就会把它显示出来。
-    expect(JSON.stringify((coordinator as any).tasks.get('om_task')?.events ?? [])).not.toContain(errorText);
+    expect(JSON.stringify(coordinator.parts.state.tasks.get('om_task')?.events ?? [])).not.toContain(errorText);
     // 新一轮仍在跑，仍然接受刷新——旧点击没有把它的状态机搅乱。
     await expect(coordinator.handleAction({ action: 'refresh', task_id: 'om_task' })).resolves.toEqual({ type: 'success', content: '已拉取最新状态' });
     emit(agentEvent(21, 'text', { text: '第二轮结果' }));
@@ -1969,13 +1969,13 @@ describe('Lark message coordinator', () => {
     const service = { update: vi.fn(async () => ({ messageId: 'om_card' })) };
     const log = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
     const coordinator = createTestLarkCoordinator(config, runtime as any, service as any, log, () => 0, 'ou_bot');
-    const internalTask = {
+    const internalTask: import('./coordinator.js').LarkTask = {
       id: 'om_queued', group: { tail: Promise.resolve() },
       event: { messageId: 'om_queued', chatId: 'oc_group', chatType: 'group', messageType: 'text', content: '{}', mentions: [] },
       prompt: '排队任务', resources: [], config, state: 'queued', events: [],
-      sessionId: 'ses_1', runtimeTaskId: 'runtime-promoted'
+      sessionId: 'ses_1', runtimeTaskId: 'runtime-promoted', turn: 1, epoch: 0, scopeId: 'group'
     };
-    (coordinator as any).tasks.set(internalTask.id, internalTask);
+    coordinator.parts.state.tasks.set(internalTask.id, internalTask);
 
     await expect(coordinator.handleAction({ action: 'cancel', task_id: internalTask.id })).resolves.toEqual({ type: 'success', content: '正在取消排队任务' });
     await vi.waitFor(() => expect(runtime.cancelQueued).toHaveBeenCalledWith('ses_1', 'runtime-promoted', undefined));
@@ -2219,7 +2219,7 @@ describe('Lark message coordinator', () => {
     };
     const mappings = { list: vi.fn(async () => []), get: vi.fn(), save: vi.fn(async () => {}) };
     const coordinator = createTestLarkCoordinator(config, runtime as any, service as any, { info: vi.fn(), warn: vi.fn(), error: vi.fn() }, Math.random, 'ou_bot', undefined, mappings as any);
-    const scheduleReconcile = vi.spyOn(coordinator as any, 'scheduleReconcile').mockImplementation(() => {});
+    const scheduleReconcile = vi.spyOn(coordinator.parts.reconcile, 'scheduleReconcile').mockImplementation(() => {});
 
     coordinator.handle({ messageId: 'om_transient_live', chatId: 'oc_group', chatType: 'p2p', messageType: 'text', content: '{"text":"执行任务"}', mentions: [] }, config);
 

@@ -1,5 +1,6 @@
 import { defaultDriverProviders } from '../driver-providers.js';
 import { runtimeComponents } from '../../../../packages/agent-runtime/test-support/components.js';
+import { TestLarkCoordinator } from './coordinator-test-fixture.js';
 import { MattersService } from '../matters.js';
 // 聊天内指挥命令的协调器级回归：/agents、/queue、/steer、/grant、/revoke，
 // 以及 /status 的执行身份说明与 /tasks 行内 Agent。
@@ -19,7 +20,6 @@ import { buildSessionMarker, claudeProjectDir } from '@dutydeck/pty-driver/suppo
 import { pinnedSessionUuid } from '@dutydeck/cli-adapters';
 import { DutydeckRuntime, type AgentDriver } from '@dutydeck/runtime';
 import { RuntimeError, type AgentConfig } from '@dutydeck/shared';
-import { LarkMessageCoordinator } from './coordinator.js';
 import { LarkGroupManager } from './group-management.js';
 import { larkBotsConfigKey, type StoredLarkConfig } from './config.js';
 import type { LarkMessageEvent } from './listener.js';
@@ -148,7 +148,7 @@ async function harness(options: { native?: boolean; answer?: boolean; managedGro
     await groupManager.sync(config.appId);
     await groupManager.save(config.appId, 'oc_group', { expectedRevision: 0, patch: {} });
   }
-  const createCoordinator = () => new LarkMessageCoordinator(runtime, service as any, log, Math.random, 'ou_bot', undefined, repos.channelMappings, async () => 'group', undefined, groupManager, { store: repos.config });
+  const createCoordinator = () => new TestLarkCoordinator(runtime, service as any, log, Math.random, 'ou_bot', undefined, repos.channelMappings, async () => 'group', undefined, groupManager, { store: repos.config });
   const coordinator = createCoordinator();
   await coordinator.initializeWorkflows(config);
   cleanups.push(async () => { coordinator.stop(); release?.(); await runtime.shutdown(); repos.close(); await rm(cwd, { recursive: true, force: true }); });
@@ -977,7 +977,7 @@ describe('/model 与 /effort 切换当前会话', () => {
     const h = await harness({ answer: true, switching: { model: true } });
     await idleSession(h);
     const authorize = vi.fn(async (_boundary: string, action: string) => ({ allowed: action !== 'run.change_model', action, code: 'denied', reason: '策略不允许切换模型', source: 'integration' as const }));
-    (h.coordinator as any).executionPolicy = { integrationMode: 'legacy_unmanaged', authorize };
+    Object.assign(h.coordinator.parts.state, { executionPolicy: { integrationMode: 'legacy_unmanaged', authorize } });
     await h.coordinator.handle(event('om_m10', '/model model-b'), h.config);
     expect(authorize).toHaveBeenCalledWith('session', 'run.change_model');
     expect(h.markdownOf(h.receiptNamed('/model 未执行'))).toContain('策略不允许切换模型');

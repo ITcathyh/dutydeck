@@ -26,7 +26,7 @@ describe('/status 显示结果投递失败', () => {
     const runtime = { getSession: vi.fn(async () => session) };
     const coordinator = createTestLarkCoordinator(config, runtime as any, {} as any, { info: vi.fn(), warn: vi.fn(), error: vi.fn() }, Math.random, 'ou_bot',
       undefined, cardMappings as any);
-    const status: string = await (coordinator as any).describeChatStatus(config, 'ses_1');
+    const status: string = await coordinator.parts.intake.describeChatStatus(config, 'ses_1');
     expect(status).toContain('结果未送达');
     expect(status).toContain('任务 om_failed');
     expect(status).toContain('230002');
