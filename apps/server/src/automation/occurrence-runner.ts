@@ -126,9 +126,9 @@ export function acceptedActorId(label: AutomationTaskLabel, accepted: AcceptedTa
 }
 
 type Dependencies = Pick<SessionAutomationService['scheduler'],
-  'advanceSchedule' | 'ci' | 'clock' | 'closed' | 'delivery' | 'disableSchedule' | 'fixOccurrenceAdmission'
-  | 'freshReservation' | 'hasPendingOccurrence' | 'materializeOccurrence' | 'options' | 'ownerId'
-  | 'preconditions' | 'store' | 'warn' | 'watchSession'>;
+  'advanceSchedule' | 'ci' | 'clock' | 'closed' | 'delivery' | 'disableSchedule' | 'freshReservation'
+  | 'hasPendingOccurrence' | 'materializeOccurrence' | 'options' | 'ownerId' | 'preconditions' | 'recovery'
+  | 'store' | 'warn' | 'watchSession'>;
 
 export class OccurrenceRunner {
   readonly manualRuns = new Set<Promise<PublicSessionScheduleOccurrence>>();
@@ -823,7 +823,7 @@ export class OccurrenceRunner {
     if (pendingId) {
       const pending = await this.automation.store.getRecord(occurrenceKey(pendingId), value => sessionScheduleOccurrenceSchema.parse(value));
       if (pending) {
-        const fixed = await this.automation.fixOccurrenceAdmission(pending, new Map([[schedule.id, stored]]));
+        const fixed = await this.automation.recovery.fixOccurrenceAdmission(pending, new Map([[schedule.id, stored]]));
         if (fixed?.value.admission || fixed?.value.runStatus === 'blocked' || pending.value.taskId) return stored;
       }
     }
