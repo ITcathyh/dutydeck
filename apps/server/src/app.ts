@@ -29,7 +29,7 @@ import { createHash } from 'node:crypto';
 import { extname, resolve, sep } from 'node:path';
 import { installationOwnerTaskActor, permissionModes, supportsCodexProfiles, RuntimeError, toPublicAgent, type ExecutionActor, type PermissionMode, type PolicyAction, type PolicyDecision } from '@dutydeck/shared';
 import type { DutydeckRuntime } from '@dutydeck/runtime';
-import { createLarkRouteServices, registerLarkRoutes, type LarkRoutesOptions } from './lark/routes.js';
+import { createLarkRouteServices, mountLarkRoutes, type LarkRoutesOptions } from './lark/routes.js';
 import { discoverAgentModels } from './agent-models.js';
 import { discoverSessionAgentModels } from './session-model-probe.js';
 import { registerSystemRoutes, type SystemRoutesOptions } from './system-routes.js';
@@ -238,7 +238,6 @@ export async function buildApp(runtime: DutydeckRuntime, options: BuildAppOption
     renameBotModelSettings: (from, to) => options.agentModelSettings?.renameBot(from, to) ?? Promise.resolve(),
   };
   const lark = createLarkRouteServices(app.log, larkOptions);
-  app.addHook('onListen', async () => lark.start());
   app.get('/health/ready', async (_request, reply) => {
     void reply.header(DUTYDECK_PRODUCT_HEADER, DUTYDECK_PRODUCT);
     const pending = [lark.readiness()].filter((reason): reason is string => reason !== undefined);
@@ -327,7 +326,7 @@ export async function buildApp(runtime: DutydeckRuntime, options: BuildAppOption
   if (options.turnDiffs) registerTurnDiffRoutes(app, runtime, { ...options.turnDiffs, getShareSecret: options.auth?.getShareSecret,
     authorize: (request, sessionId, action) => requireSessionExecution(request, sessionId, 'session', action) });
   await registerSystemRoutes(app, options.system);
-  await registerLarkRoutes(app, larkOptions, lark);
+  await mountLarkRoutes(app, larkOptions, lark);
   app.get<{ Querystring: { excludeSessionId?: string; restart?: string } }>('/api/system/activity', async request => {
     const excludeSessionId = request.query.excludeSessionId?.trim() || undefined;
     return request.query.restart === 'true' ? runtime.getRestartActivity(excludeSessionId)

@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import Database from 'better-sqlite3';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
@@ -6,6 +6,7 @@ import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { createRepositories } from '@dutydeck/storage';
 import { RuntimeError, type AgentConfig } from '@dutydeck/shared';
+import { LarkLongConnectionListenerPool } from './lark/listener.js';
 import { startLocalServer, type LocalServer } from './service.js';
 
 const directories: string[] = [];
@@ -133,6 +134,48 @@ describe('Server startup integration with real SQLite file', () => {
       expect(maintenanceRepos.execution.authority()).toBe('ledger_v1');
     } finally {
       maintenanceRepos.close();
+    }
+  });
+
+  it('commits a message to the execution ledger while Lark is connecting', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'dutydeck-startup-handshake-'));
+    directories.push(dir);
+    const database = join(dir, 'handshake.sqlite');
+    const port = await allocatePort();
+    const origin = `http://127.0.0.1:${port}`;
+    const agent = fakeAgentConfig(dir);
+    let finishHandshake!: () => void;
+    const handshake = new Promise<void>(resolve => { finishHandshake = resolve; });
+    const sync = vi.spyOn(LarkLongConnectionListenerPool.prototype, 'sync').mockImplementation(() => handshake);
+    try {
+      const server = await startLocalServer({ webRoot: dir, env: {
+        HOME: dir, DUTYDECK_DATABASE_URL: database, DUTYDECK_DEFAULT_CWD: dir, DUTYDECK_PORT: String(port),
+        DUTYDECK_HOST: '127.0.0.1', DUTYDECK_AUTH: 'false', DUTYDECK_AGENTS_JSON: JSON.stringify([agent]),
+      } });
+      servers.push(server);
+      await vi.waitFor(() => expect(sync).toHaveBeenCalledTimes(1));
+      const readiness = async () => (await fetch(origin + '/health/ready')).json();
+      expect(await readiness()).toMatchObject({ ready: false });
+      const session = await server.runtime.start({ agentId: agent.id });
+      const prompt = 'message received during handshake';
+      const response = await fetch(`${origin}/api/sessions/${session.id}/send`, {
+        method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ prompt }),
+      });
+      expect(response.status).toBe(202);
+      const { task } = await response.json();
+      await vi.waitFor(async () => expect(await server.runtime.getTasks(session.id)).toMatchObject([
+        { id: task.id, prompt, status: 'completed' },
+      ]), { timeout: 15_000 });
+      finishHandshake();
+      await vi.waitFor(async () => expect(await readiness()).toMatchObject({ ready: true }));
+      await server.close();
+      servers.splice(servers.indexOf(server), 1);
+      const reopened = createRepositories(database, { mode: 'management' });
+      try { expect(reopened.execution.getAcceptedTask(task.id)?.task).toMatchObject({ id: task.id, prompt }); }
+      finally { reopened.close(); }
+    } finally {
+      finishHandshake();
+      sync.mockRestore();
     }
   });
 

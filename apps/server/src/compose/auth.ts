@@ -1,10 +1,10 @@
 import { accessMode } from '../access-policy.js';
 import { DutydeckRuntime } from '@dutydeck/runtime';
-import { type PolicyAction,type PolicyDecision,type Session } from '@dutydeck/shared';
+import type { PolicyAction, PolicyDecision, Session } from '@dutydeck/shared';
 import { WorkItemService } from '../work-items.js';
-import { getAuthToken,getPasswordHash,getShareLinkSecret,loadOrCreateAuthToken,loadOrCreateShareLinkSecret,SHARE_TOKEN_QUERY_KEY,signSessionShareToken,signTurnDiffToken,tokensEqual,verifyBrowserSession } from '../auth/auth.js';
+import { getAuthToken, getPasswordHash, getShareLinkSecret, loadOrCreateAuthToken, loadOrCreateShareLinkSecret, SHARE_TOKEN_QUERY_KEY, signSessionShareToken, signTurnDiffToken, tokensEqual, verifyBrowserSession } from '../auth/auth.js';
 import { TURN_DIFF_LINK_TTL_MS } from '../turn-diff.js';
-import { createFoundationExecutionAuthorizer,createFoundationManagementAuthorizer,createInstallationPrincipalResolver } from '../foundation-policy.js';
+import { createFoundationExecutionAuthorizer, createFoundationManagementAuthorizer, createInstallationPrincipalResolver } from '../foundation-policy.js';
 import { createPluginManagementAuthorizer } from '../plugins/management-auth.js';
 import type { ComposeContext } from './context.js';
 import type { LarkGroupManager } from '../lark/group-management.js';
@@ -73,7 +73,8 @@ export async function composeAuth({ config, repos, lifecycle }: ComposeContext,
     getPasswordHash: () => getPasswordHash(repos.config), getShareSecret: () => getShareLinkSecret(repos.config), localOnly: mode === 'local' };
   const terminalAuth = { mode, allowUnauthenticated: mode === 'local', check: (presented: string | undefined) => !!presented && (tokensEqual(presented, activeToken) || verifyBrowserSession(presented, activePasswordHash)) };
   const stop = () => { if (tokenRefresh) clearInterval(tokenRefresh); stopSigning(); };
-  return { resolveInstallationPrincipal, authorizeInstallationManagement, foundationManagementAuthorizer, foundationExecution, legacyExecutionPolicy, httpAuth, terminalAuth, stop };
+  lifecycle.beforeStop('http', stop);
+  return { resolveInstallationPrincipal, authorizeInstallationManagement, foundationManagementAuthorizer, foundationExecution, legacyExecutionPolicy, httpAuth, terminalAuth };
 }
 
 export function sessionAuthorization(runtime: DutydeckRuntime, workItems: WorkItemService, groupManager: LarkGroupManager,

@@ -34,7 +34,7 @@ export function composePlugins({ repos, config, log, env, lifecycle, channel }: 
   return pluginWiring;
 }
 
-export function composePluginResults({ repos, config, options, log, env, channel, lifecycle }: ComposeContext,
+export function composePluginResults({ repos, options, log, env, channel, lifecycle }: ComposeContext,
   deps: {
     pluginHost?: PluginHost; pluginWiring?: ReturnType<typeof wirePlugins>; runtime: DutydeckRuntime;
     relayCapabilities: RelayCapabilityRegistry; capabilities: TurnAuthority; groupManager: LarkGroupManager;
@@ -65,5 +65,5 @@ export function composePluginResults({ repos, config, options, log, env, channel
     pluginResultTimer.unref();
     void sweepPluginResults();
   };
-  return { start, businessToolGrants, businessTools, pluginResultIdentity, pluginResultRegistry, pluginResultAdapter, pluginResultService };
+  return { start: { pluginResults: start }, businessToolGrants, businessTools, pluginResultIdentity, pluginResultRegistry, pluginResultAdapter, pluginResultService };
 }

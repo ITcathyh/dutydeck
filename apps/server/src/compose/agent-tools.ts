@@ -3,7 +3,7 @@ import { DutydeckRuntime } from '@dutydeck/runtime';
 import { localLoopbackUrl } from '../local-api-url.js';
 import { TurnAuthority } from '../agent-host/turn-authority.js';
 import { loadOrCreateGroupToolsSigningSecret } from '../agent-host/turn-token.js';
-import { RelayCapabilityRegistry,loadOrCreateRelaySigningSecret } from '@dutydeck/relay';
+import { RelayCapabilityRegistry, loadOrCreateRelaySigningSecret } from '@dutydeck/relay';
 import type { ComposeContext } from './context.js';
 import type { LarkAgentToolsService } from '../lark/agent-tools.js';
 
@@ -40,15 +40,15 @@ export function composeAgentTools({ repos, config, env, options }: ComposeContex
     env,
     groupToolsCommand: options.groupToolsCommand,
     artifactPrivatePaths: privatePaths(config.databaseUrl),
-    workbenchTask: sessionId => ports.activeTask(sessionId),
+    workbenchTask: ports.activeTask,
     scheduleRequests: true,
-    automatedTask: taskId => isAutomatedTask(taskId),
+    automatedTask: isAutomatedTask,
     polishReply: ports.polishReply,
     finalTaskContext: async (binding, task) => resolveFinal(await repos.channelMappings.list(`lark-card:${binding.appId}`), binding, task),
-    authorizeTool: (sessionId, action) => ports.authorizeTool(sessionId, action),
+    authorizeTool: ports.authorizeTool,
     previewTool: (sessionId, action) => ports.authorizeTool(sessionId, action, true),
-    previewWork: (sessionId, actorId) => ports.previewWork(sessionId, actorId),
-    previewCollaboration: (binding, actorId) => ports.previewCollaboration(binding, actorId),
+    previewWork: ports.previewWork,
+    previewCollaboration: ports.previewCollaboration,
     executionPolicy: legacyExecutionPolicy,
     groupManager,
     history: repos,

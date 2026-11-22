@@ -1,6 +1,6 @@
 import { createTestLarkCoordinator } from './coordinator-test-fixture.js';
 import Fastify from 'fastify';
-import { registerLarkRoutes } from './routes.js';
+import { mountLarkRoutes } from './routes.js';
 import { LarkLongConnectionListener } from './listener.js';
 import type { StoredLarkConfig } from './config.js';
 import { createServer, type Server, type ServerResponse } from 'node:http';
@@ -139,7 +139,7 @@ describe('default HTTP lifecycle wiring', () => {
   it('closes a route request before waiting for Fastify shutdown', async () => {
     route = () => {};
     const app = Fastify();
-    await registerLarkRoutes(app, { listeningDisabled: true, env: { LARK_OPEN_API_BASE_URL: baseUrl, LARK_API_REQUEST_TIMEOUT_MS: '5000' } });
+    await mountLarkRoutes(app, { listeningDisabled: true, env: { LARK_OPEN_API_BASE_URL: baseUrl, LARK_API_REQUEST_TIMEOUT_MS: '5000' } });
     const pending = app.inject({ method: 'POST', url: '/api/lark/bot/inspect', payload: { appId: 'cli_route', appSecret: 'synthetic' } });
     try {
       await vi.waitFor(() => expect(paths).toHaveLength(1));

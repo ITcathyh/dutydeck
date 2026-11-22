@@ -2,7 +2,7 @@ import Fastify, { type FastifyInstance } from 'fastify';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ConfigRepository } from '@dutydeck/shared';
 import { saveLarkConfig } from './config.js';
-import { registerLarkRoutes } from './routes.js';
+import { mountLarkRoutes } from './routes.js';
 import { LarkMemoryStore, type LarkMemoryStatus } from './memory.js';
 import { LarkMemoryPipeline } from './memory-pipeline.js';
 
@@ -39,7 +39,7 @@ describe('GET /api/lark/bots/:appId/memory/status', () => {
   } = {}) {
     const app = Fastify();
     apps.push(app);
-    await registerLarkRoutes(app, {
+    await mountLarkRoutes(app, {
       config,
       fetcher,
       env: {},

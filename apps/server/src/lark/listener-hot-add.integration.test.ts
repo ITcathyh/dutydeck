@@ -2,7 +2,7 @@ import Fastify from 'fastify';
 import { expect, it, vi } from 'vitest';
 import type { ConfigRepository } from '@dutydeck/shared';
 import { saveLarkConfig } from './config.js';
-import { registerLarkRoutes } from './routes.js';
+import { mountLarkRoutes } from './routes.js';
 import { LarkLongConnectionListener, LarkLongConnectionListenerPool } from './listener.js';
 
 // Keep the real HTTP routes, configuration store and listener pool. Only the
@@ -40,9 +40,8 @@ it('starts a new ask-mode bot through HTTP without restarting the server or exis
   };
   const app = Fastify();
   try {
-    const channel = await registerLarkRoutes(app, { config, fetcher, env: {} });
+    await mountLarkRoutes(app, { config, fetcher, env: {} });
     await app.listen({ host: '127.0.0.1', port: 0 });
-    channel.start();
     await vi.waitFor(() => expect(sockets.map(socket => socket.appId)).toEqual(['cli_existing']));
     const existing = sockets[0]!;
 
@@ -98,7 +97,7 @@ it.each([
   const listener = { listening: false, activeAppIds: [], sync: vi.fn(async () => {}), stop: vi.fn() };
   const app = Fastify();
   try {
-    await registerLarkRoutes(app, { config, listener, listeningDisabled: options.listeningDisabled });
+    await mountLarkRoutes(app, { config, listener, listeningDisabled: options.listeningDisabled });
     listener.sync.mockClear();
     const response = await app.inject({ method: 'POST', url: '/api/lark/bots/cli_blocked/listener/sync' });
     expect(response.statusCode).toBe(409);
@@ -113,7 +112,7 @@ it('reports failed activation without claiming the saved bot is listening', asyn
   const listener = { listening: false, activeAppIds: [], sync: vi.fn(async () => { throw new Error('transport private details'); }), stop: vi.fn() };
   const app = Fastify();
   try {
-    await registerLarkRoutes(app, { config, listener });
+    await mountLarkRoutes(app, { config, listener });
     const response = await app.inject({ method: 'POST', url: '/api/lark/bots/cli_failed/listener/sync' });
     expect(response.statusCode).toBe(503);
     expect(response.json().error.code).toBe('LARK_LISTENER_START_FAILED');
@@ -132,7 +131,7 @@ it.each(['ready', 'error', 'timeout'] as const)('waits for actual WebSocket read
   const app = Fastify();
   let request: ReturnType<typeof app.inject> | undefined;
   try {
-    await registerLarkRoutes(app, { config, fetcher, env: {} });
+    await mountLarkRoutes(app, { config, fetcher, env: {} });
     await saveLarkConfig(config, undefined, { appId: 'cli_wait', appSecret: 'secret', permissionMode: 'ask', listening: true });
     vi.useFakeTimers();
     let settled = false;
@@ -176,7 +175,7 @@ it('keeps a concurrent user stop after the first connection attempt fails', asyn
   let enabling: PromiseLike<unknown> | undefined;
   let disabling: PromiseLike<unknown> | undefined;
   try {
-    await registerLarkRoutes(app, { config, listener });
+    await mountLarkRoutes(app, { config, listener });
     enabling = app.inject({ method: 'PUT', url: '/api/lark/config', payload: { originalAppId: 'cli_race', listening: true } }).then(response => response);
     await vi.waitFor(() => expect(start).toHaveBeenCalledOnce());
     disabling = app.inject({ method: 'PUT', url: '/api/lark/config', payload: { originalAppId: 'cli_race', listening: false } }).then(response => response);

@@ -1,7 +1,7 @@
 import { PluginHost } from '../plugins/host.js';
 import { DutydeckRuntime } from '@dutydeck/runtime';
-import { parseLarkSourceId,timeLoop } from '@dutydeck/shared';
-import { WorkItemService,readWorkItemStatus } from '../work-items.js';
+import { parseLarkSourceId, timeLoop } from '@dutydeck/shared';
+import { WorkItemService, readWorkItemStatus } from '../work-items.js';
 import { createWorkbenchFetch } from '../workbench-fetch.js';
 import { SessionAutomationService } from '../session-automation.js';
 import { createAutomationIntegration } from '../automation-integration.js';
@@ -70,5 +70,5 @@ export function composeAutomation({ repos, env, log, lifecycle, channel }: Compo
     timer.unref();
     tick();
   };
-  return { automation, automationIntegration, ciWebhook, pullRequests, start };
+  return { automation, automationIntegration, ciWebhook, pullRequests, start: { automation: start } };
 }

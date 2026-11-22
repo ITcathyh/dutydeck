@@ -9,7 +9,7 @@ import { buildApp } from './app.js';
 import { createCliProgram } from './cli-program.js';
 import { registerCollaborationRoutes } from './collaboration-routes.js';
 import { CollaborationService } from './collaboration-service.js';
-import { registerLarkRoutes } from './lark/routes.js';
+import { mountLarkRoutes } from './lark/routes.js';
 import { larkBotsConfigKey, readLarkConfig } from './lark/config.js';
 import { LarkGroupManager } from './lark/group-management.js';
 import { LarkGroupParticipation } from './lark/group-participation.js';
@@ -129,7 +129,7 @@ describe('settings CLI Lark credential stage', () => {
     });
     const app = Fastify();
     cleanups.push(() => app.close());
-    await registerLarkRoutes(app, { config, env: {}, listeningDisabled: true, fetcher: upstream });
+    await mountLarkRoutes(app, { config, env: {}, listeningDisabled: true, fetcher: upstream });
     const request = bridge(app);
     let race = false;
     const fetcher = vi.fn(async (url: URL | string | Request, init?: RequestInit) => {
@@ -167,7 +167,7 @@ describe('settings CLI default Agent approval', () => {
     const agents = { get: async (id: string) => ({ id, protocol: 'pty-cli', adapterId: id === 'claude' ? 'claude-code' : 'codex' }) } as any;
     const app = Fastify();
     cleanups.push(() => app.close());
-    await registerLarkRoutes(app, { config, agents, env: {}, listeningDisabled: true });
+    await mountLarkRoutes(app, { config, agents, env: {}, listeningDisabled: true });
     const fetcher = bridge(app);
     const run = (pairs: string[]) => runSettingsCli('bot-set', { ...target, appId: 'cli_a', pairs }, { fetcher, readToken });
     await expect(run(['defaultAgentId=codex'])).rejects.toMatchObject({ code: 'LARK_APPROVAL_UNSUPPORTED' });
@@ -231,7 +231,7 @@ describe('settings CLI against the real bot routes', () => {
     const before = await readLarkConfig(repos.config, 'cli_a');
     // A target-app definitive miss must reach the CLI as the route's identity error.
     const app = Fastify(); cleanups.push(() => app.close());
-    await registerLarkRoutes(app, { config: repos.config, env: {}, listeningDisabled: true, fetcher: async url => String(url).includes('tenant_access_token')
+    await mountLarkRoutes(app, { config: repos.config, env: {}, listeningDisabled: true, fetcher: async url => String(url).includes('tenant_access_token')
       ? json({ code: 0, tenant_access_token: 'fixture-token', expire: 7200 })
       : json({ code: 99992361, msg: 'foreign app open_id' }) });
     await expect(runSettingsCli('bot-set', { ...target, appId: 'cli_a', pairs: ['highRiskAllowedUsers=[{"openId":"ou_foreign","name":"Other"}]'] }, { fetcher: bridge(app), readToken }))

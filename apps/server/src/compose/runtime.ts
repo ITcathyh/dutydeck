@@ -4,32 +4,32 @@ import { prepareBoundTaskPrompt } from '../plugins/bound-skills.js';
 import { PluginHost } from '../plugins/host.js';
 import { AgentModelSettings } from '../agent-model-settings.js';
 import { HerdrBackend } from '@dutydeck/session-backends';
-import { TerminalSettings,primaryHerdrBinary } from '../terminal-settings.js';
+import { TerminalSettings, primaryHerdrBinary } from '../terminal-settings.js';
 import { HerdrSessions } from '../herdr.js';
 import { createCollaborationIntegration } from '../collaboration-integration.js';
 import { isAutomatedRequest } from '../agent-request-tools.js';
 import { WorkspaceApprovals } from '../workspace-approvals.js';
 import { LeaderDelegationService } from '../leader-delegation.js';
-import { createAcceptPrompt,DutydeckRuntime,RuntimeEventBus } from '@dutydeck/runtime';
-import { childProcessIdentity,observeProcess } from '@dutydeck/storage';
+import { createAcceptPrompt, DutydeckRuntime, RuntimeEventBus } from '@dutydeck/runtime';
+import { childProcessIdentity, observeProcess } from '@dutydeck/storage';
 import { defaultDriverProviders } from '../driver-providers.js';
-import { channelExecutionAppId,dutydeckSessionKinds,renderSessionNotice,backgroundKindFor,COLLABORATION_LIST_LIMIT,RuntimeError,type Session } from '@dutydeck/shared';
-import { dirname,join } from 'node:path';
+import { channelExecutionAppId, dutydeckSessionKinds, renderSessionNotice, backgroundKindFor, COLLABORATION_LIST_LIMIT, RuntimeError, type Session } from '@dutydeck/shared';
+import { dirname, join } from 'node:path';
 import { WorkItemService } from '../work-items.js';
 import { createWorkbenchFetch } from '../workbench-fetch.js';
-import { capturedRiskPolicy,workItemRiskPolicy } from '../work-item-policy.js';
+import { capturedRiskPolicy, workItemRiskPolicy } from '../work-item-policy.js';
 import { SessionAutomationService } from '../session-automation.js';
 import { CiWebhookService } from '../ci-webhook.js';
 import { PullRequestService } from '../pull-requests.js';
-import { prepareSkillPrompt,type PrepareSkillPromptResult } from '../skill-delivery.js';
+import { prepareSkillPrompt, type PrepareSkillPromptResult } from '../skill-delivery.js';
 import { readTokenEfficiencyPolicy } from '../token-efficiency.js';
 import { createSessionPrompt } from '../prompt/session.js';
-import { isFrozenCollaborationSession,promptTemplateVersion } from '../prompt-context.js';
+import { isFrozenCollaborationSession, promptTemplateVersion } from '../prompt-context.js';
 import { TurnAuthority } from '../agent-host/turn-authority.js';
 import { createTurnDiffObserver } from '../turn-diff.js';
 import { createPtyCliProvider } from '@dutydeck/pty-driver';
 import { RelayCapabilityRegistry } from '@dutydeck/relay';
-import { parseUsageBackgroundLimits,parseUsagePricing,UsageLedger,withExtraPricing } from '../usage-ledger.js';
+import { parseUsageBackgroundLimits, parseUsagePricing, UsageLedger, withExtraPricing } from '../usage-ledger.js';
 import { wirePlugins } from '../plugins/service-wiring.js';
 import type { ComposeContext } from './context.js';
 import type { LarkGroupManager } from '../lark/group-management.js';
@@ -69,11 +69,11 @@ interface RuntimePorts {
   workItems(): WorkItemService;
   delegations(): LeaderDelegationService;
   collaboration(): ReturnType<typeof createCollaborationIntegration>;
-  automation(): { automation: SessionAutomationService; ciWebhook?: CiWebhookService; pullRequests: PullRequestService };
+  schedules(): { automation: SessionAutomationService; ciWebhook?: CiWebhookService; pullRequests: PullRequestService };
   awaitingAnswer(id: string): boolean;
 }
 
-export function composeRuntime({ config, repos, env, log, options, channel }: ComposeContext,
+export function composeRuntime({ config, repos, env, log, options, channel, lifecycle }: ComposeContext,
   deps: RuntimeDependencies, ports: RuntimePorts) {
   const { pluginHost, pluginWiring, groupManager, workbenchHttp, capabilities, relayCapabilities, herdr,
     agentTools, agentModelSettings, isAutomatedTask, drivers: { terminalSettings, ptyProvider } } = deps;
@@ -148,7 +148,7 @@ export function composeRuntime({ config, repos, env, log, options, channel }: Co
       authorize: async request => {
         if (request.phase === 'start') {
           const { sessionId, actorId } = request;
-          if (await ports.automation().automation.authorizeExecutionSession(sessionId, actorId)) return;
+          if (await ports.schedules().automation.authorizeExecutionSession(sessionId, actorId)) return;
           if (await ports.collaboration().background.authorizeExecution(sessionId, actorId)) return;
           // work item 授权先行判断并自行短路；其余会话把 prepareTurn 返回的可选本地提交
           // 交回 Runtime，由其短写序列在归属校验后执行（prepare 不写运行身份）。
@@ -164,13 +164,13 @@ export function composeRuntime({ config, repos, env, log, options, channel }: Co
         }
         const { session, task, phase } = request;
         await ports.collaboration().background.authorizeTask(session, task);
-        await ports.automation().automation.authorizeTask(task, phase);
-        await ports.automation().ciWebhook?.authorizeTask(task, phase);
-        await ports.automation().pullRequests.authorizeTask(task, phase);
+        await ports.schedules().automation.authorizeTask(task, phase);
+        await ports.schedules().ciWebhook?.authorizeTask(task, phase);
+        await ports.schedules().pullRequests.authorizeTask(task, phase);
         await ports.workItems().authorizeTask(session, task, phase);
       },
       riskPolicy: async (sessionId, fallback) => {
-        const scheduleSource = await ports.automation().automation.sourceSessionId(sessionId);
+        const scheduleSource = await ports.schedules().automation.sourceSessionId(sessionId);
         if (scheduleSource) return groupManager.riskPolicy(scheduleSource, fallback);
         const background = await ports.collaboration().riskPolicy(sessionId, fallback);
         if (background) return background.policy;
@@ -198,14 +198,15 @@ export function composeRuntime({ config, repos, env, log, options, channel }: Co
       atExecute: createSessionPrompt({
         channelTools: (session, active) => agentTools.toolPromptContributor(session, { active }),
         plugins: pluginHost, tokens: capabilities, isAutomatedTask, command: options.groupToolsCommand ?? 'dutydeck',
-        projectMemory, scheduleResult: session => ports.automation().automation.resultContext(session), herdr
+        projectMemory, scheduleResult: session => ports.schedules().automation.resultContext(session), herdr
       }),
     },
     driverIdleTimeoutMs: config.driverIdleTimeoutMs,
     driverIdleCpuAction: config.driverIdleCpuAction,
     cleanupIntervalMs: config.cleanupIntervalMs,
-    awaitingAnswer: sessionId => ports.awaitingAnswer(sessionId),
+    awaitingAnswer: ports.awaitingAnswer,
     log: { warn: (...args: unknown[]) => log.warn(...args as [unknown, string]), info: (data, message) => log.info(data, message) }
   });
+  lifecycle.register('runtime', () => runtime.shutdown());
   return { runtime, sessionAgentConfig, usageLedger, workspaceApprovals, projectMemory };
 }

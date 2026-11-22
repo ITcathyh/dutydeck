@@ -9,6 +9,7 @@ const stopOrder = [
   ['capabilities'], ['database'], ['pluginDispose'],
 ] as const;
 type Phase = typeof stopOrder[number][number];
+const startOrder = ['watch', 'pluginResults', 'historyRetention', 'workItems', 'delegations', 'automation', 'collaboration'] as const satisfies readonly Phase[];
 type Operation = () => unknown;
 
 export class ServerLifecycle {
@@ -20,6 +21,10 @@ export class ServerLifecycle {
   private closing?: Promise<void>;
 
   constructor(private readonly log: FastifyBaseLogger) {}
+
+  startBackground(operations: Record<typeof startOrder[number], () => void>) {
+    for (const phase of startOrder) operations[phase]();
+  }
 
   // Until all core services exist, setup failures release acquired resources
   // concurrently, in reverse registration order, with SQLite closed last.

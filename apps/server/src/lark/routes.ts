@@ -1,28 +1,28 @@
 import { composeLarkChannel } from '../compose/lark-channel.js';
 import type { ReplyPolish } from './reply-polish.js';
 import { queryDispositions } from './disposition.js';
-import { unrecordedPromptUsages,promptHistory,promptVersion,promptLineDiff } from './prompt-versions.js';
+import { unrecordedPromptUsages, promptHistory, promptVersion, promptLineDiff } from './prompt-versions.js';
 import { isAbsolute } from 'node:path';
 import { createWorkbenchFetch } from '../workbench-fetch.js';
 import type { LarkGroupParticipation } from './group-participation.js';
 import { LarkAppCreationJobManager } from './app-creation.js';
 import { registerLarkAppCreationRoutes } from './app-creation-routes.js';
 import type { RelayAskBroker } from '@dutydeck/relay';
-import { registerLarkGroupManagementRoutes,type LarkGroupManager } from './group-management.js';
-import type { FastifyInstance,FastifyReply } from 'fastify';
-import { type LarkHookDraft,agentWeightsSchema,larkHookDraftSchema,validateHighRiskPattern,type AgentRepository,type ChannelMappingRepository,type ConfigRepository,type PolicyAction,type PolicyDecision } from '@dutydeck/shared';
+import { registerLarkGroupManagementRoutes, type LarkGroupManager } from './group-management.js';
+import type { FastifyInstance, FastifyReply } from 'fastify';
+import { type LarkHookDraft, agentWeightsSchema, larkHookDraftSchema, validateHighRiskPattern, type AgentRepository, type ChannelMappingRepository, type ConfigRepository, type PolicyAction, type PolicyDecision } from '@dutydeck/shared';
 import type { DutydeckRuntime } from '@dutydeck/runtime';
-import { createLarkCardService,LarkServiceError,larkConfigurationStatus,type LarkBotConfigInput,type LarkCardService,type LarkSendInput,type LarkUpdateInput } from './service.js';
-import { detectUnusableOwnerEntries,type ContactLookup } from './owner-identity.js';
-import { backfillBotPromptVersions,defaultHighRiskPattern,deleteLarkConfig,larkExecutionConfirmed,larkMemoryEnabled,publicLarkConfigs,readLarkConfig,readLarkConfigs,resolveRiskControlModeInput,saveLarkConfig,type SaveLarkConfigInput } from './config.js';
-import { LarkLongConnectionListenerPool,type LarkListenerPool } from './listener.js';
-import { installLarkHook,larkHookStatus } from './security-hooks.js';
+import { createLarkCardService, LarkServiceError, larkConfigurationStatus, type LarkBotConfigInput, type LarkCardService, type LarkSendInput, type LarkUpdateInput } from './service.js';
+import { detectUnusableOwnerEntries, type ContactLookup } from './owner-identity.js';
+import { backfillBotPromptVersions, defaultHighRiskPattern, deleteLarkConfig, larkExecutionConfirmed, larkMemoryEnabled, publicLarkConfigs, readLarkConfig, readLarkConfigs, resolveRiskControlModeInput, saveLarkConfig, type SaveLarkConfigInput } from './config.js';
+import { LarkLongConnectionListenerPool, type LarkListenerPool } from './listener.js';
+import { installLarkHook, larkHookStatus } from './security-hooks.js';
 import { registerLarkAgentToolRoutes } from './agent-tools-routes.js';
 import type { LarkAgentToolsService } from './agent-tools.js';
-import { larkMemoryErrorLabel,type LarkMemoryStore } from './memory.js';
+import { larkMemoryErrorLabel, type LarkMemoryStore } from './memory.js';
 import type { LarkMemoryPipeline } from './memory-pipeline.js';
 import { OpenPlatformConfigurationJobManager } from './open-platform-jobs.js';
-import { isValidLarkAppId,larkSlashCommandDefinitions } from './open-platform-configurator.js';
+import { isValidLarkAppId, larkSlashCommandDefinitions } from './open-platform-configurator.js';
 import type { LoginLinkStore } from '../auth/auth.js';
 
 export type { LarkHookDraft } from '@dutydeck/shared';
@@ -204,12 +204,18 @@ export function createLarkRouteServices(log: FastifyInstance['log'], options: La
     closeHttp: () => { http.close(); options.service?.close?.(); } };
 }
 
-export async function registerLarkRoutes(app: FastifyInstance, options: LarkRoutesOptions = {},
+export async function mountLarkRoutes(app: FastifyInstance, options: LarkRoutesOptions = {},
   services = createLarkRouteServices(app.log, options)) {
-  const { listener, syncListeners, listeningDisabled, fetcher, env, openPlatformJobs, storedBot, resolveService, saveBotConfig, invalidateService } = services;
+  app.addHook('onListen', async () => services.start());
   // Abort before Fastify waits for active requests; onClose would be too late.
   app.addHook('preClose', async () => services.closeHttp());
   app.addHook('onClose', async () => services.stop());
+  return registerLarkRoutes(app, options, services);
+}
+
+export async function registerLarkRoutes(app: FastifyInstance, options: LarkRoutesOptions = {},
+  services = createLarkRouteServices(app.log, options)) {
+  const { listener, syncListeners, listeningDisabled, fetcher, env, openPlatformJobs, storedBot, resolveService, saveBotConfig, invalidateService } = services;
   if (options.config) app.get<{ Querystring: { appId?: string; messageId?: string; chatId?: string; since?: string } }>('/api/lark/inbox', request => queryDispositions(options.config!, request.query));
   await registerLarkAgentToolRoutes(app, options.agentTools);
   await registerLarkGroupManagementRoutes(app, options.groupManager);

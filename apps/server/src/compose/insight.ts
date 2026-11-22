@@ -8,9 +8,8 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { makeId } from '@dutydeck/shared';
 import type { DutydeckRuntime } from '@dutydeck/runtime';
-import type { AppConfig } from '@dutydeck/config';
+import type { ComposeContext } from './context.js';
 import type { createRepositories } from '@dutydeck/storage';
-import type { FastifyBaseLogger } from 'fastify';
 import type { WorkspaceOrganizationService } from '../workspace-organization.js';
 
 /**
@@ -74,9 +73,8 @@ export function createInsightResolver(
   };
 }
 
-export async function composeInsight(repos: ReturnType<typeof createRepositories>, config: AppConfig,
-  env: NodeJS.ProcessEnv, workspaceOrganizationService: WorkspaceOrganizationService,
-  runtime: DutydeckRuntime, log: FastifyBaseLogger, startupPhase: (name: string) => void) {
+export async function composeInsight({ repos, config, env, log, lifecycle }: ComposeContext,
+  workspaceOrganizationService: WorkspaceOrganizationService, runtime: DutydeckRuntime, startupPhase: (name: string) => void) {
   // 会话分析服务（T4c）：1 running/16 queued，按需 Go 分析，失败不影响 Agent 运行。
   // resolver 每次 resolve 按 session agent 当前 env 实时计算候选根；静态接线，无动态 import。
   try {
@@ -99,6 +97,7 @@ export async function composeInsight(repos: ReturnType<typeof createRepositories
     });
     startupPhase('wiring');
     await insightService.initialize();
+    lifecycle.register('insight', () => insightService.close(), false);
     return insightService;
   } catch {
     // 只记录固定 code，绝不回显 error.message（可能携带私有路径/token）。

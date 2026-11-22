@@ -5,11 +5,11 @@ import { sha256Hex } from '../hash.js';
 import { DutydeckRuntime } from '@dutydeck/runtime';
 import { workPlanConfirmationRequired } from '@dutydeck/shared';
 import { tmpdir } from 'node:os';
-import { join,resolve } from 'node:path';
+import { join, resolve } from 'node:path';
 import { WorkItemService } from '../work-items.js';
 import { WorkItemInteractions } from '../work-item-interactions.js';
 import { createWorkbenchFetch } from '../workbench-fetch.js';
-import { authorizeWorkItemAgent,authorizeWorkItemInteraction } from '../work-item-policy.js';
+import { authorizeWorkItemAgent, authorizeWorkItemInteraction } from '../work-item-policy.js';
 import { createAutomationIntegration } from '../automation-integration.js';
 import { createRelayAskStore } from '../relay-ask-store.js';
 import { RelayAskBroker } from '@dutydeck/relay';
@@ -53,7 +53,9 @@ export function composeWork({ repos, config, env, log, lifecycle, channel }: Com
     resolveGroupConfig: (bot, chatId) => groupManager.resolved(bot, chatId),
     workspaceRoot: join(tmpdir(), 'dutydeck-leader', sha256Hex(resolve(config.databaseUrl)).slice(0, 16)), log: { warn: (details, message) => log.warn(details, message) } });
   lifecycle.register('leaderMode', () => leaderMode.close());
+  lifecycle.register('relayClose', () => relayBroker.close(), false);
+  lifecycle.register('relayFlush', () => relayBroker.flush(), false);
   const startDelegations = () => { void delegations.start().catch(error => log.warn({ error }, 'Leader 模式规划恢复失败')); };
   return { workbench, workItems, delegations, workInteractions, relayBroker, relayContinuation,
-    startWorkItems: () => workItems.start(), startDelegations };
+    start: { workItems: () => workItems.start(), delegations: startDelegations } };
 }
