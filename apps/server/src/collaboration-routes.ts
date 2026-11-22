@@ -1,3 +1,5 @@
+import { toolNeeds } from './agent-host/tool-table.js';
+import { registerToolFamily } from './agent-host/routes.js';
 import { createHash, randomUUID } from 'node:crypto';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { z } from 'zod';
@@ -73,39 +75,37 @@ export async function registerCollaborationRoutes(app: FastifyInstance, options:
       return previewScenario(scope, id, input);
     });
   }
-  for (const [base, context] of [
-    ['/api/lark/groups/:appId/:chatId/collaboration', managementContext],
-    ['/api/lark/agent-tools/collaboration', agentContext]
-  ] as const) {
-    app.get(base, async request => {
+  type CollaborationRequest = FastifyRequest<{ Params: { id: string } }>;
+  const handlers = (context: (request: FastifyRequest) => Promise<Context>) => ({
+    'collaborate.status': async (request: CollaborationRequest) => {
       const ctx = await context(request);
       const result = await options.service.get(ctx.scope, ctx.actorId);
       return options.scenarios ? { ...result, scenarios: await options.scenarios(ctx.scope) } : result;
-    });
-    app.patch(`${base}/settings`, async request => {
+    },
+    'collaborationSettings': async (request: CollaborationRequest) => {
       const ctx = await context(request);
       await options.service.require(ctx.scope, ctx.actorId, 'manage');
       let patch = parse(updateCollaborationSettingsRequestSchema, request.body);
       if (options.prepareSettings) patch = await options.prepareSettings(ctx.scope, patch);
       const result = await options.service.updateSettings(ctx.scope, ctx.actorId, patch);
       await changed(ctx.scope); return result;
-    });
-    app.post(`${base}/followups`, async request => {
+    },
+    'collaborate.followup-create': async (request: CollaborationRequest) => {
       const ctx = await context(request); const result = await options.service.createFollowup(ctx.scope, ctx.actorId, createInput(ctx, request.body), ctx.taskId ? 'inferred' : 'confirmed');
       await changed(ctx.scope); return result;
-    });
-    app.patch<{ Params: { appId?: string; chatId?: string; id: string } }>(`${base}/followups/:id`, async request => {
+    },
+    'collaborate.followup-update': async (request: CollaborationRequest) => {
       const ctx = await context(request); const result = await options.service.updateFollowup(ctx.scope, ctx.actorId, request.params.id, { ...parse(updateFollowupInputSchema, request.body), provenance: ctx.taskId ? 'inferred' : 'confirmed' });
       await changed(ctx.scope); return result;
-    });
-    app.post(`${base}/mandates`, async request => {
+    },
+    'collaborate.mandate-create': async (request: CollaborationRequest) => {
       const ctx = await context(request);
       // 只有 Agent 通道带 taskId；Web 管理端是用户自己在页面上操作，保持立即创建。
       if (ctx.taskId && options.confirmMandate) return options.confirmMandate(ctx.scope, ctx.actorId, createInput(ctx, request.body), ctx.origin ?? {});
       const result = await options.service.createMandate(ctx.scope, ctx.actorId, createInput(ctx, request.body));
       await changed(ctx.scope); return result;
-    });
-    app.patch<{ Params: { appId?: string; chatId?: string; id: string } }>(`${base}/mandates/:id`, async request => {
+    },
+    'collaborate.mandate-update': async (request: CollaborationRequest) => {
       const ctx = await context(request);
       if (ctx.taskId && !tighteningOnly(request.body)) {
         if (!options.confirmMandateUpdate) throw new RuntimeError('COLLABORATION_CONFIRMATION_UNAVAILABLE', '当前服务不能发确认卡，Agent 不能直接修改委托的内容、时间或恢复执行。', 503);
@@ -113,21 +113,34 @@ export async function registerCollaborationRoutes(app: FastifyInstance, options:
       }
       const result = await options.service.updateMandate(ctx.scope, ctx.actorId, request.params.id, request.body);
       await changed(ctx.scope); return result;
-    });
-    app.post<{ Params: { appId?: string; chatId?: string; id: string } }>(`${base}/decisions/:id/feedback`, async request => {
+    },
+    'collaborate.feedback': async (request: CollaborationRequest) => {
       const ctx = await context(request); await options.service.require(ctx.scope, ctx.actorId, 'write');
       const input = parse(feedbackSchema, request.body);
       return { feedback: await repo.addFeedback({ id: randomUUID(), scope: ctx.scope, decisionId: request.params.id, actorId: ctx.actorId, ...input, createdAt: new Date().toISOString() }) };
-    });
-    app.post(`${base}/replay`, async request => {
+    },
+    'collaborationReplay': async (request: CollaborationRequest) => {
       const ctx = await context(request); await options.service.require(ctx.scope, ctx.actorId, 'manage');
       return options.evaluation.replay(ctx.scope, parse(replaySchema, request.body));
-    });
-    app.post(`${base}/bootstrap`, async request => {
+    },
+    'collaborationBootstrap': async (request: CollaborationRequest) => {
       const ctx = await context(request); await options.service.require(ctx.scope, ctx.actorId, 'manage');
       await options.bootstrap(ctx.scope); return { bootstrap: await repo.getBootstrap(ctx.scope) };
-    });
-  }
+    },
+  });
+  registerToolFamily<{ Params: { id: string } }>(app, [toolNeeds.collaboration], handlers(agentContext));
+
+  const management = handlers(managementContext);
+  const base = '/api/lark/groups/:appId/:chatId/collaboration';
+  app.get(base, management['collaborate.status']);
+  app.patch(`${base}/settings`, management['collaborationSettings']);
+  app.post(`${base}/followups`, management['collaborate.followup-create']);
+  app.patch(`${base}/followups/:id`, management['collaborate.followup-update']);
+  app.post(`${base}/mandates`, management['collaborate.mandate-create']);
+  app.patch(`${base}/mandates/:id`, management['collaborate.mandate-update']);
+  app.post(`${base}/decisions/:id/feedback`, management['collaborate.feedback']);
+  app.post(`${base}/replay`, management['collaborationReplay']);
+  app.post(`${base}/bootstrap`, management['collaborationBootstrap']);
   // 群分工只在 Web 群设置里改，Agent 工具不改。
   app.patch('/api/lark/groups/:appId/:chatId/collaboration/duty', async request => {
     const ctx = await managementContext(request);

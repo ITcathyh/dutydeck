@@ -1457,3 +1457,27 @@ describe('draft hook preparation', () => {
     expect(screen.queryByText('已为 ccflash、codex 配置拦截 Hook。')).toBeNull();
   });
 });
+
+it('refreshes recent settings, groups and model options when returning to bot management', async () => {
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const config = { configured: true, bots: [mockBot], listeningDisabled: false };
+  const capabilities = { platform: 'linux', directoryPicker: false, filePicker: false };
+  const models = { models: [], reasoningEfforts: [] };
+  client.setQueryData(['lark-config'], config);
+  client.setQueryData(['system-capabilities'], capabilities);
+  client.setQueryData(['lark-management-groups'], { groups: [] }, { updatedAt: Date.now() - 20_000 });
+  client.setQueryData(['bot-agent-models', mockBot.appId, mockBot.defaultAgentId, mockBot.defaultModel], models);
+  const readConfig = vi.spyOn(api, 'larkConfig').mockResolvedValue(config);
+  const readCapabilities = vi.spyOn(api, 'systemCapabilities').mockResolvedValue(capabilities);
+  const readGroups = vi.spyOn(api, 'managementGroups').mockResolvedValue({ groups: [] });
+  const readModels = vi.spyOn(api, 'agentModels').mockResolvedValue(models);
+  const view = render(<QueryClientProvider client={client}><BotManagement selectedAppId={mockBot.appId} agents={mockAgents}
+    onSelectBot={() => {}} onOpenLarkSetup={() => {}} onSelectGroup={() => {}}/></QueryClientProvider>);
+  await waitFor(() => {
+    expect(readConfig).toHaveBeenCalled();
+    expect(readCapabilities).toHaveBeenCalled();
+    expect(readGroups).toHaveBeenCalled();
+    expect(readModels).toHaveBeenCalled();
+  });
+  view.unmount();
+});

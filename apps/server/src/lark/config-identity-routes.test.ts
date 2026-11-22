@@ -35,6 +35,23 @@ async function fixture(contact: 'invalid' | 'valid' | 'scope' | 'network' = 'inv
 }
 
 describe('final bot application identity', () => {
+  it('shows unavailable credentials and repairs them without replacing bot settings', async () => {
+    const { app, repos } = await fixture();
+    const raw = { appId: 'cli_source', appSecretRef: 'missing', revision: 4, riskControlMode: 'enforced',
+      defaultAgentId: 'codex', preInjectPrompt: 'original', allowedUsers: [{ name: 'Owner', openId: 'ou_owner' }] };
+    await repos.config.set(larkBotsConfigKey, JSON.stringify([raw]));
+    const view = (await app.inject({ method: 'GET', url: '/api/lark/config' })).json().bots[0];
+    expect(view).toMatchObject({ appId: raw.appId, revision: 4, credentialUnavailable: true, setupComplete: false });
+    expect(view).not.toHaveProperty('appSecretRef');
+    const result = await app.inject({ method: 'PUT', url: '/api/lark/config', payload: {
+      appId: raw.appId, stage: 'lark', appSecret: 'replacement', expectedRevision: 4, allowedUsers: [], riskControlMode: 'off'
+    } });
+    expect(result.statusCode).toBe(200);
+    expect(result.json().bots[0]).not.toHaveProperty('credentialUnavailable');
+    const { appSecretRef, ...settings } = raw;
+    expect(JSON.parse((await repos.config.get(larkBotsConfigKey))!)).toEqual([{ ...settings, revision: 5, appSecret: 'replacement' }]);
+  });
+
   for (const stage of ['lark', 'agent'] as const) for (const explicit of [false, true]) {
     it(`rejects a foreign ${explicit ? 'explicit' : 'inherited'} owner in the ${stage} stage without changing config`, async () => {
       const { app, repos, fetcher } = await fixture();

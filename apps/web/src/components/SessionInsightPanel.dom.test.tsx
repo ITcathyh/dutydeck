@@ -702,3 +702,10 @@ describe('SessionInsightPanel 实例隔离', () => {
     expect(urls.some(url => url.startsWith('/api/sessions/s1/insight'))).toBe(false);
   });
 });
+
+it('polls the comparison session while its insight refresh is running', async () => {
+  const read = vi.spyOn(insightApi, 'details').mockImplementation(async id =>
+    detailsResponse({ status: { ...detailsResponse().status, sessionId: id, refreshState: id === 's2' ? 'running' : 'succeeded' } }));
+  mountPanel({ compareSessionId: 's2' });
+  await waitFor(() => expect(read.mock.calls.filter(([id]) => id === 's2').length).toBeGreaterThan(1), { timeout: 5_000 });
+});

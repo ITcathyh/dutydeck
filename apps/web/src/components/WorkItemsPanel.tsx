@@ -1,3 +1,4 @@
+import { queryKeys } from '../queries';
 import { useRef, useState, type RefObject } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import type { CreateWorkItemInput, WorkItem, WorkPlan, WorkRevisionImpact, WorkRevisionPreview, WorkTemplate } from '@dutydeck/shared';
@@ -42,7 +43,7 @@ function SessionWorkItems({ session, agents, onSelectSession, control }: Props) 
   const [notice, setNotice] = useState('');
   const submission = useRef<Submission>(undefined);
   const qc = useQueryClient();
-  const queryKey = ['work-items', session.id];
+  const queryKey = queryKeys.workItems(session.id);
   const records = useWorkItems(session.id, open);
   const mutation = useMutation({
     mutationFn: async (action: Action): Promise<unknown> => {
@@ -70,7 +71,7 @@ function SessionWorkItems({ session, agents, onSelectSession, control }: Props) 
           : action.kind === 'revise' || action.kind === 'confirm' ? `计划已更新为 v${item.planVersion ?? 1}。` : action.kind === 'discard' ? '已放弃修订，按原计划继续。' : '目标已接收。');
       }
     },
-    onSettled: async () => { await Promise.all([qc.invalidateQueries({ queryKey }), qc.invalidateQueries({ queryKey: ['work-item-requests', session.id] })]); }
+    onSettled: async () => { await Promise.all([qc.invalidateQueries({ queryKey }), qc.invalidateQueries({ queryKey: queryKeys.sessionWorkRequests(session.id) })]); }
   });
   const readOnly = isSessionActionDisabled(session);
   const disabled = readOnly || mutation.isPending || records.isFetching || records.isError || !records.data;

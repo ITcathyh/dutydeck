@@ -1,3 +1,4 @@
+import { agentModelsQuery, hookRoutingQuery, larkConfigQuery, larkMemoryStatusQuery, leaderSkillsQuery, managementGroupsQuery, queryKeys, systemCapabilitiesQuery } from '../queries';
 import { draftFromBot, saveBodyFromDraft } from '../bot-settings-form';
 import { ReplyPolishSettings } from './ReplyPolishSettings';
 import { ReactionTriggerSetting } from './ReactionTriggerSetting';
@@ -35,7 +36,6 @@ import { AgentSelect, CompactSelect } from './CompactSelect';
 import { DirectoryPicker } from './DirectoryPicker';
 import { ConfirmDialog } from './ConfirmDialog';
 import { toastStore } from '../useToasts';
-import { agentModelsQueryKey, loadAgentModels } from '../model-cache';
 import { supportsModelServiceSettings } from '../agent-model-support';
 
 export type BotManagementProps = {
@@ -148,24 +148,12 @@ export function BotManagement({
   const clearBotDraft = useDraftStore(state => state.clearBotDraft);
   const setBotConflict = useDraftStore(state => state.setBotConflict);
 
-  const larkConfig = useQuery({
-    queryKey: ['lark-config'],
-    queryFn: api.larkConfig,
-    staleTime: 30_000
-  });
+  const larkConfig = useQuery(larkConfigQuery());
 
-  const managedGroups = useQuery({
-    queryKey: ['lark-management-groups'],
-    queryFn: api.managementGroups,
-    staleTime: 30_000
-  });
+  const managedGroups = useQuery(managementGroupsQuery());
 
   // 原生目录对话框只在 macOS 可用；Linux 上按真实能力隐藏，避免摆一颗必然失败的按钮。
-  const systemCapabilities = useQuery({
-    queryKey: ['system-capabilities'],
-    queryFn: api.systemCapabilities,
-    staleTime: Infinity
-  });
+  const systemCapabilities = useQuery(systemCapabilitiesQuery());
 
   const bots = useMemo(() => larkConfig.data?.bots ?? [], [larkConfig.data]);
 
@@ -249,21 +237,10 @@ export function BotManagement({
   const isDirty = activeBot && currentDraft ? hasDraftChanges(activeBot, currentDraft) : false;
 
   // 模型选项
-  const agentOptions = useQuery({
-    queryKey: agentModelsQueryKey(currentDraft?.defaultAgentId, currentDraft?.defaultModel, activeAppId),
-    queryFn: () => loadAgentModels(currentDraft!.defaultAgentId, currentDraft?.defaultModel || undefined, false, activeAppId),
-    enabled: Boolean(currentDraft?.defaultAgentId),
-    staleTime: 5 * 60_000
-  });
+  const agentOptions = useQuery({ ...agentModelsQuery(currentDraft?.defaultAgentId, currentDraft?.defaultModel || undefined, activeAppId), enabled: Boolean(currentDraft?.defaultAgentId) });
 
   // 机器人的群共享会话记忆状态
-  const memoryStatusQuery = useQuery({
-    queryKey: ['lark-memory-status', activeAppId],
-    queryFn: () => api.larkMemoryStatus(activeAppId!),
-    enabled: Boolean(activeAppId && currentDraft?.memoryEnabled),
-    staleTime: 30_000,
-    refetchInterval: query => query.state.data?.groups?.running ? 10_000 : false
-  });
+  const memoryStatusQuery = useQuery({ ...larkMemoryStatusQuery(activeAppId), enabled: Boolean(activeAppId && currentDraft?.memoryEnabled) });
 
   /*
     保存。
@@ -316,8 +293,8 @@ export function BotManagement({
         setBotDraft(appId, { ...latest, baseRevision: savedRevision ?? latest.baseRevision });
         setBotConflict(appId, undefined);
       }
-      if (nextConfig) qc.setQueryData(['lark-config'], nextConfig);
-      void qc.invalidateQueries({ queryKey: ['lark-config'] });
+      if (nextConfig) qc.setQueryData(queryKeys.larkConfig(), nextConfig);
+      void qc.invalidateQueries({ queryKey: queryKeys.larkConfig() });
       toastStore.push({
         kind: 'success',
         key: `save-bot-${appId}`,
@@ -356,22 +333,14 @@ export function BotManagement({
   /** 只有「正在保存的就是当前这个对象」时才显示忙碌态，否则切过去的 B 会跟着转圈。 */
   const savingThisBot = saveMutation.isPending && saveMutation.variables?.appId === activeAppId;
 
-  const leaderSkills = useQuery({
-    queryKey: ['bot-leader-skills', activeAppId, activeBot?.workspace],
-    queryFn: () => api.skills(activeBot?.workspace || undefined, activeAppId!),
-    enabled: Boolean(activeAppId && leaderEnabled),
-    staleTime: 60_000
-  });
+  const leaderSkills = useQuery({ ...leaderSkillsQuery(activeAppId, activeBot?.workspace), enabled: Boolean(activeAppId && leaderEnabled) });
   const leaderSkillOptions = (leaderSkills.data ?? []).map(skill => ({ value: skill.ref ?? skill.path, name: skill.name }));
 
   const hookDraft: LarkHookDraft = { workspace: currentDraft?.workspace, defaultAgentId: currentDraft?.defaultAgentId, fallbackAgentId: currentDraft?.fallbackAgentId, defaultAgentWeights: activeBot?.defaultAgentWeights ?? [] };
   const routingAgentIds = [...new Set([currentDraft?.defaultAgentId, currentDraft?.fallbackAgentId, ...(activeBot?.defaultAgentWeights ?? []).map(row => row.agentId)].filter((id): id is string => Boolean(id)))];
-  const hookQueryKey = ['lark-hook-status', activeAppId, 'routing', currentDraft?.workspace, ...routingAgentIds];
-  const hookStatus = useQuery({
-    queryKey: hookQueryKey,
-    queryFn: () => Promise.all(routingAgentIds.map(id => api.larkHookStatus(activeAppId!, id, currentDraft!.workspace))),
-    enabled: Boolean(activeAppId && currentDraft?.riskControlMode === 'enforced' && routingAgentIds.length)
-  });
+  const hookOptions = hookRoutingQuery(activeAppId, currentDraft?.workspace, routingAgentIds);
+  const hookQueryKey = hookOptions.queryKey;
+  const hookStatus = useQuery({ ...hookOptions, enabled: Boolean(activeAppId && currentDraft?.riskControlMode === 'enforced' && routingAgentIds.length) });
   const missingHook = hookStatus.data?.find(status => !status.supported || !status.installed || !status.writable || status.nativeReady === false);
   const installHook = useMutation({
     mutationFn: ({ appId, draft, targets }: { appId: string; draft: BotDraft; targets: LarkHookDraft; queryKey: typeof hookQueryKey }) => api.installLarkHook(appId, draft.highRiskPattern, draft.baseRevision, targets),
@@ -391,8 +360,8 @@ export function BotManagement({
     mutationFn: (appId: string) => api.deleteLarkConfig(appId),
     onSuccess: (nextConfig) => {
       setDeleteConfirmAppId(null);
-      if (nextConfig) qc.setQueryData(['lark-config'], nextConfig);
-      void qc.invalidateQueries({ queryKey: ['lark-config'] });
+      if (nextConfig) qc.setQueryData(queryKeys.larkConfig(), nextConfig);
+      void qc.invalidateQueries({ queryKey: queryKeys.larkConfig() });
       toastStore.push({ kind: 'success', key: 'delete-bot', title: '机器人已移除' });
     }
   });

@@ -24,7 +24,7 @@ const validResult = (value: unknown): value is AgentModelsResult => {
     && (result.source === undefined || result.source === 'acp' || result.source === 'cli' || result.source === 'agent');
 };
 
-export const agentModelsQueryKey = (agentId?: string, model?: string, appId?: string) => appId ? ['bot-agent-models', appId, agentId ?? '', model ?? ''] as const : ['agent-models', agentId ?? '', model ?? ''] as const;
+export { agentModelsQueryKey } from './query-keys';
 
 export function readCachedAgentModels(agentId: string, model?: string, storage: ModelCacheStorage | undefined = browserStorage(), now = Date.now()): AgentModelsResult | undefined {
   if (!agentId || !storage) return undefined;

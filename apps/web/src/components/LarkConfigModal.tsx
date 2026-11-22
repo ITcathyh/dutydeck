@@ -1,3 +1,4 @@
+import { agentModelsQuery, hookSummaryQuery, larkConfigQuery, openPlatformJobQuery, queryKeys, systemCapabilitiesQuery } from '../queries';
 import { draftFromBot, saveBodyFromDraft, msFromSeconds, secondsFromMs, type SharedBotDraft } from '../bot-settings-form';
 import { ReplyPolishSettings } from './ReplyPolishSettings';
 import { ReactionTriggerSetting } from './ReactionTriggerSetting';
@@ -12,7 +13,6 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { AlertTriangle, Bot, Check, ExternalLink, Eye, EyeOff, FolderOpen, Plus, Trash2, Wrench, X } from 'lucide-react';
 import { botSettingDescriptors as fields, agentWeightsSchema, type AgentWeight, describeWebBaseUrlReachability, validateHighRiskPattern } from '@dutydeck/shared';
 import { api, ApiError, type Agent, type LarkAppCreationJob, type LarkBotConfig, type RiskControlMode } from '../api';
-import { agentModelsQueryKey, loadAgentModels, readCachedAgentModels } from '../model-cache';
 import { supportsModelServiceSettings } from '../agent-model-support';
 import { Badge, Banner, Button, Dialog, Field, IconButton, Input, Select, Skeleton, Spinner, Textarea } from './primitives';
 import { ConfirmDialog } from './ConfirmDialog';
@@ -75,6 +75,8 @@ type Draft = SharedBotDraft & {
   highRiskAllowedUserNames: string[]; fullTrustConfirmed: boolean;
   name: string;
 };
+
+const initialBotStep = (bot?: LarkBotConfig) => bot && !bot.setupComplete && !bot.credentialUnavailable ? 2 : 1;
 
 const browserOrigin = () => typeof window !== 'undefined' ? window.location.origin : '';
 
@@ -145,8 +147,8 @@ function Switch({ id, label, checked, disabled, onToggle }: { id: string; label:
 
 export function LarkConfigModal({ agents, target, field, onLeaveGuardChange, onClose }: LarkConfigModalProps) {
   const qc = useQueryClient();
-  const config = useQuery({ queryKey: ['lark-config'], queryFn: api.larkConfig });
-  const capabilities = useQuery({ queryKey: ['system-capabilities'], queryFn: api.systemCapabilities });
+  const config = useQuery(larkConfigQuery());
+  const capabilities = useQuery(systemCapabilitiesQuery());
   const [confirmation, setConfirmation] = useState<'incomplete' | 'discard' | 'delete'>();
   const [openPlatformJobId, setOpenPlatformJobId] = useState('');
   const [creationBusy, setCreationBusy] = useState(false);
@@ -204,19 +206,11 @@ export function LarkConfigModal({ agents, target, field, onLeaveGuardChange, onC
   const [modelSettingsSaving, setModelSettingsSaving] = useState(false);
   const handleModelDirtyChange = useCallback((dirty: boolean, saving = false) => { setModelSettingsPending(dirty); setModelSettingsSaving(saving); }, []);
   const routingAgentIds = [...new Set([defaultAgentId, ...(fallbackAgentId ? [fallbackAgentId] : []), ...defaultAgentWeights.map(row => row.agentId)])];
-  const hookQueryKey = ['lark-hook-status', current?.appId, 'summary', workspace, defaultAgentId, fallbackAgentId, ...defaultAgentWeights.map(row => row.agentId)];
-  const hookStatus = useQuery({ queryKey: hookQueryKey, queryFn: async () => {
-    const statuses = await Promise.all(routingAgentIds.map(id => api.larkHookStatus(current!.appId, id, workspace)));
-    const failed = statuses.find(status => !status.supported || !status.installed || !status.writable || status.nativeReady === false);
-    return failed && routingAgentIds.length > 1 ? { ...failed, reason: `${failed.agentId}: ${failed.reason ?? '尚未配置可写 Hook'}` } : failed ?? statuses[0]!;
-  }, enabled: Boolean(current && defaultAgentId && riskControlMode === 'enforced') });
-  const agentOptions = useQuery({ queryKey: agentModelsQueryKey(defaultAgentId, defaultModel, current?.appId), queryFn: () => loadAgentModels(defaultAgentId, defaultModel || undefined, false, current?.appId), enabled: Boolean(defaultAgentId), initialData: () => current ? undefined : readCachedAgentModels(defaultAgentId, defaultModel || undefined), initialDataUpdatedAt: 0, refetchOnMount: 'always', staleTime: 5 * 60_000 });
-  const openPlatformJob = useQuery({
-    queryKey: ['lark-open-platform-job', openPlatformJobId],
-    queryFn: () => api.larkOpenPlatformSetupJob(openPlatformJobId),
-    enabled: Boolean(openPlatformJobId),
-    refetchInterval: query => ['preparing', 'waiting_for_scan', 'configuring'].includes(query.state.data?.status ?? '') ? 1_000 : false
-  });
+  const hookOptions = hookSummaryQuery(current?.appId, workspace, defaultAgentId, fallbackAgentId, defaultAgentWeights.map(row => row.agentId), routingAgentIds);
+  const hookQueryKey = hookOptions.queryKey;
+  const hookStatus = useQuery({ ...hookOptions, enabled: Boolean(current && defaultAgentId && riskControlMode === 'enforced') });
+  const agentOptions = useQuery({ ...agentModelsQuery(defaultAgentId, defaultModel || undefined, current?.appId), enabled: Boolean(defaultAgentId) });
+  const openPlatformJob = useQuery({ ...openPlatformJobQuery(openPlatformJobId), enabled: Boolean(openPlatformJobId) });
   useEffect(() => {
     const job = openPlatformJob.data;
     if (job?.status !== 'completed' || !job.slashCommands) return;
@@ -226,7 +220,7 @@ export function LarkConfigModal({ agents, target, field, onLeaveGuardChange, onC
   }, [openPlatformJob.data?.status, openPlatformJob.data?.appId, openPlatformJob.data?.slashCommands]);
   const startOpenPlatformSetup = useMutation({
     mutationFn: (forceLogin: boolean) => api.startLarkOpenPlatformSetup(appId.trim(), forceLogin),
-    onSuccess: job => { setOpenPlatformJobId(job.id); qc.setQueryData(['lark-open-platform-job', job.id], job); }
+    onSuccess: job => { setOpenPlatformJobId(job.id); qc.setQueryData(queryKeys.openPlatformJob(job.id), job); }
   });
   const enforcedHookReady = Boolean(hookStatus.data?.supported && hookStatus.data.installed && hookStatus.data.writable && hookStatus.data.nativeReady !== false);
   const legacyHighRiskNeedsMigration = Boolean(riskControlMode !== 'off' && current?.highRiskAllowedEmails.length && !highRiskAllowedUserNames.length);
@@ -238,7 +232,7 @@ export function LarkConfigModal({ agents, target, field, onLeaveGuardChange, onC
     if (!config.data || selectedAppId !== null) return;
     const initialBot = target && target !== 'new' ? config.data.bots.find(bot => bot.appId === target.appId) : target === 'new' ? undefined : config.data.bots[0];
     setSelectedAppId(target && target !== 'new' ? target.appId : initialBot?.appId ?? '');
-    setStep(destination?.step ?? (!target && initialBot && !initialBot.setupComplete ? 2 : 1));
+    setStep(destination?.step ?? (target ? 1 : initialBotStep(initialBot)));
   }, [config.data, selectedAppId, target]);
   useEffect(() => {
     if (!config.data || selectedAppId === null) return;
@@ -271,9 +265,10 @@ export function LarkConfigModal({ agents, target, field, onLeaveGuardChange, onC
       if (submitted.step === 1 && !current) enableListeningAfterNewBot.current = true;
       const savedId = submitted.appId;
       draftRevision.current = data.bots.find(bot => bot.appId === savedId)?.revision ?? 1;
-      qc.setQueryData(['lark-config'], data); setSelectedAppId(savedId);
+      if (current?.credentialUnavailable) { hydratedSelection.current = null; setReloadVersion(value => value + 1); }
+      qc.setQueryData(queryKeys.larkConfig(), data); setSelectedAppId(savedId);
       if (submitted.step === 1) setField('appSecret', '');
-      void qc.invalidateQueries({ queryKey: ['lark-hook-status', savedId] });
+      void qc.invalidateQueries({ queryKey: queryKeys.botHooks(savedId) });
       if (submitted.step === 1) setStep(2);
       else if (latestDraftSignature.current === submitted.signature) setCloseAfterSave(true);
     }
@@ -286,11 +281,11 @@ export function LarkConfigModal({ agents, target, field, onLeaveGuardChange, onC
   });
   const reload = useMutation({ mutationFn: api.larkConfig, onSuccess: data => {
     hydratedSelection.current = null;
-    qc.setQueryData(['lark-config'], data); setReloadVersion(value => value + 1);
+    qc.setQueryData(queryKeys.larkConfig(), data); setReloadVersion(value => value + 1);
     save.reset(); installHook.reset();
   } });
   const configurationBusy = save.isPending || installHook.isPending || reload.isPending;
-  const remove = useMutation({ mutationFn: () => api.deleteLarkConfig(current!.appId), onSuccess: data => { qc.setQueryData(['lark-config'], data); const firstBot = data.bots[0]; setSelectedAppId(firstBot?.appId ?? ''); setStep(firstBot && !firstBot.setupComplete ? 2 : 1); setConfirmation(undefined); } });
+  const remove = useMutation({ mutationFn: () => api.deleteLarkConfig(current!.appId), onSuccess: data => { qc.setQueryData(queryKeys.larkConfig(), data); const firstBot = data.bots[0]; setSelectedAppId(firstBot?.appId ?? ''); setStep(initialBotStep(firstBot)); setConfirmation(undefined); } });
   const pickWorkspace = useMutation({ mutationFn: api.selectDirectory, onSuccess: result => setField('workspace', result.path) });
   const agentCapabilitiesPending = step === 2 && Boolean(defaultAgentId) && !agentOptions.data && (agentOptions.isLoading || agentOptions.isFetching);
   const agentCapabilitiesReady = step !== 2 || Boolean(agentOptions.data);
@@ -312,7 +307,9 @@ export function LarkConfigModal({ agents, target, field, onLeaveGuardChange, onC
     notifyQuietHours.trim() && !validQuietHours(notifyQuietHours.trim()) ? '免打扰时段格式应为 22:00-08:00（24 小时制，起止不同），留空表示不启用。' : '',
     pinAfterSeconds.trim() && (pinAfterMs === undefined || pinAfterMs < minPinAfterSeconds * 1000) ? `置顶等待时间至少 ${minPinAfterSeconds} 秒，留空表示用默认的 10 分钟。` : ''
   ].filter(Boolean);
-  const canSave = !creationBusy && !configurationBusy && !modelSettingsPending && !missingTarget && (step === 1
+  const canSave = !creationBusy && !configurationBusy && !modelSettingsPending && !missingTarget && (current?.credentialUnavailable
+    ? step === 1 && appId.trim() === current.appId && Boolean(appSecret.trim())
+    : step === 1
     ? Boolean(appId.trim() && (current || appSecret.trim()) && (!restrictUsers || allowedUserNames.length) && !invalidWorkspaceAliases.length && !reminderErrors.length && Number.isInteger(pushIntervalMs) && pushIntervalMs >= 500 && pushIntervalMs <= 20000)
     : Boolean(current && defaultAgentId && agentWeightsSchema.safeParse(defaultAgentWeights).success && (permissionMode === 'full-trust' ? fullTrustConfirmed : remoteApprovalReady) && agentCapabilitiesReady && (riskControlMode === 'off' || highRiskPatternValidation.valid) && !legacyHighRiskNeedsMigration && (riskControlMode !== 'enforced' || enforcedHookReady)));
   const formError = reload.error ?? save.error ?? remove.error ?? pickWorkspace.error ?? inspect.error ?? startOpenPlatformSetup.error ?? openPlatformJob.error ?? (installHook.variables?.appId === current?.appId ? installHook.error : undefined) ?? (agentOptions.data ? undefined : agentOptions.error) ?? hookStatus.error ?? config.error;
@@ -335,7 +332,7 @@ export function LarkConfigModal({ agents, target, field, onLeaveGuardChange, onC
     requestLeave(onClose);
   }, [closeAfterSave, save.isPending, requestLeave, onClose]);
   useEffect(() => {
-    if (destination && current && hydratedVersion) setStep(destination.step);
+    if (destination && current && hydratedVersion) setStep(current.credentialUnavailable ? 1 : destination.step);
   }, [field, current?.appId, hydratedVersion]);
   useEffect(() => {
     if (!destination || !current || !hydratedVersion || step !== destination.step || !form.current) return;
@@ -349,7 +346,7 @@ export function LarkConfigModal({ agents, target, field, onLeaveGuardChange, onC
     return () => observer.disconnect();
   }, [field, current?.appId, hydratedVersion, step]);
   const requestClose = useCallback(() => {
-    const incompleteDraft = Boolean(current && !current.setupComplete);
+    const incompleteDraft = Boolean(current && !current.setupComplete && !current.credentialUnavailable);
     const unsavedNewBot = !current && selectedAppId === '' && Boolean(appId.trim() || appSecret.trim() || workspace.trim());
     if (incompleteDraft || unsavedNewBot) { setConfirmation(incompleteDraft ? 'incomplete' : 'discard'); return; }
     requestLeave(onClose);
@@ -376,7 +373,7 @@ export function LarkConfigModal({ agents, target, field, onLeaveGuardChange, onC
     setCreationNeedsSetup(configured ? '' : createdAppId);
     setCreationPendingReview(pendingReview ? createdAppId : '');
     setSlashWarning(slashCommands && slashCommands !== 'configured' ? { appId: createdAppId, status: slashCommands } : undefined);
-    qc.setQueryData(['lark-config'], latest);
+    qc.setQueryData(queryKeys.larkConfig(), latest);
     setSelectedAppId(createdAppId);
     setStep(configured ? 2 : 1);
   };
@@ -386,13 +383,13 @@ export function LarkConfigModal({ agents, target, field, onLeaveGuardChange, onC
     <form ref={form} onSubmit={event => { event.preventDefault(); if (canSave) save.mutate({ step, values: draftValues, signature: draftSignature, appId: appId.trim(), restrictUsers }); }} className="flex min-h-0 flex-1 flex-col">
       <Dialog.Header className="flex-wrap"><div className="min-w-0 flex-1"><h2 className="text-body font-semibold text-primary">{current ? `更新飞书 Bot：${current.name}` : '绑定飞书 Bot'}</h2><p className="mt-0.5 text-caption text-subtle">Bot 负责收发消息，Agent 负责执行任务</p></div><div className="order-3 mt-2 flex w-full shrink-0 items-center justify-end gap-0.5 sm:order-none sm:ml-auto sm:mt-0 sm:w-auto"><a href="https://open.larkoffice.com/app" target="_blank" rel="noreferrer" className="flex min-h-10 items-center gap-1.5 whitespace-nowrap rounded-md px-2.5 text-caption font-medium text-subtle transition-colors duration-fast ease-out hover:bg-hover hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus-ring">飞书开发者后台<ExternalLink size={12}/></a><a href="https://open.larkoffice.com/page/launcher?from=backend_oneclick" target="_blank" rel="noreferrer" className="flex min-h-10 items-center gap-1.5 whitespace-nowrap rounded-md px-2.5 text-caption font-medium text-secondary transition-colors duration-fast ease-out hover:bg-hover hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus-ring">快速创建应用<ExternalLink size={12}/></a></div><IconButton label="关闭" onClick={requestClose}><X size={15}/></IconButton></Dialog.Header>
       <div className="flex shrink-0 gap-1 overflow-x-auto border-b border-subtle bg-muted px-3 py-2">
-        {config.data?.bots.map(bot => <button key={bot.appId} type="button" disabled={creationBusy || configurationBusy} onClick={() => requestLeave(() => { discardApproved.current = false; setSelectedAppId(bot.appId); setStep(bot.setupComplete ? 1 : 2); })} className={`flex h-10 max-w-[250px] shrink-0 items-center gap-1.5 rounded-md px-2.5 text-caption font-medium transition-colors duration-fast ease-out ${selectedAppId === bot.appId ? 'border border-default bg-surface text-primary shadow-card' : 'border border-transparent text-subtle hover:bg-hover hover:text-primary'}`}><Bot size={13} className="shrink-0"/><span title={bot.name} className="min-w-0 max-w-32 truncate">{bot.tabLabel}</span>{bot.setupComplete ? <span title="配置完成" className="shrink-0"><Badge tone="success"><Check size={9}/>已配置</Badge></span> : <span className="shrink-0"><Badge tone="warning">待配置</Badge></span>}{bot.activeListening && !config.data?.listeningDisabled && bot.listening && <span title="监听已启动" className="h-1.5 w-1.5 shrink-0 rounded-full bg-success-solid"/>}</button>)}
+        {config.data?.bots.map(bot => <button key={bot.appId} type="button" disabled={creationBusy || configurationBusy} onClick={() => requestLeave(() => { discardApproved.current = false; setSelectedAppId(bot.appId); setStep(initialBotStep(bot)); })} className={`flex h-10 max-w-[250px] shrink-0 items-center gap-1.5 rounded-md px-2.5 text-caption font-medium transition-colors duration-fast ease-out ${selectedAppId === bot.appId ? 'border border-default bg-surface text-primary shadow-card' : 'border border-transparent text-subtle hover:bg-hover hover:text-primary'}`}><Bot size={13} className="shrink-0"/><span title={bot.name} className="min-w-0 max-w-32 truncate">{bot.tabLabel}</span>{bot.setupComplete ? <span title="配置完成" className="shrink-0"><Badge tone="success"><Check size={9}/>已配置</Badge></span> : <span className="shrink-0"><Badge tone="warning">{bot.credentialUnavailable ? '凭据不可用' : '待配置'}</Badge></span>}{bot.activeListening && !config.data?.listeningDisabled && bot.listening && <span title="监听已启动" className="h-1.5 w-1.5 shrink-0 rounded-full bg-success-solid"/>}</button>)}
         <button type="button" disabled={creationBusy || configurationBusy} aria-pressed={selectedAppId === ''} onClick={() => selectedAppId === '' ? addBot() : requestLeave(addBot)} className={`flex h-10 shrink-0 items-center gap-1 rounded-md px-2.5 text-caption font-medium transition-colors duration-fast ease-out ${selectedAppId === '' ? 'border border-default bg-surface text-primary shadow-card' : 'border border-transparent text-subtle hover:bg-hover hover:text-primary'}`}><Plus size={13}/>新增机器人</button>
       </div>
       <Dialog.Body className="space-y-3.5">
         {destination && current && <p role="status" className="text-caption text-secondary">定位：{current.name} · {destination.label}{'parent' in destination ? `；若当前选项不可见，请先检查“${botSettingFields[destination.parent].label}”及 Agent 支持情况。` : ''}</p>}
         {config.isLoading ? <Skeleton variant="row" lines={3}/> : missingTarget ? <Banner tone="warning">找不到指定机器人。请选择已有机器人或点击新增机器人。</Banner> : <>
-          <div className="mb-1 grid grid-cols-2 rounded-md bg-muted p-1"><button type="button" disabled={configurationBusy} onClick={() => setStep(1)} className={`min-h-10 rounded-md px-3 text-caption font-medium transition-colors duration-fast ease-out ${step === 1 ? 'bg-surface text-primary shadow-card' : 'text-subtle'}`}><span className="mr-1.5 inline-grid h-5 w-5 place-items-center rounded-full bg-inverse text-meta text-on-inverse">1</span>连接飞书应用</button><button type="button" disabled={!current || configurationBusy} onClick={() => setStep(2)} className={`min-h-10 rounded-md px-3 text-caption font-medium transition-colors duration-fast ease-out disabled:opacity-40 ${step === 2 ? 'bg-surface text-primary shadow-card' : 'text-subtle'}`}><span className="mr-1.5 inline-grid h-5 w-5 place-items-center rounded-full bg-inverse text-meta text-on-inverse">2</span>选择 Agent 并启用</button></div>
+          <div className="mb-1 grid grid-cols-2 rounded-md bg-muted p-1"><button type="button" disabled={configurationBusy} onClick={() => setStep(1)} className={`min-h-10 rounded-md px-3 text-caption font-medium transition-colors duration-fast ease-out ${step === 1 ? 'bg-surface text-primary shadow-card' : 'text-subtle'}`}><span className="mr-1.5 inline-grid h-5 w-5 place-items-center rounded-full bg-inverse text-meta text-on-inverse">1</span>连接飞书应用</button><button type="button" disabled={!current || current.credentialUnavailable || configurationBusy} onClick={() => setStep(2)} className={`min-h-10 rounded-md px-3 text-caption font-medium transition-colors duration-fast ease-out disabled:opacity-40 ${step === 2 ? 'bg-surface text-primary shadow-card' : 'text-subtle'}`}><span className="mr-1.5 inline-grid h-5 w-5 place-items-center rounded-full bg-inverse text-meta text-on-inverse">2</span>选择 Agent 并启用</button></div>
           <p role={selectedAppId === '' ? 'status' : undefined} className="-mt-1 text-caption text-subtle">{step === 1 ? current ? '填写飞书应用凭据并配置必要能力；成员范围可以留空，稍后再收紧。' : '正在新增机器人。可以创建新应用，或填写已有应用的 App ID 和 App Secret，再点击“下一步”。' : '选择处理飞书消息的 Agent、确认工作方式并启用监听。'}</p>
           {agents.length === 0 && <Banner tone="warning" role="alert">当前没有可用 Agent。你可以先保存飞书应用，但完成绑定前需要安装并登录 Agent CLI，然后重启 Dutydeck。</Banner>}
           {current?.appId === creationPendingReview && <Banner tone="warning">应用已提交发布，正在等待飞书管理员审核。可以先保存 Agent 设置，审核通过后生效。</Banner>}
@@ -415,9 +412,9 @@ export function LarkConfigModal({ agents, target, field, onLeaveGuardChange, onC
             `...(appSecret.trim() ? { appSecret } : {})` 保证——键根本不进请求体。
             这套语义一行都不许改，测试有对应守卫。
           */}
-          <Field htmlFor={botSettingFields.appSecret.anchor} label={botSettingFields.appSecret.label} hint={current ? '留空不修改' : undefined}>
+          <Field htmlFor={botSettingFields.appSecret.anchor} label={botSettingFields.appSecret.label} hint={current?.credentialUnavailable ? '本次只补回 App Secret，其他设置保留。' : current ? '留空不修改' : undefined}>
             <span className="relative block">
-              <Input value={appSecret} onChange={event => setField('appSecret', event.target.value)} type={showSecret ? 'text' : 'password'} placeholder={current ? '已保存' : '输入 App Secret'} autoComplete="new-password" className="pr-10 font-mono"/>
+              <Input value={appSecret} onChange={event => setField('appSecret', event.target.value)} type={showSecret ? 'text' : 'password'} placeholder={current && !current.credentialUnavailable ? '已保存' : '输入 App Secret'} autoComplete="new-password" className="pr-10 font-mono"/>
               {/* IconButton 是 40×40，套进 40px 高的输入框会撑破它；这里保留手写按钮，
                   但命中区做到 40×40（契约 §9），输入框补 pr-10 让出位置。 */}
               <button type="button" onClick={() => setShowSecret(value => !value)} aria-label={showSecret ? '隐藏 Secret' : '显示 Secret'} className="absolute right-0 top-0 grid h-10 w-10 place-items-center rounded-md text-subtle hover:bg-hover hover:text-secondary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus-ring">{showSecret ? <EyeOff size={13}/> : <Eye size={13}/>}</button>
@@ -532,7 +529,7 @@ export function LarkConfigModal({ agents, target, field, onLeaveGuardChange, onC
           </>}
           <Field htmlFor={botSettingFields.preInjectPrompt.anchor} label={botSettingFields.preInjectPrompt.label} hint="每轮飞书对话都会在用户请求前隐式注入，不会在 Agent 聊天记录中重复显示为用户消息。">
             {current && <BotPromptHistory key={current.appId} appId={current.appId} revision={draftRevision.current} disabled={dirty || modelSettingsPending || configurationBusy}
-              onRollback={data => { hydratedSelection.current = null; qc.setQueryData(['lark-config'], data); setReloadVersion(value => value + 1); }}/>}
+              onRollback={data => { hydratedSelection.current = null; qc.setQueryData(queryKeys.larkConfig(), data); setReloadVersion(value => value + 1); }}/>}
             <Textarea value={preInjectPrompt} onChange={event => setField('preInjectPrompt', event.target.value)} rows={3} placeholder="例如：请始终使用中文回答，并优先给出结论。" className="resize-y"/>
           </Field>
           <div className="rounded-md bg-surface px-3 py-2.5 shadow-card"><div className="flex items-center"><div className="min-w-0"><label htmlFor="lark-switch-group-tools" className="cursor-pointer text-body font-medium text-primary">{botSettingFields.groupToolsEnabled.label}</label><div className="mt-0.5 text-caption text-subtle">允许 Agent 在当前飞书群发现其他已配置 Agent，并读取增量消息</div></div><Switch id="lark-switch-group-tools" label={botSettingFields.groupToolsEnabled.label} checked={groupToolsEnabled} onToggle={() => setField('groupToolsEnabled', value => !value)}/></div>{groupToolsEnabled && <div className="mt-3 flex items-center border-t border-subtle pt-3"><div className="min-w-0"><label htmlFor="lark-switch-group-send" className="cursor-pointer text-caption font-medium text-primary">{botSettingFields.groupToolsAllowSend.label}</label><div className="mt-0.5 text-caption text-subtle">关闭后仅保留 self、peers、messages 和 wait 只读能力</div></div><Switch id="lark-switch-group-send" label={botSettingFields.groupToolsAllowSend.label} checked={groupToolsAllowSend} onToggle={() => setField('groupToolsAllowSend', value => !value)}/></div>}<p className="mt-2 text-caption text-subtle">缺少群成员、消息或发消息权限时，Agent 会停止对应操作并给出管理员授权链接；不会索要 App Secret。</p></div>

@@ -42,6 +42,10 @@ export function projectLarkBotStatus(
     };
   }
 
+  if (bot?.credentialUnavailable) {
+    return { key: 'incomplete', label: '凭据不可用', description: '请为此机器人补回 App Secret', tone: 'warning' };
+  }
+
   if (!bot || !bot.setupComplete) {
     return {
       key: 'incomplete',

@@ -1,3 +1,5 @@
+import { toolNeeds } from './agent-host/tool-table.js';
+import { registerToolFamily } from './agent-host/routes.js';
 import { agentSettingsRequestSchema } from './lark/agent-settings.js';
 /**
  * 飞书会话里的 Agent 替这一轮发起人办事，用户说人话就行，不用记命令：
@@ -41,72 +43,74 @@ export async function registerAgentRequestTools(app: FastifyInstance, options: A
       options.tools.capabilities, token => options.tools.requestContext(token), allowAutomated ? undefined : options.automatedTask);
     return { appId: binding.appId, sessionId, actorId, taskId };
   };
-  app.post('/api/lark/agent-tools/schedules/stop-self', async request => {
-    z.object({}).strict().parse(request.body ?? {});
-    const { sessionId, taskId, actorId } = await turnContext(request, true);
-    const active = options.runtime.getActiveTaskContext(sessionId);
-    if (!active?.attemptId || active.taskId !== taskId || !options.automation.requestScheduleStop) throw new RuntimeError('SESSION_AUTOMATION_TASK_REVOKED', 'Only an active scheduled task may request self stop', 403);
-    return options.automation.requestScheduleStop(sessionId, taskId, active.attemptId, actorId);
-  });
-  app.post('/api/lark/agent-tools/commands', async request => {
-    const { appId, ...turn } = await turnContext(request);
-    return await options.tools.commands.run(appId, { ...turn, command: commandSchema.parse(request.body).command });
-  });
-  app.post<{ Params: { name: string }; Body: Record<string, unknown> | undefined }>('/api/lark/agent-tools/actions/:name', async request => {
-    const { appId, ...turn } = await turnContext(request);
-    const { dryRun, ...params } = request.body ?? {};
-    if (dryRun !== undefined && typeof dryRun !== 'boolean') throw new AgentCommandParamError('INVALID_ARGUMENT', '--dry-run 不带值。', [{ name: '--dry-run', reason: '不带值' }]);
-    const { command, members } = agentActionCommand(request.params.name, params);
-    return await options.tools.commands.run(appId, { ...turn, command, action: request.params.name, dryRun: dryRun === true, ...(members ? { members } : {}) });
-  });
-  app.get<{ Params: { name: string }; Querystring: { page?: string } }>('/api/lark/agent-tools/views/:name', async request => {
-    const { appId, ...turn } = await turnContext(request);
-    const view = request.params.name as LarkAgentViewName;
-    if (!larkAgentViews.includes(view)) throw new AgentCommandParamError('AGENT_ACTION_UNKNOWN', `没有 ${request.params.name} 这个查看命令。`, [{ name: '<命令>', reason: `可用：${larkAgentViews.join('、')}` }]);
-    const page = request.query.page === undefined ? undefined : Number(request.query.page);
-    if (page !== undefined && (!Number.isInteger(page) || page < 1)) throw new AgentCommandParamError('INVALID_ARGUMENT', '--page 要是从 1 开始的整数。', [{ name: '--page', reason: '要是从 1 开始的整数' }]);
-    return await options.tools.commands.view(appId, { ...turn, view, ...(page !== undefined ? { page } : {}) });
-  });
-  app.get('/api/lark/agent-tools/settings', async request => {
-    const { appId, ...turn } = await turnContext(request);
-    return options.tools.commands.settings(appId, { ...turn, action: 'show' });
-  });
-  app.post('/api/lark/agent-tools/settings', async request => {
-    const { appId, ...turn } = await turnContext(request);
-    const body = agentSettingsRequestSchema.parse(request.body);
-    return options.tools.commands.settings(appId, { ...turn, action: 'set', ...body });
-  });
-  app.patch<{ Params: { id: string } }>('/api/lark/agent-tools/schedules/:id', async request => {
-    const { sessionId, actorId, taskId } = await turnContext(request);
-    const body = z.object({ prompt: z.string().trim().min(1).optional(), name: z.string().trim().min(1).optional(),
-      every: z.number().int().positive().optional(), cron: z.string().min(1).optional(), at: z.string().min(1).optional(),
-      mode: z.enum(['session', 'fresh']).optional(), until: z.string().trim().min(1).max(2_000).optional(), deadline: z.string().trim().min(1).optional(),
-      dryRun: z.boolean().optional() }).strict().parse(request.body);
-    if ([body.every, body.cron, body.at].filter(value => value !== undefined).length > 1) throw new RuntimeError('SCHEDULE_REQUEST_INVALID', '--every、--cron、--at 只选一个。', 400);
-    if (!options.automation.listBySession || !options.automation.updateSchedule) throw new RuntimeError('SESSION_AUTOMATION_UNAVAILABLE', '当前实例不支持更新计划。', 503);
-    const current = (await options.automation.listBySession(sessionId, actorId)).schedules.find(item => item.id === request.params.id);
-    if (!current) throw new RuntimeError('SESSION_AUTOMATION_SCHEDULE_NOT_FOUND', '本事项没有这个可见的计划。', 404);
-    const { every, cron, at, dryRun, until, deadline, ...rest } = body;
-    let deadlineAt: string | undefined;
-    if (deadline !== undefined) {
-      // 与新建一致按北京时间解释，不随计划时区变化；错误提示也写的是北京时间。
-      try { deadlineAt = resolveScheduleDeadline(deadline, 'Asia/Shanghai'); }
-      catch { throw new AgentCommandParamError('INVALID_ARGUMENT', '--deadline 要写北京时间 YYYY-MM-DDTHH:mm。', [{ name: '--deadline', reason: '格式 YYYY-MM-DDTHH:mm' }]); }
+  registerToolFamily<{ Params: { id: string; name: string }; Querystring: { page?: string }; Body: Record<string, unknown> | undefined }>(app, [toolNeeds.humanRequest, toolNeeds.scheduledRequest], {
+    'schedule.stop-self': async request => {
+      z.object({}).strict().parse(request.body ?? {});
+      const { sessionId, taskId, actorId } = await turnContext(request, true);
+      const active = options.runtime.getActiveTaskContext(sessionId);
+      if (!active?.attemptId || active.taskId !== taskId || !options.automation.requestScheduleStop) throw new RuntimeError('SESSION_AUTOMATION_TASK_REVOKED', 'Only an active scheduled task may request self stop', 403);
+      return options.automation.requestScheduleStop(sessionId, taskId, active.attemptId, actorId);
+    },
+    'command': async request => {
+      const { appId, ...turn } = await turnContext(request);
+      return await options.tools.commands.run(appId, { ...turn, command: commandSchema.parse(request.body).command });
+    },
+    'action': async request => {
+      const { appId, ...turn } = await turnContext(request);
+      const { dryRun, ...params } = request.body ?? {};
+      if (dryRun !== undefined && typeof dryRun !== 'boolean') throw new AgentCommandParamError('INVALID_ARGUMENT', '--dry-run 不带值。', [{ name: '--dry-run', reason: '不带值' }]);
+      const { command, members } = agentActionCommand(request.params.name, params);
+      return await options.tools.commands.run(appId, { ...turn, command, action: request.params.name, dryRun: dryRun === true, ...(members ? { members } : {}) });
+    },
+    'view': async request => {
+      const { appId, ...turn } = await turnContext(request);
+      const view = request.params.name as LarkAgentViewName;
+      if (!larkAgentViews.includes(view)) throw new AgentCommandParamError('AGENT_ACTION_UNKNOWN', `没有 ${request.params.name} 这个查看命令。`, [{ name: '<命令>', reason: `可用：${larkAgentViews.join('、')}` }]);
+      const page = request.query.page === undefined ? undefined : Number(request.query.page);
+      if (page !== undefined && (!Number.isInteger(page) || page < 1)) throw new AgentCommandParamError('INVALID_ARGUMENT', '--page 要是从 1 开始的整数。', [{ name: '--page', reason: '要是从 1 开始的整数' }]);
+      return await options.tools.commands.view(appId, { ...turn, view, ...(page !== undefined ? { page } : {}) });
+    },
+    'settings.show': async request => {
+      const { appId, ...turn } = await turnContext(request);
+      return options.tools.commands.settings(appId, { ...turn, action: 'show' });
+    },
+    'settings.set': async request => {
+      const { appId, ...turn } = await turnContext(request);
+      const body = agentSettingsRequestSchema.parse(request.body);
+      return options.tools.commands.settings(appId, { ...turn, action: 'set', ...body });
+    },
+    'schedule.update': async request => {
+      const { sessionId, actorId, taskId } = await turnContext(request);
+      const body = z.object({ prompt: z.string().trim().min(1).optional(), name: z.string().trim().min(1).optional(),
+        every: z.number().int().positive().optional(), cron: z.string().min(1).optional(), at: z.string().min(1).optional(),
+        mode: z.enum(['session', 'fresh']).optional(), until: z.string().trim().min(1).max(2_000).optional(), deadline: z.string().trim().min(1).optional(),
+        dryRun: z.boolean().optional() }).strict().parse(request.body);
+      if ([body.every, body.cron, body.at].filter(value => value !== undefined).length > 1) throw new RuntimeError('SCHEDULE_REQUEST_INVALID', '--every、--cron、--at 只选一个。', 400);
+      if (!options.automation.listBySession || !options.automation.updateSchedule) throw new RuntimeError('SESSION_AUTOMATION_UNAVAILABLE', '当前实例不支持更新计划。', 503);
+      const current = (await options.automation.listBySession(sessionId, actorId)).schedules.find(item => item.id === request.params.id);
+      if (!current) throw new RuntimeError('SESSION_AUTOMATION_SCHEDULE_NOT_FOUND', '本事项没有这个可见的计划。', 404);
+      const { every, cron, at, dryRun, until, deadline, ...rest } = body;
+      let deadlineAt: string | undefined;
+      if (deadline !== undefined) {
+        // 与新建一致按北京时间解释，不随计划时区变化；错误提示也写的是北京时间。
+        try { deadlineAt = resolveScheduleDeadline(deadline, 'Asia/Shanghai'); }
+        catch { throw new AgentCommandParamError('INVALID_ARGUMENT', '--deadline 要写北京时间 YYYY-MM-DDTHH:mm。', [{ name: '--deadline', reason: '格式 YYYY-MM-DDTHH:mm' }]); }
+      }
+      const fields = { ...rest, ...(until !== undefined ? { completionCondition: until } : {}), ...(deadlineAt ? { deadlineAt } : {}) };
+      const trigger = every !== undefined ? { kind: 'interval' as const, everySeconds: every * 60, anchorAt: new Date().toISOString() }
+        : cron !== undefined ? { kind: 'cron' as const, expression: cron } : at !== undefined ? { kind: 'at' as const, localDateTime: at } : undefined;
+      if (!trigger && Object.values(fields).every(value => value === undefined)) throw new RuntimeError('SCHEDULE_REQUEST_INVALID', '请提供要修改的时间或内容。', 400);
+      const patch = { ...fields, ...(trigger ? { trigger } : {}), expectedRevision: current.revision, enabled: false };
+      if (dryRun) return { dryRun: true, scheduleId: current.id, needsConfirmation: true, effect: '更新原计划并暂停，用户确认启用后执行。' };
+      const schedule = await options.automation.updateSchedule(current.sessionId, current.id, patch, actorId);
+      await options.sendConfirmation(schedule);
+      return { scheduleId: schedule.id, updated: true, pendingConfirmation: true, message: '已更新原计划并发确认卡，用户确认启用后执行。' };
+    },
+    'schedule.create': async request => {
+      const { sessionId, taskId, actorId } = await turnContext(request);
+      return runAgentScheduleRequest({ automation: options.automation,
+        prepareDelivery: id => options.prepareDelivery(sessionId, taskId, id), sendConfirmation: options.sendConfirmation
+      }, { sessionId, requestId: taskId, actorId }, request.body);
     }
-    const fields = { ...rest, ...(until !== undefined ? { completionCondition: until } : {}), ...(deadlineAt ? { deadlineAt } : {}) };
-    const trigger = every !== undefined ? { kind: 'interval' as const, everySeconds: every * 60, anchorAt: new Date().toISOString() }
-      : cron !== undefined ? { kind: 'cron' as const, expression: cron } : at !== undefined ? { kind: 'at' as const, localDateTime: at } : undefined;
-    if (!trigger && Object.values(fields).every(value => value === undefined)) throw new RuntimeError('SCHEDULE_REQUEST_INVALID', '请提供要修改的时间或内容。', 400);
-    const patch = { ...fields, ...(trigger ? { trigger } : {}), expectedRevision: current.revision, enabled: false };
-    if (dryRun) return { dryRun: true, scheduleId: current.id, needsConfirmation: true, effect: '更新原计划并暂停，用户确认启用后执行。' };
-    const schedule = await options.automation.updateSchedule(current.sessionId, current.id, patch, actorId);
-    await options.sendConfirmation(schedule);
-    return { scheduleId: schedule.id, updated: true, pendingConfirmation: true, message: '已更新原计划并发确认卡，用户确认启用后执行。' };
-  });
-  app.post('/api/lark/agent-tools/schedules', async request => {
-    const { sessionId, taskId, actorId } = await turnContext(request);
-    return runAgentScheduleRequest({ automation: options.automation,
-      prepareDelivery: id => options.prepareDelivery(sessionId, taskId, id), sendConfirmation: options.sendConfirmation
-    }, { sessionId, requestId: taskId, actorId }, request.body);
   });
 }

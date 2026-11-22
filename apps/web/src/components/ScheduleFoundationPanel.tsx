@@ -1,3 +1,4 @@
+import { archivedIntegrationsQuery, queryKeys, scheduleCapabilitiesQuery, schedulesQuery } from '../queries';
 import { useEffect, useMemo, useState, type FormEvent } from 'react';
 import { useMutation, useQueries, useQuery, useQueryClient } from '@tanstack/react-query';
 import { AlertTriangle, CalendarClock, Clock3, ShieldAlert, X } from 'lucide-react';
@@ -18,16 +19,11 @@ function occurrenceLabel(value?: { scheduledForUtc: string; localLabel: string; 
 
 export function ScheduleFoundationPanel({ open, onClose }: { open: boolean; onClose(): void }) {
   const queryClient = useQueryClient();
-  const capabilities = useQuery({ queryKey: ['schedule-capabilities'], queryFn: scheduleApi.capabilities, enabled: open, retry: false });
-  const schedules = useQuery({ queryKey: ['schedule-foundation-list'], queryFn: scheduleApi.list, enabled: open && capabilities.data?.repositoriesWired === true, retry: false });
+  const capabilities = useQuery({ ...scheduleCapabilitiesQuery(), enabled: open });
+  const schedules = useQuery({ ...schedulesQuery(), enabled: open && capabilities.data?.repositoriesWired === true });
   const channelBotIds = useMemo(() => [...new Set((schedules.data?.schedules ?? []).map(item => item.definition.channelBotId))], [schedules.data]);
   const integrationQueries = useQueries({
-    queries: channelBotIds.map(channelBotId => ({
-      queryKey: ['schedule-archived-integrations', channelBotId],
-      queryFn: () => scheduleApi.archivedIntegrations(channelBotId),
-      enabled: open,
-      retry: false
-    }))
+    queries: channelBotIds.map(channelBotId => ({ ...archivedIntegrationsQuery(channelBotId), enabled: open }))
   });
   const archivedIntegrations = integrationQueries.flatMap(query => query.data?.integrations ?? []);
   const [draft, setDraft] = useState<Draft>();
@@ -45,7 +41,7 @@ export function ScheduleFoundationPanel({ open, onClose }: { open: boolean; onCl
       dstPolicy: current.dstPolicy,
       state: current.state
     }),
-    onSuccess: async () => { setDraft(undefined); setConflict(undefined); await queryClient.invalidateQueries({ queryKey: ['schedule-foundation-list'] }); },
+    onSuccess: async () => { setDraft(undefined); setConflict(undefined); await queryClient.invalidateQueries({ queryKey: queryKeys.schedules() }); },
     onError: error => {
       if (error instanceof ApiError && error.code === 'SCHEDULE_REVISION_CONFLICT' && error.current) setConflict(error.current as ScheduleDetail);
     }

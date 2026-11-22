@@ -1,3 +1,4 @@
+import { pullRequestsQuery, queryKeys } from '../queries';
 import { useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import type { PublicPullRequest, PullRequestStatus } from '@dutydeck/shared';
@@ -11,8 +12,8 @@ const excludedReasons = { not_session: '不是本会话改的', changed_after: '
 /** 把本会话的改动推到 dutydeck/ 新分支并开 PR：先出确认框，确认后才推送。 */
 export function PullRequestPanel({ session }: { session: Session }) {
   const qc = useQueryClient();
-  const queryKey = ['pullRequests', session.id];
-  const records = useQuery({ queryKey, queryFn: () => api.pullRequests(session.id), retry: false, refetchInterval: query => query.state.error ? false : 10_000 });
+  const queryKey = queryKeys.pullRequests(session.id);
+  const records = useQuery(pullRequestsQuery(session.id));
   const [title, setTitle] = useState('');
   const [proposal, setProposal] = useState<PublicPullRequest>();
   const [notice, setNotice] = useState('');

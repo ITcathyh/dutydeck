@@ -1,7 +1,8 @@
+import { sharedSessionsQuery, tasksQuery } from '../queries';
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { ArrowUpRight, Link2Off, MessageSquareText, UserRound, Users } from 'lucide-react';
-import { api, ApiError, type DockEvent, type Session } from '../api';
+import { ApiError, type DockEvent, type Session } from '../api';
 import { createTimelineProjector, hasAnswerSince, type TimelineSection } from '../timeline';
 import { useEventHistory } from '../useEventHistory';
 import { sessionDisplayName } from '../run-summary';
@@ -21,7 +22,7 @@ import { ToastViewport } from './ToastViewport';
 /**
  * 飞书卡片「查看详情」打开的只读分享页：只有这一个任务的状态、执行记录和结果。
  *
- * 数据走和工作台同一套接口与缓存键（['sessions'] 里只放这一个会话），实时流因此能原样复用
+ * 数据走和工作台同一套接口与缓存键（queryKeys.sessions() 里只放这一个会话），实时流因此能原样复用
  * useSessionStream；请求都带着分享 token（api.ts 的 withShareToken），服务端只放行这个会话的读接口。
  * 页面上没有侧栏、任务列表、设置，也没有链回工作台的入口；不给任何写操作——授权卡只显示状态。
  *
@@ -30,10 +31,10 @@ import { ToastViewport } from './ToastViewport';
  */
 export function SharedSessionPage({ sessionId }: { sessionId: string }) {
   useTheme();
-  const sessions = useQuery({ queryKey: ['sessions'], queryFn: async () => [await api.session(sessionId)], retry: false, refetchInterval: 15_000, refetchIntervalInBackground: false });
+  const sessions = useQuery(sharedSessionsQuery(sessionId));
   const session = sessions.data?.[0];
   const events = useEventHistory(sessionId, Boolean(session));
-  const tasks = useQuery({ queryKey: ['tasks', sessionId], queryFn: () => api.tasks(sessionId), enabled: Boolean(session) });
+  const tasks = useQuery({ ...tasksQuery(sessionId), enabled: Boolean(session) });
   const streamStatus = useSessionStream(session ? sessionId : undefined, session?.runId, events.isSuccess);
   // 后台任务结束后的回答不属于任何一轮：投影前就去掉，否则只有它一条实时事件时会被当成「最新一轮」，盖掉历史结论和状态。
   const eventList = useMemo(() => shareableList(events.data?.events ?? noEvents), [events.data?.events]);

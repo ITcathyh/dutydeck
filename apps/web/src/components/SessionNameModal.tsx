@@ -1,3 +1,4 @@
+import { queryKeys } from '../queries';
 import { useEffect, useState } from 'react';
 import { X } from 'lucide-react';
 import { useQueryClient } from '@tanstack/react-query';
@@ -40,10 +41,10 @@ export function SessionNameModal({ open, session, onClose }: SessionNameModalPro
     setPending(true);
     setError(undefined);
     try {
-      await queryClient.cancelQueries({ queryKey: ['sessions'] });
+      await queryClient.cancelQueries({ queryKey: queryKeys.sessions() });
       const result = await api.setSessionName(targetSession.id, nextName);
-      await queryClient.cancelQueries({ queryKey: ['sessions'] });
-      queryClient.setQueryData<Session[]>(['sessions'], current => {
+      await queryClient.cancelQueries({ queryKey: queryKeys.sessions() });
+      queryClient.setQueryData<Session[]>(queryKeys.sessions(), current => {
         if (!current) return current;
         return current.map(item => item.id === targetSession.id ? { ...item, name: result.name } : item);
       });

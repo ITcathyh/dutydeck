@@ -1,7 +1,8 @@
+import { automationSchedulesQuery, instancesQuery, sessionQuery } from '../queries';
 import { useEffect, useState } from 'react';
-import { useQueries, useQuery, type Query } from '@tanstack/react-query';
+import { useQueries, useQuery } from '@tanstack/react-query';
 import type { AutomationScheduleSummary } from '@dutydeck/shared';
-import { api, ApiError, type Agent, type RunSummary, type Session } from '../api';
+import { ApiError, type Agent, type RunSummary, type Session } from '../api';
 import { currentInstance, instanceHomePath, instancePagePath } from '../instance';
 import { useExperimental } from '../experimental';
 import { Banner, Button, Card, EmptyState, Spinner, Input, Field, Select } from './primitives';
@@ -14,7 +15,6 @@ import { runStateLabels } from './automation-display';
 
 const healthLabels = { blocked: '等待人工核对', queued: '等待执行资源', running: '正在执行', delivery: '等待结果投递', disabled: '已停用', ready: '等待到期', error: '需要处理错误' };
 const pageSize = 20;
-const poll = (query: Query) => query.state.error ? false : 10_000;
 const coverage = (error: Error) => error instanceof ApiError && error.status === 403 ? '无权限（forbidden）' : error instanceof ApiError && [404, 405].includes(error.status) ? '版本不支持（unsupported）' : '未连通（unavailable）';
 
 function PlanState({ item, instanceId }: { item: AutomationScheduleSummary; instanceId: string }) {
@@ -43,7 +43,7 @@ export function AutomationOverview({ sessions, summaries = {}, onSelectSession, 
   const [health, setHealth] = useState('');
   const [scope, setScope] = useState('all');
   const [pages, setPages] = useState<Record<string, number>>({});
-  const peers = useQuery({ queryKey: ['instances'], queryFn: api.instances, retry: false, staleTime: Infinity });
+  const peers = useQuery(instancesQuery());
   const sources = [{ id: '', name: '主实例' }, ...(peers.data?.instances ?? [])];
   if (currentInstance() && !sources.some(item => item.id === currentInstance())) sources.push({ id: currentInstance()!, name: '当前实例' });
   const visibleSources = sources.filter(item => scope === 'all' || item.id === (scope === 'main' ? '' : scope));
@@ -56,10 +56,10 @@ export function AutomationOverview({ sessions, summaries = {}, onSelectSession, 
     if (agentId.trim()) search.set('agentId', agentId.trim());
     if (enabled) search.set('enabled', enabled);
     if (health) search.set('health', health);
-    return { queryKey: ['automation-schedules', source.id || null, search.toString()], queryFn: () => api.automationSchedules(search, source.id || null), retry: false, enabled: !selected && !runOpen, refetchInterval: poll, refetchIntervalInBackground: false };
+    return { ...automationSchedulesQuery(source.id || null, search), enabled: !selected && !runOpen };
   }) });
   const selectedId = selected?.sessionId;
-  const selectedDetails = useQuery({ queryKey: ['session', currentInstance(), selectedId], queryFn: () => api.session(selectedId!), enabled: Boolean(selectedId) && !sessions.some(item => item.id === selectedId) && createdSession?.id !== selectedId, retry: false });
+  const selectedDetails = useQuery({ ...sessionQuery(currentInstance(), selectedId), enabled: Boolean(selectedId) && !sessions.some(item => item.id === selectedId) && createdSession?.id !== selectedId });
   const selectedSession = sessions.find(session => session.id === selectedId) ?? (createdSession?.id === selectedId ? createdSession : undefined) ?? selectedDetails.data;
   const failed = queries.filter(query => query.isError).length;
   const successful = queries.filter(query => query.isSuccess);

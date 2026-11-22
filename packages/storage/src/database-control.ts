@@ -44,6 +44,7 @@ export function openDatabaseControl(filename: string, options: RepositoryOpenOpt
     let closed = false; let current: string | undefined; let generation = 0; let maintenance = false;
     return {
       accessId, needsRecovery() { return false; },
+      runtimeCapabilities: () => current || options.mode === 'runtime' ? options.runtimeCapabilities ?? [] : undefined,
       beginUpgrade() {
         if (closed) fail('DATABASE_CLOSED');
         if (current) fail('DATABASE_RUNTIME_STILL_ATTACHED');
@@ -128,12 +129,22 @@ export function openDatabaseControl(filename: string, options: RepositoryOpenOpt
         if (next.runtime) fail('DATABASE_RUNTIME_BUSY');
         next.runtime = accessId;
       }
-      db.prepare('INSERT INTO dutydeck_access VALUES (?, ?)').run(accessId, JSON.stringify(identity));
+      db.prepare('INSERT INTO dutydeck_access VALUES (?, ?)').run(accessId, JSON.stringify({ ...identity, runtimeCapabilities: options.runtimeCapabilities }));
     });
     registered = true;
   } catch (error) { db.close(); throw error; }
   return {
     accessId,
+    runtimeCapabilities() {
+      const row = db.prepare(`SELECT c.runtime, c.instance, a.identity FROM dutydeck_control c
+        LEFT JOIN dutydeck_access a ON a.id = c.runtime WHERE c.id = 1`).get() as
+        { runtime: string | null; instance: string | null; identity: string | null } | undefined;
+      if (row && row.runtime === null && row.instance === null) return undefined;
+      try {
+        const capabilities = JSON.parse(row?.identity ?? 'null')?.runtimeCapabilities;
+        return Array.isArray(capabilities) ? capabilities : [];
+      } catch { return []; }
+    },
     needsRecovery() { return state().phase !== 'idle'; },
     beginUpgrade() {
       mutate((next, access) => {

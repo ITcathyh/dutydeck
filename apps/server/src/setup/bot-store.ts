@@ -62,7 +62,7 @@ export const readBot: ReadBot = async (database, appId) => {
   if (!existsSync(database)) return undefined;
   const repositories = createRepositories(database);
   try {
-    const bot = await readLarkConfig(repositories.config, appId, { readOnly: true });
+    const bot = await readLarkConfig(repositories.config, appId, { readOnly: true, includeUnavailable: true });
     return bot ? { ...(bot.appSecret ? { appSecret: bot.appSecret } : {}), ...(bot.defaultAgentId ? { defaultAgentId: bot.defaultAgentId } : {}), listening: bot.listening } : undefined;
   } finally { repositories.close(); }
 };
@@ -74,9 +74,9 @@ export const saveBot: SaveBot = async input => {
       ...repositories.agents,
       get: async (id: string) => await repositories.agents.get(id) ?? input.knownAgents.find(agent => agent.id === id) as AgentConfig | undefined
     } as AgentRepository;
-    const current = await readLarkConfig(repositories.config, input.appId);
-    if (!current && !input.appSecret) {
-      throw new Error('机器人尚未保存，需要 App Secret 才能新建它。');
+    const current = await readLarkConfig(repositories.config, input.appId, { readOnly: true, includeUnavailable: true });
+    if (!current?.appSecret && !input.appSecret) {
+      throw new Error(current ? '凭据不可用，需要 App Secret。' : '机器人尚未保存，需要 App Secret 才能新建它。');
     }
     const workspace = current?.workspace ? undefined : input.workspace;
     const secret = input.appSecret && input.appSecret !== current?.appSecret ? input.appSecret : undefined;
@@ -90,7 +90,7 @@ export const saveBot: SaveBot = async input => {
       ? { stage: 'lark', originalAppId: input.appId, expectedRevision: current.revision ?? 1 }
       // 新机器人：完全信任需要用户在 Dashboard 或 settings 里显式确认，向导不替用户决定。
       : { stage: 'lark', expectedRevision: 0, appId: input.appId, permissionMode: 'ask' };
-    const saved = await saveLarkConfig(repositories.config, agents, {
+    const saved = await saveLarkConfig(repositories.config, agents, current && !current.appSecret ? { ...patch, appSecret: secret } : {
       ...patch,
       ...(secret ? { appSecret: secret } : {}),
       ...(agent ? { defaultAgentId: agent } : {}),

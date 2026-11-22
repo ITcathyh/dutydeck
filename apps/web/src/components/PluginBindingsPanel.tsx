@@ -1,3 +1,4 @@
+import { pluginBindingsQuery, queryKeys } from '../queries';
 import { useRef, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import type { PluginBinding, SavePluginBinding } from '@dutydeck/shared';
@@ -34,7 +35,7 @@ function PluginSlotPreview({ slot }: { slot: { id: string; slot: string; title: 
 
 export function PluginBindingsPanel() {
   const queryClient = useQueryClient();
-  const query = useQuery({ queryKey: ['plugin-bindings'], queryFn: pluginBindingsApi.list });
+  const query = useQuery(pluginBindingsQuery());
   const [draft, setDraft] = useState<SavePluginBinding>(empty);
   const draftRef = useRef(draft);
   draftRef.current = draft;
@@ -46,7 +47,7 @@ export function PluginBindingsPanel() {
       const sameTarget = (left: SavePluginBinding, right: SavePluginBinding) => left.plugin === right.plugin && left.botAppId === right.botAppId && left.chatId === right.chatId && left.workspaceRoot === right.workspaceRoot;
       if (draftRef.current === submitted) edit(binding);
       else setDraft(current => sameTarget(current, submitted) ? { ...current, expectedRevision: binding.revision } : current);
-      await queryClient.invalidateQueries({ queryKey: ['plugin-bindings'] });
+      await queryClient.invalidateQueries({ queryKey: queryKeys.pluginBindings() });
     }
   });
   const preview = useMutation({ mutationFn: () => pluginBindingsApi.explain({ plugin: draft.plugin, botAppId: draft.botAppId, chatId: draft.chatId, cwd: draft.workspaceRoot }) });

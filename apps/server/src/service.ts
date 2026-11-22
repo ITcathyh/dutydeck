@@ -242,7 +242,7 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
       if (refusal) throw new Error(refusal);
       assertBotProcessStartup(config.databaseUrl, (options.env ?? process.env).DUTYDECK_BOT_APP_ID);
       let migrateMs = 0;
-      const repos = createRepositories(config.databaseUrl, { mode: 'runtime', newDatabaseAuthority: 'ledger_v1', onMigrated: ms => { migrateMs = Math.round(ms); } });
+      const repos = createRepositories(config.databaseUrl, { mode: 'runtime', runtimeCapabilities: ['lark_secret_refs'], newDatabaseAuthority: 'ledger_v1', onMigrated: ms => { migrateMs = Math.round(ms); } });
       try { await backfillBotPromptVersions(repos.config); }
       catch { process.stderr.write('[dutydeck] 提示词版本回填失败，继续启动；缺少历史的轮次会标为未记录版本。\n'); }
       startupPhase('database');

@@ -1,18 +1,11 @@
+import { toolsByName } from './agent-host/tool-table.js';
 import { readFile } from 'node:fs/promises';
-import { AgentGroupToolHttpClient } from './lark/agent-tools-cli.js';
+import { AgentGroupToolHttpClient } from './agent-host/http-client.js';
 
 export interface CollaborationCliOptions { json?: string; file?: string; turn?: string; env?: NodeJS.ProcessEnv; fetcher?: typeof fetch }
 export async function runCollaboration(operation: string, id: string | undefined, options: CollaborationCliOptions = {}): Promise<Record<string, unknown>> {
   if (options.json && options.file) throw new Error('只选择 --json 或 --file。');
-  const commands: Record<string, { method: string; path: string }> = {
-    status: { method: 'GET', path: '' },
-    'followup-create': { method: 'POST', path: '/followups' },
-    'followup-update': { method: 'PATCH', path: `/followups/${encodeURIComponent(id ?? '')}` },
-    'mandate-create': { method: 'POST', path: '/mandates' },
-    'mandate-update': { method: 'PATCH', path: `/mandates/${encodeURIComponent(id ?? '')}` },
-    feedback: { method: 'POST', path: `/decisions/${encodeURIComponent(id ?? '')}/feedback` }
-  };
-  const command = commands[operation];
+  const command = toolsByName.get('collaborate.' + operation);
   if (!command) throw new Error(`未知协作操作：${operation}`);
   if (['followup-update', 'mandate-update', 'feedback'].includes(operation) && !id) throw new Error('此操作需要记录编号。');
   const raw = options.file ? await readFile(options.file, 'utf8') : options.json;
@@ -20,8 +13,7 @@ export async function runCollaboration(operation: string, id: string | undefined
   const body: unknown = raw ? JSON.parse(raw) : undefined;
   if (body !== undefined && (!body || typeof body !== 'object' || Array.isArray(body))) throw new Error('参数必须是 JSON 对象。');
   if (operation.endsWith('-create') && !(body as { id?: string })?.id) throw new Error('创建需要稳定 id；重试时沿用同一个 id。');
-  return new AgentGroupToolHttpClient(options).request(`/collaboration${command.path}`, {
-    method: command.method,
+  return new AgentGroupToolHttpClient(options).call(command, [id], {
     headers: { 'x-dutydeck-work-turn': options.turn ?? '' },
     ...(body === undefined ? {} : { body: JSON.stringify(body) })
   });

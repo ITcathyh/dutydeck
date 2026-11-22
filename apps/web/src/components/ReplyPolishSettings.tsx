@@ -1,6 +1,6 @@
+import { agentModelsQuery } from '../queries';
 import { useQuery } from '@tanstack/react-query';
 import type { Agent } from '../api';
-import { agentModelsQueryKey, loadAgentModels } from '../model-cache';
 import { Field, Input, Select } from './primitives';
 import { CompactSelect } from './CompactSelect';
 
@@ -10,12 +10,7 @@ export function ReplyPolishSettings({ agents, value, onChange, appId }: {
   agents: Agent[]; appId?: string; value: Values; onChange(patch: Partial<Values>): void;
 }) {
   const supported = agents.filter(agent => agent.protocol === 'acp');
-  const models = useQuery({
-    queryKey: agentModelsQueryKey(value.replyPolishAgentId, undefined, appId),
-    queryFn: () => loadAgentModels(value.replyPolishAgentId, undefined, false, appId),
-    enabled: value.replyPolishEnabled && supported.some(agent => agent.id === value.replyPolishAgentId),
-    staleTime: 5 * 60_000
-  });
+  const models = useQuery({ ...agentModelsQuery(value.replyPolishAgentId, undefined, appId), enabled: value.replyPolishEnabled && supported.some(agent => agent.id === value.replyPolishAgentId) });
   return <div className="space-y-3 border-t border-subtle pt-4" id="bot-setting-replyPolishEnabled">
     <label className="flex items-center gap-2 text-caption"><input type="checkbox" role="switch" aria-label="文字优化" checked={value.replyPolishEnabled} onChange={event => onChange({ replyPolishEnabled: event.target.checked })}/>文字优化</label>
     <p className="text-caption text-subtle">默认关闭。最终回复交给另一个 Agent 润色，会增加一次模型调用和等待时间；超过设定等待时间、失败或内容校验不通过时发送原文。执行记录保留原文。</p>

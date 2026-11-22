@@ -1,32 +1,24 @@
-import { AgentGroupToolHttpClient } from './agent-tools-cli.js';
+import { AgentGroupToolHttpClient } from '../agent-host/http-client.js';
 
 export interface MemoryCliClientOptions { turn?: string; env?: NodeJS.ProcessEnv; fetcher?: typeof globalThis.fetch }
 
-const path = '/memory';
-
 export function runMemoryList(options: MemoryCliClientOptions & { topic?: string } = {}): Promise<Record<string, unknown>> {
   const query = options.topic ? `?topic=${encodeURIComponent(options.topic)}` : '';
-  return new AgentGroupToolHttpClient(options).request(`${path}${query}`);
+  return new AgentGroupToolHttpClient(options).callLegacy('memory.list', [], {}, query);
 }
 
 export function runMemoryShow(topic: string, options: MemoryCliClientOptions = {}): Promise<Record<string, unknown>> {
-  return new AgentGroupToolHttpClient(options).request(`${path}/topics/${encodeURIComponent(topic)}`);
+  return new AgentGroupToolHttpClient(options).callLegacy('memory.show', [topic]);
 }
 
 export function runMemorySearch(query: string, options: MemoryCliClientOptions & { topic?: string; limit?: number } = {}): Promise<Record<string, unknown>> {
-  const params = new URLSearchParams({ q: query });
-  if (options.topic) params.set('topic', options.topic);
-  if (options.limit !== undefined) params.set('limit', String(options.limit));
-  return new AgentGroupToolHttpClient(options).request(`${path}/search?${params.toString()}`);
+  return new AgentGroupToolHttpClient(options).callLegacy('memory.search', [query], { ...options, topic: options.topic || undefined });
 }
 
 export function runMemoryAdd(content: string, options: MemoryCliClientOptions & { topic?: string } = {}): Promise<Record<string, unknown>> {
-  return new AgentGroupToolHttpClient(options).request(path, {
-    method: 'POST',
-    body: JSON.stringify({ content, ...(options.topic ? { topic: options.topic } : {}) })
-  });
+  return new AgentGroupToolHttpClient(options).callLegacy('memory.add', [content], { topic: options.topic || undefined });
 }
 
 export function runMemoryRemove(id: string, options: MemoryCliClientOptions = {}): Promise<Record<string, unknown>> {
-  return new AgentGroupToolHttpClient(options).request(`${path}/${encodeURIComponent(id)}`, { method: 'DELETE' });
+  return new AgentGroupToolHttpClient(options).callLegacy('memory.remove', [id]);
 }

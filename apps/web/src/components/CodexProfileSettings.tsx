@@ -1,20 +1,20 @@
+import { codexProfileQuery, profileModelsQuery, queryKeys } from '../queries';
 import { useEffect, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { supportsCodexProfiles } from '@dutydeck/shared';
-import { agentConfigApi, api, type Agent } from '../api';
-import { currentInstance } from '../instance';
+import { agentConfigApi, type Agent } from '../api';
 import { Banner, Button, Field, Select, Spinner } from './primitives';
 
 export function CodexProfileSettings({ agent, onDirtyChange }: { agent: Agent; onDirtyChange?: (dirty: boolean, saving?: boolean) => void }) {
   const client = useQueryClient();
-  const key = ['codex-profile', currentInstance(), agent.id];
+  const key = queryKeys.codexProfile(agent.id);
   const supported = supportsCodexProfiles(agent);
-  const config = useQuery({ queryKey: key, queryFn: () => agentConfigApi.get(agent.id), enabled: supported, retry: false });
-  const models = useQuery({ queryKey: ['agent-models', currentInstance(), agent.id], queryFn: () => api.agentModels(agent.id), enabled: supported, retry: false });
+  const config = useQuery({ ...codexProfileQuery(agent.id), enabled: supported });
+  const models = useQuery({ ...profileModelsQuery(agent.id), enabled: supported });
   const [draft, setDraft] = useState<string | undefined>();
   const save = useMutation({
     mutationFn: (profile: string | null) => agentConfigApi.set(agent.id, profile),
-    onSuccess: async value => { setDraft(undefined); client.setQueryData(key, { id: value.id, codexProfile: value.codexProfile ?? '' }); await client.invalidateQueries({ queryKey: ['agents'] }); }
+    onSuccess: async value => { setDraft(undefined); client.setQueryData(key, { id: value.id, codexProfile: value.codexProfile ?? '' }); await client.invalidateQueries({ queryKey: queryKeys.agents() }); }
   });
   const dirty = draft !== undefined;
   useEffect(() => { onDirtyChange?.(dirty || save.isPending, save.isPending); }, [dirty, save.isPending, onDirtyChange]);

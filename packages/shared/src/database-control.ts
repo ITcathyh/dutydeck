@@ -6,10 +6,13 @@ export interface RuntimeControlClaim {
 }
 export interface DatabaseControl {
   readonly accessId: string;
+  /** Undefined when no runtime holds the database. Older registrations have no capabilities. */
+  runtimeCapabilities(): readonly string[] | undefined;
   attachRuntime(instanceId: string): RuntimeControlClaim;
 }
 export interface RepositoryOpenOptions {
   mode?: 'runtime' | 'management';
+  runtimeCapabilities?: readonly string[];
   upgrade?: 'never' | 'if-idle';
   /** Initial authority only when no user schema exists; existing databases are unchanged. */
   newDatabaseAuthority?: 'legacy' | 'ledger_v1';

@@ -49,6 +49,34 @@ afterEach(async () => {
 });
 
 describe('dutydeck secret CLI black box', () => {
+  it('requires a stopped or compatible runtime before migrating live credentials', async () => {
+    const root = await fixture();
+    const database = join(root, 'dutydeck.db');
+    const raw = JSON.stringify([{ appId: 'cli_runtime', appSecret: INITIAL_SECRET }]);
+    const command = (...args: string[]) => invoke(root, ['secret', 'migrate-lark', ...args]);
+    const old = createRepositories(database, { mode: 'runtime' });
+    try {
+      await old.config.set('lark.bots', raw);
+      expect(command('--dry-run').status).toBe(0);
+      const refused = command();
+      expectNoValues(refused);
+      expect(refused.status).toBe(1);
+      expect(refused.stderr).toContain('LARK_SECRET_READER_REQUIRED');
+      expect(await old.config.get('lark.bots')).toBe(raw);
+      await expect(lstat(join(root, 'secrets'))).rejects.toMatchObject({ code: 'ENOENT' });
+    } finally { old.close(); }
+    expect(command().status).toBe(0);
+    const unmarked = createRepositories(database, { mode: 'runtime' });
+    try {
+      expect(command().stderr).toContain('LARK_SECRET_READER_REQUIRED');
+      expect(command('--revert').status).toBe(0);
+    } finally { unmarked.close(); }
+    const compatible = createRepositories(database, { mode: 'runtime', runtimeCapabilities: ['lark_secret_refs'] });
+    try {
+      expect(JSON.parse(command().stdout).appIds).toEqual(['cli_runtime']);
+    } finally { compatible.close(); }
+  });
+
   it('migrates live bots one at a time, resolves them after reopen and restores legacy JSON', async () => {
     const root = await fixture();
     const database = join(root, 'dutydeck.db');

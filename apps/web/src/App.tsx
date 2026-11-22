@@ -1,8 +1,8 @@
+import { agentsQuery, authStatusQuery, historyOutlineQuery, inboxQuery, instancesQuery, larkConfigQuery, pluginCommandsQuery, queryKeys, runSummariesQuery, sessionUsageQuery, sessionsQuery, skillsQuery, systemCapabilitiesQuery, tasksQuery, workspaceGroupsQuery } from './queries';
 import { backgroundKindFor } from '@dutydeck/shared';
 import { settingsSearchActions } from './settings-search';
 import { ConfigurationExplanationPanel } from './components/ConfigurationExplanationPanel';
 import { MemoryManagementPanel } from './components/MemoryManagementPanel';
-import { fetchSkillCatalog } from './skill-catalog-api';
 import { RawHistoryContent } from './components/RawHistoryContent';
 import { UsageHud } from './components/UsageHud';
 import { useEscapeKey } from './useEscapeKey';
@@ -14,14 +14,14 @@ import { VerificationSummary } from './components/VerificationSummary';
 import { TurnMemoryPanel } from './components/TurnMemoryPanel';
 import { UnknownTasksPanel } from './components/UnknownTasksPanel';
 import { PlanPanel } from './components/PlanPanel';
-import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { useIsMutating, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { lazy, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { BookOpen, CalendarClock, ChevronRight, Coins, MessagesSquare, PanelRightClose, PanelRightOpen, Settings2, Terminal, Users, X } from 'lucide-react';
-import { api, ApiError, type RunSummary, type Session, type SteeringResult, type Task } from './api';
+import { api, type RunSummary, type Session } from './api';
 import { useDockStore } from './store';
 import { createTimelineProjector, hasAnswerSince, pendingPermissionId } from './timeline';
 import { createRawLogProjector, hasRawText } from './raw-log';
-import { Composer, type SendMode } from './components/Composer';
+import { Composer } from './components/Composer';
 import { busyStates, createTaskAffordance, effectiveStatus } from './components/ui';
 import { Banner, Button, Card, Dialog, IconButton, Spinner } from './components/primitives';
 import { SessionList } from './components/SessionList';
@@ -35,18 +35,15 @@ import { LazyBoundary } from './components/ErrorBoundary';
 import { WorkspaceOverview } from './components/WorkspaceOverview';
 import { InboxPanel } from './components/InboxPanel';
 import { RunDetailTabs, RunHeader } from './components/RunHeader';
-import { SessionTraceView } from './components/SessionTraceView';
+import { AutomationOverview, OverlayHost } from './OverlayHost';
 import { useSessionStream } from './useSessionStream';
-import { loadSessions } from './sessions-query';
-import { buildPrompt, commandsFromEvents, currentContextStats, getModelReadiness, splitPromptFileReferences } from './composer-utils';
-import { agentModelsQueryKey, loadAgentModels, readCachedAgentModels } from './model-cache';
-import { historyOutlineQuery, useEventHistory } from './useEventHistory';
+import { commandsFromEvents, currentContextStats } from './composer-utils';
+import { useEventHistory } from './useEventHistory';
 import { LazyTimelineView as TimelineView } from './timeline-view-loader';
-import { createCompleteHistoryProjector, HISTORY_TURN_PAGE_SIZE, type EventWindow } from './event-history';
+import { createCompleteHistoryProjector, HISTORY_TURN_PAGE_SIZE } from './event-history';
 import { summaryFromTasks } from './run-summary';
 import { nextActionForState, sessionWorkspaceName, type WorkbenchView } from './workspace-model';
-import { appLocationPath, OVERLAY_HISTORY_MARK, parseAppLocation, type AppLocation, type OverlayRoute, type PrimaryNav, type LarkSetupTarget } from './app-route';
-import type { ControlCenterSection, SettingsLeaveGuard } from './components/ControlCenterModal';
+import { useAppLocation } from './app-location';
 import { useMediaQuery } from './useMediaQuery';
 import { currentInstance, instanceHomePath } from './instance';
 import { captureDialogOpener } from './useDialogFocus';
@@ -56,78 +53,32 @@ import { toastStore } from './useToasts';
 import { TopBar } from './components/TopBar';
 import { MobileTabBar } from './components/MobileTabBar';
 import { useTheme } from './useTheme';
-import { acknowledgeComposerDraft, readComposerDraft, updateComposerDraft, useComposerDraft } from './composer-draft';
 import { taskReadingScopeKey, useTimelineDensityPreference, useViewPreference } from './view-preferences';
-import { useExperimental } from './experimental';
 import { shortcutAvailability, useKeyboardShortcuts, workbenchViewShortcutIds } from './useKeyboardShortcuts';
 import { ShortcutHelpSheet } from './components/ShortcutHelpSheet';
-import { requestId } from './request-id';
-import { SendOperationStore } from './send-operations';
+import { useSessionActions, type SendFailure } from './useSessionActions';
 
 // 终端与控制面都属于低频重功能，避免进入工作台首屏 chunk。
 const TerminalView = lazy(() => import('./components/TerminalView').then(module => ({ default: module.TerminalView })));
-const ControlCenterModal = lazy(() => import('./components/ControlCenterModal').then(module => ({ default: module.ControlCenterModal })));
-const LarkConfigModal = lazy(() => import('./components/LarkConfigModal').then(module => ({ default: module.LarkConfigModal })));
-const GroupPolicyModal = lazy(() => import('./components/GroupPolicyModal').then(module => ({ default: module.GroupPolicyModal })));
-const AutomationOverview = lazy(() => import('./components/AutomationOverview').then(module => ({ default: module.AutomationOverview })));
-const UsageOverview = lazy(() => import('./components/UsageOverview').then(module => ({ default: module.UsageOverview })));
-const SessionInsightPanel = lazy(() => import('./components/SessionInsightPanel').then(module => ({ default: module.SessionInsightPanel })));
 // 机器人 / 群聊是一级视图但不是首屏：多数会话只用任务中心，两块管理界面各自带表单
 // 与目录浏览器，进首屏 chunk 只会拖慢每个人的第一次加载。
 const BotManagement = lazy(() => import('./components/BotManagement').then(module => ({ default: module.BotManagement })));
 const GroupManagement = lazy(() => import('./components/GroupManagement').then(module => ({ default: module.GroupManagement })));
 const SessionChangesPanel = lazy(() => import('./components/SessionChangesPanel').then(module => ({ default: module.SessionChangesPanel })));
-const WorkspaceGroupsModal = lazy(() => import('./components/WorkspaceGroupsModal').then(module => ({ default: module.WorkspaceGroupsModal })));
 
 type DetailTab = 'timeline' | 'changes' | 'terminal';
-type TaskListFilters = { view: WorkbenchView; query: string; project: string };
-const LIST_HISTORY_KEY = 'dutydeckTaskFilters';
-const HISTORY_POSITION_KEY = 'dutydeckHistoryPosition';
-const isTaskListFilters = (value: unknown): value is TaskListFilters => value !== null && typeof value === 'object' && 'view' in value && ['all', 'attention', 'active', 'completed', 'archived'].includes(String(value.view)) && 'query' in value && typeof value.query === 'string' && 'project' in value && typeof value.project === 'string';
 
 type TaskView = { tab: DetailTab; inspector: boolean; inspectorChosen?: boolean; terminalVisited?: boolean; changesVisited?: boolean };
 type MainQueryFailure = { label: string; message: string; hasData: boolean; retrying: boolean; retry(): Promise<void> };
-type QueueCancelOperation = { id: string; editDraftKey?: string; task?: Task };
-const queueCancelOperations = new Map<string, QueueCancelOperation>();
-const queueCancelKey = (sessionId: string, taskId: string) => JSON.stringify([currentInstance(), sessionId, taskId]);
-
-// 只有明确未投递的指令继续排队；结果未知时由人在执行记录下方选择重新执行、标为已完成或标为失败。
-const steeringSkipped: Record<string, string> = {
-  promptRequired: '正在执行的那一轮此刻接不了插话（还没交给 Agent，或已经结束）。', unsupported: '当前 Agent 不支持插话。',
-  incompatible: '这条指令的执行设置与正在执行的这一轮不同。'
-};
-const steeringToast = ({ outcome, error }: SteeringResult, task: Task) => {
-  if (task.status === 'reconcile_required') return { kind: 'warning' as const, key: 'steering', title: '插话投递结果未知', description: '这条指令可能已送达，也可能没有。不会自动重发：请在执行记录下方选择重新执行、标为已完成或标为失败。' };
-  if (outcome === 'failed' && task.status !== 'queued') return { kind: 'info' as const, key: 'steering', title: '插话请求未确认', description: '这条指令已不在队列中，请查看最新执行记录核对。' };
-  return outcome === 'injected'
-    ? { kind: 'success' as const, key: 'steering', title: '已插话到当前这一轮', description: 'Agent 会在这一轮里接着处理这条指令。' }
-    : outcome === 'moved'
-      ? { kind: 'info' as const, key: 'steering', title: '没有插话', description: task.status === 'cancelled' ? '这条指令在插话之前已被取消。' : task.status === 'running' ? '这条指令在插话之前已经开始执行，按普通的一轮处理。' : '这条指令已不在队列中，请查看最新执行记录核对。' }
-    : outcome === 'startedNewTurn'
-      ? { kind: 'warning' as const, key: 'steering', title: 'Agent 用这条指令另起了一轮', description: '那一轮不在执行记录里，结果不会显示在这里。' }
-      : { kind: 'info' as const, key: 'steering', title: '没有插话，这条指令在排队', description: `${steeringSkipped[outcome] ?? `插话失败${error ? `：${error}` : '。'}`}当前任务完成后会执行它。` };
-};
-
-const currentLocation = (): AppLocation => typeof window === 'undefined'
-  ? { route: { kind: 'overview' } }
-  : parseAppLocation(window.location.pathname, window.location.search);
-
 export default function App() {
   const qc = useQueryClient();
   const { activeSessionId, setActive, rawVisible, toggleRaw } = useDockStore();
-  const [sidebarOpen, setSidebarOpen] = useState(false);
   const matchesDesktop = useMediaQuery('(min-width: 768px)');
   const mobile = typeof window !== 'undefined' && typeof window.matchMedia === 'function' && !matchesDesktop;
   const [newOpen, setNewOpen] = useState(false);
   const rawSideBySide = useMediaQuery('(min-width: 1536px)');
   const toggleRawPanel = useCallback(() => { if (!rawVisible) captureDialogOpener(); toggleRaw(); }, [rawVisible, toggleRaw]);
-  const [archiveConfirm, setArchiveConfirm] = useState(false);
-  const [bulkArchiveIds, setBulkArchiveIds] = useState<string[]>([]);
   const [systemPromptOpen, setSystemPromptOpen] = useState(false);
-  const composerDraft = useComposerDraft(activeSessionId);
-  const composerInput = useRef<HTMLTextAreaElement>(null);
-  const pendingSends = useIsMutating({ mutationKey: ['composer-send'], predicate: mutation => (mutation.state.variables as { sessionId?: string } | undefined)?.sessionId === activeSessionId });
-  const { text: prompt, references: composerReferences, mode: sendMode, planFirst } = composerDraft.draft;
   const [sidebarWidth, setSidebarWidth] = useViewPreference('sidebar-width', 234, (value): value is number => typeof value === 'number' && value >= 208 && value <= 320);
   const [sidebarCollapsed, setSidebarCollapsed] = useViewPreference('sidebar-collapsed', false, (value): value is boolean => typeof value === 'boolean');
   const [taskViews, setTaskViews] = useViewPreference<Record<string, TaskView>>('task-views', {}, (value): value is Record<string, TaskView> => value !== null && typeof value === 'object' && Object.values(value).every((item: unknown) => item !== null && typeof item === 'object' && 'tab' in item && ['timeline', 'changes', 'terminal'].includes(String(item.tab)) && 'inspector' in item && typeof item.inspector === 'boolean'));
@@ -142,39 +93,24 @@ export default function App() {
   const inspectorDefaultAll = useMediaQuery('(min-width: 1880px)');
   const inspectorDefaultCompleted = useMediaQuery('(min-width: 1600px)');
   const [actionError, setActionError] = useState<string>();
-  const [sendFailure, setSendFailure] = useState<{ sessionId: string; message: string; retry: boolean }>();
-  // queue/interrupt 的未确认操作只在同一标签页内跨刷新保留，另一标签页视为新请求。
-  const sendOperations = useRef<SendOperationStore | null>(null);
-  const sendOperationStore = sendOperations.current ??= new SendOperationStore();
+  const [sendFailure, setSendFailure] = useState<SendFailure>();
   const [workItemPanel, setWorkItemPanel] = useState<{ sessionId: string; itemId: string } | null>(null);
-  // 路由与「可深链的浮层」是同一个东西的两半，合成一个 state：分开存会让 URL 与界面
-  // 各走各的，回退键、刷新、分享链接三者立刻打架（见 app-route.ts 的说明）。
-  const [location, setLocation] = useState<AppLocation>(currentLocation);
-  const settingsLeaveGuard = useRef<SettingsLeaveGuard | undefined>(undefined);
-  const registerSettingsLeaveGuard = useCallback((guard: SettingsLeaveGuard | undefined) => { settingsLeaveGuard.current = guard; }, []);
-  const historyEntry = useRef({ path: `${window.location.pathname}${window.location.search}`, state: window.history.state, position: Number(window.history.state?.[HISTORY_POSITION_KEY] ?? 0) });
-  const restoringSettingsHistory = useRef<{ path: string; restored(): void } | undefined>(undefined);
-  const route = location.route;
-  const [experimental] = useExperimental();
-  // 群与权限只有草稿态：实验功能关闭时，?panel=groups 深链不打开浮层。
-  const overlay = location.overlay?.kind === 'groups' && !experimental ? undefined : location.overlay;
-  // 主区一级视图与选中对象。三者都在 URL 里，刷新和分享都能回到同一个对象
-  // （app-route.ts 的 nav/appId/chatId）。
-  const primaryNav: PrimaryNav = location.nav ?? (route.kind === 'session' ? 'tasks' : 'home');
-  const selectedAppId = location.appId;
-  const selectedChatId = location.chatId;
+  const applySessionSelection = useCallback((id?: string) => {
+    if (useDockStore.getState().activeSessionId === id) return;
+    setActive(id);
+    setWorkItemPanel(null);
+    setActionError(undefined);
+    setSendFailure(undefined);
+  }, [setActive]);
+
+  const navigation = useAppLocation(applySessionSelection);
+  const {
+    location, route, overlay, primaryNav, selectedAppId, selectedChatId, experimental,
+    sidebarOpen, setSidebarOpen, taskFilters, workbenchView, updateTaskFilters, setWorkbenchView,
+    navigate, openOverlay, closeOverlay, selectSession, setPrimaryNav, selectBot, selectGroup,
+    openSettings, openLarkSetup
+  } = navigation;
   const [density, setDensity] = useTimelineDensityPreference();
-  const [taskFilters, setTaskFiltersPreference] = useViewPreference<TaskListFilters>('task-filters', { view: 'all', query: '', project: '' }, isTaskListFilters);
-  const taskFiltersRef = useRef(taskFilters);
-  taskFiltersRef.current = taskFilters;
-  const workbenchView = taskFilters.view;
-  const updateTaskFilters = (patch: Partial<TaskListFilters>) => {
-    const next = { ...taskFiltersRef.current, ...patch };
-    taskFiltersRef.current = next;
-    setTaskFiltersPreference(next);
-    if (route.kind === 'overview' && primaryNav === 'tasks') window.history.replaceState({ ...window.history.state, [LIST_HISTORY_KEY]: next }, '', window.location.href);
-  };
-  const setWorkbenchView = (view: WorkbenchView) => updateTaskFilters({ view });
   const [runSummaries, setRunSummaries] = useState<Record<string, RunSummary>>({});
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [helpOpen, setHelpOpen] = useState(false);
@@ -189,104 +125,18 @@ export default function App() {
     setSidebarOpen(true);
   };
 
-  const applySessionSelection = useCallback((id?: string) => {
-    if (useDockStore.getState().activeSessionId === id) return;
-    setActive(id);
-    setWorkItemPanel(null);
-    setActionError(undefined);
-    setSendFailure(undefined);
-  }, [setActive]);
 
-  /**
-   * 写 URL 并同步界面状态。
-   *
-   * 打开浮层时在 history.state 上打 `OVERLAY_HISTORY_MARK` 标记，这样关闭时能分辨
-   * 两种来路：本次会话里点开的（back() 回到浮层之前，后退键行为自然），还是别人
-   * 甩过来的深链（此时 back() 会离开站点，改用 replaceState 抹掉 query）。
-   */
-  const navigate = useCallback((next: AppLocation, options?: { replace?: boolean }) => {
-    const commit = () => {
-      setLocation(next);
-      const nextPath = appLocationPath(next);
-      if (`${window.location.pathname}${window.location.search}` === nextPath) return;
-      const position = historyEntry.current.position + (options?.replace ? 0 : 1);
-      const state = { [HISTORY_POSITION_KEY]: position, [LIST_HISTORY_KEY]: taskFiltersRef.current, sessionId: next.route.kind === 'session' ? next.route.sessionId : undefined, ...(next.overlay ? { [OVERLAY_HISTORY_MARK]: true } : {}) };
-      if (options?.replace) window.history.replaceState(state, '', nextPath);
-      else window.history.pushState(state, '', nextPath);
-      historyEntry.current = { path: nextPath, state, position };
-    };
-    if (settingsLeaveGuard.current) settingsLeaveGuard.current(commit);
-    else commit();
-  }, []);
-
-  const openOverlay = useCallback((next: OverlayRoute) => {
-    captureDialogOpener();
-    setSidebarOpen(false);
-    navigate({ route, nav: primaryNav, appId: selectedAppId, chatId: selectedChatId, overlay: next });
-  }, [navigate, route, primaryNav, selectedAppId, selectedChatId]);
-
-  /**
-   * 关闭可深链浮层。
-   *
-   * 走 back() 而不是再 push 一条：否则用户按后退会把刚关掉的浮层重新打开，
-   * 而且每开关一次就往历史里塞两条记录。
-   */
-  const closeOverlay = useCallback(() => {
-    const pushedByUs = Boolean((window.history.state as Record<string, unknown> | null)?.[OVERLAY_HISTORY_MARK]);
-    if (pushedByUs) { window.history.back(); return; }
-    navigate({ route, nav: primaryNav, appId: selectedAppId, chatId: selectedChatId }, { replace: true });
-  }, [navigate, route, primaryNav, selectedAppId, selectedChatId]);
-
-  /**
-   * 选中任务。
-   *
-   * 一律切回任务视图（点任务却停在 Bot 管理页上，是在无视用户刚做的选择），
-   * 但 appId / chatId 原样留在 URL 里：用户从任务详情跳去改配置、再切回来时
-   * 仍然落在原来那个 Bot 或群上，不用重新找一遍。
-   */
-  const selectSession = useCallback((id?: string) => {
-    applySessionSelection(id);
-    navigate({ route: id ? { kind: 'session', sessionId: id } : { kind: 'overview' }, nav: id ? 'tasks' : 'home', appId: selectedAppId, chatId: selectedChatId });
-  }, [applySessionSelection, navigate, selectedAppId, selectedChatId]);
-
-  /**
-   * 切换主区一级视图。
-   *
-   * `route` 原样保留：用户在任务详情里切去「机器人」，主区换成 Bot 管理，但
-   * 那条任务仍在 URL 里；切回「任务」直接回到同一条任务，不用重新找。这正是
-   * 契约要求的「跳转配置再返回不丢任务」。
-   */
-  const setPrimaryNav = useCallback((next: PrimaryNav) => {
-    const returningToTask = next === 'tasks' && (primaryNav === 'bots' || primaryNav === 'groups') && route.kind === 'session';
-    const destination = ['home', 'tasks', 'automation'].includes(next) && !returningToTask ? { kind: 'overview' as const } : route;
-    if (destination.kind === 'overview') applySessionSelection(undefined);
-    setSidebarOpen(false);
-    navigate({ route: destination, nav: next, appId: selectedAppId, chatId: selectedChatId });
-  }, [navigate, route, applySessionSelection, primaryNav, selectedAppId, selectedChatId]);
-
-  /** 选中某个 Bot，进入机器人视图。chatId 保留，便于从 Bot 再跳回原来的群。 */
-  const selectBot = useCallback((appId: string) => {
-    navigate({ route, nav: 'bots', appId: appId || undefined, chatId: selectedChatId });
-  }, [navigate, route, selectedChatId]);
-
-  /** 选中某个群，进入群聊视图；带上 appId 时直接定位到该群里的这个 Bot。 */
-  const selectGroup = useCallback((chatId: string, appId?: string) => {
-    navigate({ route, nav: 'groups', chatId: chatId || undefined, appId: appId ?? selectedAppId });
-  }, [navigate, route, selectedAppId]);
-
-  const agents = useQuery({ queryKey: ['agents'], queryFn: api.agents, staleTime: 5 * 60_000 });
+  const agents = useQuery(agentsQuery());
   // 非当前任务没有 SSE，低频同步用于捕获飞书创建等外部变化；当前任务状态仍由 SSE 即时写入缓存。
-  const sessions = useQuery({ queryKey: ['sessions'], queryFn: ({ signal }) => loadSessions(qc, signal), refetchInterval: 15_000, refetchIntervalInBackground: false });
-  const summaries = useQuery({ queryKey: ['run-summaries'], queryFn: api.runSummaries, refetchInterval: 15_000, refetchIntervalInBackground: false });
-  const inbox = useQuery({ queryKey: ['inbox'], queryFn: api.inbox, refetchInterval: 15_000, refetchIntervalInBackground: false, retry: false });
-  const workspaceGroups = useQuery({ queryKey: ['workspace-groups'], queryFn: api.workspaceGroups, refetchInterval: 15_000, refetchIntervalInBackground: false });
-  const larkConfig = useQuery({ queryKey: ['lark-config'], queryFn: api.larkConfig, staleTime: 30_000, refetchOnWindowFocus: true });
-  const systemCapabilities = useQuery({ queryKey: ['system-capabilities'], queryFn: api.systemCapabilities, staleTime: Infinity });
-  const authStatus = useQuery({ queryKey: ['auth-status'], queryFn: api.authStatus, staleTime: Infinity, retry: false });
-  const peerInstances = useQuery({ queryKey: ['instances'], queryFn: api.instances, staleTime: Infinity, retry: false });
+  const sessions = useQuery(sessionsQuery());
+  const summaries = useQuery(runSummariesQuery());
+  const inbox = useQuery(inboxQuery());
+  const workspaceGroups = useQuery(workspaceGroupsQuery());
+  const larkConfig = useQuery(larkConfigQuery());
+  const systemCapabilities = useQuery(systemCapabilitiesQuery());
+  const authStatus = useQuery(authStatusQuery());
+  const peerInstances = useQuery(instancesQuery());
 
-  const openSettings = (section: ControlCenterSection = 'agents') => openOverlay({ kind: 'settings', section });
-  const openLarkSetup = (target?: LarkSetupTarget) => openOverlay({ kind: 'lark-setup', target });
   const taskCreation = useNewSession({ agents: agents.data ?? [], onCreated: (session, task) => {
     setRunSummaries(current => ({ ...current, [session.id]: { sessionId: session.id, taskId: task.id, prompt: task.prompt, status: task.status, queuedCount: task.status === 'queued' ? 1 : 0, updatedAt: task.updatedAt || task.createdAt } }));
     selectSession(session.id);
@@ -326,56 +176,6 @@ export default function App() {
       navigationTrigger.current = null;
     };
   }, [mobileNavigationOpen]);
-
-  useEffect(() => {
-    const syncSelectionFromLocation = () => {
-      const path = `${window.location.pathname}${window.location.search}`;
-      const restoration = restoringSettingsHistory.current;
-      if (restoration?.path === path) {
-        restoringSettingsHistory.current = undefined;
-        restoration.restored();
-        return;
-      }
-      const next = currentLocation();
-      const state = window.history.state;
-      const position: unknown = state?.[HISTORY_POSITION_KEY];
-      const commit = () => {
-        const savedFilters: unknown = state?.[LIST_HISTORY_KEY];
-        if (isTaskListFilters(savedFilters)) {
-          taskFiltersRef.current = savedFilters;
-          setTaskFiltersPreference(savedFilters);
-        }
-        const nextPosition = typeof position === 'number' ? position : historyEntry.current.position;
-        const nextState = { ...state, [HISTORY_POSITION_KEY]: nextPosition, [LIST_HISTORY_KEY]: taskFiltersRef.current };
-        window.history.replaceState(nextState, '', path);
-        historyEntry.current = { path, state: nextState, position: nextPosition };
-        setLocation(next);
-        applySessionSelection(next.route.kind === 'session' ? next.route.sessionId : undefined);
-      };
-      if (!settingsLeaveGuard.current || path === historyEntry.current.path) { commit(); return; }
-      // popstate 已经移动了浏览器历史。先回到草稿 entry，确认后才重新走向目标。
-      const source = historyEntry.current;
-      const delta = typeof position === 'number' ? position - source.position : 0;
-      let restored = false;
-      let approved = false;
-      const replay = () => { settingsLeaveGuard.current = undefined; window.history.go(delta || -1); };
-      const allowed = settingsLeaveGuard.current(() => { approved = true; if (restored) replay(); });
-      if (allowed) { commit(); return; }
-      if (delta) {
-        restoringSettingsHistory.current = { path: source.path, restored: () => { restored = true; if (approved) replay(); } };
-        window.history.go(-delta);
-      } else {
-        // 旧 entry 没有位置标记：保留目标，再补回当前设置 entry，避免守卫反复触发。
-        window.history.replaceState({ ...state, [HISTORY_POSITION_KEY]: source.position - 1 }, '', path);
-        window.history.pushState(source.state, '', source.path);
-        restored = true;
-        if (approved) replay();
-      }
-    };
-    syncSelectionFromLocation();
-    window.addEventListener('popstate', syncSelectionFromLocation);
-    return () => window.removeEventListener('popstate', syncSelectionFromLocation);
-  }, [applySessionSelection]);
 
   const sortedSessions = useMemo(() => [...(sessions.data ?? [])].sort((left, right) => (right.updatedAt ?? right.createdAt).localeCompare(left.updatedAt ?? left.createdAt)), [sessions.data]);
   // 目标步骤（work_item）、飞书记忆提取（lark-memory）和文字优化都不是用户下达的任务：
@@ -424,16 +224,22 @@ export default function App() {
   // and tasks still wait until the list confirms the session.
   useEffect(() => { if (activeSessionId && sessions.isPending) void qc.prefetchQuery(historyOutlineQuery(activeSessionId, HISTORY_TURN_PAGE_SIZE)); }, [activeSessionId, sessions.isPending, qc]);
   const events = useEventHistory(activeSessionId, Boolean(active), HISTORY_TURN_PAGE_SIZE);
-  const tasks = useQuery({ queryKey: ['tasks', activeSessionId], queryFn: () => api.tasks(activeSessionId!), enabled: Boolean(active) });
-  const sessionUsage = useQuery({ queryKey: ['session-usage', activeSessionId], queryFn: () => api.sessionUsage(activeSessionId!), enabled: Boolean(active), retry: false, refetchInterval: 15_000, refetchIntervalInBackground: false });
+  const tasks = useQuery({ ...tasksQuery(activeSessionId), enabled: Boolean(active) });
+  const sessionUsage = useQuery({ ...sessionUsageQuery(activeSessionId), enabled: Boolean(active) });
   const missingActiveSession = Boolean(route.kind === 'session' && sessions.isSuccess && !active);
   const activeAgent = useMemo(() => agents.data?.find(agent => agent.id === active?.agentId), [agents.data, active?.agentId]);
   const activeOutputLabel = active?.model ?? activeAgent?.name ?? active?.agentId ?? 'Agent';
   const streamStatus = useSessionStream(activeSessionId, active?.runId, events.isSuccess);
-  const activeModels = useQuery({ queryKey: agentModelsQueryKey(active?.agentId, active?.model), queryFn: () => loadAgentModels(active!.agentId, active!.model), enabled: Boolean(active && !active.archivedAt), initialData: () => active ? readCachedAgentModels(active.agentId, active.model) : undefined, initialDataUpdatedAt: 0, refetchOnMount: 'always', staleTime: 60_000 });
-  const skillCatalog = useQuery({ queryKey: ['skills', active?.cwd, active?.sourceId], queryFn: () => fetchSkillCatalog(active?.cwd, active?.source === 'lark' || active?.source === 'plugin_trigger' ? active.sourceId?.split(':')[0] : undefined, active?.sourceId?.split(':')[1], active?.workspaceSourceCwd), enabled: Boolean(active && !active.archivedAt), staleTime: 60_000 });
+  const {
+    composerDraft, composerInput, prompt, composerReferences, sendMode, planFirst, pendingSends,
+    archiveConfirm, setArchiveConfirm, bulkArchiveIds, setBulkArchiveIds, retryQueuedEdits,
+    send, submit, act, cancelQueued, cancelQueueTask, steerQueued, injectQueued, archive, bulkArchive,
+    restart, resolvePermission, resolveActivePermission, pickComposerFile, activeModels, refreshModels,
+    switchModel, switchReasoningEffort, modelReadiness
+  } = useSessionActions(activeSessionId, { active, tasks, selectSession, setActionError, setSendFailure });
+  const skillCatalog = useQuery({ ...skillsQuery(active), enabled: Boolean(active && !active.archivedAt) });
   const skills = { ...skillCatalog, data: skillCatalog.data?.skills };
-  const pluginCommands = useQuery({ queryKey: ['plugin-commands', active?.cwd], queryFn: () => api.pluginCommands(active?.cwd), enabled: Boolean(active && !active.archivedAt), staleTime: 60_000 });
+  const pluginCommands = useQuery({ ...pluginCommandsQuery(active?.cwd), enabled: Boolean(active && !active.archivedAt) });
   const eventList = events.data?.events ?? [];
   const taskContext = useMemo(() => currentContextStats(eventList, sessionUsage.data?.snapshot?.context), [eventList, sessionUsage.data?.snapshot?.context]);
   const commandCatalog = events.data?.outline?.commandCatalog;
@@ -471,18 +277,6 @@ export default function App() {
     return () => window.removeEventListener('dutydeck:show-history-turn', showSource);
   }, [activeSessionId, inspectorOpen]);
   const queuedTasks = useMemo(() => tasks.data?.filter(task => task.status === 'queued') ?? [], [tasks.data]);
-  useEffect(() => {
-    if (!queueCancelOperations.size) return;
-    for (const task of tasks.data ?? []) {
-      if (task.status !== 'queued' && task.status !== 'cancelled') queueCancelOperations.delete(queueCancelKey(task.sessionId, task.id));
-    }
-  }, [tasks.data]);
-  // A cancellation event can remove the queue row before the HTTP response arrives.
-  const retryQueuedEdits = Array.from(queueCancelOperations.values()).flatMap(({ task, editDraftKey }) => {
-    if (!task || editDraftKey !== composerDraft.key) return [];
-    const status = tasks.data?.find(current => current.id === task.id)?.status;
-    return status === undefined || status === 'cancelled' ? [task] : [];
-  });
   const blockingPermissionId = useMemo(() => active?.state === 'waiting_for_permission' ? pendingPermissionId(timeline) : undefined, [active?.state, timeline]);
   const latestUserIndex = useMemo(() => {
     for (let index = timeline.length - 1; index >= 0; index--) if (timeline[index].type === 'text' && timeline[index].data.role === 'user') return index;
@@ -519,119 +313,6 @@ export default function App() {
     if (summary) setRunSummaries(current => current[activeSessionId]?.taskId === summary.taskId && current[activeSessionId]?.status === summary.status && current[activeSessionId]?.queuedCount === summary.queuedCount && current[activeSessionId]?.updatedAt === summary.updatedAt ? current : { ...current, [activeSessionId]: summary });
   }, [activeSessionId, tasks.data]);
 
-  const send = useMutation({
-    mutationKey: ['composer-send'],
-    retry: false,
-    mutationFn: ({ sessionId, message, mode, skillRequests, plan, idempotencyKey }: { sessionId: string; message: string; mode: SendMode; skillRequests?: string[]; draftKey: string; submittedDraft: typeof composerDraft.draft; plan?: boolean; idempotencyKey?: string; reusedUnknownOperation: boolean }) => plan ? api.plan(sessionId, message) : mode === 'steer' ? api.send(sessionId, message, mode, skillRequests) : api.send(sessionId, message, mode, skillRequests, idempotencyKey),
-    onSuccess: (result, variables) => {
-      if (variables.idempotencyKey) sendOperationStore.delete(variables.draftKey, variables.idempotencyKey);
-      setSendFailure(current => current?.sessionId === variables.sessionId ? undefined : current);
-      acknowledgeComposerDraft(variables.draftKey, variables.submittedDraft);
-      qc.setQueryData<Task[]>(['tasks', variables.sessionId], current => current?.some(task => task.id === result.task.id) ? current : [...(current ?? []), result.task]);
-      void qc.invalidateQueries({ queryKey: ['tasks', variables.sessionId], exact: true });
-      if (result.steering && (result.task.status === 'queued' || result.steering.outcome !== 'promptRequired')) toastStore.push(steeringToast(result.steering, result.task));
-    },
-    onError: (error, variables) => {
-      if (variables.sessionId !== useDockStore.getState().activeSessionId) return;
-      const unknown = !(error instanceof ApiError) || error.status === 408 || error.status >= 500 || error.code === 'unknown_outcome' || (variables.reusedUnknownOperation && error.status === 401);
-      if (!unknown) {
-        if (variables.idempotencyKey) sendOperationStore.delete(variables.draftKey, variables.idempotencyKey);
-        setActionError(error.message);
-        return;
-      }
-      if (variables.plan) { setActionError(error.message); return; }
-      setSendFailure({
-        sessionId: variables.sessionId,
-        retry: variables.mode !== 'steer',
-        message: variables.mode === 'steer'
-          ? `插话结果未知：${error.message}。请先核对现有任务和执行记录；为避免重复执行，不会自动重发。`
-          : `发送结果未知：${error.message}。可重试同一草稿；若服务端已接受，将返回原任务，不会重复执行。`
-      });
-    }
-  });
-  const cancelQueued = useMutation({ mutationFn: ({ sessionId, taskId, operation }: { sessionId: string; taskId: string; key: string; operation: QueueCancelOperation; prompt?: string }) => api.cancelQueued(sessionId, taskId, operation.id), onSuccess: (result, variables) => {
-    const { key, operation } = variables;
-    if (queueCancelOperations.get(key) !== operation) return;
-    qc.setQueryData<Task[]>(['tasks', variables.sessionId], current => current?.map(task => task.id === result.id ? result : task));
-    setActionError(undefined);
-    if (operation.editDraftKey) {
-      if (result.canEditQueued === false) {
-        queueCancelOperations.delete(key);
-        setActionError('这条待执行指令已取消。原来选择的 Skill 无法恢复。');
-        return;
-      }
-      const draft = readComposerDraft(operation.editDraftKey);
-      const restored = splitPromptFileReferences(result.prompt);
-      const references = new Map(draft.references.map(reference => [reference.id, reference]));
-      for (const reference of restored.references) if (!references.has(reference.id)) references.set(reference.id, reference);
-      for (const value of result.skillRequests ?? []) {
-        const id = `skill-${value}`;
-        const label = result.skillDeliveries?.find(skill => skill.path === value || skill.ref === value)?.name ?? value;
-        if (!references.has(id)) references.set(id, { id, kind: 'skill', label, value });
-      }
-      updateComposerDraft(operation.editDraftKey, { text: [draft.text, restored.text].filter(text => text.trim()).join('\n\n'), references: [...references.values()] });
-      queueCancelOperations.delete(key);
-      requestAnimationFrame(() => {
-        if (useDockStore.getState().activeSessionId !== variables.sessionId) return;
-        const input = composerInput.current;
-        input?.focus();
-        input?.setSelectionRange(input.value.length, input.value.length);
-      });
-      return;
-    }
-    // 撤销只能把指令重新排到队尾，拿不回原来的任务 ID 和位置，所以 description 必须说清楚，不假装能还原现场。
-    queueCancelOperations.delete(key);
-    const restorable = result.canEditQueued === false ? undefined : variables.prompt?.trim();
-    toastStore.push({ kind: 'success', key: `cancel-queued-${variables.taskId}`, title: '已取消 1 条待执行指令', description: restorable ? '恢复会把这条指令重新排到队列末尾，不会回到原来的位置。' : undefined, action: restorable ? { label: '重新加入队尾', run: () => api.send(variables.sessionId, restorable, 'queue', result.skillRequests, requestId()).then(() => { void qc.invalidateQueries({ queryKey: ['tasks', variables.sessionId] }); }) } : undefined });
-  }, onError: (error, { key, operation }) => {
-    const current = queueCancelOperations.get(key);
-    if (current && current !== operation) return;
-    if (error instanceof ApiError && error.status === 409) operation.task = undefined;
-    setActionError(error.message);
-    toastStore.push({ kind: 'error', key: 'cancel-queued', title: '取消待执行指令失败', description: error.message });
-  } });
-  const cancelQueueTask = (sessionId: string, taskId: string, editDraftKey?: string) => {
-    const key = queueCancelKey(sessionId, taskId);
-    const operation = queueCancelOperations.get(key) ?? { id: requestId() };
-    const task = qc.getQueryData<Task[]>(['tasks', sessionId])?.find(item => item.id === taskId);
-    operation.editDraftKey = editDraftKey;
-    operation.task = editDraftKey ? operation.task ?? task : undefined;
-    queueCancelOperations.set(key, operation);
-    cancelQueued.mutate({ sessionId, taskId, key, operation, prompt: task?.prompt });
-  };
-  const steerQueued = useMutation({ mutationFn: ({ sessionId, taskId }: { sessionId: string; taskId: string }) => api.steerQueued(sessionId, taskId), onSuccess: (_result, variables) => { setActionError(undefined); void qc.invalidateQueries({ queryKey: ['tasks', variables.sessionId] }); }, onError: error => setActionError(error.message) });
-  const injectQueued = useMutation({ mutationFn: ({ sessionId, taskId }: { sessionId: string; taskId: string }) => api.injectQueued(sessionId, taskId), onSuccess: (result, variables) => { setActionError(undefined); toastStore.push(steeringToast(result, result.task)); void qc.invalidateQueries({ queryKey: ['tasks', variables.sessionId] }); }, onError: error => setActionError(error.message) });
-  const archive = useMutation({ mutationFn: (sessionId: string) => api.archive(sessionId), onSuccess: result => { qc.setQueryData<Session[]>(['sessions'], current => current?.map(session => session.id === result.id ? result : session)); setArchiveConfirm(false); selectSession(undefined); toastStore.push({ kind: 'success', key: 'archive', title: '任务已归档', description: '历史指令和执行记录仍可在「已归档」筛选中查看。' }); }, onError: error => setActionError(error.message) });
-  const bulkArchive = useMutation({
-    mutationFn: async (ids: string[]) => {
-      const archived = new Map<string, Session>();
-      const failures: Array<{ id: string; message: string }> = [];
-      for (const id of new Set(ids)) {
-        try { archived.set(id, await api.archive(id)); }
-        catch (error) { failures.push({ id, message: error instanceof Error ? error.message : String(error) }); }
-      }
-      return { archived, failures };
-    },
-    onSuccess: async ({ archived, failures }) => {
-      await qc.cancelQueries({ queryKey: ['sessions'], exact: true });
-      qc.setQueryData<Session[]>(['sessions'], current => current?.map(session => archived.get(session.id) ?? session));
-      setBulkArchiveIds(failures.map(failure => failure.id));
-      toastStore.push({
-        kind: failures.length ? archived.size ? 'warning' : 'error' : 'success',
-        key: 'bulk-archive',
-        title: failures.length ? `已清理 ${archived.size} 个任务，${failures.length} 个失败` : `已清理 ${archived.size} 个任务`,
-        description: failures.length ? '失败项已保留，可重试。' : '历史指令和执行记录可在「已归档」中查看。'
-      });
-    }
-  });
-  const restart = useMutation({ mutationFn: api.restart, onSuccess: result => { setActionError(undefined); qc.setQueryData<Session[]>(['sessions'], current => current?.map(session => session.id === result.id ? result : session)); void qc.invalidateQueries({ queryKey: ['sessions'] }); void qc.invalidateQueries({ queryKey: ['events', activeSessionId] }); void qc.invalidateQueries({ queryKey: ['tasks', activeSessionId] }); toastStore.push({ kind: 'success', key: 'restart', title: '任务已重新启动', description: '这是一个全新的 Agent 进程，会从空白上下文开始；之前的对话不会带过来。' }); }, onError: error => { setActionError(error.message); toastStore.push({ kind: 'error', key: 'restart', title: '重新启动失败', description: error.message }); } });
-  const resolvePermission = useMutation({ mutationFn: ({ sessionId, permissionId, approved, reason }: { sessionId: string; permissionId: string; approved: boolean; reason?: string }) => reason ? api.permission(sessionId, permissionId, approved, reason) : api.permission(sessionId, permissionId, approved), onSuccess: (_result, variables) => { qc.setQueryData<EventWindow>(['events', variables.sessionId], current => { if (!current) return current; const next = current.events.map(event => event.type === 'permission_request' && (event.data.id === variables.permissionId || event.id === variables.permissionId) ? { ...event, data: { ...event.data, status: variables.approved ? 'approved' : 'rejected', ...(variables.reason ? { reason: variables.reason } : {}) } } : event); return { ...current, events: next, previousEvents: undefined, changes: undefined }; }); }, onError: (error, variables) => { setActionError(error.message); void qc.invalidateQueries({ queryKey: ['events', variables.sessionId] }); void qc.invalidateQueries({ queryKey: ['sessions'] }); } });
-  const resolveActivePermission = useCallback((permissionId: string, approved: boolean, reason?: string) => resolvePermission.mutateAsync({ sessionId: active!.id, permissionId, approved, reason }), [active?.id, resolvePermission.mutateAsync]);
-  const pickComposerFile = useMutation({ mutationFn: api.selectFile, onError: error => setActionError(error.message) });
-  const refreshModels = useMutation({ mutationFn: ({ agentId: targetAgentId, currentModel }: { agentId: string; currentModel?: string }) => loadAgentModels(targetAgentId, currentModel, true), onSuccess: (result, variables) => { setActionError(undefined); qc.setQueryData(agentModelsQueryKey(variables.agentId, variables.currentModel), result); }, onError: error => setActionError(error.message) });
-  const switchModel = useMutation({ mutationFn: ({ sessionId, nextModel }: { sessionId: string; nextModel: string }) => api.setSessionModel(sessionId, nextModel), onSuccess: result => { setActionError(undefined); qc.setQueryData<Session[]>(['sessions'], current => current?.map(session => session.id === result.id ? result : session)); void activeModels.refetch(); }, onError: error => setActionError(error.message) });
-  const switchReasoningEffort = useMutation({ mutationFn: ({ sessionId, nextReasoningEffort }: { sessionId: string; nextReasoningEffort: string }) => api.setSessionReasoningEffort(sessionId, nextReasoningEffort), onSuccess: result => { setActionError(undefined); qc.setQueryData<Session[]>(['sessions'], current => current?.map(session => session.id === result.id ? result : session)); }, onError: error => setActionError(error.message) });
-  const modelReadiness = getModelReadiness({ loaded: activeModels.data !== undefined, loading: activeModels.data === undefined && (activeModels.isPending || activeModels.isFetching || refreshModels.isPending), switching: switchModel.isPending, failed: activeModels.data === undefined && activeModels.isError });
   const mainQueryFailures: MainQueryFailure[] = [
     ...(agents.isError ? [{ label: 'Agent 信息', message: agents.error.message, hasData: agents.data !== undefined, retrying: agents.isFetching, retry: async () => { await agents.refetch(); } }] : []),
     ...(sessions.isError ? [{ label: '任务列表', message: sessions.error.message, hasData: sessions.data !== undefined, retrying: sessions.isFetching, retry: async () => { await sessions.refetch(); } }] : []),
@@ -640,26 +321,6 @@ export default function App() {
   const blockingMainQueryFailures = mainQueryFailures.filter(failure => !failure.hasData);
   const staleMainQueryFailures = mainQueryFailures.filter(failure => failure.hasData);
   const retryingMainQueries = mainQueryFailures.some(failure => failure.retrying);
-  const submit = () => {
-    if (modelReadiness.kind !== 'ready') { setActionError(modelReadiness.reason); return; }
-    if (planFirst && active?.source === 'lark') { setActionError('飞书会话请在飞书发送 /plan；如需直接执行，请先改为普通消息。'); return; }
-    const message = buildPrompt(prompt, composerReferences);
-    if (!activeSessionId) { setActionError('请先选择要发送消息的任务。'); return; }
-    if (!message) { setActionError('请先填写消息或添加引用，再重试发送。'); return; }
-    const draftKey = composerDraft.key!;
-    const submittedDraft = composerDraft.draft;
-    const skillRequests = composerReferences.filter(reference => reference.kind === 'skill').map(reference => reference.value);
-    const snapshot = JSON.stringify({ message, skillRequests, mode: sendMode, planFirst });
-    const previous = sendOperationStore.get(draftKey, snapshot);
-    const retry = planFirst ? undefined : previous;
-    // interrupt 被接受后页面可能已经空闲；同一未知响应的重试仍须沿用最初的实际 mode。
-    const mode = retry?.mode ?? (busyStates.has(active?.state ?? '') ? sendMode : 'queue');
-    const idempotencyKey = !planFirst && mode !== 'steer' ? retry?.key ?? requestId() : undefined;
-    if (idempotencyKey && mode !== 'steer' && !retry) sendOperationStore.set(draftKey, { snapshot, mode, key: idempotencyKey });
-    setSendFailure(undefined);
-    send.mutate({ sessionId: activeSessionId, message, draftKey, submittedDraft, mode, skillRequests, plan: planFirst, idempotencyKey, reusedUnknownOperation: Boolean(retry) });
-  };
-  const act = async (action: string) => { try { setActionError(undefined); await api.action(activeSessionId!, action); } catch (error) { setActionError(error instanceof Error ? error.message : String(error)); } };
 
   // 有浮层占用键盘时整套快捷键停用，避免和弹窗内的按键语义打架。
   const overlayOpen = Boolean(overlay && !(overlay.kind === 'workspace' && inspectorSideBySide)) || newOpen || archiveConfirm || bulkArchiveIds.length > 0 || systemPromptOpen || paletteOpen || helpOpen || Boolean(renameSession) || (rawVisible && !rawSideBySide) || (inspectorOpen && !inspectorSideBySide);
@@ -749,9 +410,6 @@ export default function App() {
     <div className="mt-3 space-y-2"><MemoryManagementPanel key={`memory-${session.id}`} session={session}/><ConfigurationExplanationPanel key={`configuration-${session.id}`} sessionId={session.id}/></div>
   </>;
 
-  // 四个懒加载浮层的加载态是同一件事，只有文案不同。
-  const overlayFallback = (label: string) => <div className="fixed inset-0 z-dialog grid place-items-center bg-scrim backdrop-blur-sm"><Spinner label={label}/></div>;
-
   const detailRail = active && primaryNav === 'tasks' ? (inspectorOpen && inspectorSideBySide ? 384 : 0) + (rawVisible && rawSideBySide ? 420 : 0) : 0;
   const createTask = createTaskAffordance({ agents: agents.data ?? [], agentsLoading: agents.isLoading, onCreate: openCreateTask, onPrepareAgents: () => openSettings('agents') });
   return <div style={{ '--sidebar-w': `${!mobile && sidebarCollapsed ? 68 : sidebarWidth}px`, '--main-inset': 'calc(var(--sidebar-w) + var(--shell-gap) * 2)', '--detail-rail': `${detailRail}px` } as React.CSSProperties} className="relative flex h-[100dvh] min-h-[100dvh] flex-col overflow-hidden bg-canvas font-sans text-primary md:bg-chrome">
@@ -773,7 +431,7 @@ export default function App() {
       {primaryNav === 'bots' ? <LazyBoundary fallback={<div className="grid min-h-0 flex-1 place-items-center"><Spinner label="正在打开机器人管理…"/></div>}><BotManagement selectedAppId={selectedAppId} field={location.botField} onSelectBot={selectBot} onOpenLarkSetup={openLarkSetup} onSelectGroup={selectGroup} agents={agents.data ?? []} larkListeningDisabled={larkConfig.data?.listeningDisabled ?? false}/></LazyBoundary>
       : primaryNav === 'groups' ? <LazyBoundary fallback={<div className="grid min-h-0 flex-1 place-items-center"><Spinner label="正在打开群聊管理…"/></div>}><GroupManagement selectedChatId={selectedChatId} selectedAppId={selectedAppId} onSelectGroup={selectGroup} onNavigateToBot={selectBot} agents={agents.data ?? []}/></LazyBoundary>
       : primaryNav === 'automation' ? <div className="min-h-0 flex-1 overflow-y-auto"><div className="ui-page py-6 sm:py-8"><h1 className="mb-5 text-display font-semibold">自动化</h1><LazyBoundary fallback={<Spinner label="正在读取任务自动化…"/>}><AutomationOverview agents={agents.data ?? []} capabilities={systemCapabilities.data} onOpenAgentSetup={() => openSettings('agents')} sessions={visibleSessions} summaries={runSummaries} onSelectSession={selectSession}/></LazyBoundary></div></div>
-      : primaryNav === 'inbox' ? <div className="min-h-0 flex-1 overflow-y-auto"><div className="ui-page py-6 sm:py-8"><header className="mb-6"><p className="text-caption text-subtle">人的决定是执行的一部分</p><h1 className="mt-1 text-display font-semibold">待办</h1><p className="mt-1 text-body text-secondary">权限、提问和结果核对集中在这里。高风险授权只在任务卡里完成。</p></header><InboxPanel items={inbox.data?.items ?? []} loading={inbox.isLoading} failed={inbox.isError} onRetry={() => void inbox.refetch()} call={api.inboxAction} onSettled={() => { void qc.invalidateQueries({ queryKey: ['inbox'] }); void qc.invalidateQueries({ queryKey: ['sessions'] }); void qc.invalidateQueries({ queryKey: ['run-summaries'] }); }} onOpen={handleSelectAttention}/></div></div>
+      : primaryNav === 'inbox' ? <div className="min-h-0 flex-1 overflow-y-auto"><div className="ui-page py-6 sm:py-8"><header className="mb-6"><p className="text-caption text-subtle">人的决定是执行的一部分</p><h1 className="mt-1 text-display font-semibold">待办</h1><p className="mt-1 text-body text-secondary">权限、提问和结果核对集中在这里。高风险授权只在任务卡里完成。</p></header><InboxPanel items={inbox.data?.items ?? []} loading={inbox.isLoading} failed={inbox.isError} onRetry={() => void inbox.refetch()} call={api.inboxAction} onSettled={() => { void qc.invalidateQueries({ queryKey: queryKeys.inbox() }); void qc.invalidateQueries({ queryKey: queryKeys.sessions() }); void qc.invalidateQueries({ queryKey: queryKeys.runSummaries() }); }} onOpen={handleSelectAttention}/></div></div>
       : primaryNav === 'more' ? <div className="min-h-0 flex-1 overflow-y-auto"><div className="ui-page py-6 sm:py-8"><header className="mb-6"><p className="text-caption text-subtle">管理与偏好</p><h1 className="mt-1 text-display font-semibold">更多</h1></header>
           <div className="overflow-hidden rounded-xl border border-default bg-surface shadow-card divide-y divide-subtle">
             <button type="button" onClick={() => setPrimaryNav('automation')} className="flex min-h-12 w-full items-center justify-between px-4 py-3 text-left transition-colors hover:bg-hover">
@@ -834,54 +492,19 @@ export default function App() {
             ? <aside aria-label="原始日志" className="ui-side-panel flex w-[420px] shrink-0 flex-col border-l border-code-border bg-code-surface text-code-header-text"><div className="flex h-11 items-center border-b border-code-border px-3 text-caption font-medium"><Terminal size={13} className="mr-2"/>原始日志<span className="ml-auto"><IconButton label="关闭原始日志" onClick={toggleRawPanel}><PanelRightClose size={14}/></IconButton></span></div><RawHistoryContent sessionId={active.id} text={raw} events={completeRawEvents} readComplete={events.loadAll} loading={events.loadingRaw} error={events.rawError} retry={() => void events.loadAll()}/></aside>
             : <Dialog open onClose={toggleRawPanel} label="原始日志" size="lg"><Dialog.Header><Terminal size={16}/><h2 className="text-title font-semibold">原始日志</h2><span className="ml-auto"><IconButton label="关闭原始日志" onClick={toggleRawPanel}><PanelRightClose size={16}/></IconButton></span></Dialog.Header><Dialog.Body className="bg-code-surface"><RawHistoryContent sessionId={active.id} text={raw} events={completeRawEvents} readComplete={events.loadAll} loading={events.loadingRaw} error={events.rawError} retry={() => void events.loadAll()}/></Dialog.Body></Dialog>)}
         </div>
-      : <WorkspaceOverview homeComposer={<HomeTaskComposer creation={taskCreation} onOpenSettings={openCreateTask}/>} mode={primaryNav === 'tasks' ? 'tasks' : 'home'} filters={primaryNav === 'home' ? { query: '', project: '' } : { query: taskFilters.query, project: taskFilters.project }} onFiltersChange={filters => updateTaskFilters(filters)} inbox={{ items: inbox.data?.items ?? [], loading: inbox.isLoading, failed: inbox.isError, onRetry: () => void inbox.refetch(), call: api.inboxAction, onSettled: () => { void qc.invalidateQueries({ queryKey: ['inbox'] }); void qc.invalidateQueries({ queryKey: ['sessions'] }); void qc.invalidateQueries({ queryKey: ['run-summaries'] }); } }} onSelectAttention={handleSelectAttention} onOpenChanges={(id: string) => { selectSession(id); setTaskViews(current => ({ ...current, [id]: { ...current[id], tab: 'changes', changesVisited: true, inspector: false, inspectorChosen: true } })); }} sessions={visibleSessions} summaries={runSummaries} agents={agents.data ?? []} loading={sessions.isLoading} agentsLoading={agents.isLoading} larkBots={larkConfig.data?.bots ?? []} larkBotsLoading={larkConfig.isLoading} larkListeningDisabled={larkConfig.data?.listeningDisabled ?? false} larkBotsFailed={larkConfig.isError} larkBotsRetrying={larkConfig.isFetching} onRetryLarkBots={() => void larkConfig.refetch()} view={primaryNav === 'home' ? 'all' : workbenchView} onViewChange={view => { setWorkbenchView(view); setPrimaryNav('tasks'); }} onSelect={selectSession} onBulkArchive={ids => { captureDialogOpener(); bulkArchive.reset(); setBulkArchiveIds(ids); }} onCreate={openCreateTask} onOpenAgentSetup={() => openSettings('agents')} onOpenLarkSetup={() => openLarkSetup('new')} onManageBots={() => setPrimaryNav('bots')}/>}
+      : <WorkspaceOverview homeComposer={<HomeTaskComposer creation={taskCreation} onOpenSettings={openCreateTask}/>} mode={primaryNav === 'tasks' ? 'tasks' : 'home'} filters={primaryNav === 'home' ? { query: '', project: '' } : { query: taskFilters.query, project: taskFilters.project }} onFiltersChange={filters => updateTaskFilters(filters)} inbox={{ items: inbox.data?.items ?? [], loading: inbox.isLoading, failed: inbox.isError, onRetry: () => void inbox.refetch(), call: api.inboxAction, onSettled: () => { void qc.invalidateQueries({ queryKey: queryKeys.inbox() }); void qc.invalidateQueries({ queryKey: queryKeys.sessions() }); void qc.invalidateQueries({ queryKey: queryKeys.runSummaries() }); } }} onSelectAttention={handleSelectAttention} onOpenChanges={(id: string) => { selectSession(id); setTaskViews(current => ({ ...current, [id]: { ...current[id], tab: 'changes', changesVisited: true, inspector: false, inspectorChosen: true } })); }} sessions={visibleSessions} summaries={runSummaries} agents={agents.data ?? []} loading={sessions.isLoading} agentsLoading={agents.isLoading} larkBots={larkConfig.data?.bots ?? []} larkBotsLoading={larkConfig.isLoading} larkListeningDisabled={larkConfig.data?.listeningDisabled ?? false} larkBotsFailed={larkConfig.isError} larkBotsRetrying={larkConfig.isFetching} onRetryLarkBots={() => void larkConfig.refetch()} view={primaryNav === 'home' ? 'all' : workbenchView} onViewChange={view => { setWorkbenchView(view); setPrimaryNav('tasks'); }} onSelect={selectSession} onBulkArchive={ids => { captureDialogOpener(); bulkArchive.reset(); setBulkArchiveIds(ids); }} onCreate={openCreateTask} onOpenAgentSetup={() => openSettings('agents')} onOpenLarkSetup={() => openLarkSetup('new')} onManageBots={() => setPrimaryNav('bots')}/>}
     </main>
     </div>
     {showTabBar && <MobileTabBar current={primaryNav} onNavigate={setPrimaryNav} inboxCount={inbox.data?.items.length ?? 0}/>}
     {newOpen && <NewSessionDialog open creation={taskCreation} onClose={() => setNewOpen(false)} onOpenAgentSetup={() => { setNewOpen(false); openSettings('agents'); }} agents={agents.data ?? []} capabilities={systemCapabilities.data}/>}
-    {overlay?.kind === 'lark-setup' && <Suspense fallback={overlayFallback('正在打开 Bot 绑定向导…')}><LarkConfigModal key={overlay.target === 'new' ? 'new' : overlay.target?.appId ?? 'manage'} target={overlay.target} field={overlay.field} onLeaveGuardChange={registerSettingsLeaveGuard} agents={agents.data ?? []} onClose={() => { closeOverlay(); void qc.invalidateQueries({ queryKey: ['lark-config'] }); }}/></Suspense>}
-    {overlay?.kind === 'settings' && <Suspense fallback={overlayFallback('正在打开设置与接入…')}><ControlCenterModal open onLeaveGuardChange={registerSettingsLeaveGuard} initialSection={overlay.section} field={overlay.field} agents={agents.data ?? []} legacyBots={larkConfig.data?.bots ?? []} larkListeningDisabled={larkConfig.data?.listeningDisabled ?? false} larkBotsLoading={larkConfig.isLoading} larkBotsFailed={larkConfig.isError} larkBotsRetrying={larkConfig.isFetching} onRetryLarkBots={() => void larkConfig.refetch()} authRequired={authStatus.data?.required} onClose={closeOverlay} onCreateTask={agentId => { closeOverlay(); openCreateTaskForAgent(agentId); }} onOpenLarkSetup={openLarkSetup} onOpenGroups={() => openOverlay({ kind: 'groups' })} onOpenSchedules={() => openOverlay({ kind: 'automation' })}/></Suspense>}
-    {overlay?.kind === 'groups' && <Suspense fallback={overlayFallback('正在打开群配置…')}><GroupPolicyModal open onClose={closeOverlay}/></Suspense>}
-    {overlay?.kind === 'automation' && <Dialog open onClose={closeOverlay} label="任务自动化" size="lg">
-      <Dialog.Header><h2 className="text-title font-semibold">任务自动化</h2><span className="ml-auto"><IconButton label="关闭自动化" onClick={closeOverlay}><X size={16}/></IconButton></span></Dialog.Header>
-      <Dialog.Body><LazyBoundary fallback={<Spinner label="正在读取任务自动化…"/>}><AutomationOverview agents={agents.data ?? []} capabilities={systemCapabilities.data} onOpenAgentSetup={() => openSettings('agents')} sessions={visibleSessions} summaries={runSummaries} onSelectSession={id => { applySessionSelection(id); navigate({ route: { kind: 'session', sessionId: id }, nav: 'tasks', appId: selectedAppId, chatId: selectedChatId }, { replace: true }); }}/></LazyBoundary></Dialog.Body>
-    </Dialog>}
-    {overlay?.kind === 'usage' && <Dialog open onClose={closeOverlay} label="用量与成本" size="lg">
-      <Dialog.Header><h2 className="text-title font-semibold">用量与成本</h2><span className="ml-auto"><IconButton label="关闭用量与成本" onClick={closeOverlay}><X size={16}/></IconButton></span></Dialog.Header>
-      <Dialog.Body><LazyBoundary fallback={<Spinner label="正在读取用量…"/>}><UsageOverview
-        bots={larkConfig.data?.bots ?? []}
-        initialView={overlay.view === 'insight' ? 'insight' : 'cost'}
-        onViewChange={view => navigate({
-          route, nav: primaryNav, appId: selectedAppId, chatId: selectedChatId,
-          overlay: { kind: 'usage', ...(view === 'insight' ? { view: 'insight' as const } : {}) }
-        }, { replace: true })}
-        onOpenSession={id => {
-          applySessionSelection(id);
-          navigate({ route: { kind: 'session', sessionId: id }, nav: 'tasks', appId: selectedAppId, chatId: selectedChatId, overlay: { kind: 'insight' } });
-        }}
-        onOpenTask={id => {
-          applySessionSelection(id);
-          navigate({ route: { kind: 'session', sessionId: id }, nav: 'tasks', appId: selectedAppId, chatId: selectedChatId });
-        }}
-        onCompare={(leftSessionId, rightSessionId) => {
-          applySessionSelection(leftSessionId);
-          navigate({ route: { kind: 'session', sessionId: leftSessionId }, nav: 'tasks', appId: selectedAppId, chatId: selectedChatId, overlay: { kind: 'insight', compare: rightSessionId } });
-        }}
-      /></LazyBoundary></Dialog.Body>
-    </Dialog>}
-    {traceOpen && active && <SessionTraceView session={active} agent={activeAgent} events={completeRawEvents ?? eventList} loading={events.loadingRaw || events.isPending} error={events.rawError ?? (events.error instanceof Error ? events.error.message : undefined)} historyLoaded={Boolean(completeRawEvents)} streamStatus={streamStatus} onRetry={() => void events.loadAll()} onClose={closeOverlay}/>}
-    {overlay?.kind === 'insight' && route.kind === 'session' && <Suspense fallback={overlayFallback('正在打开会话分析…')}>
-      <SessionInsightPanel
-        sessionId={route.sessionId}
-        compareSessionId={overlay.compare ?? null}
-        onCompareSessionChange={compare => navigate({
-          route, nav: primaryNav, appId: selectedAppId, chatId: selectedChatId,
-          overlay: { kind: 'insight', ...(compare ? { compare } : {}) }
-        }, { replace: true })}
-        onClose={closeOverlay}
-      />
-    </Suspense>}
-    {workspaceGroupsOpen && <Suspense fallback={overlayFallback('正在打开整理分组…')}><WorkspaceGroupsModal open onClose={() => setWorkspaceGroupsOpen(false)} snapshot={workspaceGroups.data} loading={workspaceGroups.isLoading} error={workspaceGroups.error ?? undefined} sessions={visibleSessions} summaries={runSummaries} onRetry={() => void workspaceGroups.refetch()}/></Suspense>}
+    <OverlayHost location={navigation} agents={agents.data ?? []} larkConfig={larkConfig}
+      capabilities={systemCapabilities.data} authRequired={authStatus.data?.required}
+      visibleSessions={visibleSessions} runSummaries={runSummaries}
+      applySessionSelection={applySessionSelection} openCreateTaskForAgent={openCreateTaskForAgent}
+      trace={traceOpen && active ? { session: active, agent: activeAgent, events: completeRawEvents ?? eventList,
+        loading: events.loadingRaw || events.isPending, error: events.rawError ?? (events.error instanceof Error ? events.error.message : undefined),
+        historyLoaded: Boolean(completeRawEvents), streamStatus, onRetry: () => void events.loadAll() } : undefined}
+      workspaceGroupsOpen={workspaceGroupsOpen} closeWorkspaceGroups={() => setWorkspaceGroupsOpen(false)} workspaceGroups={workspaceGroups}/>
     <ConfirmDialog open={archiveConfirm} tone="danger" title="归档此任务？" description="归档后任务将变为只读且无法恢复，历史指令和执行记录会继续保留。" confirmLabel="确认归档" busy={archive.isPending} error={archive.error?.message} onCancel={() => { if (!archive.isPending) setArchiveConfirm(false); }} onConfirm={() => { if (active) archive.mutate(active.id); }}/>
     <ConfirmDialog open={bulkArchiveIds.length > 0} tone="danger" title={`清理所选的 ${bulkArchiveIds.length} 个任务？`} description="所选任务将归档为只读且无法恢复；正在执行的任务会停止，排队指令会取消。历史指令和执行记录会保留，可在「已归档」中查看。" confirmLabel={bulkArchive.data?.failures.length ? '重试失败项' : '确认清理'} busy={bulkArchive.isPending} error={bulkArchive.data?.failures.length ? `${bulkArchive.data.failures.length} 个任务未清理。首个错误：${bulkArchive.data.failures[0].message}` : undefined} onCancel={() => { if (!bulkArchive.isPending) setBulkArchiveIds([]); }} onConfirm={() => { if (bulkArchiveIds.length && !bulkArchive.isPending) bulkArchive.mutate(bulkArchiveIds); }}/>
     <SystemPromptModal open={systemPromptOpen} session={active} onClose={() => setSystemPromptOpen(false)}/>
