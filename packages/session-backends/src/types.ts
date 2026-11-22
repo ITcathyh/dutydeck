@@ -87,8 +87,8 @@ export interface PersistentSessionBackend extends SessionBackend {
   verifyAdoption(snapshot: unknown, idle: () => boolean, probe?: ProcessProbe, pid?: number): Promise<void>;
   captureIdentity(probe?: ProcessProbe): Promise<unknown>;
   captureAbsence(probe?: ProcessProbe): Promise<unknown>;
-  stopOwned(snapshot: unknown, probe?: ProcessProbe, beforeKill?: (snapshot: unknown) => Promise<void>): Promise<unknown>;
-  verifyExit(snapshot: unknown, probe?: ProcessProbe): Promise<boolean>;
+  stopOwned(snapshot: unknown, probe: ProcessProbe, beforeKill?: (snapshot: unknown) => Promise<void>): Promise<unknown>;
+  verifyExit(snapshot: unknown, probe: ProcessProbe): Promise<boolean>;
   getMetadata(key: TerminalMetadataKey): Promise<string | undefined>;
   setMetadata(key: TerminalMetadataKey, value: string): Promise<void>;
   reattach(size: { cols: number; rows: number }): Promise<void>;

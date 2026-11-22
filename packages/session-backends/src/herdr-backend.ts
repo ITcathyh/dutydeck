@@ -57,7 +57,7 @@ export class HerdrBackend implements PersistentSessionBackend {
   async prepareReplacement() { await this.stopOwnedIdentity(); }
   exitedAfterDisconnect() { return this.isStopped(); }
   async stopAttached() {
-    try { await this.stopOwnedIdentity(); } catch { /* A subsequent exit check must prove the stop. */ }
+    try { await this.stopOwned(this.state); } catch { /* A subsequent exit check must prove the stop. */ }
   }
   attachedExitVerified() { return this.isStopped(); }
   adoptionIdentity() { return this.captureOwnedIdentity(); }
@@ -788,7 +788,7 @@ export class HerdrBackend implements PersistentSessionBackend {
       && this.options.processProbe.observe(state.server) === 'alive') (await this.cli(['session', 'stop', this.sessionName, '--json']));
   }
   async isStopped(): Promise<boolean> {
-    return !!this.state && (await this.verifyOwnedIdentity(this.state))
+    return !!this.state && (await this.verifyExit(this.state))
       && this.captures.every(identity => this.options.processProbe.observe(identity) === 'dead');
   }
 }
