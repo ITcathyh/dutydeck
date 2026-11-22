@@ -112,6 +112,10 @@ export async function sendTaskCard(
   return await service.send({ chatId: event.chatId, ...executionInput });
 }
 
+interface WorkflowDependencies {
+  cards: Pick<CoordinatorParts['cards'], 'submitConfirmation' | 'submitPlanDecision'>;
+}
+
 export class LarkCoordinatorCore {
   readonly workflows: LarkWorkflowInteractions;
   readonly inbox: LarkTaskInbox;
@@ -120,7 +124,7 @@ export class LarkCoordinatorCore {
   /** 会话记忆：与 inbox / workflows 共用 workflowStore，缺存储时三条记忆命令收敛为 unavailable，也不注入。 */
   readonly memory?: LarkMemoryStore;
 
-  constructor(private readonly state: CoordinatorState, private readonly parts: Pick<CoordinatorParts, 'cards'>) {
+  constructor(private readonly state: CoordinatorState, private readonly parts: WorkflowDependencies) {
     const { workflowOptions, runtime, service } = this.state;
     this.memory = workflowOptions.memory?.store;
     this.inbox = new LarkTaskInbox(workflowOptions.store);

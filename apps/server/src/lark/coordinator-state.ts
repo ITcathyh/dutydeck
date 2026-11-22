@@ -32,6 +32,12 @@ export class CoordinatorState {
   /** 本进程的转交世代：认领上的 boot 不是它，说明那次转交随上一个进程中断了。 */
   readonly relaunchBoot = randomUUID();
 
+  groupFor(key: string): LarkGroup {
+    const group = this.groups.get(key) ?? { tail: Promise.resolve() };
+    this.groups.set(key, group);
+    return group;
+  }
+
   constructor(
     readonly runtime: LarkRuntime,
     readonly service: LarkCardService,

@@ -728,7 +728,7 @@ describe('handoff of persisted legacy Lark source IDs', () => {
     const persisted = await h.repos.sessions.get(session.id);
     expect(persisted?.sourceId).toBe(sourceId);
     const tasks = await h.runtime.getTasks(session.id);
-    const text = await h.coordinator.parts.intake.newSessionHandoff(h.config, { ...message('handoff', ''), chatId, chatType }, session.id, tasks, 'legacy note');
+    const text = await h.coordinator.parts.routing.newSessionHandoff(h.config, { ...message('handoff', ''), chatId, chatType }, session.id, tasks, 'legacy note');
     expect(text).toContain(`来源 session=${session.id}`);
     expect(text).toContain(`来源 task=${tasks[0]!.id} attempt=${tasks[0]!.currentAttemptId}`);
     expect(text).toContain('原目标：legacy goal');

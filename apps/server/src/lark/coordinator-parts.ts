@@ -4,6 +4,7 @@ import { LarkCoordinatorCards } from './coordinator-cards.js';
 import { LarkCoordinatorRecovery } from './coordinator-recovery.js';
 import { LarkCoordinatorDispatch } from './coordinator-dispatch.js';
 import { LarkCoordinatorInbound } from './coordinator-inbound.js';
+import { LarkSessionRouting } from './coordinator-routing.js';
 
 export interface CoordinatorParts {
   state: CoordinatorState;
@@ -12,22 +13,44 @@ export interface CoordinatorParts {
   reconcile: LarkCoordinatorRecovery;
   runner: LarkCoordinatorDispatch;
   intake: LarkCoordinatorInbound;
+  routing: LarkSessionRouting;
 }
 
 export function createCoordinatorParts(...args: ConstructorParameters<typeof CoordinatorState>): CoordinatorParts {
   const state = new CoordinatorState(...args);
-  // 恢复会重新派发，派发也会唤醒对账。回调在使用时取同一实例的部件。
-  const parts: CoordinatorParts = {
-    state,
-    get core() { return core; },
+  // 恢复与派发会相互唤醒；构造时只延迟引用尚未创建的部件。
+  const core: LarkCoordinatorCore = new LarkCoordinatorCore(state, {
     get cards() { return cards; },
-    get reconcile() { return reconcile; },
-    get runner() { return intake; },
+  });
+  const cards: LarkCoordinatorCards = new LarkCoordinatorCards(state, {
+    core,
     get intake() { return intake; },
-  };
-  const core = new LarkCoordinatorCore(state, parts);
-  const cards = new LarkCoordinatorCards(state, parts);
-  const reconcile = new LarkCoordinatorRecovery(state, parts);
-  const intake = new LarkCoordinatorInbound(state, parts);
-  return parts;
+  });
+  const reconcile: LarkCoordinatorRecovery = new LarkCoordinatorRecovery(state, {
+    core,
+    cards,
+    get runner() { return runner; },
+    get routing() { return routing; },
+    get intake() { return intake; },
+  });
+  const runner: LarkCoordinatorDispatch = new LarkCoordinatorDispatch(state, {
+    core,
+    cards,
+    reconcile,
+    get routing() { return routing; },
+    get intake() { return intake; },
+  });
+  const routing: LarkSessionRouting = new LarkSessionRouting(state, {
+    core,
+    reconcile,
+    runner,
+  });
+  const intake: LarkCoordinatorInbound = new LarkCoordinatorInbound(state, {
+    core,
+    cards,
+    reconcile,
+    runner,
+    routing,
+  });
+  return { state, core, cards, reconcile, runner, routing, intake };
 }

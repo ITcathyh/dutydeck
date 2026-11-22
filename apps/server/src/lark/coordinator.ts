@@ -1,4 +1,6 @@
-import type { LarkInboxRecord } from './task-inbox.js';
+import type { ButtonResult, ButtonSource } from './handlers/button-context.js';
+import type { LarkAgentCommandRequest, LarkAgentViewRequest, LarkAgentSettingsRequest } from './agent-command.js';
+import type { LarkInboxRecord, LarkInboxAdoption } from './task-inbox.js';
 import type { LarkLaunchOptions } from './new-session.js';
 import type { AgentEvent, Session, TaskRecord } from '@dutydeck/shared';
 import type { StoredLarkConfig } from './config.js';
@@ -139,79 +141,79 @@ export class LarkMessageCoordinator {
     this.components = createCoordinatorParts(...args);
   }
 
-  repairClosedCards(...args: Parameters<typeof this.components.core.repairClosedCards>) {
-    return this.components.core.repairClosedCards(...args);
+  repairClosedCards(appId: string) {
+    return this.components.core.repairClosedCards(appId);
   }
 
-  endDurableConfirmations(...args: Parameters<typeof this.components.core.endDurableConfirmations>) {
-    return this.components.core.endDurableConfirmations(...args);
+  endDurableConfirmations(appId: string) {
+    return this.components.core.endDurableConfirmations(appId);
   }
 
-  stop(...args: Parameters<typeof this.components.core.stop>) {
-    return this.components.core.stop(...args);
+  stop() {
+    return this.components.core.stop();
   }
 
-  reconcile(...args: Parameters<typeof this.components.reconcile.reconcile>) {
-    return this.components.reconcile.reconcile(...args);
+  reconcile(config: StoredLarkConfig) {
+    return this.components.reconcile.reconcile(config);
   }
 
-  startReconciliation(...args: Parameters<typeof this.components.reconcile.startReconciliation>) {
-    return this.components.reconcile.startReconciliation(...args);
+  startReconciliation(config: StoredLarkConfig, intervalMs = 5_000) {
+    return this.components.reconcile.startReconciliation(config, intervalMs);
   }
 
-  initializeWorkflows(...args: Parameters<typeof this.components.intake.initializeWorkflows>) {
-    return this.components.intake.initializeWorkflows(...args);
+  initializeWorkflows(config: StoredLarkConfig) {
+    return this.components.intake.initializeWorkflows(config);
   }
 
-  pollLarkTaskDispatches(...args: Parameters<typeof this.components.intake.pollLarkTaskDispatches>) {
-    return this.components.intake.pollLarkTaskDispatches(...args);
+  pollLarkTaskDispatches(config: StoredLarkConfig): Promise<number> {
+    return this.components.intake.pollLarkTaskDispatches(config);
   }
 
-  handleTaskAssigneesUpdate(...args: Parameters<typeof this.components.intake.handleTaskAssigneesUpdate>) {
-    return this.components.intake.handleTaskAssigneesUpdate(...args);
+  handleTaskAssigneesUpdate(config: StoredLarkConfig): void {
+    return this.components.intake.handleTaskAssigneesUpdate(config);
   }
 
-  canConfirmParticipation(...args: Parameters<typeof this.components.intake.canConfirmParticipation>) {
-    return this.components.intake.canConfirmParticipation(...args);
+  canConfirmParticipation(scope: { appId: string; chatId: string }, actor: string): Promise<boolean> {
+    return this.components.intake.canConfirmParticipation(scope, actor);
   }
 
-  trustsBotSender(...args: Parameters<typeof this.components.intake.trustsBotSender>) {
-    return this.components.intake.trustsBotSender(...args);
+  trustsBotSender(config: StoredLarkConfig, chatId: string, senderOpenId: string): Promise<boolean> {
+    return this.components.intake.trustsBotSender(config, chatId, senderOpenId);
   }
 
-  adopt(...args: Parameters<typeof this.components.intake.adopt>) {
-    return this.components.intake.adopt(...args);
+  adopt(event: LarkMessageEvent, config: StoredLarkConfig) {
+    return this.components.intake.adopt(event, config);
   }
 
-  receive(...args: Parameters<typeof this.components.intake.receive>) {
-    return this.components.intake.receive(...args);
+  receive(event: LarkMessageEvent, config: StoredLarkConfig, trustedReplyMessageId?: string) {
+    return this.components.intake.receive(event, config, trustedReplyMessageId);
   }
 
-  handleEdited(...args: Parameters<typeof this.components.intake.handleEdited>) {
-    return this.components.intake.handleEdited(...args);
+  handleEdited(event: LarkMessageEvent, config: StoredLarkConfig) {
+    return this.components.intake.handleEdited(event, config);
   }
 
-  handleReaction(...args: Parameters<typeof this.components.intake.handleReaction>) {
-    return this.components.intake.handleReaction(...args);
+  handleReaction(messageId: string, emoji: string, actor: string, config: StoredLarkConfig) {
+    return this.components.intake.handleReaction(messageId, emoji, actor, config);
   }
 
-  handle(...args: Parameters<typeof this.components.intake.handle>) {
-    return this.components.intake.handle(...args);
+  handle(event: LarkMessageEvent, config: StoredLarkConfig, recovering = false, adopted = false, retrying?: LarkTask, captured?: LarkInboxRecord, adoption?: LarkInboxAdoption) {
+    return this.components.intake.handle(event, config, recovering, adopted, retrying, captured, adoption);
   }
 
-  agentCommand(...args: Parameters<typeof this.components.intake.agentCommand>) {
-    return this.components.intake.agentCommand(...args);
+  agentCommand(request: LarkAgentCommandRequest): Promise<Record<string, unknown>> {
+    return this.components.intake.agentCommand(request);
   }
 
-  agentView(...args: Parameters<typeof this.components.intake.agentView>) {
-    return this.components.intake.agentView(...args);
+  agentView(request: LarkAgentViewRequest): Promise<Record<string, unknown>> {
+    return this.components.intake.agentView(request);
   }
 
-  agentSettings(...args: Parameters<typeof this.components.intake.agentSettings>) {
-    return this.components.intake.agentSettings(...args);
+  agentSettings(request: LarkAgentSettingsRequest): Promise<Record<string, unknown>> {
+    return this.components.intake.agentSettings(request);
   }
 
-  handleAction(...args: Parameters<typeof this.components.intake.handleAction>) {
-    return this.components.intake.handleAction(...args);
+  handleAction(value: unknown, operatorOpenId?: string, context?: ButtonSource): Promise<ButtonResult> {
+    return this.components.intake.handleAction(value, operatorOpenId, context);
   }
 }

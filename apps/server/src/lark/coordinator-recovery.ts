@@ -55,8 +55,21 @@ const larkRecoveryOwner = { kind: 'installation_owner', id: 'installation_owner'
  */
 const larkReconcileMaxIntervalMs = 60_000;
 
+interface ReconcileDependencies {
+  cards: Pick<CoordinatorParts['cards'],
+    | 'capabilitiesForTask' | 'mutatePendingVerifications' | 'refreshResultFeedback' | 'refreshResultVerification'
+    | 'restoredCardTask' | 'resultActionCapabilities' | 'verificationView'>;
+  core: Pick<CoordinatorParts['core'],
+    | 'applyReminderSettings' | 'authorizeFinalRelay' | 'currentAccess' | 'foreignActionConfirmed' | 'inbox'
+    | 'isDeferredTask' | 'isInterruptOperatorAllowed' | 'isOperatorAllowed' | 'pins' | 'requesterOnlyReason'
+    | 'requireExecution' | 'resolveSessionAgentName' | 'workflows'>;
+  intake: Pick<CoordinatorParts['intake'], 'handle' | 'recoverAcceptedCards' | 'scheduleTaskAgentPoll'>;
+  routing: Pick<CoordinatorParts['routing'], 'sessionFor'>;
+  runner: Pick<CoordinatorParts['runner'], 'runTurn'>;
+}
+
 export class LarkCoordinatorRecovery {
-  constructor(private readonly state: CoordinatorState, private readonly parts: Pick<CoordinatorParts, 'cards' | 'core' | 'intake' | 'runner'>) {
+  constructor(private readonly state: CoordinatorState, private readonly parts: ReconcileDependencies) {
     this.decisions = new TurnRecoveryDecisions(state.workflowOptions.store, state.cardMappings, state.log);
   }
 
@@ -432,8 +445,7 @@ export class LarkCoordinatorRecovery {
     const scopeId = saved.scope_id!;
     const chatType = saved.chat_type ?? 'group';
     const groupKey = larkGroupKey(event, scopeId, claim.appId);
-    const group = this.state.groups.get(groupKey) ?? { tail: Promise.resolve() };
-    this.state.groups.set(groupKey, group);
+    const group = this.state.groupFor(groupKey);
     group.tail = group.tail.then(async () => {
       const retired = (group.retiredSessionIds ??= new Set());
       const previous = this.state.tasks.get(claim.taskId);
@@ -463,7 +475,7 @@ export class LarkCoordinatorRecovery {
         for (const id of retiring) retired.add(id);
         if (group.sessionId && retired.has(group.sessionId)) { group.sessionId = undefined; group.sessionConfigKey = undefined; }
         const bound = group.sessionId;
-        session = resumed ? await this.state.runtime.getSession(claim.sessionId) : await this.parts.runner.sessionFor(group, effective, saved.chat_id, chatType, scopeId);
+        session = resumed ? await this.state.runtime.getSession(claim.sessionId) : await this.parts.routing.sessionFor(group, effective, saved.chat_id, chatType, scopeId);
         if (!session) throw new Error('原会话已不存在。');
         await this.state.runtime.trackMatterSession?.(session.id, { sourceSessionId: claim.sessionId, relation: 'retry', title: saved.prompt });
         if (!resumed && session.id !== bound && !persisted.some(item => item.id === session!.id)) created = session;

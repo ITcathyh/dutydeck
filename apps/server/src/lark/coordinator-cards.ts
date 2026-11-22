@@ -56,8 +56,16 @@ type LarkResultActionTarget = {
   task: LarkTask; operator: string; scopeId: string; resultMessageId: string;
 };
 
+interface CardDependencies {
+  core: Pick<CoordinatorParts['core'],
+    | 'authorizeInteraction' | 'confirmationAvailable' | 'inbox' | 'interactionContext' | 'isOperatorAllowed'
+    | 'isStaticOperatorAllowed' | 'pins' | 'requireExecution' | 'resolveSessionAgentName' | 'taskTitle'
+    | 'workflowObserveOptions' | 'workflows'>;
+  intake: Pick<CoordinatorParts['intake'], 'handle'>;
+}
+
 export class LarkCoordinatorCards {
-  constructor(private readonly state: CoordinatorState, private readonly parts: Pick<CoordinatorParts, 'core' | 'intake'>) {}
+  constructor(private readonly state: CoordinatorState, private readonly parts: CardDependencies) {}
 
   async observeLiveWaiters(task: LarkTask) {
     const context = this.parts.core.interactionContext(task);

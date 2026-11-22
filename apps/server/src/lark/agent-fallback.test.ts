@@ -145,7 +145,7 @@ it.each(['queued', 'running', 'new-turn', 'cancelled'] as const)('rechecks %s ar
   let entered!: () => void, release!: () => void;
   const reading = new Promise<void>(resolve => { entered = resolve; });
   const gate = new Promise<void>(resolve => { release = resolve; });
-  vi.spyOn(coordinator.parts.intake, 'newSessionHandoff').mockImplementation(async () => { entered(); await gate; return 'handoff'; });
+  vi.spyOn(coordinator.parts.routing, 'newSessionHandoff').mockImplementation(async () => { entered(); await gate; return 'handoff'; });
   const recovering = coordinator.parts.runner.recoverFallbackSession(task, primary, 'rate limit', false);
   await reading;
   if (change === 'new-turn') task.turn++;
