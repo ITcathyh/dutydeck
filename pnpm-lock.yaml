@@ -102,9 +102,15 @@ importers:
         specifier: 3.25.67
         version: 3.25.67
     devDependencies:
+      '@dutydeck/acp-client':
+        specifier: workspace:*
+        version: link:../../packages/acp-client
       '@dutydeck/cli-adapters':
         specifier: workspace:*
         version: link:../../packages/cli-adapters
+      '@dutydeck/config':
+        specifier: workspace:*
+        version: link:../../packages/config
       '@dutydeck/legacy-importer':
         specifier: workspace:*
         version: link:../../packages/legacy-importer
@@ -114,12 +120,21 @@ importers:
       '@dutydeck/relay':
         specifier: workspace:*
         version: link:../../packages/relay
+      '@dutydeck/runtime':
+        specifier: workspace:*
+        version: link:../../packages/agent-runtime
       '@dutydeck/secret-provider':
         specifier: workspace:*
         version: link:../../packages/secret-provider
       '@dutydeck/session-backends':
         specifier: workspace:*
         version: link:../../packages/session-backends
+      '@dutydeck/shared':
+        specifier: workspace:*
+        version: link:../../packages/shared
+      '@dutydeck/storage':
+        specifier: workspace:*
+        version: link:../../packages/storage
       '@dutydeck/transports':
         specifier: workspace:*
         version: link:../../packages/transports

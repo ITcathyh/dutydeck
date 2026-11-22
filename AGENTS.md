@@ -18,7 +18,7 @@
 
 - 主检出是部署源，不在里面切分支。多轮功能或修复用独立 worktree：`git worktree add ../dutydeck-<主题>-<日期> -b <type>/<主题>-<日期>`；不要把主检出的 `.env` 复制进去。其他 worktree 可能属于并行中的 Agent，不改动、不清理。
 - 合入：在 worktree 提交后先 `git merge master` 带上最新主线并重跑验证。解决冲突时对照双方原改动逐处核对，git 自动合并的相邻代码也要看，合并丢逻辑在本仓库发生过。再到主检出（保持在 `master`）执行 `git merge <分支>`；要推送时 `git push origin master`。pre-push 钩子拒绝基于已改写旧历史的提交时，按它提示的 `rebase --onto` 迁移，不用 `--no-verify`。合入后删除自己的 worktree 和分支。
-- Node 要满足根 `package.json` 的 `engines`，pnpm 用 `packageManager` 指定版本。新 worktree 执行 `pnpm install --frozen-lockfile`，再 `pnpm build:packages`；共享包的类型声明与普通运行入口依赖 `dist`，根 Vitest 则通过 alias 读取源码。所以改了某个包的导出后要重跑 `pnpm build:packages`，否则依赖方的 typecheck 读的还是旧声明。
+- Node 要满足根 `package.json` 的 `engines`，pnpm 用 `packageManager` 指定版本。新 worktree 执行 `pnpm install --frozen-lockfile`，再 `pnpm build:packages`。
 - 本机仓库根 `.env` 指向线上 runtime，CLI 会读取实际 shell cwd 的 `.env`。`--cwd` 只改 Agent 默认目录；只覆盖数据库和端口仍不能隔离 daemon 管理命令，它们可能通过 `~/.dutydeck/last-daemon-dir` 找到已有实例。
 - 手动调试用临时数据目录、空闲端口和前台根命令。以下从检出根执行，`14310` 先确认空闲；退出用该前台进程的 Ctrl-C，不用无目标的 `dutydeck stop/restart`：
 
@@ -41,12 +41,12 @@ pnpm exec tsx apps/server/src/cli.ts --local-only --port 14310 --no-lark-listen
 - **子进程环境**：复用 `packages/shared/runtime/child-environment.mjs` 清洗继承环境，再合并显式 Agent 配置与当前会话凭证；不要修改 daemon 的全局 `process.env` 来切账号或会话。改动同时检查 ACP、PTY 和恢复路径的 `child-environment.test.ts`。
 - **任务与恢复**：沿用执行账本和原生回执区分未提交、执行中与结果未知。超时、断线或重启不能当作“没有执行”自动重发；改生命周期时覆盖停止、迟到回执和恢复后的轮次归属，不能仅凭终端出现文本判完成。入口在 `packages/agent-runtime/`，跨层回归在 `tests/`。
 - **数据库升级**：结构变化同步 `packages/storage/src/schema.ts` 与 `migrations.ts`，追加迁移版本；测试已有数据升级、重复打开和外键完整性。只新增旧程序不使用的表或索引时，迁移可声明上一步的 `compatibleReaderVersion`，让部署失败时能自动切回支持该机制的旧代码；其余迁移仍是单向门。切回代码保留当前数据库。根 Vitest 设置了 `DUTYDECK_TEST_NO_SYNC`（关闭 SQLite 刷盘）和 `DUTYDECK_TEST_FRESH_SCHEMA_TEMPLATE`，后者让空库直接复制本进程首次真实迁移得到的结构；要观察迁移在空库上逐个执行的用例，先在用例里删掉这个变量。
-- **打包入口**：新增共享包、子路径导出或运行时资源时，核对包 `exports/files` 和资源复制。入口只在各包 `package.json` 的 `exports` 里声明，alias 和打包映射由 `scripts/workspace-entries.mjs` 生成；源码测试通过不能证明发布产物可运行。进入打包映射的模块（含 `packages/shared/runtime/*.mjs`）不写顶层 `await`：它会让导入方变成异步初始化，落在循环导入里时 esbuild 生成非法代码，打包后的 CLI 无法启动；只复制、不被导入的启动脚本（如 `packages/acp-client/agents/*.mjs`）不受此限。
+- **打包入口**：新增共享包、子路径导出或运行时资源时，核对包 `exports/files` 和资源复制。入口只在各包 `package.json` 的 `exports` 里声明；源码测试通过不能证明发布产物可运行。进入打包映射的模块（含 `packages/shared/runtime/*.mjs`）不写顶层 `await`：它会让导入方变成异步初始化，落在循环导入里时 esbuild 生成非法代码，打包后的 CLI 无法启动；只复制、不被导入的启动脚本（如 `packages/acp-client/agents/*.mjs`）不受此限。
 - 用户可见的行为、命令或配置变化，同一个改动里更新 `docs/zh/` 与 `docs/en/` 下同名的主题文档（`getting-started`、`cli`、`agents`、`lark`、`plugins`、`web-console`、`features`、`troubleshooting`、`upgrading`）；`README.md` / `README.en.md` 只放概览，功能卖点、上手步骤或支持的 Agent 变化时同步两份 README。`CLAUDE.md` 只引用本文件，项目执行规则集中维护在这里。
 
 ## 验证
 
-代码改动均须通过 `pnpm typecheck` 和受影响测试的 `pnpm exec vitest run <测试路径>`。从仓库根运行，Node 与 Web/jsdom 由根配置分流；需要限定时用 `--project=node` 或 `--project=web`。node project 由 `tests/setup/node-env.ts` 在每个测试文件前清掉服务实例变量（`child-environment.mjs` 的 `inheritedServiceKeys`、`DUTYDECK_DATABASE_URL`、`DUTYDECK_SUPERVISOR`、`DUTYDECK_SYSTEMD_UNIT` 和 `DUTYDECK_DAEMON_RESTART_*`），需要这些变量的用例要显式设置。`pnpm typecheck` 在输入与上次构建相同时只查 server（包和 Web 已在构建时检查过），否则全查；它不检查 `*.test.ts`（tsconfig 已排除），Vitest 运行时也不做类型检查，测试代码里的类型错误两边都发现不了。全量测试并行执行、机器负载高，涉及时间的断言要留足余量或改用假时钟，不能只调到在本机刚好通过。未设置 `CI` 时根 `vitest.config.ts` 把 worker 数限制为可用核数的四分之一（至少 1、至多 16），需要别的并发时在命令行加 `--maxWorkers`；web project 另用最多 3 个线程与 node 同时跑。测试要反复起 TypeScript 入口的子进程（CLI、fixture）时，用 `tests/support/bundle-for-test.ts` 先打包一次再用 `node` 启动，不要每次 `--import tsx`：后者每次冷启动要 1～3 秒，负载高时是超时的主要来源。跑真实 ACPX 轮次的测试文件导入 `tests/support/short-acpx-reply-drain.ts`，否则每轮多等 1 秒。测试里的本地 HTTP 桩按目标路径过滤后再计数或断言，并行测试会复用刚释放的端口打进无关请求；请求体解析失败时断开该连接并返回，不抛成未处理 rejection。把失败归为既有问题要有依据：在 master 的 detached worktree 复跑同一测试，或对照更早的全量日志。
+代码改动均须通过 `pnpm typecheck` 和受影响测试的 `pnpm exec vitest run <测试路径>`。从仓库根运行，Node 与 Web/jsdom 由根配置分流；需要限定时用 `--project=node` 或 `--project=web`。node project 由 `tests/setup/node-env.ts` 在每个测试文件前清掉服务实例变量（`child-environment.mjs` 的 `inheritedServiceKeys`、`DUTYDECK_DATABASE_URL`、`DUTYDECK_SUPERVISOR`、`DUTYDECK_SYSTEMD_UNIT` 和 `DUTYDECK_DAEMON_RESTART_*`），需要这些变量的用例要显式设置。`pnpm typecheck` 按项目引用顺序更新包的声明，并增量检查包、server 和 Web。包与 server 排除 `*.test.ts`，Web 只排除 `src/api/route-contract.test.ts`；Vitest 运行时不做类型检查。全量测试并行执行、机器负载高，涉及时间的断言要留足余量或改用假时钟，不能只调到在本机刚好通过。未设置 `CI` 时根 `vitest.config.ts` 把 worker 数限制为可用核数的四分之一（至少 1、至多 16），需要别的并发时在命令行加 `--maxWorkers`；web project 另用最多 3 个线程与 node 同时跑。测试要反复起 TypeScript 入口的子进程（CLI、fixture）时，用 `tests/support/bundle-for-test.ts` 先打包一次再用 `node` 启动，不要每次 `--import tsx`：后者每次冷启动要 1～3 秒，负载高时是超时的主要来源。跑真实 ACPX 轮次的测试文件导入 `tests/support/short-acpx-reply-drain.ts`，否则每轮多等 1 秒。测试里的本地 HTTP 桩按目标路径过滤后再计数或断言，并行测试会复用刚释放的端口打进无关请求；请求体解析失败时断开该连接并返回，不抛成未处理 rejection。把失败归为既有问题要有依据：在 master 的 detached worktree 复跑同一测试，或对照更早的全量日志。
 
 | 额外影响范围 | 追加检查 |
 |---|---|
@@ -55,7 +55,7 @@ pnpm exec tsx apps/server/src/cli.ts --local-only --port 14310 --no-lark-listen
 | 飞书卡片、机器人接入与设置 | 对应 `apps/server/src/lark/` 测试，加 `pnpm e2e:full`（core + 合成飞书 extended）；普通 smoke 不覆盖飞书投递与回调 |
 | 发布、launcher 或插件 SDK/资源 | `pnpm verify:package`（全部打包/安装验证，确认脱离源码目录后仍能使用）；新增打包验证脚本要挂进 `verify:package:run` |
 
-`pnpm e2e`、`pnpm e2e:full`、`pnpm verify:package` 先跑 `pnpm build:if-changed`：构建输入（`apps/`、`packages/`、锁文件等，不含测试文件）与上次构建相同就复用，否则重新构建；`pnpm build` 总是重建。要一次跑完所有检查用 `pnpm verify:all`（按需构建、全量测试、`e2e:full`、`verify:package`），不必再单独跑 smoke。E2E 按文件并行，默认 worker 数为 CPU 数的一半、最多 4 个，`DUTYDECK_E2E_WORKERS` 可覆盖；用例必须自带服务、数据库、HOME、tmux socket 和端口。
+`pnpm e2e`、`pnpm e2e:full`、`pnpm verify:package` 先跑 `pnpm build:if-changed`：构建输入（`apps/`、`packages/`、锁文件等，不含测试文件）与上次构建相同就复用，否则重新构建；`pnpm build` 每次都运行构建流程，其中包编译可复用增量缓存。要一次跑完所有检查用 `pnpm verify:all`（按需构建、全量测试、`e2e:full`、`verify:package`），不必再单独跑 smoke。E2E 按文件并行，默认 worker 数为 CPU 数的一半、最多 4 个，`DUTYDECK_E2E_WORKERS` 可覆盖；用例必须自带服务、数据库、HOME、tmux socket 和端口。
 
 E2E 需要 `git`、`tmux` 和 Playwright Chromium；命令、场景及产物位置见 [tests/e2e/README.md](tests/e2e/README.md)。默认使用假 CLI/合成飞书，不能据此宣称真实模型、飞书发送或卡片点击已验证。纯文档改动核对命令、路径、全文一致性及 `git diff --check`，不要求跑无关产品测试。
 

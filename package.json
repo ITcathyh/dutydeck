@@ -12,7 +12,7 @@
     "dev:web": "pnpm --filter @dutydeck/web dev",
     "server": "pnpm build && pnpm --filter dutydeck start",
     "lark:echo": "node scripts/lark-card-echo-bot.mjs",
-    "build:packages": "pnpm -r --filter './packages/**' build",
+    "build:packages": "tsc -b packages/*",
     "build": "node scripts/build-workspace.mjs",
     "build:if-changed": "node scripts/build-workspace.mjs --if-changed",
     "typecheck": "node scripts/build-workspace.mjs --typecheck",

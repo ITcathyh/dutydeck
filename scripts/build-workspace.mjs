@@ -2,7 +2,7 @@
 // Builds the workspace packages, the Web UI and the server bundle, then records a fingerprint of the build inputs.
 //   node scripts/build-workspace.mjs               always build (pnpm build)
 //   node scripts/build-workspace.mjs --if-changed  skip when the inputs match the last successful build (e2e, verify:package)
-//   node scripts/build-workspace.mjs --typecheck   after a build of the same inputs, check only the esbuild-bundled server (pnpm typecheck)
+//   node scripts/build-workspace.mjs --typecheck   incrementally check the packages, server and Web UI (pnpm typecheck)
 // The fingerprint covers every non-ignored file under the build roots except test files, which no build output contains,
 // plus the Node version and install state, so any source, lockfile or patch edit rebuilds. It lives in apps/server/dist,
 // which the server build recreates.
@@ -14,7 +14,7 @@ import { fileURLToPath } from 'node:url';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const stampPath = join(root, 'apps/server/dist/.build-inputs');
-const inputs = ['apps', 'packages', 'builtin-plugins', 'patches', 'package.json', 'pnpm-lock.yaml', 'pnpm-workspace.yaml', 'tsconfig.base.json', 'THIRD_PARTY_NOTICES.md', 'scripts/build-workspace.mjs', 'scripts/workspace-entries.mjs'];
+const inputs = ['apps', 'packages', 'builtin-plugins', 'patches', 'package.json', 'pnpm-lock.yaml', 'pnpm-workspace.yaml', 'tsconfig.base.json', 'tsconfig.json', 'THIRD_PARTY_NOTICES.md', 'scripts/build-workspace.mjs', 'scripts/workspace-entries.mjs'];
 const steps = [
   ['pnpm', ['build:packages']],
   ['pnpm', ['--filter', '@dutydeck/web', 'build']],
@@ -44,13 +44,12 @@ function outputsPresent() {
   return [...packages, 'apps/web/dist/index.html', 'apps/server/dist/cli.js'].every(path => existsSync(join(root, path)));
 }
 
+if (process.argv.includes('--typecheck')) {
+  process.exit(spawnSync('pnpm', ['exec', 'tsc', '-b'], { cwd: root, stdio: 'inherit' }).status ?? 1);
+}
+
 const before = fingerprint();
 const builtFromInputs = outputsPresent() && existsSync(stampPath) && readFileSync(stampPath, 'utf8').trim() === before;
-if (process.argv.includes('--typecheck')) {
-  // tsc already checked the packages and the Web UI during that build.
-  const args = builtFromInputs ? ['--filter', 'dutydeck', 'typecheck'] : ['-r', 'typecheck'];
-  process.exit(spawnSync('pnpm', args, { cwd: root, stdio: 'inherit' }).status ?? 1);
-}
 if (process.argv.includes('--if-changed') && builtFromInputs) {
   console.log('[build] inputs unchanged since the last build; reusing it (pnpm build forces a rebuild)');
   process.exit(0);

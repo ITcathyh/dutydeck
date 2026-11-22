@@ -32,6 +32,7 @@ describe('工作区包发布清单', () => {
       ...['js', 'js.map', 'd.ts'].map(extension => `dist/${module}.${extension}`)])].filter(path => existsSync(join(root, path)));
     expect(expected.filter(path => !packed.has(path))).toEqual([]);
     expect([...packed].filter(path => path.includes('.test.'))).toEqual([]);
+    expect([...packed].filter(path => path.endsWith('.tsbuildinfo'))).toEqual([]);
   }, 60_000);
 });
 

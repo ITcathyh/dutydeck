@@ -49,6 +49,11 @@
     "yaml": "2.9.0"
   },
   "devDependencies": {
+    "@dutydeck/acp-client": "workspace:*",
+    "@dutydeck/config": "workspace:*",
+    "@dutydeck/runtime": "workspace:*",
+    "@dutydeck/shared": "workspace:*",
+    "@dutydeck/storage": "workspace:*",
     "@dutydeck/legacy-importer": "workspace:*",
     "@dutydeck/cli-adapters": "workspace:*",
     "@dutydeck/pty-driver": "workspace:*",

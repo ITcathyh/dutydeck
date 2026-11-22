@@ -20,7 +20,8 @@
   "files": [
     "src",
     "!src/**/*.test.ts",
-    "dist"
+    "dist",
+    "!dist/*.tsbuildinfo"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
