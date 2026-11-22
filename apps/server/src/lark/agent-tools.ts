@@ -1,3 +1,4 @@
+import type { ActiveTaskContext } from '@dutydeck/runtime';
 import type { ReplyPolish } from './reply-polish.js';
 import { OrdinarySendError, sendOrdinaryMessage } from './ordinary-send.js';
 import { AgentGroupToolError } from '../agent-host/turn-token.js';
@@ -599,15 +600,15 @@ export class LarkAgentToolsService {
     return this.membersFor(await this.context(token, 'group_tools.discover'));
   }
 
-  toolPromptContributor(session: Session): PromptContributor {
-    return { stage: 'capability', order: 10, sessions: 'host-enabled', contribute: () => this.toolPromptParts(session) };
+  toolPromptContributor(session: Session, turn?: { active?: ActiveTaskContext }): PromptContributor {
+    return { stage: 'capability', order: 10, sessions: 'host-enabled', contribute: () => this.toolPromptParts(session, turn) };
   }
 
   async promptForSession(session: Session, prompt: string) {
     return renderPromptParts(await composePromptParts(session, [this.toolPromptContributor(session)])) + prompt;
   }
 
-  private async toolPromptParts(session: Session) {
+  private async toolPromptParts(session: Session, turnContext?: { active?: ActiveTaskContext }) {
     const binding = larkAgentSessionBinding(session);
     if (!binding) return [];
     const base = await readLarkConfig(this.configs, binding.appId, { readOnly: true });
@@ -617,7 +618,7 @@ export class LarkAgentToolsService {
     let configAvailable = true;
     try { config = await this.options.groupManager?.resolved(base, binding.chatId, true) ?? base; }
     catch { configAvailable = false; }
-    const task = this.options.workbenchTask?.(session.id);
+    const task = turnContext ? turnContext.active : this.options.workbenchTask?.(session.id);
     const collaborationSession = parseLarkSourceId(session.sourceId).scope[0] === 'collaboration';
     const allowed = async (action: 'group_tools.read' | 'group_tools.discover' | 'group_tools.send' | 'memory') => {
       try {

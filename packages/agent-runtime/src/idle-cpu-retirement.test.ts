@@ -1,3 +1,5 @@
+import { runtimeComponents } from '../test-support/components.js';
+import { captureBoundExecution } from '../../../tests/support/bound-execution.js';
 import { afterEach, expect, it, vi } from 'vitest';
 import { createRepositories } from '@dutydeck/storage';
 import { agentConfigSchema, type AgentDriver, type DriverIdleCpuProof } from '@dutydeck/shared';
@@ -7,6 +9,7 @@ const cleanup: Array<() => Promise<void>> = [];
 afterEach(async () => { for (const close of cleanup.splice(0).reverse()) await close(); });
 async function fixture(action: 'off' | 'diagnose' | 'retire' = 'retire') {
   const repos = createRepositories(':memory:', { newDatabaseAuthority: 'ledger_v1' });
+  const bound = captureBoundExecution(repos);
   const state = { input: 0, cpu: 0, at: 0, prepared: true, idle: true, background: false, ask: false, stopped: true };
   const log = { warn: vi.fn(), info: vi.fn() };
   const drivers: AgentDriver[] = [];
@@ -28,7 +31,7 @@ async function fixture(action: 'off' | 'diagnose' | 'retire' = 'retire') {
   await runtime.send(session.id, 'first');
   const start = Date.now() + 11 * 60_000;
   async function sample(index: number) { state.cpu = index * 120_000; state.at = start + index * 120_000; await runtime.cleanupIdleDrivers(start + index * 120_000); }
-  return { runtime, repos, state, log, drivers, session, sample };
+  return { runtime, repos, bound, state, log, drivers, session, sample };
 }
 it.each(['off', 'diagnose', 'retire'] as const)('supports %s independently of the six-hour timer', async action => {
   const h = await fixture(action);
@@ -60,12 +63,12 @@ it.each(['background', 'ask', 'notIdle', 'unprepared', 'unknownDriver', 'queue',
   if (block === 'queue') await enqueue('queued');
   if (block === 'running') {
     await enqueue('running');
-    const claimed = (h.runtime as any).bound().claimNext({ sessionId: h.session.id, runId: h.session.runId });
-    expect(claimed?.task.status).toBe('running');
+    const claimed = h.bound().claimNext({ sessionId: h.session.id, runId: h.session.runId });
+    expect(claimed?.task?.status).toBe('running');
   }
   if (block === 'unknown') vi.spyOn(h.repos.execution, 'getUnresolvedTasks').mockReturnValue([{ id: 'unknown', status: 'reconcile_required' }]);
   if (block === 'unresolvedAttempt') vi.spyOn(h.repos.execution, 'getUnresolvedTasks').mockReturnValue([{ id: 'terminal', status: 'cancelled' }]);
-  if (block === 'permission') vi.spyOn(h.runtime as any, 'permissionsForSession').mockReturnValue([{}]);
+  if (block === 'permission') vi.spyOn(runtimeComponents(h.runtime).humanWaits, 'pendingPermissionCount').mockReturnValue(1);
   if (block === 'sessionQueue') {
     const read = h.repos.sessions.get.bind(h.repos.sessions);
     let enqueued = false;

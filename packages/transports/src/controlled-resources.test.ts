@@ -1,3 +1,4 @@
+import { captureBoundExecution } from '../../../tests/support/bound-execution.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { mkdtemp, readFile, rm, writeFile, symlink, chmod, mkdir } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
@@ -412,7 +413,7 @@ describe('controlled resources and fixed submission protocol', () => {
     const first = await h.runtime.send(h.session.id, 'first-turn');
     expect(first.status).toBe('completed');
 
-    const driver = (h.runtime as any).drivers.get(h.session.id);
+    const driver = h.runtime.getDriver(h.session.id);
     expect(driver).toBeDefined();
 
     // 持有原 ChildProcess 对象，不能使用裸 PID kill
@@ -442,11 +443,11 @@ describe('controlled resources and fixed submission protocol', () => {
 
   it('rejects raw string send in controlled-v1 mode to prevent bypass of frozen intent', async () => {
     const h = await setup('jsonl');
-    const driver = (h.runtime as any).drivers.get(h.session.id);
+    const driver = h.runtime.getDriver(h.session.id);
     expect(driver).toBeDefined();
 
     // 在受控模式下，直接调用 driver.send('string') 必须明确报错拒绝
-    await expect(driver.send('raw-string-bypass')).rejects.toThrow('DRIVER_SUBMISSION_REQUIRED');
+    await expect(driver!.send('raw-string-bypass')).rejects.toThrow('DRIVER_SUBMISSION_REQUIRED');
   });
 
   it('real send rejects tampering, altered refs, and another driver, but accepts original and same-scope nested once', async () => {
@@ -501,7 +502,7 @@ describe('controlled resources and fixed submission protocol', () => {
 
   it('rejects a frozen submission when target process dies after preparation, without spawning a replacement', async () => {
     const h = await setup('jsonl');
-    const driver = (h.runtime as any).drivers.get(h.session.id) as JsonlTransport;
+    const driver = h.runtime.getDriver(h.session.id) as JsonlTransport;
     const send = driver.send.bind(driver);
 
     let spawnedCount = 0;
@@ -572,6 +573,7 @@ describe('controlled resources and fixed submission protocol', () => {
     });
 
     const repos = createRepositories(join(dir, 'db'), { newDatabaseAuthority: 'ledger_v1' });
+    const bound = captureBoundExecution(repos);
     const driverFactory: DriverFactory = (ag, proto, onEvent, onExit, sessionId, context) => {
       return new JsonlTransport(ag, { onEvent, onExit, context, killGraceMs: 300 });
     };
@@ -596,7 +598,7 @@ describe('controlled resources and fixed submission protocol', () => {
 
     // 人工决策 confirm_result 释放活动槽
     const a = repos.execution.getTaskExecution(first.id)!.currentAttempt!;
-    (runtime as any).bound().settleAttempt(
+    bound().settleAttempt(
       { sessionId: session.id, runId: session.runId, taskId: first.id, attemptId: a.attemptId, expectedRevision: a.revision },
       'late-probe-manual',
       {

@@ -1,3 +1,4 @@
+import { runtimeComponents } from '../test-support/components.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createHash } from 'node:crypto';
 import { spawn, type ChildProcess } from 'node:child_process';
@@ -362,7 +363,7 @@ describe('Runtime uses the execution ledger', () => {
   it('keeps the busy code when a pending permission blocks a model or effort switch', async () => {
     const h = await fixture(); h.driver().setReasoningEffort = vi.fn(async () => {});
     // 待审批请求只在一轮执行中出现；这里直接让运行时看到一条，覆盖切换前的检查。
-    vi.spyOn(h.runtime as unknown as { permissionsForSession(id: string): unknown[] }, 'permissionsForSession').mockReturnValue([{}]);
+    vi.spyOn(runtimeComponents(h.runtime).humanWaits, 'pendingPermissionCount').mockReturnValue(1);
     await expect(h.runtime.setModel(h.session.id, 'B')).rejects.toMatchObject({ code: 'DRIVER_CONFIGURATION_BUSY' });
     await expect(h.runtime.setReasoningEffort(h.session.id, 'high')).rejects.toMatchObject({ code: 'DRIVER_CONFIGURATION_BUSY' });
     expect(h.models).toEqual([]); expect(h.driver().setReasoningEffort).not.toHaveBeenCalled();
@@ -841,10 +842,11 @@ describe('Runtime uses the execution ledger', () => {
     if(action==='abandon')expect(projection.task.status).toBe('cancelled');
   });
   it.each(['pending','unknown'] as const)('retains %s steering across runtime shutdown and a new runtime without replay',async state=>{
-    const entered=deferred(),gate=deferred();const h=await fixture({},async(emit,prompt)=>{if(prompt==='first'){entered.resolve();await gate.promise;}emit({type:'text',data:{text:prompt}});emit({type:'completed',data:{stopReason:'end_turn'}});});cleanup.push(async()=>{gate.resolve();});
+    let execution!: BoundExecutionRepository;
+    const entered=deferred(),gate=deferred();const h=await fixture({},async(emit,prompt)=>{if(prompt==='first'){entered.resolve();await gate.promise;}emit({type:'text',data:{text:prompt}});emit({type:'completed',data:{stopReason:'end_turn'}});}, bound => { execution = bound; });cleanup.push(async()=>{gate.resolve();});
     const first=await h.runtime.dispatch(h.session.id,'first');await entered.promise;const second=await h.runtime.dispatch(h.session.id,'second');
     if(state==='unknown'){h.driver().steer=async()=>{throw new Error('no acknowledgement');};await h.runtime.injectQueued(h.session.id,second.id,'installation_owner');}
-    else {const target=h.repos.execution.getTaskExecution(first.id)!.currentAttempt!;const queued=h.repos.execution.getTaskExecution(second.id)!.task;(h.runtime as any).bound().beginQueuedSteering({sessionId:h.session.id,runId:h.session.runId},second.id,queued.revision,{operationId:'pending-before-crash',actor:{kind:'installation_owner',id:'installation_owner'},target:{taskId:first.id,attemptId:target.attemptId}});}
+    else {const target=h.repos.execution.getTaskExecution(first.id)!.currentAttempt!;const queued=h.repos.execution.getTaskExecution(second.id)!.task;execution.beginQueuedSteering({sessionId:h.session.id,runId:h.session.runId},second.id,queued.revision,{operationId:'pending-before-crash',actor:{kind:'installation_owner',id:'installation_owner'},target:{taskId:first.id,attemptId:target.attemptId}});}
     gate.resolve();await vi.waitFor(()=>expect(h.repos.execution.getTaskExecution(first.id)?.task.status).toBe('completed'));await h.runtime.shutdown();
     const factory=vi.fn(()=>{throw new Error('must not create a replacement driver');});
     const next=new DutydeckRuntime(h.repos,{driverFactory:factory,driverIdleTimeoutMs:0});cleanup.push(async()=>{await next.shutdown();});await next.initialize([{...agent,cwd:h.directory}]);

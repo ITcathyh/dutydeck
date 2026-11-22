@@ -1,3 +1,4 @@
+import { configureRuntime } from '../../../tests/support/runtime-construction.js';
 import Fastify from 'fastify';
 import { afterEach, expect, it, vi } from 'vitest';
 import { randomBytes } from 'node:crypto';
@@ -8,7 +9,6 @@ import { createServer } from 'node:net';
 import { createRepositories } from '@dutydeck/storage';
 import { RelayCapabilityRegistry } from '@dutydeck/relay';
 import { agentConfigSchema, RuntimeError } from '@dutydeck/shared';
-import type { DriverFactory, RuntimeOptions } from '@dutydeck/runtime';
 import { AUTH_PASSWORD_CONFIG_KEY, getAuthToken, hashPassword, issueBrowserSession } from './auth/auth.js';
 import { startLocalServer } from './service.js';
 import { larkBotsConfigKey } from './lark/config.js';
@@ -33,11 +33,12 @@ it.each(['local', 'open', 'token'] as const)('real %s service refuses task ident
   const passwordHash = await hashPassword('isolated-test-password');
   await repos.config.set(AUTH_PASSWORD_CONFIG_KEY, passwordHash);
   await repos.config.set(larkBotsConfigKey, JSON.stringify([{ appId: scope.appId, appSecret: 'fixture-secret', workspace: root, memoryEnabled: true, memoryAutoExtract: false, defaultAgentId: 'fake' }]));
+  configureRuntime.mockImplementationOnce(options => {
+    options.launchContext!.probe = () => ({ protocol: 'acp', available: true, pause: false, resume: true });
+    options.launchContext!.driverFactory = () => ({ isIdle: () => true, hasBackgroundWork: () => false, resume: async () => {}, start: async () => {}, stop: async () => {}, isStopped: async () => true, interrupt: async () => {}, send: async () => {} });
+  });
   const service = await startLocalServer({ webRoot: root, env: { PATH: process.env.PATH, HOME: root, NODE_ENV: 'test', DUTYDECK_HOST: mode === 'local' ? '127.0.0.1' : '0.0.0.0', DUTYDECK_PORT: String(port), DUTYDECK_DEFAULT_CWD: root, DUTYDECK_DATABASE_URL: database, DUTYDECK_DAEMON_DIR: join(root, 'daemon'), DUTYDECK_AUTH: mode === 'open' ? 'false' : 'true', DUTYDECK_UNSAFE_NO_AUTH: mode === 'open' ? 'true' : undefined, DUTYDECK_DISABLE_LARK_LISTENER: 'true', DUTYDECK_AGENTS_JSON: '[]' } });
   cleanup.push(() => service.close());
-  const runtime = service.runtime as unknown as { factory: DriverFactory; options: RuntimeOptions };
-  runtime.options.probe = () => ({ protocol: 'acp', available: true, pause: false, resume: true });
-  runtime.factory = () => ({ isIdle: () => true, hasBackgroundWork: () => false, start: async () => {}, stop: async () => {}, isStopped: async () => true, interrupt: async () => {}, send: async () => {} });
   await repos.agents.save(agentConfigSchema.parse({ id: 'fake', name: 'Fake', command: 'fake', protocol: 'acp', cwd: root }));
   const session = await service.runtime.start({ agentId: 'fake' });
   const lark = await service.runtime.start({ agentId: 'fake', source: 'lark', sourceId: `${scope.appId}:${scope.chatId}:group` });

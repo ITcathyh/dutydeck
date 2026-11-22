@@ -1,3 +1,5 @@
+import { VerificationManager } from './verification.js';
+import { captureBoundExecution } from '../../../tests/support/bound-execution.js';
 import { afterEach, expect, it, vi } from 'vitest';
 import { createRepositories } from '@dutydeck/storage';
 import type { AgentConfig } from '@dutydeck/shared';
@@ -11,6 +13,7 @@ afterEach(async () => { vi.useRealTimers(); for (const close of cleanup.splice(0
 interface Behaviour { exited: (build: number) => boolean; start?: (build: number) => Promise<void>; unverifiable?: boolean }
 async function fixture(behaviour: Behaviour) {
   const repos = createRepositories(':memory:', { newDatabaseAuthority: 'ledger_v1' });
+  const bound = captureBoundExecution(repos);
   cleanup.push(() => repos.close());
   const log = { warn: vi.fn(), info: vi.fn() }, notices: SessionNotice[] = [], drivers: AgentDriver[] = [];
   const runtime = new DutydeckRuntime(repos, {
@@ -29,7 +32,7 @@ async function fixture(behaviour: Behaviour) {
   });
   cleanup.push(() => runtime.shutdown());
   await runtime.initialize([agent]);
-  return { runtime, repos, log, notices, drivers };
+  return { runtime, repos, bound, log, notices, drivers };
 }
 /** First message completes, then idle retirement cannot prove the driver exited. */
 async function idleBlocked() {
@@ -57,15 +60,15 @@ it('a recheck whose earlier exit proof now verifies does not stop the driver aga
 
 it('a recheck neither aborts verification nor cancels capacity retries of the session', async () => {
   const h = await idleBlocked();
-  const internal = h.runtime as unknown as { verifications: { stopSession(id: string): Promise<void> }; execution: { cancelCapacityRetries(...args: unknown[]): unknown[] } };
-  const stopVerification = vi.spyOn(internal.verifications, 'stopSession');
-  const cancelRetries = vi.spyOn(internal.execution, 'cancelCapacityRetries');
+  const stopVerification = vi.spyOn(VerificationManager.prototype, 'stopSession');
+  const cancelRetries = vi.spyOn(h.bound(), 'cancelCapacityRetries');
   h.state.exited = true;
   await vi.advanceTimersByTimeAsync(45_000);
   vi.useRealTimers();
   expect(h.runtime.getDriverStopBlock(h.session.id)).toBeUndefined();
   expect(stopVerification).not.toHaveBeenCalled();
   expect(cancelRetries).not.toHaveBeenCalled();
+  stopVerification.mockRestore();
 });
 
 it('a new message during a recheck that stops the driver again is told the stop is unverified, not that it was revoked', async () => {

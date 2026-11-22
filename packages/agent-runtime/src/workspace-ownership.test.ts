@@ -1,12 +1,13 @@
+import { WorkspaceManager } from './workspace.js';
 import { afterEach, expect, it, vi } from 'vitest';
 import { execFileSync } from 'node:child_process';
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createRepositories } from '@dutydeck/storage';
-import type { AgentConfig } from '@dutydeck/shared';
-import { DutydeckRuntime } from './index.js';
-import { owner } from './ownership.js';
+import type { AgentConfig, SessionWorkspace } from '@dutydeck/shared';
+import { DutydeckRuntime, type RuntimeOptions } from './index.js';
+import { owner, SessionMutations } from './ownership.js';
 
 const fsGate = vi.hoisted(() => ({ path: '', entered: undefined as (() => void) | undefined, gate: undefined as Promise<void> | undefined }));
 vi.mock('node:fs/promises', async importOriginal => {
@@ -30,15 +31,20 @@ async function fixture(archive = true) {
   git(root, 'init', '-q', source); git(source, 'config', 'user.name', 'test'); git(source, 'config', 'user.email', 'test@example.com');
   writeFileSync(join(source, 'file'), 'baseline'); git(source, 'add', '.'); git(source, 'commit', '-qm', 'baseline');
   const repos = createRepositories(join(root, 'runtime.sqlite'), { newDatabaseAuthority: 'ledger_v1' });
-  const runtime = new DutydeckRuntime(repos, { workspaceRoot: join(root, 'workspaces'), driverIdleTimeoutMs: 0,
+  const options: RuntimeOptions = { workspaceRoot: join(root, 'workspaces'), driverIdleTimeoutMs: 0,
     probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }),
-    driverFactory: () => ({ start: async () => {}, send: async () => {}, stop: async () => {}, interrupt: async () => {}, resume: async () => {}, isStopped: async () => true }) });
+    driverFactory: () => ({ start: async () => {}, send: async () => {}, stop: async () => {}, interrupt: async () => {}, resume: async () => {}, isStopped: async () => true }) };
+  const runtime = new DutydeckRuntime(repos, options);
   let closed = false;
   const close = async () => { if (closed) return; await runtime.shutdown(); repos.close(); closed = true; };
   cleanups.push(async () => { await close(); rmSync(root, { recursive: true, force: true }); });
+  const prepare = vi.spyOn(WorkspaceManager.prototype, 'prepare');
+  const run = vi.spyOn(SessionMutations.prototype, 'run');
   await runtime.initialize([agent]); const session = await runtime.start({ agentId: agent.id, cwd: source, workspaceMode: 'worktree' });
   const workspace = (await runtime.getWorkspace(session.id))!; if (archive) await runtime.archive(session.id);
-  return { runtime, repos, root, source, session, workspace, close };
+  const manager = prepare.mock.contexts[0] as WorkspaceManager, mutations = run.mock.contexts[0] as SessionMutations;
+  prepare.mockRestore(); run.mockRestore();
+  return { runtime, repos, root, source, session, workspace, close, options, manager, mutations };
 }
 
 it('rejects new cleanup after shutdown without deleting its worktree', async () => {
@@ -51,7 +57,7 @@ it('rejects new cleanup after shutdown without deleting its worktree', async () 
 it('owns an admitted archived cleanup independently of the caller lifecycle', async () => {
   const h = await fixture(); const preview = await h.runtime.getWorkspaceCleanupPreview(h.session.id);
   const stale = owner('another-session'); stale.revoke();
-  const cleaning = (h.runtime as any).mutations.run(stale, () => h.runtime.cleanWorkspace(h.session.id, preview.fingerprint));
+  const cleaning = h.mutations.run(stale, () => h.runtime.cleanWorkspace(h.session.id, preview.fingerprint));
   expect((await cleaning).ok).toBe(true); expect(existsSync(h.workspace.cwd)).toBe(false);
 });
 
@@ -60,9 +66,9 @@ it.each(['getWorkspace', 'getSession', 'listSessions'] as const)('seals %s recov
   const cleaning = { ...h.workspace, state: 'cleaning', revision: h.workspace.revision + 1 };
   await h.repos.config.set('runtime_workspace:' + h.session.id, JSON.stringify(cleaning));
   git(h.source, 'worktree', 'remove', h.workspace.repoRoot!);
-  const manager = (h.runtime as any).workspaces; const recover = manager.tryRecoverCleaning.bind(manager);
+  const manager = h.manager; const recover = manager.tryRecoverCleaning.bind(manager);
   const entered = deferred(), gate = deferred(), finished = deferred(); let once = true;
-  manager.tryRecoverCleaning = async (...args: unknown[]) => {
+  manager.tryRecoverCleaning = async (...args) => {
     if (once) { once = false; entered.resolve(); await gate.promise; }
     try { return await recover(...args); } finally { finished.resolve(); }
   };
@@ -101,24 +107,27 @@ it.each([false, true])('retains directories with persisted unverified resources 
 });
 
 it('does not reload a stale persisted stop block after physical proof clears it', async () => {
-  const h = await fixture(); const key = 'runtime_driver_stop_block:' + h.session.id;
-  await h.repos.config.set(key, JSON.stringify({ sessionId: h.session.id, runId: 'old-run', reason: 'pending proof' }));
-  await (h.runtime as any).loadStopBlock(h.session.id);
+  const h = await fixture();
+  const other = await h.runtime.start({ agentId: agent.id, cwd: h.workspace.cwd });
+  const key = 'runtime_driver_stop_block:' + other.id;
+  await h.repos.config.set(key, JSON.stringify({ sessionId: other.id, runId: other.runId, reason: 'pending proof' }));
+  await h.runtime.getWorkspaceCleanupPreview(h.session.id);
+  expect(h.runtime.getDriverStopBlock(other.id)).toBe('pending proof');
   const entered = deferred(), gate = deferred(); const get = h.repos.config.get.bind(h.repos.config);
+  let firstRead = true;
   h.repos.config.get = async name => {
     const value = await get(name);
-    if (name === key) { entered.resolve(); await gate.promise; }
+    if (name === key && firstRead) { firstRead = false; entered.resolve(); await gate.promise; }
     return value;
   };
-  const runtime = h.runtime as any;
-  const reading = runtime.mutations.run(owner(h.session.id), () => runtime.loadStopBlock(h.session.id));
-  await entered.promise;
-  let cleared = false;
-  const clearing = runtime.mutations.run(undefined, () => runtime.clearStopBlock(h.session.id)).then(() => { cleared = true; });
-  await new Promise(resolve => setImmediate(resolve));
-  expect(cleared).toBe(true);
-  gate.resolve(); await reading; await clearing;
-  expect(h.runtime.getDriverStopBlock(h.session.id)).toBeUndefined();
+  const reading = h.runtime.getWorkspaceCleanupPreview(h.session.id);
+  try {
+    await entered.promise;
+    await h.runtime.stop(other.id);
+    expect(h.runtime.getDriverStopBlock(other.id)).toBeUndefined();
+  } finally { gate.resolve(); }
+  await reading;
+  expect(h.runtime.getDriverStopBlock(other.id)).toBeUndefined();
   expect(await get(key)).toBe('');
 });
 
@@ -141,7 +150,7 @@ it.each(['stop', 'shutdown'] as const)('does not register a late starting worksp
   const h = await fixture(); const entered = deferred(), gate = deferred();
   fsGate.path = h.source; fsGate.entered = entered.resolve; fsGate.gate = gate.promise;
   const registrations = vi.spyOn((h.runtime as any).preparingWorkspaces, 'set');
-  const prepare = vi.spyOn((h.runtime as any).workspaces, 'prepare');
+  const prepare = vi.spyOn(h.manager, 'prepare');
   const starting = h.runtime.start({ agentId: agent.id, cwd: h.source }).catch(error => error); await entered.promise;
   const fresh = (await h.repos.sessions.list()).find(session => session.id !== h.session.id)!;
   if (action === 'stop') await h.runtime.stop(fresh.id); else await h.runtime.shutdown();
@@ -150,11 +159,11 @@ it.each(['stop', 'shutdown'] as const)('does not register a late starting worksp
 });
 
 it('retains each preparation claim until its filesystem work settles and drains it at shutdown', async () => {
-  const h = await fixture(); const manager = (h.runtime as any).workspaces;
+  const h = await fixture(); const manager = h.manager;
   const prepare = manager.prepare.bind(manager);
   const firstEntered = deferred(), firstGate = deferred(), secondEntered = deferred(), secondGate = deferred();
   let calls = 0;
-  manager.prepare = async (...args: unknown[]) => {
+  manager.prepare = async (...args) => {
     const first = calls++ === 0;
     (first ? firstEntered : secondEntered).resolve();
     await (first ? firstGate : secondGate).promise;
@@ -183,10 +192,10 @@ it('retains each preparation claim until its filesystem work settles and drains 
 
 it('drains physical workspace preparation before closing SQLite', async () => {
   const h = await fixture(false);
-  const manager = (h.runtime as any).workspaces;
+  const manager = h.manager as unknown as { prepareWorktree(record: SessionWorkspace): Promise<SessionWorkspace> };
   const prepare = manager.prepareWorktree.bind(manager);
   const entered = deferred(), gate = deferred(), finished = deferred();
-  manager.prepareWorktree = async (...args: unknown[]) => {
+  manager.prepareWorktree = async (...args) => {
     entered.resolve(); await gate.promise;
     try { return await prepare(...args); } finally { finished.resolve(); }
   };
@@ -210,16 +219,17 @@ it('initialize and restart block unrecovered preparing workspace without startin
   await h.runtime.shutdown();
   git(h.source, 'worktree', 'remove', h.workspace.repoRoot!);
   await h.repos.config.set('runtime_workspace:' + h.session.id, JSON.stringify({ ...h.workspace, state: 'preparing', revision: h.workspace.revision + 1 }));
-  const runtime = new DutydeckRuntime(h.repos, (h.runtime as any).options);
-  const prepareWorktree = vi.spyOn((runtime as any).workspaces, 'prepareWorktree');
+  const runtime = new DutydeckRuntime(h.repos, h.options);
+  const prepareWorktree = vi.spyOn(WorkspaceManager.prototype as unknown as { prepareWorktree: () => Promise<unknown> }, 'prepareWorktree');
   await runtime.initialize([agent]);
   expect(prepareWorktree).not.toHaveBeenCalled();
-  const blockers = (runtime as any).resourceBlockers(h.session.id);
+  const blockers = (await runtime.inspectExecutionRecovery(h.session.id, { kind: 'installation_owner', id: 'installation_owner' })).blockers;
   expect(blockers.some((b: any) => b.code === 'WORKSPACE_RECOVERY_REQUIRED')).toBe(true);
 
   // Restart on the same unrecovered preparing workspace is also blocked with zero prepareWorktree calls.
   await expect(runtime.restart(h.session.id)).rejects.toMatchObject({ code: 'SESSION_RESOURCE_BLOCKED' });
   expect(prepareWorktree).not.toHaveBeenCalled();
+  prepareWorktree.mockRestore();
   await runtime.shutdown();
   h.repos.close();
 });

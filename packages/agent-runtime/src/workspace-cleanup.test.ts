@@ -539,18 +539,13 @@ describe('managed workspace cleanup', () => {
     };
 
     const cleanupRun = h.runtime.cleanWorkspace(session.id, preview.fingerprint);
+    const prepare = vi.spyOn(WorkspaceManager.prototype, 'prepare');
     try {
       await Promise.race([started, cleanupRun.then(() => {
         throw new Error('Cleanup settled before logging the cleaning intent');
       })]);
 
       // 尝试以正在被清理的 worktree 目录作为 sourceCwd 启动新 session
-      let reachedPrepare = false;
-      (h.runtime as any).workspaces.prepare = async () => {
-        reachedPrepare = true;
-        throw new Error('should not reach prepare');
-      };
-
       await expect(h.runtime.start({
         agentId: agent.id,
         cwd: workspace.repoRoot!,
@@ -559,11 +554,12 @@ describe('managed workspace cleanup', () => {
         code: 'WORKSPACE_CONFLICT',
         statusCode: 409
       });
-      expect(reachedPrepare).toBe(false);
+      expect(prepare).not.toHaveBeenCalled();
 
       cleaningGate();
       await expect(cleanupRun).resolves.toMatchObject({ ok: true });
     } finally {
+      prepare.mockRestore();
       cleaningGate();
       await Promise.allSettled([cleanupRun]);
       h.repos.config.compareAndSet = originalCAS;

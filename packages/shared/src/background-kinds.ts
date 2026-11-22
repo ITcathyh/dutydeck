@@ -5,6 +5,7 @@ interface BackgroundKind {
   hidden: boolean;
   injectHost: boolean;
   botScoped: boolean;
+  managesQueueExpiry?: boolean;
 }
 
 // Persisted source values are also used when creating or resuming a particular kind.
@@ -17,7 +18,7 @@ export const backgroundSource = {
 } as const;
 
 export const backgroundKinds = {
-  [backgroundSource.memory]: { usageOrigin: 'memory', userSettingsOnly: true, hookMode: 'deny-only', hidden: true, injectHost: true, botScoped: true },
+  [backgroundSource.memory]: { usageOrigin: 'memory', managesQueueExpiry: true, userSettingsOnly: true, hookMode: 'deny-only', hidden: true, injectHost: true, botScoped: true },
   [backgroundSource.decision]: { usageOrigin: 'decision', userSettingsOnly: true, hookMode: 'deny-only', hidden: false, injectHost: true, botScoped: true },
   [backgroundSource.response]: { usageOrigin: 'response', userSettingsOnly: true, hookMode: 'deny-only', hidden: false, injectHost: true, botScoped: true },
   [backgroundSource.replyPolish]: { usageOrigin: 'reply_polish', userSettingsOnly: false, hookMode: 'deny-only', hidden: true, injectHost: false, botScoped: true },

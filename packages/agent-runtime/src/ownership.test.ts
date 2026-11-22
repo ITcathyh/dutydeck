@@ -1,3 +1,5 @@
+import { runtimeComponents } from '../test-support/components.js';
+import { captureBoundExecution } from '../../../tests/support/bound-execution.js';
 import { afterEach, expect, it, vi } from 'vitest';
 import { createRepositories } from '@dutydeck/storage';
 import type { AgentConfig, AgentDriver, NormalizedDriverEvent } from '@dutydeck/shared';
@@ -13,6 +15,7 @@ const cleanup: Array<() => Promise<void>> = [];
 afterEach(async () => { for (const close of cleanup.splice(0)) await close(); });
 async function fixture(options: ConstructorParameters<typeof DutydeckRuntime>[1] = {}, filename = ':memory:') {
   const repos = createRepositories(filename, { newDatabaseAuthority: 'ledger_v1' });
+  const bound = captureBoundExecution(repos);
   const runs: Array<{ driver: AgentDriver; emit: (event: NormalizedDriverEvent) => void; sent: ReturnType<typeof deferred>; done: ReturnType<typeof deferred>; settled: boolean }> = [];
   const factory = vi.fn((_a, _p, emit) => {
     const sent = deferred(), done = deferred();
@@ -31,7 +34,7 @@ async function fixture(options: ConstructorParameters<typeof DutydeckRuntime>[1]
   const close = async () => { if (closed) return; closed = true; try { await runtime.shutdown(); } finally { repos.close(); } };
   cleanup.push(close);
   await runtime.initialize([agent]); const session = await runtime.start({ agentId: agent.id });
-  return { repos, runtime, session, runs, factory, close };
+  return { repos, bound, runtime, session, runs, factory, close };
 }
 
 it('reports the nearest revoked owner on checks and cancelled waits', async () => {
@@ -133,7 +136,7 @@ it('waits for an already-entered actor commit before allowing a replacement', as
   const old = h.runtime.send(h.session.id, 'old').catch(error => error); await entered.promise;
   const stopping = h.runtime.stop(h.session.id); let stopped = false;
   void stopping.then(() => { stopped = true; });
-  await vi.waitFor(() => expect((h.runtime as any).lifecycle(h.session.id).revoked).toBe(true));
+  await expect(h.runtime.dispatch(h.session.id, 'after stop')).rejects.toMatchObject({ code: 'OPERATION_REVOKED' });
   expect(stopped).toBe(false); expect(h.factory).toHaveBeenCalledTimes(1);
   gate.resolve(); await stopping; await old;
   expect(actor).toBe('old');
@@ -282,9 +285,8 @@ it('keeps the binding through physical teardown even when stop fact persistence 
   const h = await fixture(), driverRun = h.runs[0]!;
   const run = h.runtime.send(h.session.id, 'active').catch(error => error);
   await driverRun.sent.promise;
-  const internal = h.runtime as unknown as { bound(): import('@dutydeck/shared').BoundExecutionRepository };
   const failure = new Error('stop fact failure');
-  vi.spyOn(internal.bound(), 'markReconcileRequired').mockImplementation(() => { throw failure; });
+  vi.spyOn(h.bound(), 'markReconcileRequired').mockImplementation(() => { throw failure; });
   const entered = deferred(), gate = deferred(); let physical = false;
   driverRun.driver.stop = vi.fn(async () => { entered.resolve(); await gate.promise; driverRun.done.resolve(); physical = true; });
   driverRun.driver.isStopped = async () => physical;
@@ -318,7 +320,7 @@ it('seals paused preparation before closing SQLite and observes its later reject
 it('restores promoted and successive front queue positions after SQLite is closed and reopened', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'dutydeck-owned-queue-')); const file = join(directory, 'queue.sqlite');
   const h = await fixture({}, file);
-  vi.spyOn(h.runtime as any, 'scheduleQueue').mockImplementation(() => {});
+  h.runtime.setQueueHeld(true);
   const env = (key: string, prompt: string, mode: 'queue' | 'interrupt' = 'queue') => ({ version: 1 as const, namespace: 'runtime' as const, sessionId: h.session.id, key, actor: { kind: 'installation_owner' as const, id: 'installation_owner' as const }, prompt, mode, skills: [] as string[], options: {}, sources: [] as never[], sourcePayload: {} });
   const a = await h.runtime.dispatch(h.session.id, 'A', 'queue', 'A', undefined, 'installation_owner', 'A', [], env('A', 'A'));
   await h.runtime.dispatch(h.session.id, 'B', 'queue', 'B', undefined, 'installation_owner', 'B', [], env('B', 'B'));
@@ -397,11 +399,8 @@ it('clears a held permission on stop and never submits a stale approval after it
 it('drains registered task continuations when a separate cleanup makes shutdown reject', async () => {
   const h = await fixture();
   const entered = deferred(), gate = deferred();
-  const internal = h.runtime as unknown as {
-    executeTask(id: string, task: import('@dutydeck/shared').TaskRecord): Promise<import('@dutydeck/shared').PublicTaskRecord>;
-    cleanupRun?: Promise<void>;
-  };
-  const execute = internal.executeTask.bind(h.runtime);
+  const internal = runtimeComponents(h.runtime).runner;
+  const execute = internal.executeTask.bind(internal);
   internal.executeTask = async (id, task) => {
     const result = await execute(id, task);
     entered.resolve(); await gate.promise;
@@ -411,7 +410,7 @@ it('drains registered task continuations when a separate cleanup makes shutdown 
   await h.runs[0]!.sent.promise;
   const failure = new Error('cleanup failed');
   const failedCleanup = Promise.reject(failure); void failedCleanup.catch(() => {});
-  internal.cleanupRun = failedCleanup;
+  vi.spyOn(runtimeComponents(h.runtime).maintenance, 'currentRun', 'get').mockReturnValue(failedCleanup);
   let stopped = false;
   const stopping = h.runtime.shutdown().catch(error => error).then(result => { stopped = true; return result; });
   try {
@@ -536,8 +535,8 @@ it('does not let the delivery of an old promotion stop a new task', async () => 
   await h.runs[0]!.sent.promise;
   const queued = await h.runtime.dispatch(h.session.id, 'queued');
   const entered = deferred(), gate = deferred();
-  const internal = h.runtime as unknown as { applyQueueActions(session: import('@dutydeck/shared').Session): Promise<void>; bound(): import('@dutydeck/shared').BoundExecutionRepository; fence(session: import('@dutydeck/shared').Session): import('@dutydeck/shared').SessionFence };
-  const deliver = internal.applyQueueActions.bind(h.runtime);
+  const internal = runtimeComponents(h.runtime).scheduler;
+  const deliver = internal.applyQueueActions.bind(internal);
   let paused = true, firstDelivery = true;
   internal.applyQueueActions = async session => {
     if (paused) {
@@ -552,7 +551,7 @@ it('does not let the delivery of an old promotion stop a new task', async () => 
   const steering = h.runtime.steerQueued(h.session.id, queued.id, 'installation_owner', undefined, operationId);
   try {
     await entered.promise;
-    const action = internal.bound().getPendingQueueActions(internal.fence(h.session)).find(item => item.operationId === operationId)!;
+    const action = h.bound().getPendingQueueActions({ sessionId: h.session.id, runId: h.session.runId }).find(item => item.operationId === operationId)!;
     const originalAttempt = h.repos.execution.getTaskExecution(action.target!.taskId)!.currentAttempt!;
     expect(action.target).toMatchObject({ taskId: originalAttempt.taskId, attemptId: originalAttempt.attemptId });
     h.runs[0]!.emit({ type: 'text', data: { text: 'answer' } });
@@ -563,7 +562,7 @@ it('does not let the delivery of an old promotion stop a new task', async () => 
     const active = h.repos.execution.getTaskExecution(queued.id)!.currentAttempt!;
     expect(active).toMatchObject({ state: 'active', submissionState: 'intent_recorded' });
     expect(driver.send).toHaveBeenCalledTimes(2);
-    expect(internal.bound().getPendingQueueActions(internal.fence(h.session)).find(item => item.operationId === operationId)?.target).toEqual(action.target);
+    expect(h.bound().getPendingQueueActions({ sessionId: h.session.id, runId: h.session.runId }).find(item => item.operationId === operationId)?.target).toEqual(action.target);
     paused = false; gate.resolve(); await steering;
     expect(h.repos.execution.getTaskExecution(queued.id)!.currentAttempt).toEqual(active);
     expect(driver.interrupt).not.toHaveBeenCalled();

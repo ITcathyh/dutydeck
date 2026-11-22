@@ -179,3 +179,11 @@ export class DriverConfigurationLedger {
     } finally { this.active.delete(record.operationId); }
   }
 }
+
+export function nativeTargetOf(options: ExecutionOptions): Omit<ExecutionOptions, 'permissionMode'> {
+  return { ...(options.model !== undefined ? { model: options.model } : {}), ...(options.reasoningEffort !== undefined ? { reasoningEffort: options.reasoningEffort } : {}) };
+}
+
+export function executionOptionsOf(options: ExecutionOptions): ExecutionOptions {
+  return { permissionMode: options.permissionMode, ...nativeTargetOf(options) };
+}

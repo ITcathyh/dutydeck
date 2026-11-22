@@ -1,3 +1,4 @@
+import { runtimeComponents } from '../test-support/components.js';
 import { describe, expect, it, vi } from 'vitest';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -30,7 +31,7 @@ async function runCase(mode: Mode) {
   let exitWork: Promise<void> | undefined;
   let stream: ReturnType<PtyCliDriver['createTerminalStream']> | undefined;
   let terminal = '', killCalls = 0;
-  const emittedTail: Array<Record<string, unknown>> = [];
+  const emittedTail: string[] = [];
   const runtimeExits: Array<number | null> = [];
   const warnings: Array<Record<string, unknown>> = [];
   const runtime = new DutydeckRuntime(repos, {
@@ -47,10 +48,7 @@ async function runCase(mode: Mode) {
           injectSessionContext: () => '', completionPattern: /THIS_FIXTURE_NEVER_COMPLETES/,
           writeInput: target => { target.write('go\r'); } },
         onEvent: event => {
-          if (event.type === 'raw_terminal' && String(event.data.text).includes(tail)) emittedTail.push({
-            activeAttempt: (runtime as any).attempts.has(id), generation: (runtime as any).sessionGenerations.get(id), shuttingDown: (runtime as any).shuttingDown,
-            lifecycleValid: (runtime as any).mutations.valid((runtime as any).lifecycles.get(id)),
-          });
+          if (event.type === 'raw_terminal' && String(event.data.text).includes(tail)) emittedTail.push(String(event.data.text));
           onEvent(event);
         },
         onExit,
@@ -108,17 +106,17 @@ async function runCase(mode: Mode) {
 
     if (mode === 'review_natural') {
       const startedAt = Date.now();
-      await until(() => !(runtime as any).attempts.has(session.id)
+      await until(() => runtime.getActiveTaskContext(session.id) === undefined
         && repos.execution.getTaskExecution(task.id)?.task.status === 'reconcile_required'
         && warnings.some(warning => warning.code === 'DRIVER_EXIT_DRAIN_TIMEOUT'), 'bounded natural exit cleanup');
       expect(Date.now() - startedAt).toBeLessThan(8_000);
       expect(repos.execution.getTaskExecution(task.id)?.attempts[0]).toMatchObject({ attemptId, state: 'reconcile_required' });
       const exitedDriver = driver, generationBefore = (runtime as any).sessionGenerations.get(session.id);
-      expect((runtime as any).exitedDriverDrains.has(exitedDriver)).toBe(true);
+      expect(runtimeComponents(runtime).events.hasExitedDrain(exitedDriver)).toBe(true);
       expect(emittedTail).toHaveLength(1);
 
       reviewGate.resolve();
-      while ((runtime as any).driverEventChains.size) await Promise.allSettled([...(runtime as any).driverEventChains.values()]);
+      await runtimeComponents(runtime).events.drainAll();
       expect(runtime.getPendingPermissions(session.id)).toEqual([]);
 
       // The natural cleanup above needs no control call. Retire the exited resource
@@ -136,7 +134,7 @@ async function runCase(mode: Mode) {
         const nextAttempt = repos.execution.getTaskExecution(nextTask.id)?.attempts[0];
         if (!nextAttempt) return false;
         nextAttemptId = nextAttempt.attemptId;
-        return (runtime as any).attempts.has(session.id) && driver !== exitedDriver;
+        return runtime.getActiveTaskContext(session.id)?.attemptId === nextAttemptId && driver !== exitedDriver;
       }, 'replacement attempt after the late approval');
       expect((runtime as any).sessionGenerations.get(session.id)).toBeGreaterThan(generationBefore);
 
@@ -151,7 +149,7 @@ async function runCase(mode: Mode) {
       expect(nextAttemptEvents.filter(event => event.type === 'permission_request')).toEqual([]);
       expect(sessionEvents.filter(event => event.type === 'permission_request' && event.data?.status === 'approved')).toEqual([]);
       expect(runtime.getPendingPermissions(session.id)).toEqual([]);
-      expect((runtime as any).exitDrainAdmissions.has(session.id)).toBe(false);
+      expect(runtimeComponents(runtime).events.hasExitAdmission(session.id)).toBe(false);
       return { persistedTail, attemptTail };
     }
 
@@ -164,7 +162,7 @@ async function runCase(mode: Mode) {
       expect(killCalls).toBe(1);
       reviewGate.resolve();
       if (pendingDecision) expect(await pendingDecision).toMatchObject({ approved: false });
-      while ((runtime as any).driverEventChains.size) await Promise.allSettled([...(runtime as any).driverEventChains.values()]);
+      await runtimeComponents(runtime).events.drainAll();
       expect(runtime.getPendingPermissions(session.id)).toEqual([]);
     } else {
       let settled = false; void control.then(() => { settled = true; }, () => { settled = true; });
@@ -173,8 +171,8 @@ async function runCase(mode: Mode) {
       if (mode === 'shutdown') await expect(runtime.dispatch(session.id, 'new work must stay closed')).rejects.toMatchObject({ code: 'RUNTIME_SHUTTING_DOWN' });
       gate.resolve(); await exitWork; await control;
     }
-    await until(() => !(runtime as any).attempts.has(session.id), 'Runtime attempt cleanup');
-    while ((runtime as any).driverEventChains.size) await Promise.allSettled([...(runtime as any).driverEventChains.values()]);
+    await until(() => runtime.getActiveTaskContext(session.id) === undefined, 'Runtime attempt cleanup');
+    await runtimeComponents(runtime).events.drainAll();
     const sessionEvents = await runtime.getEvents(session.id);
     const persistedTail = sessionEvents.filter(event => event.sequence > beforeTaskSequence && event.type === 'raw_terminal' && String((event.data as any).text).includes(tail));
     const attemptTail = repos.execution.getAttemptEvents(attemptId, { limit: 500 }).filter(event => event.type === 'raw_terminal' && String((event.data as any).text).includes(tail));

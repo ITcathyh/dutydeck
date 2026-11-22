@@ -3,7 +3,7 @@ import { PluginToolGrants } from './tool-grants.js';
 import { dirname } from 'node:path';
 import { resolveDatabaseUrl } from '@dutydeck/config';
 import { installationOwnerTaskActor, isTerminalTaskStatus, type ConfigRepository, type WorkItem, type CiWebhookRepository, type ExecutionRepository, type PublicTaskRecord, type Session } from '@dutydeck/shared';
-import type { DutydeckRuntime } from '@dutydeck/runtime';
+import type { DutydeckRuntime, RuntimeEvent } from '@dutydeck/runtime';
 import { readTaskAttemptResult } from '../task-results.js';
 import { setPluginSkillRoots } from '../skill-catalog.js';
 import { setLarkPluginCommands } from '../lark/plugin-commands.js';
@@ -54,7 +54,7 @@ export interface PluginWiringDeps {
 
 /**
  * 把已加载的插件接到 daemon：skills 根、飞书命令、hook 事件、触发器路由与结果回投。
- * runtimeOptions 只包含有对应 hook 的项，没有插件时整个函数不被调用。
+ * 订阅宿主运行时事件，按已注册的 hook 投递。
  */
 export function wirePlugins(host: PluginHost, deps: PluginWiringDeps) {
   const hooks = new PluginRuntimeHooks(host.hooks, deps.log);
@@ -97,16 +97,19 @@ export function wirePlugins(host: PluginHost, deps: PluginWiringDeps) {
     await deps.sendText(bot, { chatId: message.chatId, text: message.text, idempotencyKey: message.idempotencyKey });
   };
 
-  const runtimeOptions = {
-    ...(hooks.has('permission.request') ? { reviewPermission: (session: Session, request: Parameters<PluginRuntimeHooks['reviewPermission']>[1]) => hooks.reviewPermission(session, request) } : {}),
-    onTaskSettled: async (session: Session, task: PublicTaskRecord) => {
-      triggers.settled(task.id, task.status === 'completed' ? 'succeeded' : task.status === 'failed' ? 'failed' : task.status === 'cancelled' || task.status === 'interrupted' ? 'cancelled' : 'unknown');
-      await hooks.taskCompleted(session, task).catch(error => deps.log.warn({ error }, '插件 task.completed hook 失败'));
-      if (session.source === PLUGIN_TRIGGER_SOURCE) await deliverTriggerResult(session, task).catch(error => deps.log.warn({ taskId: task.id, error }, '插件触发器结果回投失败'));
-    },
-    ...(hooks.has('verification.completed') ? { onVerificationCompleted: (session: Session, result: Parameters<PluginRuntimeHooks['verificationCompleted']>[1]) => hooks.verificationCompleted(session, result) } : {})
+  const reviewPermission = hooks.has('permission.request')
+    ? (session: Session, request: Parameters<PluginRuntimeHooks['reviewPermission']>[1]) => hooks.reviewPermission(session, request) : undefined;
+  const onRuntimeEvent = async (event: RuntimeEvent) => {
+    if (event.type === 'verification.completed' && hooks.has('verification.completed')) {
+      await hooks.verificationCompleted(event.session, event.result);
+    }
+    if (event.type !== 'task.settled') return;
+    const { session, task } = event;
+    triggers.settled(task.id, task.status === 'completed' ? 'succeeded' : task.status === 'failed' ? 'failed' : task.status === 'cancelled' || task.status === 'interrupted' ? 'cancelled' : 'unknown');
+    await hooks.taskCompleted(session, task).catch(error => deps.log.warn({ error }, '插件 task.completed hook 失败'));
+    if (session.source === PLUGIN_TRIGGER_SOURCE) await deliverTriggerResult(session, task).catch(error => deps.log.warn({ taskId: task.id, error }, '插件触发器结果回投失败'));
   };
 
   const routes: PluginRouteOptions = { commands: host.commands, triggers };
-  return { hooks, triggers, runtimeOptions, routes, dispose: async () => { for (const dispose of disposers) dispose(); await host.dispose(); } };
+  return { hooks, triggers, reviewPermission, onRuntimeEvent, routes, dispose: async () => { for (const dispose of disposers) dispose(); await host.dispose(); } };
 }

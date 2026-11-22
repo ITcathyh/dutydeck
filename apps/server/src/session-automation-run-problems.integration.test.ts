@@ -1,3 +1,4 @@
+import { SessionMutations } from '../../../packages/agent-runtime/src/ownership.js';
 import { existsSync } from 'node:fs';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -95,7 +96,15 @@ async function fixture(origin: 'lark' | 'web' = 'lark') {
     setClock: (date: Date) => { clock.value = date; } };
 }
 
-const revoke = (runtime: DutydeckRuntime, sessionId: string) => (runtime as unknown as { lifecycle(id: string): { revoke(): void } }).lifecycle(sessionId).revoke();
+function revoke(runtime: DutydeckRuntime, sessionId: string) {
+  const check = vi.spyOn(SessionMutations.prototype, 'valid');
+  try {
+    runtime.getDriver(sessionId);
+    const token = check.mock.calls.find(([candidate]) => candidate?.sessionId === sessionId)?.[0];
+    if (!token) throw new Error('The session has no active lifecycle');
+    token.revoke();
+  } finally { check.mockRestore(); }
+}
 
 describe('schedule trigger errors', () => {
   it('11-03: an existing thread loop whose source session lock was revoked still runs, in a fresh session, and reports to the thread', async () => {

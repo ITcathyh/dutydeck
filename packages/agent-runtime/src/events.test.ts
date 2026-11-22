@@ -496,7 +496,7 @@ describe('session event sequence & concurrency regression', () => {
     // shutdown 必须排空已进入写尾队列的两条事件后才完成
     let shutdownDone = false;
     const shutdownPromise = h.runtime.shutdown().then(() => { shutdownDone = true; });
-    expect((h.runtime as any).shuttingDown).toBe(true);
+    await expect(h.runtime.dispatch(session.id, 'after shutdown began')).rejects.toMatchObject({ code: 'RUNTIME_SHUTTING_DOWN' });
     await new Promise(resolve => setImmediate(resolve));
     expect(shutdownDone).toBe(false);
 

@@ -1,3 +1,4 @@
+import { runtimeComponents } from '../test-support/components.js';
 import { createHash } from 'node:crypto';
 import { describe, expect, it, vi } from 'vitest';
 import { createRepositories } from '@dutydeck/storage';
@@ -443,8 +444,8 @@ describe('runtime lifecycle acceptance', () => {
     try {
       const sent = h.runtime.send(session.id, 'request');
       await entered.promise;
-      const internals = h.runtime as unknown as { lastActivity: Map<string, number>; turnProgressAt: Map<string, number> };
-      internals.lastActivity.set(session.id, 100); internals.turnProgressAt.set(session.id, 200);
+      const internals = h.runtime as unknown as { turnProgressAt: Map<string, number> };
+      runtimeComponents(h.runtime).supervisor.lastActivity.set(session.id, 100); internals.turnProgressAt.set(session.id, 200);
       const before = await h.runtime.getSession(session.id);
       const append = h.bound().appendEvent.bind(h.bound());
       vi.spyOn(h.bound(), 'appendEvent').mockImplementation((fence, event) => {
@@ -455,7 +456,7 @@ describe('runtime lifecycle acceptance', () => {
       h.emit({ type: 'status', data: { ...data, stage: 'pty_routing' } });
       h.emit({ type: 'status', data });
       await vi.waitFor(async () => expect((await h.runtime.getEvents(session.id)).some(event => (event.data as any)?.stage === 'pty_input')).toBe(true));
-      expect(internals.lastActivity.get(session.id)).toBe(100);
+      expect(runtimeComponents(h.runtime).supervisor.lastActivity.get(session.id)).toBe(100);
       expect(internals.turnProgressAt.get(session.id)).toBe(200);
       expect(await h.runtime.getSession(session.id)).toEqual(before);
       gate.resolve();
@@ -2014,17 +2015,18 @@ it('exposes only the matching active attempt and preserves currentAttemptId thro
   await h.runtime.initialize([agent]);
   const session = await h.runtime.start({ agentId: 'mock' });
   expect(h.runtime.getActiveTaskContext(session.id)).toBeUndefined();
+  const claim = vi.spyOn(h.bound(), 'claimNext');
   const sending = h.runtime.send(session.id, 'answer');
   await vi.waitFor(() => expect(h.runtime.getActiveTaskContext(session.id)?.attemptId).toBeTruthy());
   const active = h.runtime.getActiveTaskContext(session.id)!;
   expect((await h.repos.tasks.get!(active.taskId))?.currentAttemptId).toBe(active.attemptId);
   expect((await h.runtime.getTasks(session.id))[0]?.currentAttemptId).toBe(active.attemptId);
-  const owner = (h.runtime as any).attempts.get(session.id);
-  const ref = (h.runtime as any).attemptRefs.get(owner);
-  (h.runtime as any).attemptRefs.set(owner, { ...ref, taskId: 'another-task' });
-  expect(h.runtime.getActiveTaskContext(session.id)).toMatchObject({ taskId: active.taskId });
-  expect(h.runtime.getActiveTaskContext(session.id)?.attemptId).toBeUndefined();
-  (h.runtime as any).attemptRefs.set(owner, ref);
+  const task = claim.mock.results.find(result => result.type === 'return' && result.value?.task?.id === active.taskId)!.value!.task!;
+  task.id = 'another-task';
+  try {
+    expect(h.runtime.getActiveTaskContext(session.id)).toMatchObject({ taskId: 'another-task' });
+    expect(h.runtime.getActiveTaskContext(session.id)?.attemptId).toBeUndefined();
+  } finally { task.id = active.taskId; }
   gate.resolve(); await sending; await h.runtime.shutdown();
   const restarted = new DutydeckRuntime(h.repos);
   try {

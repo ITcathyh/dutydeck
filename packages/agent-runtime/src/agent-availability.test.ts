@@ -28,7 +28,7 @@ async function fixture(script: Array<NormalizedDriverEvent[] | Error>, options: 
   cleanups.push(async () => { await runtime.shutdown(); repos.close(); await rm(cwd, { recursive: true, force: true }); });
   await runtime.initialize([agent]);
   const session = await runtime.start({ agentId: agent.id });
-  return { runtime, session, agent, driver };
+  return { runtime, session, agent, driver, repos };
 }
 const authFailure: NormalizedDriverEvent[] = [
   { type: 'error', data: { message: 'Claude 登录或凭据已失效', code: 'claude_api_authentication_failed', retryable: false } },
@@ -103,14 +103,14 @@ describe('Agent 是否停下', () => {
     expect(h.runtime.inspectAgentQuiescence(h.session.id)).toBe('unknown');
     h.driver.idle = true;
     // 驱动不在了、执行进程还没确认退出（可能是还没接回的持久终端）：说不准。
-    const drivers = (h.runtime as any).drivers as Map<string, unknown>;
-    const attached = drivers.get(h.session.id);
-    drivers.delete(h.session.id);
-    expect(h.runtime.inspectAgentQuiescence(h.session.id)).toBe('unknown');
-    drivers.set(h.session.id, attached);
-    const driver = (h.runtime as any).drivers.get(h.session.id);
-    const send = driver.send;
-    driver.send = async (input: unknown) => { await gate; return send(input); };
+    const detachedSession = 'ses_without_driver';
+    const live = h.repos.execution.getResources(h.session.id);
+    expect(live.some(resource => resource.kind === 'local_only' && resource.observations.at(-1)?.state === 'live')).toBe(true);
+    vi.spyOn(h.repos.execution, 'getResources').mockReturnValueOnce(live.map(resource => ({ ...resource, sessionId: detachedSession })));
+    expect(h.runtime.inspectAgentQuiescence(detachedSession)).toBe('unknown');
+    const driver = h.runtime.getDriver(h.session.id)!;
+    const send = driver.send.bind(driver);
+    driver.send = async input => { await gate; return send(input); };
     const task = await h.runtime.dispatch(h.session.id, 'slow');
     await vi.waitFor(() => expect(h.runtime.inspectAgentQuiescence(h.session.id)).toBe('busy'));
     release();

@@ -9,7 +9,7 @@ import { childProcessIdentity, createRepositories, observeProcess } from '@dutyd
 import type { AgentConfig, DriverFactory } from '@dutydeck/shared';
 import { PtyCliDriver } from '../../pty-driver/src/driver.js';
 import { buildSessionMarker } from '../../pty-driver/src/session-id/index.js';
-import { DutydeckRuntime } from './index.js';
+import { DutydeckRuntime, type RuntimeOptions } from './index.js';
 
 const tmuxDescribe = await isTmuxAvailable() ? describe : describe.skip;
 tmuxDescribe('restart with a live fixture CLI in isolated tmux', () => {
@@ -53,12 +53,13 @@ tmuxDescribe('restart with a live fixture CLI in isolated tmux', () => {
       env: { CLAUDE_CONFIG_DIR: cwd }, permissionMode, timeout: 60, capabilities: { pause: false, resume: true }, builtin: false };
     async function open() {
       const repos = createRepositories(database, { newDatabaseAuthority: 'ledger_v1' });
-      const runtime = new DutydeckRuntime(repos, { driverFactory: factory, probe: () => ({ available: true, protocol: 'pty-cli', pause: false, resume: true }) });
+      const options: RuntimeOptions = { driverFactory: factory, probe: () => ({ available: true, protocol: 'pty-cli', pause: false, resume: true }) };
+      const runtime = new DutydeckRuntime(repos, options);
       let closed = false;
       const close = async () => { if (closed) return; closed = true; await runtime.shutdown(); repos.close(); };
       cleanup.push(close);
       await runtime.initialize([agent]);
-      return { runtime, repos, close };
+      return { runtime, repos, close, options };
     }
     cleanup.push(() => { if (name) { try { execFileSync('tmux', ['kill-session', '-t', name], { stdio: 'ignore' }); } catch { /* gone */ } } });
     const first = await open();
@@ -233,7 +234,7 @@ tmuxDescribe('restart with a live fixture CLI in isolated tmux', () => {
     if (reason === 'approval') h.drivers[0]!.requestPermission({ title: 'Pending fixture permission' });
     if (reason === 'risk') {
       // The live policy provider may enable a gate after the task was admitted.
-      (h.runtime as unknown as { options: { resolveRiskPolicy: () => Promise<unknown> } }).options.resolveRiskPolicy = async () => ({ enabled: true, authorized: false, pattern: '.*' });
+      h.options.resolveRiskPolicy = async () => ({ enabled: true, authorized: false, pattern: '.*' });
     }
     expect(await h.runtime.getRestartActivity()).toEqual({ runningTasks: 1, restartBlockers: 1, recoverableTasks: 0 });
     h.complete();

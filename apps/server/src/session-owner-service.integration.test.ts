@@ -1,3 +1,5 @@
+import { captureBoundExecution } from '../../../tests/support/bound-execution.js';
+import { configureRuntime } from '../../../tests/support/runtime-construction.js';
 import Database from 'better-sqlite3';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { createServer } from 'node:net';
@@ -6,7 +8,6 @@ import { join } from 'node:path';
 import { afterEach, expect, it, vi } from 'vitest';
 import { createRepositories } from '@dutydeck/storage';
 import { agentConfigSchema, installationOwnerTaskActor } from '@dutydeck/shared';
-import type { DriverFactory, RuntimeOptions } from '@dutydeck/runtime';
 import { AUTH_COOKIE_NAME, AUTH_PASSWORD_CONFIG_KEY, getAuthToken, getShareLinkSecret, hashPassword, issueBrowserSession, signSessionShareToken } from './auth/auth.js';
 import { larkBotsConfigKey } from './lark/config.js';
 import { LarkGroupManager } from './lark/group-management.js';
@@ -29,15 +30,18 @@ async function fixture(mode: 'local' | 'token') {
   await repos.config.set(AUTH_PASSWORD_CONFIG_KEY, password);
   await repos.config.set(larkBotsConfigKey, JSON.stringify([{ appId: 'cli_owner', appSecret: 'fixture-secret', defaultAgentId: 'fake', workspace: directory, listening: true, fullTrustConfirmed: true }]));
   const port = await freePort();
+  const send = vi.fn(async () => {});
+  let bound!: ReturnType<typeof captureBoundExecution>;
+  configureRuntime.mockImplementationOnce((options, repos) => {
+    bound = captureBoundExecution(repos);
+    options.launchContext!.probe = () => ({ protocol: 'acp', available: true, pause: false, resume: true });
+    options.launchContext!.driverFactory = () => ({ resume: async () => {}, start: async () => {}, stop: async () => {}, isStopped: async () => true, isIdle: () => true, hasBackgroundWork: () => false, send, interrupt: async () => {} });
+  });
   const service = await startLocalServer({ webRoot: directory, env: { PATH: process.env.PATH, HOME: directory, NODE_ENV: 'test',
     DUTYDECK_HOST: mode === 'local' ? '127.0.0.1' : '0.0.0.0', DUTYDECK_PORT: String(port), DUTYDECK_DEFAULT_CWD: directory,
     DUTYDECK_DATABASE_URL: database, DUTYDECK_DAEMON_DIR: join(directory, 'daemon'), DUTYDECK_AUTH: 'true',
     DUTYDECK_DISABLE_LARK_LISTENER: 'true', DUTYDECK_AGENTS_JSON: '[]' } });
   cleanups.push(() => service.close());
-  const internals = service.runtime as unknown as { factory: DriverFactory; options: RuntimeOptions };
-  internals.options.probe = () => ({ protocol: 'acp', available: true, pause: false, resume: true });
-  const send = vi.fn(async () => {});
-  internals.factory = () => ({ start: async () => {}, stop: async () => {}, isStopped: async () => true, isIdle: () => true, hasBackgroundWork: () => false, send, interrupt: async () => {} });
   await repos.agents.save(agentConfigSchema.parse({ id: 'fake', name: 'Fake', command: 'fake', protocol: 'acp', cwd: directory }));
   service.runtime.setQueueHeld(true);
   const base = `http://127.0.0.1:${port}`;
@@ -51,7 +55,7 @@ async function fixture(mode: 'local' | 'token') {
     expect(task.status).toBe('queued');
     return { session, task, url: `/api/sessions/${session.id}/queue/${task.id}` };
   };
-  return { repos, service, queue, request, owner, browser, send, database, directory };
+  return { repos, service, queue, request, owner, browser, send, database, directory, bound };
 }
 
 it.each([
@@ -95,11 +99,11 @@ it('real owner wiring preserves managed policy denials and work-item control bou
   const f = await fixture('token');
   await f.repos.channelBots.create({ id: 'staged-bot', channel: 'lark', externalAppId: 'cli_staged', displayName: 'Staged', brand: 'feishu', state: 'staged' });
   await f.repos.groupBindings.create({ id: 'staged-binding', channelBotId: 'staged-bot', externalChatId: 'oc_staged' });
-  const execution = (f.service.runtime as any).bound();
+  const execution = f.bound();
   for (const [id, source, sourceId, expected] of [
     ['managed', 'foundation_group_binding', 'staged-binding', 'channel_bot_disabled'],
     ['work-child', 'work_item', 'work-attempt', 'WORK_ITEM_MANAGED_SESSION']
-  ]) {
+  ] as const) {
     execution.createSession({ id, runId: `run-${id}`, agentId: 'fake', cwd: f.directory, state: 'idle', source, sourceId, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() });
     const response = await f.request(`/api/sessions/${id}/stop`);
     expect(response.status).toBe(403);

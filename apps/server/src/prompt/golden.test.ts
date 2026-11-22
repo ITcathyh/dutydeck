@@ -25,8 +25,11 @@ vi.mock('@dutydeck/runtime', async importOriginal => {
   return { ...original, DutydeckRuntime: class extends original.DutydeckRuntime {
     constructor(repos: ConstructorParameters<typeof original.DutydeckRuntime>[0], options: RuntimeOptions) {
       super(repos, {
-        prepareTaskPrompt: options.prepareTaskPrompt, sessionPrompt: options.sessionPrompt,
-        selectPromptPolicy: async () => ({ version: 'optimized-v1' }),
+        promptAssembler: {
+          atExecute: options.promptAssembler!.atExecute,
+          atAccept: (session, request, input, check) => options.promptAssembler!.atAccept(session, request,
+            { ...input, inheritedVersion: input.inheritedVersion ?? 'optimized-v1' }, check)
+        },
         probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }),
         driverFactory: (_agent, _protocol, emit, _exit, id) => ({
           start: async () => {}, resume: async () => {}, interrupt: async () => {}, stop: async () => {}, setPermissionMode: () => {},

@@ -1,11 +1,12 @@
+import { configureRuntime, runtimeInputs } from '../../../../tests/support/runtime-construction.js';
 import { afterEach, expect, it, vi } from 'vitest';
-import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { appendFile, mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createServer } from 'node:net';
 import { createRepositories } from '@dutydeck/storage';
-import type { AgentConfig, RepositoryBundle } from '@dutydeck/shared';
-import type { AgentDriver, RuntimeOptions } from '@dutydeck/runtime';
+import type { AgentConfig } from '@dutydeck/shared';
+import type { AgentDriver } from '@dutydeck/runtime';
 import { startLocalServer } from '../service.js';
 import { PluginStore } from '../plugins/store.js';
 import type { StoredLarkConfig } from './config.js';
@@ -30,15 +31,39 @@ it.each(['deny', 'rewrite'] as const)('keeps task.beforeRun %s policy on the rea
   createRepositories(database, { newDatabaseAuthority: 'ledger_v1' }).close();
   const source = join(root, 'plugin');
   const record = join(root, 'hook-inputs.jsonl');
+  const settlements = join(root, 'settlements.jsonl');
   await mkdir(join(source, '.dutydeck-plugin'), { recursive: true });
   await writeFile(join(source, '.dutydeck-plugin/plugin.json'), JSON.stringify({ name: 'polish-policy', providers: 'index.mjs' }));
   const output = mode === 'deny' ? { decision: 'deny', reason: 'POLISH_DENIED' } : { updatedPrompt: 'UNTRUSTED_REWRITE_CANARY', additionalContext: 'UNTRUSTED_CONTEXT_CANARY' };
   await writeFile(join(source, 'index.mjs'), `import { appendFileSync } from 'node:fs';
-export default api => api.registerHookHandler('task.beforeRun', input => {
-  appendFileSync(${JSON.stringify(record)}, JSON.stringify(input) + String.fromCharCode(10));
-  return ${JSON.stringify(output)};
-});`);
+export default api => {
+  api.registerHookHandler('task.beforeRun', input => {
+    appendFileSync(${JSON.stringify(record)}, JSON.stringify(input) + String.fromCharCode(10));
+    return ${JSON.stringify(output)};
+  });
+  api.registerHookHandler('task.completed', input => {
+    appendFileSync(${JSON.stringify(settlements)}, JSON.stringify(['plugin', input.sessionId, input.taskId, input.attemptId]) + String.fromCharCode(10));
+    return {};
+  });
+};`);
   await new PluginStore(root).install(source, { yes: true });
+  const starts: AgentConfig[] = [];
+  const send = vi.fn();
+  configureRuntime.mockImplementationOnce(options => {
+    options.launchContext!.probe = () => ({ protocol: 'acp', available: true, pause: false, resume: true });
+    options.launchContext!.driverFactory = (agent, _protocol, emit) => {
+      starts.push(agent);
+      let stopped = false;
+      return { start: async () => {}, resume: async () => {}, stop: async () => { stopped = true; }, isStopped: async () => stopped, interrupt: async () => {},
+        send: async prompt => {
+          const text = typeof prompt === 'string' ? prompt : prompt.prompt;
+          send(text);
+          emit({ type: 'text', data: { text: JSON.stringify({ text: '本次结果尚未验证。' }) } });
+          emit({ type: 'completed', data: { stopReason: 'end_turn' } });
+        }
+      } satisfies AgentDriver;
+    };
+  });
   const server = await startLocalServer({ webRoot: root, env: {
     ...process.env, HOME: root, NODE_ENV: 'test', DUTYDECK_HOST: '127.0.0.1', DUTYDECK_PORT: String(await freePort()),
     DUTYDECK_DEFAULT_CWD: root, DUTYDECK_DATABASE_URL: database, DUTYDECK_DAEMON_DIR: join(root, 'daemon'),
@@ -46,23 +71,11 @@ export default api => api.registerHookHandler('task.beforeRun', input => {
     DUTYDECK_AGENTS_JSON: JSON.stringify([{ id: 'editor', name: 'Editor', command: process.execPath, protocol: 'acp' }])
   } });
   cleanups.push(() => server.close());
-  const internals = server.runtime as unknown as { options: RuntimeOptions; repos: RepositoryBundle; factory: NonNullable<RuntimeOptions['driverFactory']> };
-  const starts: AgentConfig[] = [];
-  const send = vi.fn();
-  internals.options.probe = () => ({ protocol: 'acp', available: true, pause: false, resume: true });
-  internals.factory = (agent, _protocol, emit) => {
-    starts.push(agent);
-    let stopped = false;
-    return { start: async () => {}, resume: async () => {}, stop: async () => { stopped = true; }, isStopped: () => stopped, interrupt: async () => {},
-      send: async prompt => {
-        const text = typeof prompt === 'string' ? prompt : prompt.prompt;
-        send(text);
-        emit({ type: 'text', data: { text: JSON.stringify({ text: '本次结果尚未验证。' }) } });
-        emit({ type: 'completed', data: { stopReason: 'end_turn' } });
-      }
-    } satisfies AgentDriver;
-  };
-  const polisher = new LarkReplyPolisher({ runtime: server.runtime, repos: internals.repos });
+  runtimeInputs(server.runtime).options.events!.subscribe('host', async event => {
+    if (event.type === 'task.settled') await appendFile(settlements,
+      JSON.stringify(['host', event.session.id, event.task.id, event.task.currentAttemptId]) + '\n');
+  });
+  const polisher = new LarkReplyPolisher({ runtime: server.runtime, repos: runtimeInputs(server.runtime).repos });
   const original = '值得注意的是，本次结果尚未验证。';
   const config = { appId: 'cli_polish', replyPolishEnabled: true, replyPolishAgentId: 'editor', replyPolishTimeoutMs: 10000 } as StoredLarkConfig;
   const stop = vi.spyOn(server.runtime, 'stop');
@@ -74,6 +87,10 @@ export default api => api.registerHookHandler('task.beforeRun', input => {
     expect(result).toBe(original);
     expect(send).not.toHaveBeenCalled();
   } else {
+    await vi.waitFor(async () => {
+      const rows = (await readFile(settlements, 'utf8')).trim().split('\n').map(line => JSON.parse(line));
+      expect(rows).toEqual([['host', expect.any(String), expect.any(String), expect.any(String)], ['plugin', ...rows[0].slice(1)]]);
+    });
     expect(send).toHaveBeenCalledOnce();
     expect(result).toBe('本次结果尚未验证。');
     expect(send.mock.calls[0]![0]).toContain(original);

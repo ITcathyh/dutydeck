@@ -82,6 +82,13 @@ function persistentTurn(recoverable = false) {
         attachedEmit(event);
       }
     },
+    capacityFailure() {
+      const event: NormalizedDriverEvent = { type: 'error', data: {
+        code: 'codex_capacity', message: 'At capacity', capacityReason: 'selected_model_capacity',
+        nativeSource: 'codex', nativeTerminal: true, nativeTurnId: 'verified-turn',
+      }, sourceId: 'capacity-error' };
+      backendHistory.push(event); attachedEmit?.(event);
+    },
     complete() {
       backendCompleted = true;
       const event: NormalizedDriverEvent = { type: 'completed', data: { stopReason: 'end_turn' } };
@@ -119,6 +126,55 @@ async function close(handle: ReturnType<typeof open>) {
 }
 
 describe('persistent task recovery across a reopened database', () => {
+  it.each([false, true])('settles the same native capacity result with the original retry policy (recovered: %s)', async recovered => {
+    const file = database(), backend = persistentTurn(true), onTaskSettled = vi.fn();
+    const observeTurn = vi.fn<NonNullable<import('./index.js').RuntimeOptions['observeTurn']>>(async () => {});
+    const usage = vi.fn<NonNullable<import('./index.js').RuntimeOptions['recordUsage']>>(async () => {});
+    let handle = open(file, backend.factory, { onTaskSettled, observeTurn, recordUsage: usage });
+    await handle.runtime.initialize([agent]);
+    const session = await handle.runtime.start({ agentId: agent.id });
+    const task = await handle.runtime.dispatch(session.id, 'original', 'queue', 'original', undefined, 'installation_owner');
+    await vi.waitFor(() => expect(backend.prompts).toEqual(['original']));
+    const original = handle.repos.execution.getTaskExecution(task.id)!.currentAttempt!;
+    if (recovered) {
+      await close(handle);
+      observeTurn.mockClear();
+      handle = open(file, backend.factory, { onTaskSettled, observeTurn, recordUsage: usage });
+      await handle.runtime.initialize([agent]);
+      expect(backend.recoveredAfter(1)).toBe(1);
+    }
+    backend.capacityFailure();
+    backend.complete();
+    const projection = () => handle.repos.execution.getTaskExecution(task.id)!;
+    await vi.waitFor(() => expect(projection().attempts[0]?.state).toBe('settled'));
+    expect(projection().attempts[0]).toMatchObject({
+      attemptId: original.attemptId, outcome: 'failed', settlement: {
+        kind: 'driver_result', submissionId: original.submission!.submissionId, complete: true, stopReason: 'end_turn',
+      },
+    });
+    expect(usage).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ id: session.id }), { taskId: task.id, attemptId: original.attemptId }, undefined);
+    if (recovered) expect(usage.mock.invocationCallOrder[0]).toBeLessThan(onTaskSettled.mock.invocationCallOrder[0]!);
+    else {
+      expect(observeTurn.mock.calls.map(([s, id, phase]) => [s.id, id, phase])).toEqual([[session.id, task.id, 'start'], [session.id, task.id, 'end']]);
+      expect(usage.mock.invocationCallOrder[0]).toBeGreaterThan(observeTurn.mock.invocationCallOrder[0]!);
+      expect(usage.mock.invocationCallOrder[0]).toBeLessThan(observeTurn.mock.invocationCallOrder[1]!);
+    }
+    if (recovered) {
+      expect(projection().attempts).toHaveLength(1);
+      expect(projection().task.status).toBe('failed');
+      expect(observeTurn).not.toHaveBeenCalled();
+      await vi.waitFor(() => expect(onTaskSettled).toHaveBeenCalledOnce());
+      expect(onTaskSettled.mock.calls[0]![1]).toMatchObject({ id: task.id, status: 'failed' });
+    } else {
+      expect(projection().attempts).toHaveLength(2);
+      expect(projection().currentAttempt?.automaticRetry).toMatchObject({ causeAttemptId: original.attemptId, ordinal: 1 });
+      expect(projection().task.status).toBe('queued');
+      expect(observeTurn.mock.calls.map(call => call[2])).toEqual(['start', 'end']);
+      expect(onTaskSettled).not.toHaveBeenCalled();
+    }
+    expect(backend.prompts).toEqual(['original']);
+  });
+
   it.each([false, true])('keeps a submitted Attempt without a checkpoint unresolved (completed offline: %s)', async offline => {
     const file = database(); const backend = persistentTurn();
     const first = open(file, backend.factory);
@@ -280,7 +336,10 @@ describe('persistent task recovery across a reopened database', () => {
     const terminal = await h.runtime.start({ agentId: agent.id }), other = await h.runtime.start({ agentId: 'acp', cwd: independentCwd });
     await h.runtime.dispatch(terminal.id, 'terminal input');
     await h.runtime.dispatch(other.id, 'ACP input');
-    await vi.waitFor(() => expect(acp.prompts).toHaveLength(1));
+    await vi.waitFor(() => {
+      expect(acp.prompts).toEqual(['ACP input']);
+      expect(pty.prompts).toEqual(['terminal input']);
+    });
     h.runtime.setQueueHeld(true);
     expect(await h.runtime.getRestartActivity()).toEqual({ runningTasks: 2, restartBlockers: 1, recoverableTasks: 1 });
     expect(await h.runtime.getRestartActivity(terminal.id)).toEqual({ runningTasks: 1, restartBlockers: 1, recoverableTasks: 0 });

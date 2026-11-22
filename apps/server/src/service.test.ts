@@ -1,3 +1,4 @@
+import { runtimeInputs } from '../../../tests/support/runtime-construction.js';
 import { backgroundKindCases } from '../../../tests/support/background-kind-cases.js';
 import { classifyUsage } from './usage-ledger.js';
 import { PluginRuntimeHooks } from './plugins/integration.js';
@@ -11,7 +12,6 @@ import { Writable } from 'node:stream';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { createRepositories } from '@dutydeck/storage';
-import type { RuntimeOptions } from '@dutydeck/runtime';
 import { botAppIdOfSession, type Session } from '@dutydeck/shared';
 import { LarkAgentToolsService } from './lark/agent-tools.js';
 import { HerdrSessions } from './herdr.js';
@@ -53,7 +53,7 @@ it('composes frozen collaboration prompts without tool, plugin-result or Herdr d
     DUTYDECK_DEFAULT_CWD: root, DUTYDECK_DATABASE_URL: database, DUTYDECK_AUTH: 'false',
     DUTYDECK_DISABLE_LARK_LISTENER: 'true', DUTYDECK_AGENTS_JSON: '[]'
   } });
-  const options = (service.runtime as unknown as { options: RuntimeOptions }).options;
+  const options = runtimeInputs(service.runtime).options;
   const tools = vi.fn(() => [{ kind: 'dynamic_context' as const, trustScope: 'host:current_authority', content: 'TOOLS\n\n' }]);
   vi.spyOn(LarkAgentToolsService.prototype, 'toolPromptContributor').mockReturnValue({ stage: 'capability', order: 10, sessions: 'host-enabled', contribute: tools });
   const herdr = vi.spyOn(HerdrSessions.prototype, 'prompt').mockReturnValue('HERDR');
@@ -65,16 +65,16 @@ it('composes frozen collaboration prompts without tool, plugin-result or Herdr d
     for (const protocol of ['acp', 'pty-cli'] as const) for (const terminalBackend of ['tmux', 'herdr'] as const) {
       const session = { ...base, protocol, terminalBackend };
       for (const promptPolicyVersion of ['legacy-v1', 'optimized-v1'] as const) {
-        const result = await options.sessionPrompt!(session, prompt, { promptPolicyVersion, promptParts: [{ kind: 'user_request', trustScope: 'user_request', content: prompt }] });
+        const result = await options.promptAssembler!.atExecute(session, prompt, { promptPolicyVersion, promptParts: [{ kind: 'user_request', trustScope: 'user_request', content: prompt }] });
         expect(result).toMatchObject({ prompt, diagnostics: { templateVersion: promptPolicyVersion, beforeChars: prompt.length, afterChars: prompt.length } });
         for (const fallbackReason of ['invalid_configuration', 'configuration_unavailable']) {
           const context = { promptPolicyVersion, promptDiagnostics: { templateVersion: promptPolicyVersion, beforeChars: prompt.length, afterChars: prompt.length, deduplicatedParts: 0, parts: [], fallbackReason } };
-          expect(await options.sessionPrompt!(session, prompt, context)).toMatchObject({ prompt, diagnostics: { fallbackReason } });
-          expect(await options.sessionPrompt!(session, prompt, { ...context, promptParts: [{ kind: 'user_request', trustScope: 'user_request', content: 'mismatched source' }] }))
+          expect(await options.promptAssembler!.atExecute(session, prompt, context)).toMatchObject({ prompt, diagnostics: { fallbackReason } });
+          expect(await options.promptAssembler!.atExecute(session, prompt, { ...context, promptParts: [{ kind: 'user_request', trustScope: 'user_request', content: 'mismatched source' }] }))
             .toMatchObject({ prompt, diagnostics: { fallbackReason: 'source_render_mismatch' } });
         }
       }
-      const env = options.sessionEnvironment!(session);
+      const env = options.launchContext!.environment!(session);
       expect(env.dutydeck_frozen_materials).toBe(protocol === 'pty-cli' ? 'true' : undefined);
       expect(env.dutydeck_relay_token).toBeTruthy();
     }
@@ -84,11 +84,11 @@ it('composes frozen collaboration prompts without tool, plugin-result or Herdr d
       { sourceId: 'cli_test:oc_group:group' }, { source: 'web', sourceId: undefined }, { source: 'terminal', sourceId: undefined }
     ]) {
       const session = { ...base, protocol, ...patch };
-      const result = await options.sessionPrompt!(session, prompt, { promptDiagnostics: { templateVersion: 'legacy-v1', beforeChars: prompt.length, afterChars: prompt.length,
+      const result = await options.promptAssembler!.atExecute(session, prompt, { promptDiagnostics: { templateVersion: 'legacy-v1', beforeChars: prompt.length, afterChars: prompt.length,
         deduplicatedParts: 0, parts: [], fallbackReason: 'configuration_unavailable' } });
       expect(typeof result === 'string' ? result : result.prompt).toBe(`TOOLS\n\n${taskReportHint('dutydeck')}\n\nHERDR\n\n${prompt}`);
       expect(result).toMatchObject({ diagnostics: { fallbackReason: 'configuration_unavailable' } });
-      expect(options.sessionEnvironment!(session).dutydeck_frozen_materials).toBeUndefined();
+      expect(options.launchContext!.environment!(session).dutydeck_frozen_materials).toBeUndefined();
     }
   } finally { await service.close(); }
 });
@@ -101,7 +101,7 @@ it('preserves usage, Claude settings, hook permissions and host injection for pe
     DUTYDECK_DEFAULT_CWD: root, DUTYDECK_DATABASE_URL: join(root, 'dutydeck.db'),
     DUTYDECK_DISABLE_LARK_LISTENER: 'true', DUTYDECK_AGENTS_JSON: '[]'
   } });
-  const options = (service.runtime as unknown as { options: RuntimeOptions }).options;
+  const options = runtimeInputs(service.runtime).options;
   const hooks = new PluginRuntimeHooks(new PluginHookBus([{
     kind: 'handler', plugin: 'fixture', scope: 'global', event: 'task.beforeRun', timeout: 1_000,
     handler: () => ({ updatedPrompt: 'rewritten' })
@@ -116,7 +116,7 @@ it('preserves usage, Claude settings, hook permissions and host injection for pe
       expect(args.includes('--setting-sources'), row.source).toBe(row.userSettingsOnly);
       if (row.userSettingsOnly) expect(args[args.indexOf('--setting-sources') + 1]).toBe('user');
       expect(result.agentPrompt, row.source).toBe(row.hookMode === 'deny-only' ? 'original' : 'rewritten');
-      expect(Boolean(options.sessionEnvironment!(session).dutydeck_relay_token), row.source).toBe(row.injectHost);
+      expect(Boolean(options.launchContext!.environment!(session).dutydeck_relay_token), row.source).toBe(row.injectHost);
       expect(botAppIdOfSession(session), row.source).toBe(row.botScoped ? 'app' : undefined);
     }
   } finally { await service.close(); }
@@ -138,19 +138,19 @@ it('marks only group Claude sessions of a memory-enabled bot that turned claudeA
     DUTYDECK_DEFAULT_CWD: root, DUTYDECK_DATABASE_URL: database, DUTYDECK_AUTH: 'false',
     DUTYDECK_DISABLE_LARK_LISTENER: 'true', DUTYDECK_AGENTS_JSON: '[]'
   } });
-  const options = (service.runtime as unknown as { options: RuntimeOptions }).options;
+  const options = runtimeInputs(service.runtime).options;
   const terminal = { id: 'claude-code', name: 'Claude Code', command: 'claude', args: [], protocol: 'pty-cli' as const, adapterId: 'claude-code', cwd: root, env: { USER_KEY: 'kept' },
     permissionMode: 'ask' as const, timeout: 60, capabilities: { pause: false, resume: true }, builtin: true };
   const builtinAcp = { ...terminal, id: 'claude', protocol: 'acp' as const, adapterId: undefined, command: process.execPath, args: [join(root, 'agents', 'claude-acp.mjs')] };
   const customAcp = { ...builtinAcp, id: 'custom-claude', command: 'claude-code-acp', args: [] };
   const session = (patch: Partial<Session>): Session => ({ id: 'auto-memory', agentId: 'claude-code', cwd: root, state: 'idle', runId: 'run', createdAt: '', updatedAt: '',
     source: 'lark', sourceId: 'cli_off:oc_group:group', protocol: 'pty-cli', ...patch });
-  const marker = async (agent: typeof terminal | typeof builtinAcp, patch: Partial<Session> = {}) => (await options.configureAgent!(agent, session(patch))).env.dutydeck_claude_auto_memory;
+  const marker = async (agent: typeof terminal | typeof builtinAcp, patch: Partial<Session> = {}) => (await options.launchContext!.configureAgent!(agent, session(patch))).env.dutydeck_claude_auto_memory;
   try {
     expect(await marker(terminal)).toBe('off');
     expect(await marker(terminal, { sourceId: 'cli_off:oc_group:group:thread:om_root' })).toBe('off');
     expect(await marker(builtinAcp, { protocol: 'acp' })).toBe('off');
-    expect((await options.configureAgent!(terminal, session({}))).env.USER_KEY).toBe('kept');
+    expect((await options.launchContext!.configureAgent!(terminal, session({}))).env.USER_KEY).toBe('kept');
     for (const [agent, patch] of [
       [customAcp, { protocol: 'acp' }],
       [terminal, { sourceId: 'cli_inherit:oc_group:group' }],
