@@ -5,7 +5,7 @@
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": { ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js", "development": "./src/index.ts" } },
-  "files": ["dist", "src/index.ts"],
+  "files": ["dist", "!dist/*.tsbuildinfo", "src/index.ts"],
   "scripts": { "build": "tsc -p tsconfig.json", "typecheck": "tsc -p tsconfig.json --noEmit", "prepack": "pnpm build" },
   "devDependencies": { "typescript": "5.8.3" }
 }

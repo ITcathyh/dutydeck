@@ -1,1 +1,24 @@
-{"extends":"../../tsconfig.base.json","compilerOptions":{"outDir":"dist","rootDir":"src"},"include":["src"]}
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "composite": true,
+    "outDir": "dist",
+    "rootDir": "src",
+    "noEmit": true
+  },
+  "include": ["src"],
+  "references": [
+    { "path": "../../packages/acp-client" },
+    { "path": "../../packages/agent-runtime" },
+    { "path": "../../packages/cli-adapters" },
+    { "path": "../../packages/config" },
+    { "path": "../../packages/legacy-importer" },
+    { "path": "../../packages/pty-driver" },
+    { "path": "../../packages/relay" },
+    { "path": "../../packages/secret-provider" },
+    { "path": "../../packages/session-backends" },
+    { "path": "../../packages/shared" },
+    { "path": "../../packages/storage" },
+    { "path": "../../packages/transports" }
+  ]
+}

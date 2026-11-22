@@ -21,7 +21,8 @@
     "src",
     "!src/**/*.test.ts",
     "!src/fixtures",
-    "dist"
+    "dist",
+    "!dist/*.tsbuildinfo"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json",

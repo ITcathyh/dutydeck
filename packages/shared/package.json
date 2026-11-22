@@ -36,6 +36,7 @@
     "src",
     "!src/**/*.test.ts",
     "dist",
+    "!dist/*.tsbuildinfo",
     "runtime"
   ],
   "scripts": {
