@@ -16,6 +16,7 @@ import { readTurnDiffRecord } from '../turn-diff.js';
 import { redactTraceText } from './secret-redaction.js';
 import { OnlineProcessCard, type CardUpdateOutcome } from './online-process-card.js';
 import { completeExplicitFinal, explicitFinalContext, hasExplicitFinal, withExplicitFinalLock } from './explicit-final.js';
+import type { TurnVerification } from './turn-contributors/types.js';
 import { createTurnContributors } from './turn-contributors/index.js';
 import { describeLarkTaskRecovery, larkAgentUnavailableText, larkQuietSettledNote, larkStallNote, larkSteeringUnknownNote, notifyLarkTaskRecovery, verifiedLarkRecoveryOutput } from './task-recovery.js';
 import { validateLarkLaunchOptions, type LarkLaunchOptions } from './new-session.js';
@@ -998,6 +999,15 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
     }
   }
 
+  private readonly turnVerification: TurnVerification = {
+    fingerprint: (task, session) => this.sharedWorkspaceFingerprint(task, session),
+    plan: (task, before) => this.planAutoVerification(task, before),
+    run: (task, plan) => this.runAutoVerification(task, plan),
+    inFlight: taskId => this.verifyInFlight.has(taskId),
+    settle: (appId, taskId) => this.settlePendingVerification(appId, taskId),
+    view: (task, config, state, changed) => this.verificationView(task, config, state, changed),
+  };
+
   protected async runTurn(task: LarkTask, launcherRecovery = false) {
     if (!await this.confirmationInputAllowed(task.inbox)) return;
     if (this.stopped) return;
@@ -1328,7 +1338,7 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
       : [];
     if (!resumeTask) task.startedAt = Date.now();
     task.interruptRequested = false;
-    const contributors = createTurnContributors({ task, config, event, session, botSender, currentTurn, reattaching: Boolean(previous), materialPrompt, materialParts, cardMappings: this.cardMappings, options: this.workflowOptions, log: this.log });
+    const contributors = createTurnContributors({ task, config, event, session, botSender, currentTurn, reattaching: Boolean(previous), materialPrompt, materialParts, verification: this.turnVerification, cardMappings: this.cardMappings, options: this.workflowOptions, log: this.log });
     await contributors.beforeCard(cardContext);
     // An accepted task keeps its original card and mapping while reattaching.
     if (await cancelledBeforeCard()) return;
@@ -1592,7 +1602,7 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
         // 本轮有没有改这个仓库：「使用这个验证命令」按钮和 git 状态行都只在改了的时候才有意义。
         const changedCode = state === 'completed' && codeSignatureBefore !== undefined
           && await readGitCodeSignature(session.cwd) !== codeSignatureBefore;
-        const verification = await this.verificationView(task, config, state, changedCode);
+        const cardAdditions = await contributors.inspectResult(state, changedCode);
         // 计划卡不给续问、定时这些结果操作：它们和批准共用这张卡做下一轮的锚点。
         const resultActions = planTask === undefined ? await this.resultActionCapabilities(task, config, state) : {};
         const continueCause = await this.continueCause(config.appId, task.id, currentTurn, task.scopeId, state, task.events);
@@ -1606,7 +1616,7 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
           ...(continueCause?.settled ? [{ tag: 'markdown', element_id: 'recovery_note', content: larkQuietSettledNote(continueCause) }] : []),
           ...(explicit ? [] : task.steered ? [{ tag: 'markdown', element_id: 'steer_note', content: task.steerNote ?? steeringOutcomeText(task.steered) }] : renderLarkResultElements(verifiedOutput ? [verifiedOutput] : task.events, plan.resultOptions)),
           ...(context ? await this.workflows.result(context, '') : []),
-          ...(verification.element ? [verification.element] : []),
+          ...(cardAdditions.verification ? [cardAdditions.verification] : []),
           ...(turnDiff ? [turnDiff] : []),
           ...(gitStatus ? [{ tag: 'markdown', element_id: 'git_status', content: gitStatus }] : []),
           ...plan.mentionElements];
@@ -1633,7 +1643,7 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
           // 只有完成的结果卡是只读收据；失败、中断、取消时过程卡已收成一行，「重试」只能放在这张卡上。
           sessionId: task.sessionId, turn: currentTurn, readOnly: state === 'completed',
           elapsedSeconds: (Date.now() - task.startedAt!) / 1_000,
-          capabilities: { ...this.capabilitiesForTask(task), ...verification.capabilities, ...resultActions, ...(continueCause ? { canContinueInPlace: true } : {}) },
+          capabilities: { ...this.capabilitiesForTask(task), ...cardAdditions.capabilities, ...resultActions, ...(continueCause ? { canContinueInPlace: true } : {}) },
           ...(config.webBaseUrl ? { webBaseUrl: config.webBaseUrl } : {})
         };
         const beforeSend = async () => {
@@ -1778,8 +1788,6 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
 
     task.state = 'queued';
     let runtimeTaskId: string | undefined;
-    /** 共享目录在本轮派发前的代码指纹；本轮结束时与当前指纹比较，判断这一轮有没有改代码。 */
-    let codeBefore: string | undefined;
     let active = false;
     let settling = false;
     let settled = false;
@@ -1827,15 +1835,8 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
         active = false;
         task.state = resolvedState;
         if (runtimeTaskId) await this.workflows.expireTask(config.appId, runtimeTaskId);
-        // 本轮改了代码就自动验证：结果卡按「验证执行中」交付，交付之后在后台真实执行验证命令。
-        // 插话送达的这一条没有自己的一轮，代码是正在执行的那一轮改的，验证留给那一轮的结果卡。
-        const autoVerification = resolvedState === 'completed' && !task.steered ? await this.planAutoVerification(task, codeBefore) : undefined;
+        await contributors.planDelivery(resolvedState);
         await deliverTerminal(resolvedState, resolvedState === 'completed').finally(cleanup);
-        if (autoVerification) void this.runAutoVerification(task, autoVerification);
-        // 本轮不自动验证：这个任务若是返修轮次，返修到此为止，登记的轮次移出待收尾。
-        else if (config.verificationCommand?.trim() && !this.verifyInFlight.has(task.id)) {
-          void this.settlePendingVerification(config.appId, task.id).catch(error => this.log.warn({ error, taskId: task.id }, '移出待收尾的自动验证失败'));
-        }
         contributors.afterDelivery(resolvedState, runtimeTaskId);
       })().catch(error => this.log.error({ error, taskId: task.id, runtimeTaskId }, '生成飞书任务终态失败'));
     };
@@ -1886,7 +1887,7 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
     try {
       // 重启后接上的任务没有开始时的指纹，共享目录里就不自动验证。
       if (!previous) {
-        codeBefore = await this.sharedWorkspaceFingerprint(task, session);
+        await contributors.captureWorkspace();
         codeSignatureBefore = await readGitCodeSignature(session.cwd);
       }
       if (this.stopped || task.turn !== currentTurn) { cleanup(); return; }
