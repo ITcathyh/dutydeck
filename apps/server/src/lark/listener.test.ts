@@ -1,4 +1,4 @@
-import { createTestLarkCoordinator, createTestLarkStorage, fixtureRuntime } from './coordinator-test-fixture.js';
+import { expectFirstLarkTurnCard, createTestLarkCoordinator, createTestLarkStorage, fixtureRuntime } from './coordinator-test-fixture.js';
 import { createMemoryLarkRuntime } from './runtime-test-fixture.js';
 import { afterEach, describe, expect, it, onTestFinished, vi } from 'vitest';
 import '../../../../tests/support/fast-wait-for.js';
@@ -6,7 +6,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { installLarkHook } from './security-hooks.js';
-import type { AgentEvent, PromptPart, Session } from '@dutydeck/shared';
+import type { AgentEvent, Session } from '@dutydeck/shared';
 import type { StoredLarkConfig } from './config.js';
 import type { LarkLongConnectionListenerOptions } from './listener.js';
 import { isLarkMessageRateLimit, larkRateLimitBackoffMs, LarkLongConnectionListener, LarkLongConnectionListenerPool, patchRejectedCardDelta } from './listener.js';
@@ -831,7 +831,7 @@ describe('Lark message coordinator', () => {
     const service = {
       addReaction: vi.fn(async () => { order.push('reaction'); return { reactionId: 'reaction-1' }; }),
       send: vi.fn(async () => { order.push('card'); return { messageId: 'om_card' }; }),
-      reply: vi.fn(async () => { order.push('card'); return { messageId: 'om_card' }; }),
+      reply: vi.fn(async (input: import('./service.js').LarkReplyInput) => { order.push('card'); return { messageId: `om_card_${input.messageId}_${input.cardKind}` }; }),
       deleteReaction: vi.fn(async () => { order.push('delete-reaction'); }),
       update: vi.fn(async (input: any) => { order.push(`update-${input.state}`); return { messageId: 'om_card' }; })
     };
@@ -847,10 +847,16 @@ describe('Lark message coordinator', () => {
     expect(runtime.send).toHaveBeenNthCalledWith(1, 'ses_1', '帮我检查', expect.any(String));
     expect(order.slice(0, 3)).toEqual(['reaction', 'card', 'delete-reaction']);
     expect(service.addReaction).toHaveBeenCalledWith('om_1', 'OK');
-    expect(service.reply).toHaveBeenCalledWith(expect.objectContaining({ messageId: 'om_1', markdown: '正在思考中…' }));
-    const completed = service.update.mock.calls.find(([input]) => input.state === 'completed')?.[0];
-    const completedContent = JSON.stringify(completed.elements);
-    expect(completedContent).toContain('完成');
+    await expectFirstLarkTurnCard(service.reply, service.update, 'om_1', { messageId: 'om_1' });
+    const completed = service.update.mock.calls.find(([input]) => input.state === 'completed' && input.taskId === 'om_1')?.[0];
+    expect(completed).toMatchObject({ messageId: 'om_card_om_1_process', turn: 1 });
+    const result = await vi.waitFor(() => {
+      const reply = service.reply.mock.calls.find(([input]) => input.cardKind === 'result' && input.taskId === 'om_1');
+      expect(reply?.[0]).toMatchObject({ messageId: 'om_1', turn: 1, state: 'completed', readOnly: true });
+      return reply![0];
+    });
+    expect(result.elements).toContainEqual(expect.objectContaining({ element_id: 'final_output', content: '完成' }));
+    const completedContent = JSON.stringify([completed.elements, result.elements]);
     expect(completedContent).not.toContain('帮我检查');
     expect(completedContent).not.toContain('session updated');
   });
@@ -874,7 +880,7 @@ describe('Lark message coordinator', () => {
     coordinator.handle({ messageId: 'om_trigger', chatId: 'oc_group', chatType: 'group', messageType: 'text', content: JSON.stringify({ text: '@bot 分析这个' }), mentions: [{ key: '@bot', name: 'Dutydeck', openId: 'ou_bot' }] }, config);
     await vi.waitFor(() => expect(service.update).toHaveBeenCalledWith(expect.objectContaining({ state: 'completed' })));
 
-    expect(service.reply).toHaveBeenCalledWith(expect.objectContaining({ messageId: 'om_trigger', state: 'running', taskName: expect.any(String) }));
+    await expectFirstLarkTurnCard(service.reply, service.update, 'om_trigger', { messageId: 'om_trigger', taskName: '分析这个' });
     expect(service.reply.mock.calls[0]?.[0]).not.toHaveProperty('replyInThread');
     expect(service.send).not.toHaveBeenCalled();
     expect(service.update).toHaveBeenLastCalledWith(expect.objectContaining({ messageId: 'om_reply_card', state: 'completed' }));
@@ -896,7 +902,7 @@ describe('Lark message coordinator', () => {
     const coordinator = createTestLarkCoordinator(config, runtime as any, service as any, log, Math.random, 'ou_bot');
     coordinator.handle({ messageId: 'om_trigger_2', chatId: 'oc_group', chatType: 'group', messageType: 'text', content: JSON.stringify({ text: '@bot 处理' }), mentions: [{ key: '@bot', name: 'Dutydeck', openId: 'ou_bot' }] }, config);
     await vi.waitFor(() => expect(service.reply).toHaveBeenCalled());
-    expect(service.send).toHaveBeenCalledWith(expect.objectContaining({ chatId: 'oc_group', state: 'running' }));
+    await expectFirstLarkTurnCard(service.send, service.update, 'om_trigger_2', { chatId: 'oc_group' });
     expect(log.warn).toHaveBeenCalledWith(expect.objectContaining({ messageId: 'om_trigger_2' }), expect.stringContaining('回复卡片失败'));
   });
 
@@ -914,7 +920,7 @@ describe('Lark message coordinator', () => {
     coordinator.handle({ messageId: 'om_p2p_trigger', chatId: 'oc_user', chatType: 'p2p', messageType: 'text', content: JSON.stringify({ text: '你好' }), mentions: [] }, config);
     await vi.waitFor(() => expect(runtime.send).toHaveBeenCalledOnce());
     expect(service.reply).not.toHaveBeenCalled();
-    expect(service.send).toHaveBeenCalledWith(expect.objectContaining({ chatId: 'oc_user', state: 'running' }));
+    await expectFirstLarkTurnCard(service.send, service.update, 'om_p2p_trigger', { chatId: 'oc_user' });
   });
 
   it('reuses the persisted Lark session after the listener restarts', async () => {
@@ -1095,8 +1101,9 @@ describe('Lark message coordinator', () => {
     expect(runtime.send.mock.calls.map(call => call[0])).toEqual(['ses_1', 'ses_2', 'ses_1']);
     expect(runtime.send.mock.calls[0]?.[2]).toContain('[Dutydeck 预注入 Prompt]\n最新群提示');
     expect(runtime.send.mock.calls[2]?.[2]).toContain('[Dutydeck 预注入 Prompt]\n更新后的群提示');
-    expect(service.reply).toHaveBeenCalledWith(expect.objectContaining({ messageId: 'om_alice_1', replyInThread: true, markdown: '正在思考中…' }));
-    expect(service.reply).toHaveBeenCalledWith(expect.objectContaining({ messageId: 'om_bob_1', replyInThread: true, markdown: '正在思考中…' }));
+    for (const messageId of ['om_alice_1', 'om_bob_1', 'om_bob_topic_a']) {
+      await expectFirstLarkTurnCard(service.reply, service.update, messageId, { messageId, replyInThread: true });
+    }
     expect(service.reply).not.toHaveBeenCalledWith(expect.objectContaining({ messageId: expect.stringMatching(/^omt_/) }));
     expect(service.send).not.toHaveBeenCalled();
   });
@@ -1141,8 +1148,9 @@ describe('Lark message coordinator', () => {
       'cli_test:oc_group:group:user:ou_bob'
     ]);
     expect(runtime.send.mock.calls.map(call => call[0])).toEqual(['ses_1', 'ses_2', 'ses_1']);
-    expect(service.reply).toHaveBeenCalledWith(expect.objectContaining({ messageId: 'om_alice_1', markdown: '正在思考中…' }));
-    expect(service.reply).toHaveBeenCalledWith(expect.objectContaining({ messageId: 'om_bob_1', markdown: '正在思考中…' }));
+    for (const messageId of ['om_alice_1', 'om_bob_1', 'om_alice_2']) {
+      await expectFirstLarkTurnCard(service.reply, service.update, messageId, { messageId });
+    }
     // 首张过程卡保留普通群回复；终态结果同样回复到同一触发消息。
     expect(service.reply.mock.calls.every(call => call[0].replyInThread === undefined)).toBe(true);
     expect(service.send).not.toHaveBeenCalled();
@@ -1168,33 +1176,42 @@ describe('Lark message coordinator', () => {
       send: vi.fn(async () => ({ messageId: `om_card_${++nextCard}` })),
       deleteReaction: vi.fn(async () => {}), update: vi.fn(async () => ({ messageId: 'om_card' }))
     };
-    const coordinator = createTestLarkCoordinator(config, runtime as any, service as any, { info: vi.fn(), warn: vi.fn(), error: vi.fn() }, () => 0, 'ou_bot');
+    const acceptedRuntime = fixtureRuntime(runtime as any);
+    const dispatchRequest = vi.spyOn(acceptedRuntime, 'dispatchRequest');
+    const coordinator = createTestLarkCoordinator(config, acceptedRuntime, service as any, { info: vi.fn(), warn: vi.fn(), error: vi.fn() }, () => 0, 'ou_bot');
     const message = (messageId: string, text: string) => ({ messageId, chatId: 'oc_group', chatType: 'group', messageType: 'text', content: JSON.stringify({ text: `@bot ${text}` }), senderOpenId: 'ou_user', mentions: [{ key: '@bot', name: 'Dutydeck', openId: 'ou_bot' }] });
     coordinator.handle(message('om_first', '第一条'), config);
+    await vi.waitFor(() => expect(dispatchRequest).toHaveBeenCalledTimes(1));
     coordinator.handleWithBotConfig(message('om_second', '第二条'), { ...config, riskControlMode: 'guidance', highRiskAllowedUsers: [{ openId: 'ou_admin', name: '管理员' }] });
     await vi.waitFor(() => expect(runtime.dispatch).toHaveBeenCalledTimes(2));
-    expect(runtime.dispatch.mock.calls.map(call => call.slice(1, 3))).toEqual([['第一条', 'queue'], ['第二条', 'queue']]);
-    expect(runtime.dispatch.mock.calls.map(call => call.slice(4, 10))).toEqual([
-      [undefined, undefined, undefined, undefined, undefined, 24],
-      [undefined, undefined, undefined, undefined, undefined, 24]
-    ]);
-    for (const call of runtime.dispatch.mock.calls) {
-      const parts = call[10] as PromptPart[];
+    expect(runtime.dispatch.mock.calls.map(([, prompt]) => prompt)).toEqual(['第一条', '第二条']);
+    expect(dispatchRequest).toHaveBeenCalledTimes(2);
+    for (const [index, [messageId, prompt]] of [['om_first', '第一条'], ['om_second', '第二条']].entries()) {
+      const key = `lark:cli_test:${messageId}:1`;
+      const request = {
+        version: 1, namespace: 'runtime', sessionId: 'ses_1', key, prompt, mode: 'queue',
+        actor: { kind: 'channel', appId: 'cli_test', id: 'ou_user' }, skills: [], options: {}, sources: [], sourcePayload: {}
+      };
+      const [actual, material] = dispatchRequest.mock.calls[index]!;
+      expect(actual).toEqual(request);
+      expect(material?.idleCompactHours).toBe(24);
+      expect(material?.riskPolicy).toBeUndefined();
+      const parts = material!.promptParts!;
       expect(parts.length).toBeGreaterThan(0);
-      expect(parts.map(part => `${part.prefix ?? ''}${part.content}${part.suffix ?? ''}`).join('')).toBe(call[3]);
-      expect(parts).toContainEqual(expect.objectContaining({ kind: 'user_request', trustScope: 'user_request', content: call[1] }));
+      expect(parts.map(part => `${part.prefix ?? ''}${part.content}${part.suffix ?? ''}`).join('')).toBe(material!.agentPrompt);
+      expect(parts).toContainEqual(expect.objectContaining({ kind: 'user_request', trustScope: 'user_request', content: prompt }));
       const sourced = parts.filter(part => part.sourceId);
       expect(sourced.length).toBeGreaterThan(0);
       expect(sourced.every(part => part.sourceId!.startsWith(`lark:${config.appId}:oc_group:injection:`) && part.trustScope === 'host')).toBe(true);
     }
-    expect(runtime.dispatch.mock.calls[1]?.[3]).toContain('[Dutydeck 安全策略 · 自动注入]');
-    const safety = (runtime.dispatch.mock.calls[1]?.[10] as PromptPart[]).find(part => part.content.startsWith('[Dutydeck 安全策略 · 自动注入]'));
+    expect(dispatchRequest.mock.calls[1]?.[1]?.agentPrompt).toContain('[Dutydeck 安全策略 · 自动注入]');
+    const safety = dispatchRequest.mock.calls[1]![1]!.promptParts!.find(part => part.content.startsWith('[Dutydeck 安全策略 · 自动注入]'));
     expect(safety).toMatchObject({ kind: 'host_rules', trustScope: 'host' });
     expect(safety?.content).toContain(config.highRiskPattern);
     expect(safety?.content).toContain('禁止执行');
     expect(safety?.content).toContain('~/.codex');
     expect(safety?.content).toContain('不要去查找、阅读或试探这些限制的实现和配置');
-    expect((runtime.dispatch.mock.calls[0]?.[10] as PromptPart[]).some(part => part.content.startsWith('[Dutydeck 安全策略 · 自动注入]'))).toBe(false);
+    expect(dispatchRequest.mock.calls[0]![1]!.promptParts!.some(part => part.content.startsWith('[Dutydeck 安全策略 · 自动注入]'))).toBe(false);
     expect(service.update).toHaveBeenCalledWith(expect.objectContaining({ markdown: expect.stringContaining('正在排队，前面还有 1 个任务…') }));
     expect(service.update).not.toHaveBeenCalledWith(expect.objectContaining({ markdown: expect.stringContaining('前面还有 0 个任务') }));
     expect(runtime.send).not.toHaveBeenCalled();

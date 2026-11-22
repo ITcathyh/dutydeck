@@ -1,4 +1,4 @@
-import { createTestLarkCoordinator } from './coordinator-test-fixture.js';
+import { createTestLarkCoordinator, createTestLarkStorage, expectFirstLarkTurnCard } from './coordinator-test-fixture.js';
 import { readTestAcceptanceByKey } from './runtime-test-fixture.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { installLarkHook } from './security-hooks.js';
@@ -444,9 +444,9 @@ describe('飞书命令在 coordinator 重建后的会话定位', () => {
     await vi.waitFor(() => expect(runtime.send).toHaveBeenCalledOnce());
     expect(runtime.start).toHaveBeenCalledOnce();
     expect(runtime.send.mock.calls[0]?.[0]).not.toBe('ses_legacy');
-    expect(service.send).toHaveBeenCalledWith(expect.objectContaining({
-      state: 'running', markdown: expect.stringContaining('升级后创建的新上下文')
-    }));
+    await expectFirstLarkTurnCard(service.send, service.update, 'om_after_upgrade', {
+      taskName: '继续处理新目标', markdown: expect.stringContaining('升级后创建的新上下文')
+    });
   });
 
   it('/new 任务内容在一条消息里完成新建与派发，且只派发一次', async () => {
@@ -464,7 +464,7 @@ describe('飞书命令在 coordinator 重建后的会话定位', () => {
     expect(runtime.send.mock.calls[1]?.[1]).toBe('跑一遍回归测试');
     expect(runtime.send).toHaveBeenCalledTimes(2);
     // 走的是完整任务链路：有进度卡，而不是一张只读命令回执。
-    expect(service.send).toHaveBeenCalledWith(expect.objectContaining({ state: 'running', taskName: '跑一遍回归测试' }));
+    await expectFirstLarkTurnCard(service.send, service.update, 'om_new_goal', { taskName: '跑一遍回归测试', sessionId: 'ses_2' });
     expect(service.send).not.toHaveBeenCalledWith(expect.objectContaining({ taskName: '/new 已受理' }));
   });
 
@@ -904,7 +904,7 @@ describe('/retry 在 coordinator 重建后', () => {
     expect(runtime.send.mock.calls[1]?.[0]).toBe('ses_1');
     expect(runtime.send.mock.calls[1]?.[1]).toBe('原始请求');
     // 新进度卡是一张新卡；旧卡不得被更新（旧收据不可变）。
-    expect(service.send).toHaveBeenCalledWith(expect.objectContaining({ taskName: '原始请求', state: 'running' }));
+    await expectFirstLarkTurnCard(service.send, service.update, 'om_retry', { taskName: '原始请求', sessionId: 'ses_1' });
     for (const [input] of service.update.mock.calls) expect((input as any).messageId).not.toBe('om_old_card');
     // 旧卡的 mapping 不能被新任务覆盖。
     const oldRow = mappings.rows.get('lark-card:cli_test:om_first');
@@ -1458,9 +1458,12 @@ describe('卡片对账的收敛、退避与事件唤醒', () => {
         mapping.extra = extra; return true;
       })
     };
-    const coordinator = coordinatorFor(runtime, cardService(), mappings);
+    const { workflowStore } = createTestLarkStorage(config);
+    const readConfig = vi.spyOn(workflowStore, 'get');
+    const coordinator = createTestLarkCoordinator(config, runtime as any, cardService() as any, silentLog(), Math.random, 'ou_bot',
+      undefined, mappings, undefined, undefined, undefined, { store: workflowStore });
     const rounds = vi.spyOn(coordinator as any, 'performReconcile');
-    return { task, coordinator, rounds, mappings, runtime };
+    return { task, coordinator, rounds, mappings, runtime, readConfig };
   }
 
   it('一张已结算的结果未知卡空闲 10 分钟只对账一轮（修复前每 5 秒一轮，约 121 轮）', async () => {
@@ -1478,10 +1481,17 @@ describe('卡片对账的收敛、退避与事件唤醒', () => {
     const h = idleHarness({ status: 'reconcile_required', blockers: [], resolvedUnknown: false });
     try {
       await expect(h.coordinator.startReconciliation(config)).resolves.toBe(1);
+      // 同一机器人先对账任务卡，再检查对应的授权记录。
+      expect(h.mappings.list.mock.calls).toEqual([['lark-card:cli_test'], ['lark-card:cli_test']]);
+      expect(h.runtime.getTasks).toHaveBeenCalledWith('ses_1');
+      expect(h.readConfig).toHaveBeenCalledWith('task_authorization/rt_unknown');
+      h.mappings.list.mockClear();
+      h.mappings.get.mockClear();
       await vi.advanceTimersByTimeAsync(IDLE_MS);
       // 5、10、20、40 秒后各一轮，之后每 60 秒一轮：首轮 + 4 + 8 = 13 轮。
       expect(h.rounds).toHaveBeenCalledTimes(13);
-      expect(h.mappings.list).toHaveBeenCalledTimes(1);
+      expect(h.mappings.list).not.toHaveBeenCalled();
+      expect(h.mappings.get).toHaveBeenCalledWith('lark-card:cli_test', 'om_unknown');
     } finally { h.coordinator.stop(); }
   });
 
@@ -1492,14 +1502,19 @@ describe('卡片对账的收敛、退避与事件唤醒', () => {
       await h.coordinator.startReconciliation(config);
       await vi.advanceTimersByTimeAsync(5 * 60_000);
       const before = h.rounds.mock.calls.length;
+      h.mappings.list.mockClear();
+      h.readConfig.mockClear();
       h.task.status = 'completed';
       (h.coordinator as any).scheduleReconcile();
       await vi.advanceTimersByTimeAsync(5_000);
       expect(h.rounds).toHaveBeenCalledTimes(before + 1);
-      expect(h.mappings.list).toHaveBeenCalledTimes(2);
+      expect(h.mappings.list.mock.calls).toEqual([['lark-card:cli_test'], ['lark-card:cli_test']]);
+      expect(h.readConfig).toHaveBeenCalledWith('task_authorization/rt_unknown');
       expect(JSON.parse((await h.mappings.get('lark-card:cli_test', 'om_unknown'))!.extra!)).toMatchObject({ state: 'completed' });
+      h.mappings.list.mockClear();
       await vi.advanceTimersByTimeAsync(IDLE_MS);
       expect(h.rounds).toHaveBeenCalledTimes(before + 1);
+      expect(h.mappings.list).not.toHaveBeenCalled();
     } finally { h.coordinator.stop(); }
   });
 
@@ -1536,13 +1551,16 @@ it('新卡唤醒的全量对账读映射失败时，退避后的下一轮仍全�
       await expect(coordinator.startReconciliation(config)).resolves.toBe(0);
       rows.push({ id: 'lark-card:cli_test:om_new', channel: 'lark-card:cli_test', externalId: 'om_new', sessionId: 'ses_1', createdAt: '2026-01-01T00:00:00.000Z',
         extra: JSON.stringify(persistedCard({ runtime_task_id: task.id, state: 'queued', progress_frozen: true })) });
+      mappings.list.mockClear();
       mappings.list.mockRejectedValueOnce(new Error('database busy'));
       (coordinator as any).scheduleReconcile();
       await vi.advanceTimersByTimeAsync(5_000);
-      expect(mappings.list).toHaveBeenCalledTimes(2);
+      expect(mappings.list).toHaveBeenCalledTimes(1);
+      expect(runtime.getTasks).not.toHaveBeenCalled();
+      mappings.list.mockClear();
       await vi.advanceTimersByTimeAsync(10_000);
-      expect(mappings.list).toHaveBeenCalledTimes(3);
-      expect(runtime.getTasks).toHaveBeenCalled();
+      expect(mappings.list.mock.calls).toEqual([['lark-card:cli_test'], ['lark-card:cli_test']]);
+      expect(runtime.getTasks).toHaveBeenCalledWith('ses_1');
     } finally { coordinator.stop(); }
   } finally { vi.useRealTimers(); }
 });

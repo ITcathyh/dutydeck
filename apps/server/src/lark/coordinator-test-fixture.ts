@@ -1,4 +1,4 @@
-import { onTestFinished } from 'vitest';
+import { expect, onTestFinished, vi, type Mock } from 'vitest';
 import { createRepositories } from '@dutydeck/storage';
 import { randomUUID } from 'node:crypto';
 import type { AcceptedTask, AgentEvent } from '@dutydeck/shared';
@@ -89,4 +89,21 @@ export function createTestLarkCoordinator(config: StoredLarkConfig, runtime: Arg
       return coordinator.handle(...args);
     }
   });
+}
+
+// The process card belongs to the incoming message and its first turn. Running
+// is a patch to the ID returned by the original send/reply.
+export async function expectFirstLarkTurnCard(create: Mock, update: Mock, taskId: string, initial: Record<string, unknown>) {
+  const turn = { cardKind: 'process', taskId, turn: 1 };
+  const index = create.mock.calls.findIndex(([input]) => input.cardKind === 'process' && input.taskId === taskId);
+  expect(index).toBeGreaterThanOrEqual(0);
+  expect(create.mock.calls[index]?.[0]).toMatchObject({
+    ...turn, state: 'queued', readOnly: true, ...initial
+  });
+  expect(create.mock.calls[index]?.[0].markdown).toContain('任务已接收，正在准备执行…');
+  const { messageId } = await create.mock.results[index]!.value;
+  expect(messageId).toBeTruthy();
+  await vi.waitFor(() => expect(update).toHaveBeenCalledWith(expect.objectContaining({ ...turn, state: 'running', messageId })));
+  const patch = update.mock.calls.findIndex(([input]) => input.state === 'running' && input.taskId === taskId && input.messageId === messageId);
+  expect(update.mock.invocationCallOrder[patch]).toBeGreaterThan(create.mock.invocationCallOrder[index]!);
 }
