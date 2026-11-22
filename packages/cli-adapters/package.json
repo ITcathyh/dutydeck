@@ -7,6 +7,8 @@
   "types": "./dist/index.d.ts",
   "exports": {
     ".": { "types": "./dist/index.d.ts", "development": "./src/index.ts", "import": "./dist/index.js" },
+    "./native-files": { "types": "./dist/native-files.d.ts", "development": "./src/native-files.ts", "import": "./dist/native-files.js" },
+    "./claude-terminal": { "types": "./dist/claude-terminal.d.ts", "development": "./src/claude-terminal.ts", "import": "./dist/claude-terminal.js" },
     "./paths": { "types": "./dist/cli-paths.d.ts", "development": "./src/cli-paths.ts", "import": "./dist/cli-paths.js" }
   },
   "scripts": { "build": "tsc -p tsconfig.json", "typecheck": "tsc -p tsconfig.json --noEmit" },

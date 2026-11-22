@@ -651,7 +651,7 @@ describe('Claude-family terminals get child-only env defaults', () => {
     });
     try { await driver.start(); } finally {
       await driver.stop();
-      (driver as unknown as { claudeSettings: { cleanup(): void } }).claudeSettings.cleanup();
+      (driver as unknown as { claudeSettings?: { cleanup(): void } }).claudeSettings?.cleanup();
     }
     return spawned;
   }

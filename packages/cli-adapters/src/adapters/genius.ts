@@ -1,3 +1,4 @@
+import { claudeInputExtensions } from './claude-extensions.js';
 import type { CliProfile } from '../profile.js';
 import type { AdapterSessionContext, CliAdapter, PtyLike } from '../types.js';
 import { delay } from './input-settle.js';
@@ -44,6 +45,7 @@ export function createGeniusAdapter(): CliAdapter {
 }
 
 export const geniusProfile = {
+  extensions: claudeInputExtensions,
   createAdapter: createGeniusAdapter,
   discoveryOrder: 22,
   contributions: [

@@ -1,3 +1,4 @@
+import { claudeExtensions } from './claude-extensions.js';
 import type { CliProfile } from '../profile.js';
 import { claudeDataDir } from '../cli-paths.js';
 import type { CliAdapter } from '../types.js';
@@ -14,6 +15,7 @@ export function createClaudeCodeAdapter(): CliAdapter {
 }
 
 export const claudeCodeProfile = {
+  extensions: claudeExtensions,
   createAdapter: createClaudeCodeAdapter,
   discoveryOrder: 0,
   contributions: [

@@ -1,5 +1,4 @@
 import { childEnvironment } from '@dutydeck/shared/child-environment';
-import { secretGuardActive } from '@dutydeck/shared/secret-guard';
 import {
   AGENT_IDLE_TIMEOUT,
   AGENT_LOGIN_REQUIRED,
@@ -7,7 +6,6 @@ import {
   DriverRecoveryError,
   PromptNotWrittenError,
   isBackgroundFollowup,
-  isClaudeFamilyCli,
   RuntimeError,
   sameIdleCpuProof,
   warnCaught,
@@ -25,18 +23,18 @@ import {
   type TerminalStream,
 } from '@dutydeck/shared';
 import type { AdapterSessionContext, CliAdapter, PtyLike } from '@dutydeck/cli-adapters';
-import { buildDutydeckRoutingBlock, ownedClaudeCompactMenu, ownedClaudeComposer } from '@dutydeck/cli-adapters';
+import { buildDutydeckRoutingBlock, getCliProfile } from '@dutydeck/cli-adapters';
 import { ProgramStatusFramingStream, processIdentityKey, terminalScreens, PtyBackend, type PersistentSessionBackend, type SessionBackend, type ProcessProbe } from '@dutydeck/session-backends';
 import { TerminalSnapshot } from '@dutydeck/terminal-renderer';
 import { IdleDetector, type IdleTimings } from './idle-detector.js';
 import { IdleCpuProcess } from './idle-cpu-process.js';
 import { TurnCpu } from './turn-cpu.js';
 import { createTranscriptTailer, type TranscriptEventSource, type TranscriptPosition } from './transcript/index.js';
-import { buildSessionMarker, resolveCliSessionId, hasPinnedClaudeSession } from './session-id/index.js';
+import { buildSessionMarker, resolveCliSessionId } from './session-id/index.js';
 import { statSync } from 'node:fs';
 import { createHash, randomUUID } from 'node:crypto';
-import { ClaudeSettings, claudeAdapters } from './claude-settings.js';
-import { ClaudeNativeSessionResolver, claudeResumeFromObservation } from './claude-native-session.js';
+import type { TerminalLaunchSettings, NativeSessionResolver } from '@dutydeck/cli-adapters';
+export { claudeSafePrompt } from '@dutydeck/cli-adapters/claude-terminal';
 import { TranscriptSourceTracker, freezeTranscriptSource, verifyLaunchedTranscriptAsync } from './transcript-source.js';
 
 export interface PtyCliDriverOptions {
@@ -90,179 +88,6 @@ const sessionPermissionMode = (env: Record<string, string>): PermissionMode =>
 const terminalSafePrompt = (text: string): string =>
   text.replace(/\r\n?/g, '\n').replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/g, '');
 
-// Claude 2.1.295 removes these codepoints from a paste and suppresses its first
-// Enter. Keep its conditional emoji/script sequences: deleting every format
-// character would corrupt otherwise ordinary user input.
-const claudeLineBreak = (cp: number) => [10, 11, 12, 13, 133, 8232, 8233].includes(cp);
-const claudeInvisible = (cp: number): boolean => {
-  if (cp < 160) return cp < 32 && cp !== 9 && cp !== 10 || cp >= 127;
-  if (cp < 8192) return [173, 847, 1564, 4447, 4448, 6068, 6069].includes(cp) || cp >= 6155 && cp <= 6159;
-  if (cp < 65536) return cp >= 8203 && cp <= 8207 || cp >= 8232 && cp <= 8238 || cp >= 8288 && cp <= 8303
-    || cp === 12644 || cp >= 65024 && cp <= 65039 || cp === 65279 || cp === 65440 || cp >= 65520 && cp <= 65531;
-  return cp === 69759 || cp >= 78896 && cp <= 78911 || cp === 94180 || cp >= 113824 && cp <= 113827
-    || cp >= 119155 && cp <= 119162 || cp >= 917504 && cp <= 921599;
-};
-const letter = /^\p{L}$/u, mark = /^\p{M}$/u, whitespace = /^\p{White_Space}$/u;
-const emoji = /^[\p{Emoji}\p{Extended_Pictographic}]$/u, pictograph = /^\p{Extended_Pictographic}$/u, mathSymbol = /^\p{Sm}$/u;
-const decimal = /^\p{Nd}$/u;
-const script = (names: string, extensions = false) => new RegExp(`^[${names.split(' ').map(name => `\\p{${extensions ? 'Script_Extensions' : 'Script'}=${name}}`).join('')}]$`, 'u');
-const rtlScript = script('Arabic Hebrew Syriac Thaana Nko Samaritan Mandaic Adlam Hanifi_Rohingya Yezidi');
-const arabicMarkScript = script('Arabic Syriac Thaana Hanifi_Rohingya');
-const scriptPair = (names: string) => ({ base: script(names), mark: script(names, true) });
-const zwnjScripts = scriptPair('Arabic Syriac Nko Mongolian Devanagari Bengali Gurmukhi Gujarati Oriya Tamil Telugu Kannada Malayalam Sinhala Myanmar Khmer Tibetan');
-const zwjScripts = scriptPair('Devanagari Bengali Gurmukhi Gujarati Oriya Tamil Telugu Kannada Malayalam Sinhala Myanmar Khmer Tibetan Arabic Syriac Tifinagh');
-const zwjJoinScripts = scriptPair('Arabic Syriac Mongolian Nko');
-const zeroWidthScripts = script('Khmer Thai Lao Myanmar');
-const zeroWidthPair = { base: zeroWidthScripts, mark: zeroWidthScripts };
-const mongolian = scriptPair('Mongolian'), khmer = scriptPair('Khmer'), egyptian = scriptPair('Egyptian_Hieroglyphs'), duployan = scriptPair('Duployan');
-const brahmi = script('Brahmi'), variationScripts = script('Myanmar Phags_Pa Manichaean');
-const matches = (regex: RegExp, cp: number | undefined) => cp !== undefined && regex.test(String.fromCodePoint(cp));
-const scriptLetter = (regex: RegExp, cp: number | undefined) => matches(letter, cp) && matches(regex, cp);
-
-/** Equivalent to Claude's paste sanitizer, without its diagnostic counters. */
-export function claudeSafePrompt(text: string): string {
-  const normalized = text.normalize('NFC');
-  const chars = Array.from(normalized);
-  const originalMarkerStarts = new Set<number>();
-  const marker = /<<<(\/?)UNTRUSTED_DATA/gi;
-  const markerUtf16Starts = new Set(Array.from(normalized.matchAll(marker), match => match.index));
-  let normalizedUtf16 = 0;
-  for (let index = 0; index < chars.length; index++) {
-    if (markerUtf16Starts.has(normalizedUtf16)) originalMarkerStarts.add(index);
-    normalizedUtf16 += chars[index]!.length;
-  }
-  const preservedMarkerOffsets = new Set<number>();
-  const output: string[] = [];
-  let outputLength = 0;
-  const previous: number[] = [];
-  let lastWasHidden = false;
-  let lineStart = 0;
-  const push = (cp: number, hidden = false) => {
-    previous.push(cp); if (previous.length > 16) previous.shift();
-    lastWasHidden = hidden;
-  };
-  const prior = (back = 0) => previous[previous.length - 1 - back];
-  const nextVisible = (regex: RegExp, cp: number | undefined) => cp !== undefined && !claudeInvisible(cp) && matches(regex, cp);
-  const nextScriptLetter = (pair: { base: RegExp }, cp: number | undefined) => cp !== undefined && !claudeInvisible(cp) && scriptLetter(pair.base, cp);
-  const priorScriptLetter = (pair: { base: RegExp; mark: RegExp }, baseOnly: boolean) => {
-    if (lastWasHidden) return false;
-    for (let index = previous.length - 1; index >= 0; index--) {
-      const cp = previous[index]!;
-      if (matches(mark, cp)) { if (!matches(pair.mark, cp)) return false; continue; }
-      return baseOnly ? matches(pair.base, cp) : scriptLetter(pair.base, cp);
-    }
-    return false;
-  };
-  const priorMatch = (regex: RegExp) => previous.length > 0 && !lastWasHidden && matches(regex, prior());
-  let scriptCacheLine = -1;
-  const scriptCache = new Map<RegExp, boolean>();
-  const lineHasScript = (regex: RegExp) => {
-    if (scriptCacheLine !== lineStart) { scriptCacheLine = lineStart; scriptCache.clear(); }
-    const cached = scriptCache.get(regex);
-    if (cached !== undefined) return cached;
-    for (let index = lineStart; index < chars.length; index++) {
-      const cp = chars[index]!.codePointAt(0)!;
-      if (claudeLineBreak(cp)) break;
-      if ((cp >= 1424 && cp <= 2303 || cp >= 64285 && cp <= 65023 || cp >= 65136 && cp <= 65279
-        || cp >= 67584 && cp <= 69631 || cp >= 124928 && cp <= 126975) && scriptLetter(regex, cp)) {
-        scriptCache.set(regex, true);
-        return true;
-      }
-    }
-    scriptCache.set(regex, false);
-    return false;
-  };
-  const ambiguousBidi = (next: number | undefined) => {
-    const nextLetter = matches(letter, next);
-    if (!nextLetter && !matches(decimal, next)) return false;
-    for (let index = previous.length - 1; index >= 0; index--) {
-      const cp = previous[index]!;
-      if (claudeInvisible(cp)) return true;
-      if (matches(mark, cp)) continue;
-      return nextLetter ? matches(letter, cp) && (cp === 1600 || matches(rtlScript, cp)) === (next === 1600 || matches(rtlScript, next)) : matches(decimal, cp);
-    }
-    return previous.length >= 16;
-  };
-  const conditionalKeep = (index: number, cp: number): boolean => {
-    const next = chars[index + 1]?.codePointAt(0);
-    const prev = prior();
-    switch (cp) {
-      case 8204: case 8205: {
-        if (priorScriptLetter(cp === 8204 ? zwnjScripts : zwjScripts, false)) return true;
-        if (cp === 8205) {
-          let base = prev;
-          if (base === 65039 || base !== undefined && base >= 127995 && base <= 127999) {
-            base = prior(1);
-            if (base === 65039 || base !== undefined && base >= 127995 && base <= 127999) base = prior(2);
-          }
-          if (prev !== undefined && prev !== 8205 && matches(pictograph, base) && nextVisible(pictograph, next)) return true;
-        }
-        if (prev === undefined || lastWasHidden) return false;
-        return cp === 8204
-          ? nextScriptLetter(zwnjScripts, next) && !matches(whitespace, prev) && !matches(mark, prev)
-          : nextScriptLetter(zwjJoinScripts, next) && !matches(letter, prev) && !matches(decimal, prev) && !matches(mark, prev);
-      }
-      case 8203: {
-        const following = nextVisible(zeroWidthScripts, next) && !matches(mark, next);
-        return priorScriptLetter(zeroWidthPair, true) && (following || nextVisible(/^[0-9]$/, next))
-          || following && priorMatch(/^[0-9]$/);
-      }
-      case 65038: case 65039:
-        return prev !== undefined && !lastWasHidden && (prev >= 169 && matches(emoji, prev)
-          || (prev >= 48 && prev <= 57 || prev === 35 || prev === 42) && next === 8419);
-      case 65024: case 65025: case 65026:
-        return prev !== undefined && !lastWasHidden && (matches(egyptian.base, prev)
-          || cp === 65024 && (prev >= 8704 && prev <= 11007 && matches(mathSymbol, prev) || matches(variationScripts, prev)));
-      case 8206: case 8207: case 1564: {
-        const relevant = lineHasScript(cp === 1564 ? arabicMarkScript : rtlScript);
-        return relevant && !lastWasHidden && (next === undefined || claudeLineBreak(next) || !claudeInvisible(next) && !matches(mark, next)) && !ambiguousBidi(next);
-      }
-      case 847: return priorMatch(mark) || !lastWasHidden && nextVisible(mark, next);
-      case 6068: case 6069: return priorScriptLetter(khmer, false);
-      case 6155: case 6156: case 6157: case 6158: case 6159:
-        return priorScriptLetter(mongolian, false) || !lastWasHidden && nextScriptLetter(mongolian, next);
-      case 69759: return priorMatch(brahmi) && nextVisible(brahmi, next);
-      default:
-        if (cp >= 78896 && cp <= 78911) return priorScriptLetter(egyptian, false) || !lastWasHidden && nextScriptLetter(egyptian, next);
-        if (cp >= 113824 && cp <= 113827) return priorScriptLetter(duployan, false) || !lastWasHidden && nextScriptLetter(duployan, next);
-        return false;
-    }
-  };
-
-  for (let index = 0; index < chars.length; index++) {
-    if (originalMarkerStarts.has(index)) preservedMarkerOffsets.add(outputLength);
-    const char = chars[index]!;
-    const cp = char.codePointAt(0)!;
-    if (cp === 127988) {
-      const tags = chars.slice(index + 1, index + 6).map(tag => tag.codePointAt(0)!);
-      const abbreviation = tags.every(tag => tag >= 917601 && tag <= 917626)
-        ? tags.map(tag => String.fromCharCode(tag - 917504)).join('') : '';
-      if (['gbeng', 'gbsct', 'gbwls'].includes(abbreviation) && chars[index + 6]?.codePointAt(0) === 917631) {
-        for (const kept of chars.slice(index, index + 7)) { output.push(kept); outputLength += kept.length; push(kept.codePointAt(0)!, kept !== char); }
-        index += 6;
-        continue;
-      }
-    }
-    if (claudeLineBreak(cp)) {
-      if (cp === 13 && chars[index + 1]?.codePointAt(0) === 10) index++;
-      output.push('\n'); outputLength++; push(10); lineStart = index + 1;
-      continue;
-    }
-    if (!claudeInvisible(cp)) { output.push(char); outputLength += char.length; push(cp); continue; }
-    if (conditionalKeep(index, cp)) { output.push(char); outputLength += char.length; push(cp, true); }
-  }
-  let result = output.join('');
-  const reconstructed: number[] = [];
-  for (const match of result.matchAll(/<<<(\/?)UNTRUSTED_DATA/gi)) {
-    if (!preservedMarkerOffsets.has(match.index)) reconstructed.push(match.index);
-  }
-  for (let index = reconstructed.length - 1; index >= 0; index--) {
-    const offset = reconstructed[index]! + 2;
-    result = `${result.slice(0, offset)} ${result.slice(offset)}`;
-  }
-  return result;
-}
-
 /** 屏幕行和提示词按同一口径比较：框线当空白，连续空白折成一个。 */
 const screenText = (text: string): string =>
   text.replace(/[─━│┌┐└┘├┤┬┴┼╭╮╯╰]/g, ' ').replace(/\s+/g, ' ').trim();
@@ -284,15 +109,6 @@ const DEFAULT_COLS = 120;
 const DEFAULT_ROWS = 30;
 /** raw_terminal 节流窗口：窗口内屏幕文本没变就不发。 */
 const RAW_TERMINAL_THROTTLE_MS = 200;
-/** Claude 家族终端（claude-settings.ts 的 claudeAdapters 那一组）子进程的默认环境，Agent env 里的同名值优先。
- *  不能并进 agent.env：显式 env 非空时 ClaudeSettings 会给每个会话生成 --settings、改写启动参数。
- *  MCP task 转到后台后结果不归本轮，所以默认让它留在工具调用里。 */
-const claudeChildEnvDefaults: Record<string, string> = { CLAUDE_CODE_DISABLE_MCP_TASK_BACKGROUND: '1' };
-/** 机器人设了 claudeAutoMemory=off 的群聊会话（服务端在 Agent env 里放小写标记）再加这一项，与上面的默认值同层：
- *  Agent env 里的同名值、用户 ~/.claude/settings.json env 里的同名值都压过它。 */
-const claudeAutoMemoryOffDefaults = (env: Record<string, string>): Record<string, string> =>
-  env.dutydeck_claude_auto_memory === 'off' ? { CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1' } : {};
-
 /**
  * PtyCliDriver = cli-adapters + session-backends + idle-detector + transcript
  * 四路合成 AgentDriver 事件流。
@@ -316,7 +132,11 @@ export class PtyCliDriver implements AgentDriver {
 
   private backend: SessionBackend;
   private readonly cwd: string;
-  private readonly claudeSettings: ClaudeSettings;
+  private get profile() { return getCliProfile(this.adapter.id); }
+  private readonly claudeSettings?: TerminalLaunchSettings;
+  private launchArgs(generated: string[]): string[] {
+    return this.claudeSettings?.args(this.agent.args, generated, this.cwd, this.agent.env) ?? [...this.agent.args, ...generated];
+  }
   /** CLI 启动用的权限模式；任务以 deny-all（先出计划的第一阶段）运行时它仍是会话本身的模式。 */
   private readonly spawnPermissionMode: PermissionMode;
   /** 只有能接 hook 的 Claude 家族能装计划阶段守卫。 */
@@ -498,16 +318,16 @@ export class PtyCliDriver implements AgentDriver {
     this.stoppedCallback = opts.onStopped;
     this.backend = opts.backend ?? new PtyBackend();
     this.cwd = opts.agent.cwd ?? process.cwd();
-    this.claudeSettings = new ClaudeSettings(this.adapter.id, this.sessionId, this.cwd);
-    this.planGuardSupported = isClaudeFamilyCli(this.adapter.id);
+    this.claudeSettings = this.profile?.extensions?.settings?.(this.sessionId);
+    this.planGuardSupported = !!this.profile?.extensions?.permissions;
     this.planGuardActive = opts.agent.permissionMode === 'deny-all';
     this.spawnPermissionMode = this.planGuardActive ? sessionPermissionMode(opts.agent.env) : opts.agent.permissionMode;
     // 守卫脚本跟着任务走：上一个驱动留下的（daemon 在计划阶段之后重启）也按本次任务的模式改正。
-    if (this.planGuardSupported) this.claudeSettings.setPlanGuard(this.planGuardActive);
+    if (this.planGuardSupported) this.claudeSettings?.setPlanGuard(this.planGuardActive);
     this.cliSessionId = opts.cliSessionId;
-    this.claudeResumeSource = isClaudeFamilyCli(this.adapter.id) ? opts.claudeResumeSource : undefined;
+    this.claudeResumeSource = this.profile?.extensions?.nativeSession ? opts.claudeResumeSource : undefined;
     this.optsNativeForkSessionId = opts.nativeForkSessionId;
-    if (isClaudeFamilyCli(this.adapter.id)) {
+    if (this.planGuardSupported) {
       this.requestPermission = request => this.requestHookPermission(request);
       this.resolvePermission = async (id, approved, reason) => this.resolveHookPermission(id, approved, reason);
       this.setPermissionMode = mode => this.switchTaskPermission(mode);
@@ -552,30 +372,30 @@ export class PtyCliDriver implements AgentDriver {
   private switchTaskPermission(mode: PermissionMode): void {
     if (mode === 'deny-all') {
       this.assertPlanGuardWired();
-      this.claudeSettings.setPlanGuard(true);
+      this.claudeSettings?.setPlanGuard(true);
       this.planGuardActive = true;
       return;
     }
     if (mode !== this.spawnPermissionMode) throw new RuntimeError('TASK_OPTIONS_UNSUPPORTED', `PTY Agent ${this.agent.id} cannot switch to ${mode} while running`, 422);
-    this.claudeSettings.setPlanGuard(false);
+    this.claudeSettings?.setPlanGuard(false);
     this.planGuardActive = false;
   }
 
-  private assertPlanGuardWired(failureBlockRequired = this.claudeSettings.launchGuardWiring()?.failureBlock ?? false) {
-    if (!this.started || this.claudeSettings.launchGuardWiring()?.planGuard) return;
+  private assertPlanGuardWired(failureBlockRequired = this.claudeSettings?.launchGuardWiring()?.failureBlock ?? false) {
+    if (!this.started || this.claudeSettings?.launchGuardWiring()?.planGuard) return;
     if (failureBlockRequired) throw new RuntimeError('PLAN_GUARD_UNAVAILABLE', '这个终端会话的计划守卫缺少 onFailure:"block"。请开新会话（飞书里发 /new）再用先出计划。', 409);
     throw new RuntimeError('PLAN_GUARD_UNAVAILABLE', '这个终端会话启动时还没有计划阶段拦截，没法保证计划阶段不改文件。请开新会话（飞书里发 /new）后再用先出计划。', 409);
   }
 
   private secretGuardRequired(): boolean {
-    return isClaudeFamilyCli(this.adapter.id) && secretGuardActive({
+    return this.profile?.extensions?.permissions?.secretGuardActive({
       root: this.cwd, sessionId: this.agent.env.dutydeck_session_id ?? this.sessionId,
-    });
+    }) ?? false;
   }
 
   /** 受保护轮次只核对真实启动时记录的设置与能力，不重新探测可能已经升级的磁盘 CLI。 */
   private assertGuardWiring(secretActive: boolean): void {
-    const launch = this.claudeSettings.launchGuardWiring();
+    const launch = this.claudeSettings?.launchGuardWiring();
     const failureBlockRequired = launch?.failureBlock ?? false;
     if (this.planGuardActive) this.assertPlanGuardWired(failureBlockRequired);
     if (secretActive && (!this.started || !launch?.secretGuard)) {
@@ -630,12 +450,12 @@ export class PtyCliDriver implements AgentDriver {
     const resumeFragment = nativeSessionId && this.adapter.buildResumeCommand?.(nativeSessionId);
     if (nativeSessionId && resumeFragment) {
       this.cliSessionId = nativeSessionId;
-      this.lastArgs = this.claudeSettings.args(this.agent.args, this.buildResumeArgs(nativeSessionId, resumeFragment), this.cwd, this.agent.env);
+      this.lastArgs = this.launchArgs(this.buildResumeArgs(nativeSessionId, resumeFragment));
       const spawnEnv = this.spawnEnv();
       await this.backend.spawn(this.agent.command, this.lastArgs, {
         cwd: this.cwd, cols: DEFAULT_COLS, rows: DEFAULT_ROWS, env: spawnEnv, programStatus: this.usesProgramStatus,
       });
-      this.claudeSettings.recordLaunch(this.lastArgs, this.cwd, this.adapter.guardFailureBlock?.() ?? false);
+      this.claudeSettings?.recordLaunch(this.lastArgs, this.cwd, this.adapter.guardFailureBlock?.() ?? false);
       check();
       this.recordTranscriptLaunch(spawnEnv);
       (await this.wire(this.backend));
@@ -643,7 +463,7 @@ export class PtyCliDriver implements AgentDriver {
       return;
     }
 
-    this.lastArgs = this.claudeSettings.args(this.agent.args, this.adapter.buildArgs({
+    this.lastArgs = this.launchArgs(this.adapter.buildArgs({
       sessionId: this.sessionId,
       command: this.agent.command,
       ...(this.optsNativeForkSessionId ? { nativeForkSessionId: this.optsNativeForkSessionId } : {}),
@@ -653,8 +473,8 @@ export class PtyCliDriver implements AgentDriver {
       reasoningEffort: this.agent.reasoningEffort,
       permissionMode: this.spawnPermissionMode,
       env: this.agent.env,
-      ...(this.planGuardSupported ? { planGuardCommand: this.claudeSettings.planGuardCommand() } : {}),
-    }), this.cwd, this.agent.env);
+      ...(this.planGuardSupported ? { planGuardCommand: this.claudeSettings?.planGuardCommand() } : {}),
+    }));
     this.started = true;
     const spawnEnv = this.spawnEnv();
     await this.backend.spawn(this.agent.command, this.lastArgs, {
@@ -664,7 +484,7 @@ export class PtyCliDriver implements AgentDriver {
       env: spawnEnv,
       programStatus: this.usesProgramStatus,
     });
-    this.claudeSettings.recordLaunch(this.lastArgs, this.cwd, this.adapter.guardFailureBlock?.() ?? false);
+    this.claudeSettings?.recordLaunch(this.lastArgs, this.cwd, this.adapter.guardFailureBlock?.() ?? false);
     check();
     this.recordTranscriptLaunch(spawnEnv);
     (await this.wire(this.backend));
@@ -742,7 +562,7 @@ export class PtyCliDriver implements AgentDriver {
   }
 
   private spawnEnv(): Record<string, string> {
-    return (this.lastSpawnEnv ??= mergedEnv(claudeAdapters.has(this.adapter.id) ? { ...claudeChildEnvDefaults, ...claudeAutoMemoryOffDefaults(this.agent.env), ...this.agent.env } : this.agent.env));
+    return (this.lastSpawnEnv ??= mergedEnv(this.profile?.extensions?.spawnEnv?.(this.agent.env) ?? this.agent.env));
   }
 
   async send(prompt: string): Promise<void> {
@@ -778,12 +598,10 @@ export class PtyCliDriver implements AgentDriver {
       const prefix = block ? `${block.replace(/\n$/, '')}\n${marker}` : marker;
       routingPrefix = terminalSafePrompt(`${prefix}\n`);
     }
-    if (claudeAdapters.has(this.adapter.id)) {
-      finalPrompt = claudeSafePrompt(finalPrompt);
-      routingPrefix = routingPrefix === undefined ? undefined : claudeSafePrompt(routingPrefix);
-    }
-    if (claudeAdapters.has(this.adapter.id) && prompt.length > 0 && finalPrompt.length === 0) {
-      throw new PromptNotWrittenError('Claude 输入在清理不可见字符后为空；没有写入终端，也没有创建回执等待。');
+    const cleanPrompt = this.profile?.extensions?.cleanPrompt;
+    if (cleanPrompt) {
+      finalPrompt = cleanPrompt(finalPrompt, prompt);
+      if (routingPrefix !== undefined) routingPrefix = cleanPrompt(routingPrefix, '');
     }
     if (routingPrefix !== undefined) finalPrompt = `${routingPrefix}${finalPrompt}`;
     let rejectWrite!: (error: Error) => void;
@@ -815,7 +633,7 @@ export class PtyCliDriver implements AgentDriver {
         this.inputPrepared = true;
       }
       check();
-      if (this.processProbe && isClaudeFamilyCli(this.adapter.id)) {
+      if (this.processProbe && this.profile?.extensions?.nativeSession) {
         await Promise.race([this.transcript?.flush(), writeCancelled]);
         check();
       }
@@ -878,12 +696,9 @@ export class PtyCliDriver implements AgentDriver {
           if (this.activeSubmission !== submission) return;
           // 没登录的 Claude 不写用户记录、只在屏幕上回一句 Not logged in，原因码改成 AGENT_LOGIN_REQUIRED，运行时据此标记 Agent 不可用。
           const loggedOut = this.adapter.screenLoginRequiredPattern?.test(this.snapshot?.viewportText() ?? '');
-          const reviewHeld = claudeAdapters.has(this.adapter.id)
-            && /Removed \d+ invisible characters? · review and press Enter to send/.test(this.snapshot?.viewportText() ?? '');
+          const reviewMessage = this.profile?.extensions?.heldInputMessage?.(this.snapshot?.viewportText() ?? '');
           if (loggedOut) this.emitEvent({ type: 'error', data: { message: 'Agent 未登录，没有处理这条消息', code: AGENT_LOGIN_REQUIRED, retryable: false } });
-          const message = reviewHeld
-            ? 'Claude 拦下了这次发送，需要在终端确认；提交结果未知，原进程已保留'
-            : 'Native input receipt was not observed within 90 seconds; submission remains unknown and original process is preserved';
+          const message = reviewMessage ?? 'Native input receipt was not observed within 90 seconds; submission remains unknown and original process is preserved';
           const error = new DriverRecoveryError(message, loggedOut ? AGENT_LOGIN_REQUIRED : 'DRIVER_INPUT_UNCONFIRMED');
           this.cancelSubmission(submission, error); this.turnWriteReject?.(error);
         }, 90_000);
@@ -950,7 +765,7 @@ export class PtyCliDriver implements AgentDriver {
 
   async compact(): Promise<'completed' | 'failed' | 'unsupported' | 'cancelled'> {
     this.noteInput();
-    if (!isClaudeFamilyCli(this.adapter.id)) {
+    if (!this.profile?.extensions?.compact) {
       this.emitEvent({ type: 'status', data: { state: 'compaction', phase: 'unsupported', proactive: true } });
       return 'unsupported';
     }
@@ -1107,31 +922,6 @@ export class PtyCliDriver implements AgentDriver {
       && this.wiringGeneration === maintenance.wiringGeneration && this.terminalWrites === 0 && this.rawInputRecovered() && this.terminalIsIdle();
   }
 
-  private maintenanceStatusEvidenceLines(lines: string[]): string[] {
-    const footer = /^✔ /.test(lines.at(-1) ?? '') ? lines.length - 2 : lines.length - 1;
-    if (!/^(?:(?:⏵⏵|⏸) [a-z ]+ on\b|\? for shortcuts\b|paste again to expand\b)/.test(lines[footer] ?? '')) return lines;
-    for (let statusRows = 0; statusRows <= 2; statusRows++) {
-      const border = footer - statusRows - 1;
-      if (border >= 2 && /^─{8,}$/.test(lines[border] ?? '') && lines[border - 2] === lines[border]
-        && /^❯(?:\s|$)/.test(lines[border - 1] ?? '')) return lines.slice(0, border - 2);
-    }
-    return lines;
-  }
-
-  private maintenanceStatusBlocks(lines: string[], interrupted: boolean): boolean {
-    const { screenActivityPattern: activity, backgroundWaitPattern: background, completionPattern: completion,
-      screenCancelledPattern: cancelled, screenBusyPattern: busy } = this.adapter;
-    const evidence = this.maintenanceStatusEvidenceLines(lines);
-    for (let index = evidence.length - 1; index >= 0; index--) {
-      const line = evidence[index]!;
-      if (/^✔ /.test(line)) continue;
-      if (activity?.test(line) || busy?.test(line)) return true;
-      if (background?.test(line)) return !interrupted;
-      if (completion?.test(line) || cancelled?.test(line)) return false;
-    }
-    return false;
-  }
-
   private maintenanceInterruptedTerminalRecovered(maintenance: NonNullable<PtyCliDriver['maintenanceActive']>, freshScreen?: string): boolean {
     const screen = freshScreen ?? this.snapshot?.viewportText({ preserveStructure: true, joinWrapped: true, includeScrollback: true });
     if (!screen || this.maintenanceActive !== maintenance || this.stopped || this.backend !== maintenance.backend
@@ -1140,7 +930,7 @@ export class PtyCliDriver implements AgentDriver {
     // activity is different: Enter has been sent, so the composer is not safe
     // until Claude has actually left that activity and shown an empty composer.
     const lines = screen.replace(/\r/g, '').split('\n').map(line => line.trim()).filter(Boolean);
-    if (this.maintenanceStatusBlocks(lines, true)) return false;
+    if (this.profile?.extensions?.compact?.statusBlocks(this.adapter, lines, true)) return false;
     return this.adapter.isIdleScreen?.(screen) === true;
   }
 
@@ -1149,9 +939,9 @@ export class PtyCliDriver implements AgentDriver {
     if (!maintenance.composerWritten || this.maintenanceActive !== maintenance || this.backend !== maintenance.backend
       || this.wiringGeneration !== maintenance.wiringGeneration) return false;
     const screen = freshScreen ?? this.snapshot?.viewportText({ preserveStructure: true, joinWrapped: true, includeScrollback: true }) ?? '';
-    if (!ownedClaudeComposer(screen, '/compact', true)) return false;
+    if (!this.profile?.extensions?.compact?.ownsComposer(screen, '/compact', true)) return false;
     const lines = screen.replace(/\r/g, '').split('\n').map(line => line.trim()).filter(Boolean);
-    if (this.maintenanceStatusBlocks(lines, interrupted)) return false;
+    if (this.profile?.extensions?.compact?.statusBlocks(this.adapter, lines, interrupted)) return false;
     return interrupted || !this.screenWaitsForHuman();
   }
 
@@ -1160,7 +950,7 @@ export class PtyCliDriver implements AgentDriver {
     if (finalEnter) {
       const screen = await this.readSubmissionScreen(maintenance.backend as SessionBackend & Partial<PtyLike>, true, true);
       const lines = screen.replace(/\r/g, '').split('\n').map(line => line.trim()).filter(Boolean);
-      if (!ownedClaudeComposer(screen, '/compact', true) || this.maintenanceStatusBlocks(lines, false) || this.screenWaitsForHuman()) {
+      if (!this.profile?.extensions?.compact?.ownsComposer(screen, '/compact', true) || this.profile?.extensions?.compact?.statusBlocks(this.adapter, lines, false) || this.screenWaitsForHuman()) {
         throw new Error('Compaction final Enter blocked: the current composer is not the owned /compact draft');
       }
       return;
@@ -1652,7 +1442,7 @@ export class PtyCliDriver implements AgentDriver {
    */
   private resolveResumeSessionId(): string {
     if (this.claudeResumeSource) {
-      const id = claudeResumeFromObservation(this.claudeResumeSource, this.cwd, this.spawnEnv());
+      const id = this.profile?.extensions?.nativeSession?.resume(this.claudeResumeSource, this.cwd, this.spawnEnv());
       if (!id) throw new DriverRecoveryError('The current Claude session has no verified resumable conversation; original process preserved');
       return id;
     }
@@ -1702,7 +1492,7 @@ export class PtyCliDriver implements AgentDriver {
       || this.awaitingAnswer?.() || this.backendPid?.backend !== this.backend) return undefined;
     if (this.processProbe.observe(this.idleCpuRoot) !== 'alive') return undefined;
     if (this.backend.persistent?.idleProcessesVerified?.(this.idleCpuIdentity, this.processProbe) === false) return undefined;
-    if (isClaudeFamilyCli(this.adapter.id)) {
+    if (this.profile?.extensions?.nativeSession) {
       const source = this.sampleClaudeNativeSession?.(true);
       if (!source || !this.claudeSourceConfirmed || !this.claudeNativeSelectionVerified
         || source.identityProof !== this.claudeResumeSource?.identityProof) return undefined;
@@ -1725,7 +1515,7 @@ export class PtyCliDriver implements AgentDriver {
   }
 
   async prepareForIdleRetirement(): Promise<boolean> {
-    if (process.platform === 'linux' && this.processProbe && isClaudeFamilyCli(this.adapter.id)) {
+    if (process.platform === 'linux' && this.processProbe && this.profile?.extensions?.nativeSession) {
       // Retirement must not inherit the idle discovery backoff. A missing PID
       // record may be a startup/partial-write window, not a proven old dialect.
       if (!this.sampleClaudeNativeSession?.(true)) return false;
@@ -1744,16 +1534,16 @@ export class PtyCliDriver implements AgentDriver {
   }
 
   private hasPinnedNativeSession(): boolean {
-    return hasPinnedClaudeSession(this.adapter.id, {
+    return this.profile?.extensions?.nativeSession?.pinned({
       sessionId: this.sessionId, cwd: this.cwd, env: this.spawnEnv(),
-    });
+    }) ?? false;
   }
 
   private resumableNativeSession(): string | undefined {
     if (this.claudeResumeSource) {
-      return claudeResumeFromObservation(this.claudeResumeSource, this.cwd, this.spawnEnv());
+      return this.profile?.extensions?.nativeSession?.resume(this.claudeResumeSource, this.cwd, this.spawnEnv());
     }
-    if (!this.adapter.buildResumeCommand || (!isClaudeFamilyCli(this.adapter.id) && this.adapter.id !== 'codex')) return undefined;
+    if (!this.adapter.buildResumeCommand || !this.profile?.automaticResume) return undefined;
     const found = resolveCliSessionId(this.adapter.id, {
       sessionId: this.sessionId, cwd: this.cwd, env: this.spawnEnv(), requireMarker: true,
     });
@@ -1835,7 +1625,7 @@ export class PtyCliDriver implements AgentDriver {
     } finally {
       this.stoppedCallback?.();
     }
-    if (!preservePersistentSession && !this.recoveryRejected && await this.isStopped()) this.claudeSettings.cleanup();
+    if (!preservePersistentSession && !this.recoveryRejected && await this.isStopped()) this.claudeSettings?.cleanup();
     // A tmux stop that never killed or never captured its target is not "exit pending": report the real cause so the
     // caller's stop block names it and a later stop() retries the kill.
     else if (stopError !== undefined) throw stopError;
@@ -1979,7 +1769,7 @@ export class PtyCliDriver implements AgentDriver {
     check();
     // Freeze the owned backend birth identity before any asynchronous startup
     // can replace its PID. Native state is accepted only from this process tree.
-    let nativeResolver: ClaudeNativeSessionResolver | undefined;
+    let nativeResolver: NativeSessionResolver | undefined;
     let rootIdentity: ReturnType<ProcessProbe['identify']> | undefined;
     if (pid && this.processProbe) {
       try { rootIdentity = this.processProbe.identify(pid); } catch { /* Unsupported platform retains marker resolution. */ }
@@ -2167,10 +1957,11 @@ export class PtyCliDriver implements AgentDriver {
     // the daemon's env instead watches a tree the CLI never writes to, and the
     // turn is then reported as "no final output" while the screen shows a
     // perfectly good answer.
-    this.sampleClaudeNativeSession = rootIdentity && this.processProbe ? forceDiscovery => {
+    const native = this.profile?.extensions?.nativeSession;
+    this.sampleClaudeNativeSession = native && rootIdentity && this.processProbe ? forceDiscovery => {
         if (this.superseded(backend, generation)) return;
         try {
-          nativeResolver ??= new ClaudeNativeSessionResolver(rootIdentity!, this.cwd, this.spawnEnv(), this.processProbe!, this.timings.nativeDiscoveryRetryMs);
+          nativeResolver ??= native.createResolver(rootIdentity!, this.cwd, this.spawnEnv(), this.processProbe!, this.timings.nativeDiscoveryRetryMs);
           const source = nativeResolver.resolve(forceDiscovery);
           this.claudeNativeSelectionVerified = !!source;
           return source;
@@ -2178,7 +1969,7 @@ export class PtyCliDriver implements AgentDriver {
       } : undefined;
     this.transcript = createTranscriptTailer(this.adapter.id, {
       cwd: this.cwd,
-      nativeSessionPath: this.claudeResumeSource && claudeResumeFromObservation(this.claudeResumeSource, this.cwd, this.spawnEnv()) ? this.claudeResumeSource.verifiedPath ?? undefined : undefined,
+      nativeSessionPath: this.claudeResumeSource && this.profile?.extensions?.nativeSession?.resume(this.claudeResumeSource, this.cwd, this.spawnEnv()) ? this.claudeResumeSource.verifiedPath ?? undefined : undefined,
       nativeSession: this.sampleClaudeNativeSession,
       onNativeSession: source => {
         if (this.superseded(backend, generation)) return;
@@ -2582,7 +2373,7 @@ export class PtyCliDriver implements AgentDriver {
     this.flushRawTerminal(exitingSnapshot);
     this.teardownWiring();
     if (!this.backend.persistent || await this.backend.persistent.exitedAfterDisconnect()) {
-      this.claudeSettings.cleanup();
+      this.claudeSettings?.cleanup();
     }
     this.exitCallback(code);
   }
@@ -2720,7 +2511,7 @@ export class PtyCliDriver implements AgentDriver {
       reasoningEffort: this.agent.reasoningEffort,
       permissionMode: this.spawnPermissionMode,
       env: this.agent.env,
-      ...(this.planGuardSupported ? { planGuardCommand: this.claudeSettings.planGuardCommand() } : {}),
+      ...(this.planGuardSupported ? { planGuardCommand: this.claudeSettings?.planGuardCommand() } : {}),
     };
   }
 
@@ -2752,7 +2543,7 @@ export class PtyCliDriver implements AgentDriver {
 
   private async readSubmissionScreen(target: SessionBackend & Partial<PtyLike>, requireInputCursor = false, allowCompactHiddenCursor = false): Promise<string> {
     if (target.captureCurrentScreen) {
-      const strictCursor = requireInputCursor && claudeAdapters.has(this.adapter.id) && target.captureInputSubmissionScreen !== undefined;
+      const strictCursor = requireInputCursor && this.profile?.extensions?.strictCursor && target.captureInputSubmissionScreen !== undefined;
       let captured = strictCursor
         ? await target.captureInputSubmissionScreen!()
         : await target.captureCurrentScreen(true);
@@ -2761,7 +2552,7 @@ export class PtyCliDriver implements AgentDriver {
         // native command menu may use a plain fresh capture; an ordinary
         // composer still needs cursor evidence to preserve semantic padding.
         captured = await target.captureCurrentScreen(true);
-        if (captured === null || !ownedClaudeCompactMenu(captured)) return '';
+        if (captured === null || !this.profile?.extensions?.compact?.ownsMenu(captured)) return '';
       }
       if (captured === undefined || captured === null) return '';
       if (!terminalScreens[target.kind].renderedFrames) return captured;
@@ -2777,7 +2568,7 @@ export class PtyCliDriver implements AgentDriver {
       const revision = this.screenRevision;
       await snapshot.writeAndFlush('');
       if (this.snapshot !== snapshot || this.backend !== target) return '';
-      if (revision === this.screenRevision) return snapshot.viewportText({ preserveStructure: this.adapter.id !== 'codex', joinWrapped: true, includeScrollback: true });
+      if (revision === this.screenRevision) return snapshot.viewportText({ preserveStructure: !this.profile?.flattenSubmissionScreen, joinWrapped: true, includeScrollback: true });
     }
     return '';
   }
@@ -2914,7 +2705,7 @@ export class PtyCliDriver implements AgentDriver {
   }
 
   private async respawn(args: string[]): Promise<void> {
-    const launchArgs = this.claudeSettings.args(this.agent.args, args, this.cwd, this.agent.env);
+    const launchArgs = this.launchArgs(args);
     this.transcriptVerification?.controller.abort();
     this.teardownWiring();
     this.inputPrepared = false;
@@ -2939,7 +2730,7 @@ export class PtyCliDriver implements AgentDriver {
         env: respawnEnv,
         programStatus: this.usesProgramStatus,
       });
-      this.claudeSettings.recordLaunch(this.lastArgs, this.cwd, this.adapter.guardFailureBlock?.() ?? false);
+      this.claudeSettings?.recordLaunch(this.lastArgs, this.cwd, this.adapter.guardFailureBlock?.() ?? false);
       if (this.superseded(backend, generation)) throw new Error('PTY respawn cancelled by lifecycle change');
     } catch (error) {
       if (backend.persistent?.prepareReplacement && this.superseded(backend, generation)) {

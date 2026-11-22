@@ -31,7 +31,7 @@ import { getCliProfile, nativeProfiles } from '@dutydeck/cli-adapters';
  * hostile file, no match — all return undefined, and the driver degrades to
  * the previous behavior (dutydeck session id used as the CLI session id).
  */
-import type { SessionIdLookup, SessionIdLookupContext } from './types.js';
+import type { SessionIdLookupContext } from './types.js';
 import { claudeSessionIdLookup } from './claude.js';
 import { codexSessionIdLookup, traexSessionIdLookup } from './codex.js';
 import { grokSessionIdLookup } from './grok.js';

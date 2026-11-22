@@ -350,10 +350,11 @@ describe('PTY driver plan phase', () => {
     const events: NormalizedDriverEvent[] = [];
     const agent: AgentConfig = { id: adapterId, name: adapterId, command, args: [], protocol: 'pty-cli', cwd, env,
       permissionMode, timeout: 60, capabilities: { pause: false, resume: true }, builtin: false };
-    const driver = new PtyCliDriver({ agent, adapter: createCliAdapter(adapterId), backend: backend(spawned), sessionId: `ses_${randomUUID()}`,
+    const sessionId = `ses_${randomUUID()}`;
+    const driver = new PtyCliDriver({ agent, adapter: createCliAdapter(adapterId), backend: backend(spawned), sessionId,
       onEvent: event => events.push(event), onExit() {} });
     cleanups.push(() => driver.stop());
-    const settings = (driver as unknown as { claudeSettings: ClaudeSettings }).claudeSettings;
+    const settings = new ClaudeSettings(adapterId, sessionId, cwd);
     const guardPath = settings.planGuardCommand().match(/'([^']+plan-guard\.mjs)'/)![1]!;
     return { driver, spawned, events, guardPath, internals: driver as unknown as { turnActive: boolean; started: boolean; lastArgs: string[] } };
   }

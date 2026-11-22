@@ -1,3 +1,4 @@
+import { claudeExtensions } from './claude-extensions.js';
 import type { CliProfile } from '../profile.js';
 import { claudeDataDir } from '../cli-paths.js';
 import type { CliAdapter } from '../types.js';
@@ -14,6 +15,7 @@ export function createSeedAdapter(): CliAdapter {
 }
 
 export const seedProfile = {
+  extensions: claudeExtensions,
   createAdapter: createSeedAdapter,
   discoveryOrder: 19,
   contributions: [
