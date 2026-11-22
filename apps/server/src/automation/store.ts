@@ -340,9 +340,8 @@ function sameV2Binding(a: TaskBindingV2, b: TaskBindingV2) {
 }
 
 type Dependencies = Pick<SessionAutomationService['scheduler'],
-  'assertPreconditionCondition' | 'assertPreconditionInput' | 'ciCondition' | 'clock' | 'executionSession'
-  | 'hasPendingOccurrence' | 'options' | 'publicPrecondition' | 'readPrecondition' | 'resetStreak'
-  | 'retireFreshSessions' | 'saveWithPrecondition' | 'service' | 'watchSession'>;
+  'ciCondition' | 'clock' | 'executionSession' | 'hasPendingOccurrence' | 'options' | 'preconditions'
+  | 'resetStreak' | 'retireFreshSessions' | 'service' | 'watchSession'>;
 
 export class AutomationStore {
   readonly quarantinedSchedules = new Set<string>();
@@ -486,7 +485,7 @@ export class AutomationStore {
     }
     const preconditions: NonNullable<SessionAutomationList['preconditions']> = {};
     await Promise.all(publicSchedules.map(async schedule => {
-      const precondition = await this.automation.publicPrecondition(schedule.id);
+      const precondition = await this.automation.preconditions.publicPrecondition(schedule.id);
       if (precondition) preconditions[schedule.id] = precondition;
     }));
     return {
@@ -557,8 +556,8 @@ export class AutomationStore {
     const now = iso(this.automation.clock());
     const deadlineAt = input.deadlineAt ? new Date(input.deadlineAt).toISOString() : undefined;
     await this.assertFollowUpSettings(sessionId, { ...input, mode: input.mode ?? 'session', deadlineAt, enabled: false }, actorId, { deadline: true, template: true });
-    this.automation.assertPreconditionInput(input.precondition, actorId);
-    this.automation.assertPreconditionCondition(input.condition, Boolean(input.precondition));
+    this.automation.preconditions.assertPreconditionInput(input.precondition, actorId);
+    this.automation.preconditions.assertPreconditionCondition(input.condition, Boolean(input.precondition));
     const condition = input.condition.kind === 'always' ? input.condition : await this.automation.ciCondition(session, input.condition);
     await receipt?.prepareDelivery?.(id);
     if (input.mode === 'fresh' && !this.automation.options.runtime.startScheduleSession) throw new RuntimeError('FRESH_SCHEDULE_UNAVAILABLE', 'Fresh-session schedules are unavailable on this instance', 503);
@@ -600,7 +599,7 @@ export class AutomationStore {
       updatedAt: now
     });
     requireNextRun(schedule, this.automation.clock());
-    if (!await (input.precondition ? this.automation.saveWithPrecondition(schedule.id, undefined, schedule, input.precondition) : this.createRecord(scheduleKey(schedule.id), schedule))) {
+    if (!await (input.precondition ? this.automation.preconditions.saveWithPrecondition(schedule.id, undefined, schedule, input.precondition) : this.createRecord(scheduleKey(schedule.id), schedule))) {
       if (receipt) {
         const saved = await this.getRecord(scheduleKey(id), readStoredSessionSchedule);
         if (saved) return publicSchedule(saved.value);
@@ -894,9 +893,9 @@ export class AutomationStore {
     const reenabled = input.enabled === true && !stored.value.enabled;
     await this.assertFollowUpSettings(sessionId, { trigger: input.trigger ?? stored.value.trigger, mode: modeChanged ? input.mode : currentMode, condition: input.condition ?? stored.value.condition, ...followUp, enabled: input.enabled ?? stored.value.enabled },
       actorId ?? stored.value.actorId, { deadline: input.deadlineAt !== undefined || reenabled, template: input.workTemplate !== undefined && input.workTemplate !== null || reenabled });
-    this.automation.assertPreconditionInput(input.precondition, actorId);
-    this.automation.assertPreconditionCondition(input.condition ?? stored.value.condition, input.precondition !== undefined ? Boolean(input.precondition)
-      : Boolean((await this.automation.readPrecondition(id))?.value.command));
+    this.automation.preconditions.assertPreconditionInput(input.precondition, actorId);
+    this.automation.preconditions.assertPreconditionCondition(input.condition ?? stored.value.condition, input.precondition !== undefined ? Boolean(input.precondition)
+      : Boolean((await this.automation.preconditions.readPrecondition(id))?.value.command));
     let condition = stored.value.condition;
     if (input.condition) condition = input.condition.kind === 'always' ? input.condition : await this.automation.ciCondition(session, input.condition);
     const now = this.automation.clock();
@@ -927,7 +926,7 @@ export class AutomationStore {
       ...candidate,
       nextDueAt: executionChanged ? candidate.enabled ? requireNextRun(candidate, now).scheduledForUtc : undefined : stored.value.nextDueAt
     });
-    if (!await (input.precondition !== undefined ? this.automation.saveWithPrecondition(id, stored.raw, schedule, input.precondition) : this.replace(scheduleKey(id), stored.raw, schedule))) throw new RuntimeError('SESSION_AUTOMATION_REVISION_CONFLICT', 'Session schedule revision changed', 409);
+    if (!await (input.precondition !== undefined ? this.automation.preconditions.saveWithPrecondition(id, stored.raw, schedule, input.precondition) : this.replace(scheduleKey(id), stored.raw, schedule))) throw new RuntimeError('SESSION_AUTOMATION_REVISION_CONFLICT', 'Session schedule revision changed', 409);
     if (modeChanged) await this.automation.retireFreshSessions(schedule);
     if (schedule.enabled && !stored.value.enabled) await this.automation.resetStreak(id);
     return publicSchedule(schedule);

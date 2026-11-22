@@ -2991,7 +2991,7 @@ describe('schedule pre-check command', () => {
   // 前置命令停在这里，直到测试放行：不用固定时长的 sleep 判断「命令还在跑」。
   const untilExists = (file: string) => `until [ -e ${file} ]; do sleep 0.01; done`;
   const settle = async (service: SessionAutomationService) => {
-    const runs = service['scheduler'].preconditionRuns;
+    const runs = service['scheduler'].preconditions.preconditionRuns;
     while (runs.size) await Promise.allSettled([...runs.values()]);
   };
   const tick = async (h: Awaited<ReturnType<typeof fixture>>) => { await h.service.tick(); await settle(h.service); };
