@@ -21,12 +21,13 @@ export function createCoordinatorParts(...args: ConstructorParameters<typeof Coo
     state,
     get core() { return core; },
     get cards() { return cards; },
-    get reconcile() { return intake; },
+    get reconcile() { return reconcile; },
     get runner() { return intake; },
     get intake() { return intake; },
   };
   const core = new LarkCoordinatorCore(state, parts);
   const cards = new LarkCoordinatorCards(state, parts);
+  const reconcile = new LarkCoordinatorRecovery(state, parts);
   const intake = new LarkCoordinatorInbound(state, parts);
   return parts;
 }

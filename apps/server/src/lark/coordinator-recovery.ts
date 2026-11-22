@@ -13,7 +13,6 @@ import { isBotSenderType } from './card-mentions.js';
 import { larkNotice } from './notify-tier.js';
 import { describeUnknownTaskResolution, resolveUnknownTask, type UnknownTaskRuntime } from '../task-resolution.js';
 import type { LarkInboxRecord } from './task-inbox.js';
-import type { LarkLaunchOptions } from './new-session.js';
 import { AGENT_IDLE_TIMEOUT, AGENT_LOGIN_REQUIRED, RuntimeError, unknownTaskActionLabels, unknownTaskRetryWarning, unknownTaskStoppedOriginalNotice, timeLoop, type AgentEvent, type AttemptActivity, type ChannelMapping, type ChannelMappingRepository, type Session, type TaskRecord, type UnknownTaskAction, type UnknownTaskFacts } from '@dutydeck/shared';
 import { larkPermissionMode, readLarkConfig, type StoredLarkConfig } from './config.js';
 import { larkPendingVerificationKey, parseLarkPendingVerifications } from './auto-verification.js';
@@ -37,10 +36,10 @@ import {
   type LarkHeldCause
 } from './turn-redispatch.js';
 import { isLarkCardActionAvailable, larkRelaunchLabels, larkReplayLabels, type LarkCardActionState } from './card-actions.js';
-import { larkGroupKey, listPersistedLarkSessions, resolveLarkSession } from './session-resolver.js';
+import { larkGroupKey, listPersistedLarkSessions } from './session-resolver.js';
 import { planTaskOf } from '../plan-mode.js';
 import type { LarkMessageEvent } from './listener.js';
-import type { LarkGroup, LarkTask, PersistedLarkCardTask } from './coordinator.js';
+import type { LarkTask, PersistedLarkCardTask } from './coordinator.js';
 import { parseCardTask, parseOptionalCardTask, persistedReplyTarget } from './persisted-card-task.js';
 import { larkCardChannel, type LarkRelaunchAction, type LarkRelaunchClaim, relaunchRetainedKey, larkScopeContinuesFor, sendTaskCard } from './coordinator-core.js';
 // 飞书消息协调器 · 恢复与对账：卡片终态对账、重启后收尾自动验证、从持久化的卡片映射恢复卡上操作、
@@ -56,8 +55,8 @@ const larkRecoveryOwner = { kind: 'installation_owner', id: 'installation_owner'
  */
 const larkReconcileMaxIntervalMs = 60_000;
 
-export abstract class LarkCoordinatorRecovery {
-  constructor(protected readonly state: CoordinatorState, protected readonly parts: Pick<CoordinatorParts, 'cards' | 'core' | 'intake'>) {
+export class LarkCoordinatorRecovery {
+  constructor(private readonly state: CoordinatorState, private readonly parts: Pick<CoordinatorParts, 'cards' | 'core' | 'intake' | 'runner'>) {
     this.decisions = new TurnRecoveryDecisions(state.workflowOptions.store, state.cardMappings, state.log);
   }
 
@@ -92,7 +91,7 @@ export abstract class LarkCoordinatorRecovery {
 
   private async reconcileRound(config: StoredLarkConfig, cardMappings: ChannelMappingRepository, fullScan: boolean) {
     const only = fullScan ? undefined : new Set(this.reconcilePending.keys());
-    const held = await this.recoverAcceptedCards(config, only);
+    const held = await this.parts.intake.recoverAcceptedCards(config, only);
     const pending = new Map<string, boolean>();
     let unresolved = await timeLoop('lark.reconcile.cards', this.state.log, () => performLarkCardReconcile({
       only,
@@ -232,7 +231,7 @@ export abstract class LarkCoordinatorRecovery {
     // 与开关无关——把开关关掉的人期待的正是「以前置顶的都撤掉」。
     await this.parts.core.pins.reconcile({ appId: config.appId, activeTaskIds: [...this.state.tasks.keys()] })
       .catch(error => this.state.log.warn({ error, appId: config.appId }, '飞书置顶对账失败，不影响任务执行'));
-    this.scheduleTaskAgentPoll(config);
+    this.parts.intake.scheduleTaskAgentPoll(config);
     // 服务启动时查一次默认 Agent 的登录状态（不调模型）：没登录就先记上，第一条请求直接得到说明，不用白等。
     const agentId = config.defaultAgentId;
     if (agentId) void this.state.runtime.checkAgentAvailability?.(agentId, { force: true })
@@ -464,7 +463,7 @@ export abstract class LarkCoordinatorRecovery {
         for (const id of retiring) retired.add(id);
         if (group.sessionId && retired.has(group.sessionId)) { group.sessionId = undefined; group.sessionConfigKey = undefined; }
         const bound = group.sessionId;
-        session = resumed ? await this.state.runtime.getSession(claim.sessionId) : await this.sessionFor(group, effective, saved.chat_id, chatType, scopeId);
+        session = resumed ? await this.state.runtime.getSession(claim.sessionId) : await this.parts.runner.sessionFor(group, effective, saved.chat_id, chatType, scopeId);
         if (!session) throw new Error('原会话已不存在。');
         await this.state.runtime.trackMatterSession?.(session.id, { sourceSessionId: claim.sessionId, relation: 'retry', title: saved.prompt });
         if (!resumed && session.id !== bound && !persisted.some(item => item.id === session!.id)) created = session;
@@ -530,7 +529,7 @@ export abstract class LarkCoordinatorRecovery {
         ...(inbox.redispatch ? { redispatch: inbox.redispatch } : {}), ...(materialPrompt ? { retryMaterialPrompt: materialPrompt } : {}) };
       this.state.tasks.delete(task.id);
       this.state.tasks.set(task.id, task);
-      await this.runTurn(task);
+      await this.parts.runner.runTurn(task);
     }).catch(error => this.state.log.error({ error, taskId: claim.taskId }, '在新会话中执行原请求失败'));
   }
 
@@ -1161,10 +1160,4 @@ export abstract class LarkCoordinatorRecovery {
       return { type: 'warning', content: error instanceof LarkServiceError ? error.message : '暂时无法处理，请稍后重试' };
     }
   }
-
-  // 由上层实现、在本层调用。
-  protected abstract recoverAcceptedCards(config: StoredLarkConfig, only?: ReadonlySet<string>): Promise<Set<string>>;
-  protected abstract scheduleTaskAgentPoll(config: StoredLarkConfig): void;
-  protected abstract sessionFor(group: LarkGroup, config: StoredLarkConfig, chatId: string, chatType: LarkMessageEvent['chatType'], scopeId: string, launchOptions?: LarkLaunchOptions): ReturnType<typeof resolveLarkSession>;
-  protected abstract runTurn(task: LarkTask): Promise<void>;
 }

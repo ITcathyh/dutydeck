@@ -128,7 +128,7 @@ export class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
     this.registerAgentSettingsConfirm(config.appId);
     this.registerReactionTaskConfirm(config.appId);
     await this.parts.core.workflows.initialize(config.appId);
-    await this.recoverAutoVerifications(config).catch(error => this.state.log.warn({ error, appId: config.appId }, '重启后收尾自动验证失败'));
+    await this.parts.reconcile.recoverAutoVerifications(config).catch(error => this.state.log.warn({ error, appId: config.appId }, '重启后收尾自动验证失败'));
     await this.pruneIgnoredInbox(config.appId);
     // 入站恢复仍在监听建连之前、逐条完成：上次没处理完的旧请求先排进各自会话的队列，建连后新到的消息
     // （包括 /new）排在它们后面，不会反过来插队。单条记录失败只影响这一条，不让初始化抛出、不阻止建连；
@@ -229,7 +229,7 @@ export class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
     group.tail = group.tail.then(() => this.runTurn(task)).catch(error => {
       if (this.state.tasks.get(id) === task) this.state.tasks.delete(id);
       this.state.log.warn({ error, taskId }, '恢复飞书任务交互失败');
-      this.scheduleReconcile();
+      this.parts.reconcile.scheduleReconcile();
     });
   }
 
@@ -1449,26 +1449,26 @@ export class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
       text, idempotencyKey: `control_${event.messageId}`.slice(0, 50) }).catch(error => this.state.log.warn({ error, messageId: event.messageId }, '控制语回执发送失败'));
     try {
       const tasks = await this.state.runtime.getTasks(sessionId);
-      const unresolved = await this.unresolvedTurns(sessionId);
+      const unresolved = await this.parts.reconcile.unresolvedTurns(sessionId);
       const last = tasks.at(-1);
       if (kind === 'continue') {
         if (unresolved.length) {
           if (!await this.parts.core.isOperatorAllowed(config, event.senderOpenId, event.chatId, sessionId)) return undefined;
           let cause = {};
-          for (const task of unresolved) cause = await this.closeUnresolvedTurn(config, sessionId, task.id);
+          for (const task of unresolved) cause = await this.parts.reconcile.closeUnresolvedTurn(config, sessionId, task.id);
           await confirm('好，上一轮按没做完处理，接着在原对话里做。');
           return { prompt, materialPrompt: larkContinuePrompt(cause) };
         }
         if (!last || !['failed', 'interrupted'].includes(last.status)) return undefined;
-        const cause = await this.runtimeTaskContinueCause(config.appId, last);
+        const cause = await this.parts.reconcile.runtimeTaskContinueCause(config.appId, last);
         if (last.status === 'failed' && !cause) return undefined;
         await confirm('好，接着上一轮做。');
         return { prompt, materialPrompt: larkContinuePrompt(cause ?? {}) };
       }
       if (unresolved.length) {
-        const { mapping, saved } = await this.cardTaskFor(config.appId, sessionId, unresolved.at(-1)!.id);
+        const { mapping, saved } = await this.parts.reconcile.cardTaskFor(config.appId, sessionId, unresolved.at(-1)!.id);
         if (!mapping || !saved?.card_message_id || saved.sender_open_id !== event.senderOpenId) return undefined;
-        const result = await this.interruptedTurnAction('replay_turn', mapping.externalId, saved.turn ?? 0, event.senderOpenId, { messageId: saved.card_message_id, chatId: saved.chat_id });
+        const result = await this.parts.reconcile.interruptedTurnAction('replay_turn', mapping.externalId, saved.turn ?? 0, event.senderOpenId, { messageId: saved.card_message_id, chatId: saved.chat_id });
         if (result.type !== 'success') return undefined;
         await confirm('好，重新执行上一条请求。');
         await this.parts.core.clearAcknowledgementReaction({ event, acknowledgement });
@@ -1866,7 +1866,7 @@ export class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
       // 转交旧卡：映射已移到新一轮，按回调里的任务与轮次读转交认领。claim.sessionId 是原会话，
       // 与 markRelaunchedCard 给这张旧卡的页脚会话一致。
       if (!card && target?.turn !== undefined) {
-        const raw = await this.decisions.get(turnDecisionKey('relaunch', config.appId, target.taskId, target.turn));
+        const raw = await this.parts.reconcile.decisions.get(turnDecisionKey('relaunch', config.appId, target.taskId, target.turn));
         const claim = raw ? JSON.parse(raw) as LarkRelaunchClaim : undefined;
         if (claim?.phase === 'moved' && claim.cardMessageId === context.messageId && claim.chatId === context.chatId) {
           card = { externalId: claim.taskId, sessionId: claim.sessionId, saved: { app_id: claim.appId, chat_id: claim.chatId, turn: claim.turn,
@@ -2240,22 +2240,22 @@ export class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
     const state = this.state;
     return {
       capabilitiesForTask: this.parts.cards.capabilitiesForTask.bind(this.parts.cards),
-      continueInPlaceAction: this.continueInPlaceAction.bind(this),
+      continueInPlaceAction: this.parts.reconcile.continueInPlaceAction.bind(this.parts.reconcile),
       currentTurnInterruptDenial: this.currentTurnInterruptDenial.bind(this),
       handleDetailLogin: this.handleDetailLogin.bind(this),
       inbox: this.parts.core.inbox,
-      interruptedTurnAction: this.interruptedTurnAction.bind(this),
+      interruptedTurnAction: this.parts.reconcile.interruptedTurnAction.bind(this.parts.reconcile),
       isDeferredTask: this.parts.core.isDeferredTask.bind(this.parts.core),
       pushTaskError: this.parts.core.pushTaskError.bind(this.parts.core),
       queuedSteerCapabilities: this.queuedSteerCapabilities.bind(this),
       refreshResultVerification: this.parts.cards.refreshResultVerification.bind(this.parts.cards),
-      relaunchCardAction: this.relaunchCardAction.bind(this),
+      relaunchCardAction: this.parts.reconcile.relaunchCardAction.bind(this.parts.reconcile),
       retryInFlight: this.retryInFlight,
       runTurn: this.runTurn.bind(this),
       scheduleResultDaily: this.parts.cards.scheduleResultDaily.bind(this.parts.cards),
       steerQueuedTurn: this.steerQueuedTurn.bind(this),
       submitResultFollowUp: this.parts.cards.submitResultFollowUp.bind(this.parts.cards),
-      unknownTaskAction: this.unknownTaskAction.bind(this),
+      unknownTaskAction: this.parts.reconcile.unknownTaskAction.bind(this.parts.reconcile),
       verificationView: this.parts.cards.verificationView.bind(this.parts.cards),
       verifyInFlight: this.state.verifyInFlight,
       cardMappings: this.state.cardMappings,
@@ -2311,8 +2311,8 @@ export class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
       return storedButtons[action as keyof typeof storedButtons](deps, parsed, operatorOpenId, context);
     }
     const task = this.state.tasks.get(taskId) ?? (action === 'cancel'
-      ? await this.restoreQueuedCardAction(taskId, parsed.turn, context)
-      : action === 'verify' || action === 'use_verification_command' ? await this.restoreVerifyCardAction(taskId, parsed.turn, context) : undefined);
+      ? await this.parts.reconcile.restoreQueuedCardAction(taskId, parsed.turn, context)
+      : action === 'verify' || action === 'use_verification_command' ? await this.parts.reconcile.restoreVerifyCardAction(taskId, parsed.turn, context) : undefined);
     if (!task && action === 'retry' && this.state.reconcileConfig) {
       const mapping = await this.state.cardMappings.get(larkCardChannel(this.state.reconcileConfig.appId), taskId);
       const saved = mapping && parseOptionalCardTask(mapping.extra);
