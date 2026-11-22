@@ -63,8 +63,8 @@ function preconditionSummary(status: Pick<PreconditionStatus, 'outcome' | 'exitC
 }
 
 type Dependencies = Pick<SessionAutomationService['scheduler'],
-  'advanceSchedule' | 'clock' | 'closed' | 'disableSchedule' | 'finishOccurrence' | 'options' | 'ownerId'
-  | 'processOccurrence' | 'recordOutcome' | 'renewOccurrenceLease' | 'store' | 'warn'>;
+  'advanceSchedule' | 'clock' | 'closed' | 'disableSchedule' | 'occurrences' | 'options' | 'ownerId' | 'store'
+  | 'warn'>;
 
 export class AutomationPreconditions {
   /** 关闭时终止正在跑的前置命令；那次触发留在待执行，租约过期后由下次启动重新判定。 */
@@ -91,15 +91,15 @@ export class AutomationPreconditions {
     try { await this.automation.store.requireAuthorized(schedule.sessionId, occurrenceActorId(schedule, occurrence)); }
     catch (error) {
       await this.automation.disableSchedule(scheduleStored);
-      await this.automation.finishOccurrence(stored, { conditionStatus: 'error', runStatus: 'error', error: errorMessage(error) });
+      await this.automation.occurrences.finishOccurrence(stored, { conditionStatus: 'error', runStatus: 'error', error: errorMessage(error) });
       return false;
     }
     const settle = async (target: { raw: string; value: SessionScheduleOccurrenceV2 }, status: PreconditionResult) => {
       const summary = preconditionSummary(status, timeoutSeconds);
-      if (!await this.automation.finishOccurrence(target, status.outcome === 'skipped' ? { conditionStatus: 'skipped', runStatus: 'skipped', error: summary } : { conditionStatus: 'error', runStatus: 'error', error: summary })) return undefined;
+      if (!await this.automation.occurrences.finishOccurrence(target, status.outcome === 'skipped' ? { conditionStatus: 'skipped', runStatus: 'skipped', error: summary } : { conditionStatus: 'error', runStatus: 'error', error: summary })) return undefined;
       await this.notePrecondition(schedule.id, precondition, { occurrenceId: occurrence.id, at: iso(this.automation.clock()), ...status });
       if (manual) return undefined;
-      if (status.outcome === 'error') await this.automation.recordOutcome(target.value, { key: 'precondition:error', kind: 'error', reason: status.timedOut ? `前置命令超过 ${timeoutSeconds} 秒未结束` : `前置命令无法执行：${(status.error ?? '未知错误').slice(0, 160)}` });
+      if (status.outcome === 'error') await this.automation.occurrences.recordOutcome(target.value, { key: 'precondition:error', kind: 'error', reason: status.timedOut ? `前置命令超过 ${timeoutSeconds} 秒未结束` : `前置命令无法执行：${(status.error ?? '未知错误').slice(0, 160)}` });
       await this.automation.advanceSchedule(schedule, occurrence.scheduledForUtc);
       return undefined;
     };
@@ -108,7 +108,7 @@ export class AutomationPreconditions {
     catch (error) { await settle(stored, { outcome: 'error', output: '', outputTruncated: false, error: `执行目录不可用：${errorMessage(error)}` }); return false; }
     // 同一实例里同一次触发只跑一份；跨实例和后续 tick 靠租约挡住。
     if (this.preconditionRuns.has(occurrence.id)) return false;
-    const leased = await this.automation.renewOccurrenceLease(stored);
+    const leased = await this.automation.occurrences.renewOccurrenceLease(stored);
     if (!leased || this.preconditionRuns.has(occurrence.id)) return false;
     // 命令在后台跑，不占定时器主循环；结束后接着走这次触发的后续流程。
     const run = this.runPrecondition(schedule, precondition, leased, cwd, timeoutSeconds, settle)
@@ -135,7 +135,7 @@ export class AutomationPreconditions {
     const timer = setInterval(() => {
       renewing = renewing.then(async () => {
         if (controller.signal.aborted) return;
-        const renewed = await this.automation.renewOccurrenceLease(current);
+        const renewed = await this.automation.occurrences.renewOccurrenceLease(current);
         if (renewed) current = renewed;
         else controller.abort();
       }).catch(() => { controller.abort(); });
@@ -151,7 +151,7 @@ export class AutomationPreconditions {
     if (result.interrupted || controller.signal.aborted) return;
     const latest = await this.automation.store.getRecord(scheduleKey(schedule.id), readStoredSessionSchedule);
     if (!latest || latest.value.generation !== occurrence.generation || latest.value.deletedAt || !latest.value.enabled && !manual) {
-      await this.automation.finishOccurrence(current, { conditionStatus: 'invalidated', runStatus: 'invalidated', error: 'Schedule changed while its pre-check command ran' });
+      await this.automation.occurrences.finishOccurrence(current, { conditionStatus: 'invalidated', runStatus: 'invalidated', error: 'Schedule changed while its pre-check command ran' });
       return;
     }
     const error = result.cleanupError ?? result.error;
@@ -166,7 +166,7 @@ export class AutomationPreconditions {
     if (!await this.automation.store.replace(occurrenceKey(occurrence.id), current.raw, passed)) return;
     await this.notePrecondition(schedule.id, precondition, { occurrenceId: occurrence.id, at: iso(this.automation.clock()), ...status });
     if (this.automation.closed) return;
-    await this.automation.processOccurrence({ raw: JSON.stringify(passed), value: passed });
+    await this.automation.occurrences.processOccurrence({ raw: JSON.stringify(passed), value: passed });
   }
 
   readPrecondition(scheduleId: string) {

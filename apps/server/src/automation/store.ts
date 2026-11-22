@@ -340,7 +340,7 @@ function sameV2Binding(a: TaskBindingV2, b: TaskBindingV2) {
 }
 
 type Dependencies = Pick<SessionAutomationService['scheduler'],
-  'ci' | 'clock' | 'executionSession' | 'hasPendingOccurrence' | 'options' | 'preconditions' | 'resetStreak'
+  'ci' | 'clock' | 'hasPendingOccurrence' | 'occurrences' | 'options' | 'preconditions'
   | 'retireFreshSessions' | 'service' | 'watchSession'>;
 
 export class AutomationStore {
@@ -612,7 +612,7 @@ export class AutomationStore {
     } catch { console.warn('MATTER_LINK_FAILED'); }
     this.automation.watchSession(sessionId);
     if (schedule.mode === 'independent') {
-      await this.automation.executionSession(schedule);
+      await this.automation.occurrences.executionSession(schedule);
       const current = await this.getRecord(scheduleKey(id), readStoredSessionSchedule);
       return publicSchedule(current!.value);
     }
@@ -928,7 +928,7 @@ export class AutomationStore {
     });
     if (!await (input.precondition !== undefined ? this.automation.preconditions.saveWithPrecondition(id, stored.raw, schedule, input.precondition) : this.replace(scheduleKey(id), stored.raw, schedule))) throw new RuntimeError('SESSION_AUTOMATION_REVISION_CONFLICT', 'Session schedule revision changed', 409);
     if (modeChanged) await this.automation.retireFreshSessions(schedule);
-    if (schedule.enabled && !stored.value.enabled) await this.automation.resetStreak(id);
+    if (schedule.enabled && !stored.value.enabled) await this.automation.occurrences.resetStreak(id);
     return publicSchedule(schedule);
   }
 

@@ -63,7 +63,7 @@ export const sameHead = (resolved: CiHead, provider: string, repository: CiRepos
   resolved.provider.id === provider && resolved.repository.slug.toLowerCase() === repository.slug.toLowerCase() && resolved.headSha === headSha;
 
 type Dependencies = Pick<SessionAutomationService['scheduler'],
-  'buildRequest' | 'clock' | 'delivery' | 'dispatchAdmitted' | 'options' | 'ownerId' | 'store'>;
+  'clock' | 'delivery' | 'occurrences' | 'options' | 'ownerId' | 'store'>;
 
 export class AutomationCiPoll {
   private readonly providers: CiProviderRegistry;
@@ -292,11 +292,11 @@ export class AutomationCiPoll {
 
     if (record.admission) {
       // 原样使用已冻结的 request，绝不用新默认值覆盖！
-      request = record.admission.request ?? this.automation.buildRequest(session, 'automation', ciRequestKey(record.id), prompt, actor);
+      request = record.admission.request ?? this.automation.occurrences.buildRequest(session, 'automation', ciRequestKey(record.id), prompt, actor);
       taskId = record.admission.taskId;
       taskIdVersion = record.admission.taskIdVersion;
     } else {
-      const candidateRequest = this.automation.buildRequest(session, 'automation', ciRequestKey(record.id), prompt, actor);
+      const candidateRequest = this.automation.occurrences.buildRequest(session, 'automation', ciRequestKey(record.id), prompt, actor);
       let existingAccepted;
       try {
         existingAccepted = this.automation.store.execution.lookupAccepted(candidateRequest);
@@ -320,7 +320,7 @@ export class AutomationCiPoll {
 
     const stored: { raw: string; value: CiSubscriptionV2 } = { raw: JSON.stringify(record), value: record };
     const subscriptionId = record.id;
-    await this.automation.dispatchAdmitted(request, taskId, {
+    await this.automation.occurrences.dispatchAdmitted(request, taskId, {
       schemaVersion: 2,
       kind: 'ci',
       sessionId: record.sessionId,
