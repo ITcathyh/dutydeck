@@ -1,9 +1,11 @@
-import { existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { chmodSync, existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { createRepositories } from '@dutydeck/storage';
 import { readLarkConfig, saveLarkConfig } from '../lark/config.js';
+import { migrateLarkSecrets } from '../migrate-lark-secrets.js';
+import { liveLarkSecretKey } from '@dutydeck/secret-provider';
 import { detectAgents } from './detect.js';
 import { readBot, saveBot } from './bot-store.js';
 
@@ -24,6 +26,34 @@ async function stored(database: string, appId: string) {
 const known = [{ id: 'claude', protocol: 'acp' as const }, { id: 'codex', protocol: 'acp' as const }];
 
 describe('setup 的机器人配置落点', () => {
+  it.each(['setup', 'same appId'])('repairs only the missing credential via %s', async entry => {
+    const database = tempDatabase();
+    const appId = 'cli_repair';
+    const original = { appId, revision: 8, defaultAgentId: 'claude', listening: false, allowedEmails: ['owner@example.org'],
+      preInjectPrompt: 'Saved prompt', riskControlMode: 'enforced', futureSetting: ['keep'], appSecret: 'old-value' };
+    const repos = createRepositories(database);
+    try {
+      await repos.config.set('lark.bots', JSON.stringify([original]));
+      migrateLarkSecrets(database, {});
+      const [bot] = JSON.parse((await repos.config.get('lark.bots'))!);
+      const file = join(dirname(database), 'secrets', liveLarkSecretKey(appId, bot.appSecretRef) + '.secret');
+      if (entry === 'setup' || process.platform === 'win32') rmSync(file);
+      else chmodSync(file, 0o644);
+      expect(await stored(database, appId)).toBeUndefined();
+      expect(await readBot(database, appId)).toEqual({ defaultAgentId: 'claude', listening: false });
+      const appSecret = 'replacement';
+      if (entry === 'setup') {
+        expect(await saveBot({ database, appId, appSecret, defaultAgentId: 'codex', listen: true, knownAgents: known }))
+          .toEqual({ existed: true, changed: true, hasSecret: true, defaultAgentId: 'claude', listening: false });
+      } else {
+        await expect(saveLarkConfig(repos.config, undefined, { appId, appSecret, expectedRevision: 0 }))
+          .rejects.toMatchObject({ code: 'LARK_CONFIG_REVISION_CONFLICT' });
+        await saveLarkConfig(repos.config, undefined, { appId, appSecret });
+      }
+      expect(JSON.parse((await repos.config.get('lark.bots'))!)).toEqual([{ ...original, appSecret, revision: 9 }]);
+    } finally { repos.close(); }
+  });
+
   it('新建机器人：App Secret、默认 Agent、工作目录写进 lark.bots，权限模式为逐项审批', async () => {
     const database = tempDatabase();
     const result = await saveBot({ database, appId: 'cli_a', appSecret: 'secret-a', defaultAgentId: 'claude', workspace: '/work/project', knownAgents: known });

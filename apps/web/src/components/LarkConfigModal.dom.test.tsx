@@ -328,6 +328,18 @@ describe('LarkConfigModal risk control', () => {
   两条都必须在 DOM 与请求体两端各钉一颗钉子。
 */
 describe('LarkConfigModal 凭据边界', () => {
+  it('opens the credential step for a bot with an unavailable secret and requires a replacement', async () => {
+    const user = userEvent.setup();
+    renderModal(collection({ credentialUnavailable: true, revision: 5 }));
+    const save = vi.spyOn(api, 'saveLarkConfig').mockResolvedValue(collection({ revision: 6 }));
+    const field = await screen.findByPlaceholderText('输入 App Secret');
+    const next = screen.getByRole('button', { name: '下一步' });
+    expect((next as HTMLButtonElement).disabled).toBe(true);
+    await typeInto(user, field, 'replacement');
+    await user.click(next);
+    await waitFor(() => expect(save).toHaveBeenCalledWith(expect.objectContaining({ originalAppId: 'cli_test', appSecret: 'replacement', expectedRevision: 5 })));
+  });
+
   it('never rehydrates a stored App Secret into the input', async () => {
     // setupComplete 决定落在哪一步；App Secret 只在第 1 步渲染。
     renderModal(collection({ appId: 'cli_test', setupComplete: true }));

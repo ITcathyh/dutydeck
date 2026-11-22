@@ -1,5 +1,4 @@
 [
-  {"from": "agent-cli.ts", "to": "lark/agent-tools-cli.ts"},
   {"from": "agent-request-tools.ts", "to": "lark/agent-command.ts"},
   {"from": "agent-request-tools.ts", "to": "lark/agent-settings.ts"},
   {"from": "agent-schedule-request.ts", "to": "lark/agent-command.ts"},
@@ -11,7 +10,6 @@
   {"from": "automation-integration.ts", "to": "lark/task-report-card.ts"},
   {"from": "cli-program.ts", "to": "lark/agent-command.ts"},
   {"from": "collaboration-background.ts", "to": "lark/role-format.ts"},
-  {"from": "collaboration-cli.ts", "to": "lark/agent-tools-cli.ts"},
   {"from": "collaboration-integration.ts", "to": "lark/config.ts"},
   {"from": "collaboration-integration.ts", "to": "lark/group-participation.ts"},
   {"from": "collaboration-integration.ts", "to": "lark/participation-evaluate.ts"},
@@ -38,7 +36,6 @@
   {"from": "plugins/service-wiring.ts", "to": "lark/plugin-commands.ts"},
   {"from": "project-memory.ts", "to": "lark/memory.ts"},
   {"from": "resource-retention.ts", "to": "lark/inbox-fields.ts"},
-  {"from": "schedule-cli.ts", "to": "lark/agent-tools-cli.ts"},
   {"from": "setup/bot-store.ts", "to": "lark/config.ts"},
   {"from": "setup/bot-store.ts", "to": "lark/service.ts"},
   {"from": "setup/first-run.ts", "to": "lark/config.ts"},
@@ -57,7 +54,6 @@
   {"from": "watch-signals.ts", "to": "lark/listener-status.ts"},
   {"from": "watch-signals.ts", "to": "lark/message-anchor.ts"},
   {"from": "watch-signals.ts", "to": "lark/reconciler.ts"},
-  {"from": "work-item-cli.ts", "to": "lark/agent-tools-cli.ts"},
   {"from": "work-item-policy.ts", "to": "lark/config.ts"},
   {"from": "work-item-policy.ts", "to": "lark/service.ts"}
 ]

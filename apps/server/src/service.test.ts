@@ -54,7 +54,8 @@ it('composes frozen collaboration prompts without tool, plugin-result or Herdr d
     DUTYDECK_DISABLE_LARK_LISTENER: 'true', DUTYDECK_AGENTS_JSON: '[]'
   } });
   const options = runtimeInputs(service.runtime).options;
-  const tools = vi.spyOn(LarkAgentToolsService.prototype, 'promptForSession').mockImplementation(async (_session, prompt) => `TOOLS\n\n${prompt}`);
+  const tools = vi.fn(() => [{ kind: 'dynamic_context' as const, trustScope: 'host:current_authority', content: 'TOOLS\n\n' }]);
+  vi.spyOn(LarkAgentToolsService.prototype, 'toolPromptContributor').mockReturnValue({ stage: 'capability', order: 10, sessions: 'host-enabled', contribute: tools });
   const herdr = vi.spyOn(HerdrSessions.prototype, 'prompt').mockReturnValue('HERDR');
   const active = vi.spyOn(service.runtime, 'getActiveTaskContext');
   const base: Session = { id: 'prompt-fixture', agentId: 'fixture', cwd: root, state: 'idle', runId: 'fixture', createdAt: '', updatedAt: '',

@@ -1,0 +1,40 @@
+{
+  "prompt": "本轮到此为止但要人决定，用 dutydeck session report --status waiting --question \"一个具体问题\"；一次只问一个问题。做不下去用 --status blocked --summary \"一句原因\"，无需处理用 --status dropped；完成了不用报。有固定选项且要阻塞等回答时仍用 session ask --choices。\n\nHerdr (default)\n\n第一行\n\n  第二行",
+  "promptParts": [
+    {
+      "kind": "user_request",
+      "trustScope": "user_request",
+      "content": "第一行\n\n  第二行"
+    }
+  ],
+  "diagnostics": {
+    "templateVersion": "optimized-v1",
+    "beforeChars": 221,
+    "afterChars": 221,
+    "deduplicatedParts": 0,
+    "parts": [
+      {
+        "kind": "host_rules",
+        "chars": 192,
+        "sha256": "add9f7814cb1d27d4e5de49a0e3d2a54a5cd0789de9261e2d43a332aed91ad96",
+        "sourceIdDigest": "9d77cbfed7752a337ebfa7291a330f999ae7efabd3152e53dc5dd600d30b4be7",
+        "versionDigest": "3b79886925835d1aeed9fcc8bd56cb605a1f8353cb3cf7e04ec9fc6efb49b094",
+        "complete": true
+      },
+      {
+        "kind": "host_rules",
+        "chars": 15,
+        "sha256": "3f379731e4223b6978031911e8bfeb095885b1c5963acb40563e2c2c125fe345",
+        "sourceIdDigest": "c95e1b5dd616ade6f1df617eab9070bb92d5cfa1f06aa9a4ab7a3eaf240d553b",
+        "versionDigest": "3b79886925835d1aeed9fcc8bd56cb605a1f8353cb3cf7e04ec9fc6efb49b094",
+        "complete": true
+      },
+      {
+        "kind": "user_request",
+        "chars": 10,
+        "sha256": "c6fbd81abfe56238325fd009d28602133a4d4ea58e1a6c5a948c8c0f02a796a2",
+        "complete": false
+      }
+    ]
+  }
+}

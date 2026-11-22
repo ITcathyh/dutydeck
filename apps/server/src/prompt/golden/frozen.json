@@ -1,0 +1,24 @@
+{
+  "prompt": "第一行\n\n  第二行",
+  "promptParts": [
+    {
+      "kind": "user_request",
+      "trustScope": "user_request",
+      "content": "第一行\n\n  第二行"
+    }
+  ],
+  "diagnostics": {
+    "templateVersion": "optimized-v1",
+    "beforeChars": 10,
+    "afterChars": 10,
+    "deduplicatedParts": 0,
+    "parts": [
+      {
+        "kind": "user_request",
+        "chars": 10,
+        "sha256": "c6fbd81abfe56238325fd009d28602133a4d4ea58e1a6c5a948c8c0f02a796a2",
+        "complete": false
+      }
+    ]
+  }
+}

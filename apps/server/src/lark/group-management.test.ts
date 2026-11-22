@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mkdtemp, mkdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { liveLarkSecretKey } from '@dutydeck/secret-provider';
 import Database from 'better-sqlite3';
 import { agentConfigSchema, type RepositoryBundle, type Session } from '@dutydeck/shared';
 import { createRepositories } from '@dutydeck/storage';
@@ -43,6 +44,31 @@ describe('live group configuration', () => {
     await manager.sync('cli_one'); await manager.sync('cli_two');
   });
   afterEach(async () => { repos?.close(); await rm(dir, { recursive: true, force: true }); });
+
+  it.each([{}, { appId: ' cli_one ', brand: 'legacy' }])('syncs and saves group settings for an unmigrated revision-zero bot %j', async legacyFields => {
+    const bots = JSON.parse((await repos.config.get('lark.bots'))!);
+    Object.assign(bots[0], { revision: 0, riskControlMode: 'off', ...legacyFields });
+    await repos.config.set('lark.bots', JSON.stringify(bots));
+    await manager.sync('cli_one');
+    expect((await save()).binding?.revision).toBe(1);
+  });
+
+  it('guards a managed group binding while its credential file is unavailable', async () => {
+    const binding = (await save()).binding!;
+    migrateLarkSecrets(join(dir, 'state.sqlite'), {});
+    const [bot] = JSON.parse((await repos.config.get('lark.bots'))!);
+    await rm(join(dir, 'secrets', liveLarkSecretKey(bot.appId, bot.appSecretRef) + '.secret'));
+    const app = await buildApp({ listAgents: async () => [] } as any, { foundation: { repositories: repos, authorize: async () => true, isLiveManagedBot: id => manager.isLiveManagedBot(id) } });
+    try {
+      const response = await app.inject({ method: 'PATCH', url: '/api/foundation/group-bindings/' + binding.id,
+        payload: { expectedRevision: binding.revision + 1, oncall: true } });
+      expect(response.statusCode).toBe(409);
+      expect(response.json().error.code).toBe('LARK_LIVE_MANAGEMENT_REQUIRED');
+      expect(await repos.groupBindings.get(binding.id)).toEqual(binding);
+      await deleteLarkConfig(repos.config, bot.appId);
+      expect(await manager.isLiveManagedBot(binding.channelBotId)).toBe(false);
+    } finally { await app.close(); }
+  });
 
   it('inherits routing weights and disables them for a fixed group Agent', async () => {
     const weights = [{ agentId: 'agent_one', weight: 30 }, { agentId: 'agent_two', weight: 70 }];

@@ -240,6 +240,7 @@ export interface PublicLarkConfig {
   reactionTriggerEmoji?: StoredLarkConfig['reactionTriggerEmoji'];
   defaultGroupParticipation?: StoredLarkConfig['defaultGroupParticipation'];
   configured: true;
+  credentialUnavailable?: true;
   appId: string;
   name: string;
   tabLabel: string;
