@@ -22,8 +22,6 @@ import { describeLarkTaskRecovery, larkAgentUnavailableText, larkQuietSettledNot
 import { validateLarkLaunchOptions, type LarkLaunchOptions } from './new-session.js';
 import { collectLarkTaskContext } from './task-context.js';
 import type { LarkScenarioRecallLine } from './scenario-recall.js';
-import type { ModelScenarioExecution } from './scenario-model.js';
-import { larkScenarioAdoptionOf } from './scenario-legacy.js';
 import { withLarkContextReadTimeout } from './context-read-timeout.js';
 import type { AgentEvent, PolicyAction, Session, TaskRecord, ToolRiskPolicy } from '@dutydeck/shared';
 import { deferredConfirmationId, isBackgroundFollowup, RuntimeError, supportsRemoteApproval } from '@dutydeck/shared';
@@ -1331,19 +1329,8 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
       : [];
     if (!resumeTask) task.startedAt = Date.now();
     task.interruptRequested = false;
-    const contributors = createTurnContributors({ task, config, event, session, botSender, materialPrompt, materialParts, options: this.workflowOptions, log: this.log });
-    // 场景包的关联：这个 Bot 之前在本群别的话题处理过同一件事，上次的结论带给 Agent，过程卡顶部挂一行。读不到只少这一项。
-    task.scenarioRecall = undefined;
-    if (this.workflowOptions.participation) {
-      const cardMappings = this.cardMappings;
-      try {
-        task.scenarioRecall = await this.workflowOptions.participation.scenarioRecall({ appId: config.appId, chatId: event.chatId }, config, { materialPrompt, scopeId: task.scopeId, before: task.startedAt!,
-          mappings: () => cardMappings.list(larkCardChannel(config.appId)), brand: config.brand, webBaseUrl: config.webBaseUrl });
-      } catch (error) {
-        this.log.warn({ error, taskId: task.id }, '查找上一轮关联失败，本轮不带上次结论');
-      }
-      if (task.scenarioRecall) cardContext.scenarioRecall = { packId: task.scenarioRecall.packId, line: task.scenarioRecall.line };
-    }
+    const contributors = createTurnContributors({ task, config, event, session, botSender, materialPrompt, materialParts, cardMappings: this.cardMappings, options: this.workflowOptions, log: this.log });
+    await contributors.beforeCard(cardContext);
     // An accepted task keeps its original card and mapping while reattaching.
     if (await cancelledBeforeCard()) return;
     if (!resumeTask || !task.cardMessageId && !silentProgress) {
@@ -1749,7 +1736,6 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
       if (state === 'completed' || state === 'failed' || state === 'interrupted' || state === 'cancelled') return deliverTerminal(state, completed);
       await update(state);
     };
-    let scenarioExecution: ModelScenarioExecution | undefined;
     try {
       await contributors.readContext();
     } catch (error) {
@@ -1766,12 +1752,6 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
     }
     if (this.stopped || task.turn !== currentTurn || await closePreparedTurn()) return;
     await contributors.preparePrompt();
-    // model 场景包判为 act 的消息：判定时冻结的执行指令和材料，用户请求仍是原文。读不到或对不上时这一轮不带。
-    const scenarioAdoption = larkScenarioAdoptionOf(event);
-    if (scenarioAdoption?.mode === 'model' && this.workflowOptions.participation) {
-      scenarioExecution = await this.workflowOptions.participation.scenarioExecution({ appId: config.appId, chatId: event.chatId }, scenarioAdoption, larkMessageAnchor(event))
-        .catch(error => { this.log.warn({ error, taskId: task.id }, '读取场景执行内容失败，本轮不带场景指令'); return undefined; });
-    }
     const { groupInstructionsRevision } = contributors.prompt;
     let promptUsage: BotPromptUsage | undefined = {
       schemaVersion: 1, taskId: task.id, appId: config.appId, groupInstructionsRevision
@@ -1783,9 +1763,9 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
     } catch (error) { this.log.warn({ error, taskId: task.id }, '读取提示词历史失败，继续派发'); }
     if (promptUsage?.botPromptVersion === undefined) this.log.warn({ taskId: task.id }, '本轮未记录版本，继续派发');
     const { agentPrompt, promptParts } = await composeLarkDispatchPrompt({
-      session, config, event, ...contributors.prompt, scenarioRecall: task.scenarioRecall, scenarioExecution,
+      session, config, event, ...contributors.prompt,
       silentProgress, highRiskPattern: riskControlEnabled && !highRiskAuthorized ? highRiskPattern : undefined,
-      redispatch: task.redispatch, plan: planTask !== undefined, materialPrompt, materialParts, scenarioAdoption
+      redispatch: task.redispatch, plan: planTask !== undefined, materialPrompt, materialParts
     });
 
     if (this.stopped || task.turn !== currentTurn || await closePreparedTurn()) return;

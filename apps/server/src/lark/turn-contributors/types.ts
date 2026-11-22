@@ -1,4 +1,4 @@
-import type { PromptPart, Session } from '@dutydeck/shared';
+import type { ChannelMappingRepository, PromptPart, Session } from '@dutydeck/shared';
 import type { LarkMessageCoordinator, LarkTask } from '../coordinator.js';
 import type { ListenerLog } from '../listener.js';
 import type { composeLarkDispatchPrompt } from '../prompt-contributors.js';
@@ -15,14 +15,16 @@ export interface TurnContext {
   materialPrompt: string;
   materialParts?: PromptPart[];
   options: Pick<CoordinatorOptions, 'store' | 'participation' | 'memory'>;
+  cardMappings: ChannelMappingRepository;
   log: ListenerLog;
 }
 
-export type TurnPrompt = Pick<Parameters<typeof composeLarkDispatchPrompt>[0], 'groupContext' | 'groupInstructions' | 'memoryBlock'> & {
+export type TurnPrompt = Pick<Parameters<typeof composeLarkDispatchPrompt>[0], 'groupContext' | 'groupInstructions' | 'memoryBlock' | 'scenarioRecall' | 'scenarioExecution' | 'scenarioAdoption'> & {
   groupInstructionsRevision?: number;
 };
 
 export interface TurnContributor {
+  beforeCard?(card: Pick<import('../service.js').LarkCardInput, 'scenarioRecall'>): Promise<void>;
   preparePrompt?(): Promise<void>;
   attached?(receipt: { id: string; replayed?: boolean }): Promise<void>;
   afterDelivery?(state: TerminalState, runtimeTaskId?: string): void;
