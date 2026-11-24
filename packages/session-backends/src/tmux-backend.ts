@@ -400,7 +400,7 @@ function dutydeckSessionId(ownerId: string | undefined, sessionName: string): st
  * the cursor row keeps the spaces before the cursor. Native coordinates
  * are in terminal cells and refer to unjoined physical rows (-N).
  */
-export function cleanTmuxSubmissionCapture(partialAnsi: string, fullCapture: string, requireCursor = true, nativeCursorX?: number): string | null {
+export function cleanTmuxSubmissionCapture(partialAnsi: string, fullCapture: string, requireCursor = true, nativeCursor?: { column: number; physicalRow: string }): string | null {
   const rows = (capture: string) => (capture.endsWith('\n') ? capture.slice(0, -1) : capture).split('\n');
   const partialRows = rows(partialAnsi);
   const fullRows = rows(fullCapture);
@@ -415,14 +415,17 @@ export function cleanTmuxSubmissionCapture(partialAnsi: string, fullCapture: str
     beforeCursor = stripVTControlCharacters(ansiRow.slice(0, cursor.index));
     const afterCursor = stripVTControlCharacters(ansiRow.slice(cursor.index + cursor[0].length));
     if (!/^ *$/.test(afterCursor) || !capturedRow.startsWith(beforeCursor) || !/^ +$/.test(capturedRow.slice(beforeCursor.length))) return null;
-  } else if (nativeCursorX !== undefined) {
-    if (stripVTControlCharacters(ansiRow) !== capturedRow || !/^─{8,} *$/.test(fullRows[cursorRow + 1] ?? '')) return null;
-    const text = capturedRow.replace(/ +$/, '');
-    const spaces = nativeCursorX - stringWidth(text);
+  } else if (nativeCursor) {
+    const { column, physicalRow } = nativeCursor;
+    if (stripVTControlCharacters(ansiRow) !== capturedRow || !capturedRow.endsWith(physicalRow)
+      || !/^─{8,} *$/.test(fullRows[cursorRow + 1] ?? '')) return null;
+    const text = physicalRow.replace(/ +$/, '');
+    const spaces = column - stringWidth(text);
     // A fresh Claude continuation has two columns of indent but no painted cells.
-    const blankContinuation = capturedRow === '' && nativeCursorX === 2;
-    if (!blankContinuation && (spaces < 0 || spaces > capturedRow.length - text.length)) return null;
-    beforeCursor = blankContinuation ? '' : text + ' '.repeat(spaces);
+    const blankContinuation = physicalRow === '' && column === 2;
+    if (!blankContinuation && (spaces < 0 || spaces > physicalRow.length - text.length)) return null;
+    const prefix = capturedRow.slice(0, capturedRow.length - physicalRow.length);
+    beforeCursor = prefix + (blankContinuation ? '' : text + ' '.repeat(spaces));
   } else {
     return requireCursor ? null : fullCapture;
   }
@@ -848,19 +851,26 @@ export class TmuxBackend implements PersistentSessionBackend {
       if (!/^\d+ [01] \d+$/.test(cursor)) return null;
       const [cursorY, cursorFlag, cursorX] = cursor.split(' ').map(Number);
       const nativeCursorX = requireCursor && cursorFlag === 1 ? cursorX : undefined;
-      const rowMode = nativeCursorX === undefined ? '-J' : '-N';
       const marker = randomBytes(16).toString('hex');
       const separator = `\n${marker}\n`;
       const captured = await runTmux([
-        'capture-pane', '-p', '-e', rowMode, '-S', '-200', '-E', String(cursorY), '-t', this.sessionName, ';',
+        'capture-pane', '-p', '-e', '-J', '-S', '-200', '-E', String(cursorY), '-t', this.sessionName, ';',
         'display-message', '-p', marker, ';',
-        'capture-pane', '-p', rowMode, '-S', '-200', '-t', this.sessionName, ';',
-        'display-message', '-p', '-t', this.sessionName, `${marker} ${cursorFormat}`,
+        'capture-pane', '-p', '-J', '-S', '-200', '-t', this.sessionName,
+        ...(nativeCursorX === undefined ? [] : [';', 'display-message', '-p', marker, ';',
+          'capture-pane', '-p', '-N', '-S', String(cursorY), '-E', String(cursorY), '-t', this.sessionName, ';',
+          'display-message', '-p', '-t', this.sessionName, `${marker} ${cursorFormat}`]),
       ]);
       const boundary = captured.indexOf(separator);
-      const suffix = `${marker} ${cursor}\n`;
-      if (boundary < 0 || !captured.endsWith(suffix)) return null;
-      return cleanTmuxSubmissionCapture(captured.slice(0, boundary + 1), captured.slice(boundary + separator.length, -suffix.length), requireCursor, nativeCursorX);
+      if (boundary < 0) return null;
+      const partial = captured.slice(0, boundary + 1);
+      const full = captured.slice(boundary + separator.length);
+      if (nativeCursorX === undefined) return cleanTmuxSubmissionCapture(partial, full, requireCursor);
+      const end = full.indexOf(separator);
+      const suffix = `\n${marker} ${cursor}\n`;
+      if (end < 0 || !full.endsWith(suffix)) return null;
+      const physicalRow = full.slice(end + separator.length, -suffix.length);
+      return cleanTmuxSubmissionCapture(partial, full.slice(0, end + 1), true, { column: nativeCursorX, physicalRow });
     } catch (error) {
       this.warnCaught('captureSubmissionScreen', error);
       return null;
