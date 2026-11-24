@@ -1,13 +1,14 @@
+import { claudeResumeSource } from '../../../apps/server/src/compose/runtime.js';
 import { defaultDriverProviders } from '../../../apps/server/src/driver-providers.js';
 import { describe, expect, it, vi } from 'vitest';
-import { appendFileSync, mkdtempSync, readFileSync, realpathSync, rmSync } from 'node:fs';
+import { appendFileSync, mkdtempSync, readFileSync, writeFileSync, realpathSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { execFileSync } from 'node:child_process';
 import { createCliAdapter, pinnedSessionUuid } from '@dutydeck/cli-adapters';
 import { PtyBackend, TmuxBackend } from '@dutydeck/session-backends';
-import { agentConfigSchema, type DriverTranscriptSourceObservation, type NormalizedDriverEvent } from '@dutydeck/shared';
+import { agentConfigSchema, DriverRecoveryError, type DriverTranscriptSourceObservation, type NormalizedDriverEvent } from '@dutydeck/shared';
 import { createRepositories } from '@dutydeck/storage';
 import { childProcessIdentity, observeProcess } from '../../storage/src/process-identity.js';
 import { DutydeckRuntime } from '../../agent-runtime/src/index.js';
@@ -25,6 +26,57 @@ const timings = { nativeDiscoveryRetryMs: 100, nativeObservationRetryMs: 100 };
 const launches = (cwd: string) => readFileSync(join(cwd, 'launches.jsonl'), 'utf8').trim().split('\n').map(line => JSON.parse(line));
 
 describe.skipIf(process.platform !== 'linux')('Claude native process integration', () => {
+  it('starts the same pinned session after its first draft was retired, without replaying it', async () => {
+    const cwd = realpathSync(mkdtempSync(join(tmpdir(), 'dd-claude-first-draft-')));
+    vi.stubEnv('HOME', cwd); vi.stubEnv('TMUX_TMPDIR', cwd);
+    const repos = createRepositories(join(cwd, 'state.db'), { newDatabaseAuthority: 'ledger_v1' });
+    let first = true;
+    const runtime = new DutydeckRuntime(repos, { providers: defaultDriverProviders(), cleanupIntervalMs: 0,
+      probe: () => ({ available: true, protocol: 'pty-cli', resume: true }),
+      ptyDriverFactory: (configured, _protocol, onEvent, onExit, sessionId) => {
+        const cli = adapter(), write = cli.writeInput;
+        cli.writeInput = async (backend, prompt) => {
+          if (first) { first = false; await backend.write('partial draft'); throw new DriverRecoveryError('no receipt', 'DRIVER_INPUT_UNCONFIRMED'); }
+          return write(backend, prompt);
+        };
+        return new PtyCliDriver({ agent: configured, adapter: cli, backend: new TmuxBackend(`first-${sessionId}`, { ownerId: `dutydeck:${sessionId}` }),
+          processProbe: probe, sessionId, onEvent, onExit, claudeResumeSource: claudeResumeSource(repos, sessionId), timings });
+      } });
+    try {
+      await runtime.initialize([agent(cwd)]);
+      const session = await runtime.start({ agentId: 'claude-code', cwd });
+      await vi.waitFor(() => expect(latest(repos, session.id)?.identityProof).toBe('pty-claude-process-v1:pending'), { timeout: 7_000 });
+      const failed = await runtime.send(session.id, 'first');
+      expect(failed.status).toBe('reconcile_required');
+      expect(claudeResumeSource(repos, session.id)).not.toHaveProperty('emptyInitialLaunch');
+      await vi.waitFor(() => expect(runtime.getActiveTaskContext(session.id)).toBeUndefined());
+      const facts = await runtime.inspectUnknownTask(session.id, failed.id);
+      await runtime.resolveUnknownTask(session.id, { taskId: failed.id, target: facts.target!, decisionId: 'review-first-draft',
+        action: 'failed', evidenceRefs: ['reviewed-original-terminal'] }, { kind: 'installation_owner', id: 'installation_owner' });
+      await runtime.stop(session.id);
+      const source = claudeResumeSource(repos, session.id)!;
+      expect(source).toHaveProperty('emptyInitialLaunch', true);
+      const transcript = join(cwd, 'projects', cwd.replace(/[^A-Za-z0-9-]/g, '-'), pinnedSessionUuid(session.id) + '.jsonl');
+      const refused = async (dataRoot: string, message: string) => {
+        const driver = new PtyCliDriver({ agent: agent(cwd), adapter: adapter(), backend: new TmuxBackend('scope-check'),
+          sessionId: session.id, onEvent() {}, onExit() {}, claudeResumeSource: { ...source, dataRoot } });
+        try { await expect(driver.start()).rejects.toThrow(message); }
+        finally { await driver.stop(); }
+      };
+      await refused(join(cwd, 'different-root'), 'no verified resumable conversation');
+      writeFileSync(transcript, '');
+      await refused(cwd, 'Pinned Claude session exists');
+      rmSync(transcript);
+      await runtime.restart(session.id);
+      expect((await runtime.send(session.id, 'after')).status).toBe('completed');
+      expect(launches(cwd).map(launch => launch.args.slice(0, 2))).toEqual(Array(2).fill(['--session-id', pinnedSessionUuid(session.id)]));
+      const messages = readFileSync(transcript, 'utf8').trim().split('\n').map(line => JSON.parse(line)).filter(entry => entry.type === 'user');
+      expect(messages).toHaveLength(1);
+      expect(messages[0].message.content).toMatch(/after$/);
+      expect(claudeResumeSource(repos, session.id)).not.toHaveProperty('emptyInitialLaunch');
+    } finally { await runtime.shutdown(); repos.close(); rmSync(cwd, { recursive: true, force: true }); vi.unstubAllEnvs(); }
+  }, 30_000);
+
   it('an active native rotation rejects the old attempt, never resends, and the next input belongs to the new session', async () => {
     const cwd = realpathSync(mkdtempSync(join(tmpdir(), 'dd-claude-active-'))), backend = new PtyBackend(), events: NormalizedDriverEvent[] = [];
     const driver = new PtyCliDriver({ agent: agent(cwd), adapter: adapter(), backend, processProbe: probe, sessionId: 'ses_rotation_active', onEvent: event => events.push(event), onExit() {}, timings });

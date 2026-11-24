@@ -31,7 +31,8 @@ import { IdleCpuProcess } from './idle-cpu-process.js';
 import { TurnCpu } from './turn-cpu.js';
 import { createTranscriptTailer, type TranscriptEventSource, type TranscriptPosition } from './transcript/index.js';
 import { buildSessionMarker, resolveCliSessionId } from './session-id/index.js';
-import { statSync } from 'node:fs';
+import { realpathSync, statSync } from 'node:fs';
+import { claudeDataDir } from './cli-paths.js';
 import { createHash, randomUUID } from 'node:crypto';
 import type { TerminalLaunchSettings, NativeSessionResolver } from '@dutydeck/cli-adapters';
 export { claudeSafePrompt } from '@dutydeck/cli-adapters/claude-terminal';
@@ -56,7 +57,7 @@ export interface PtyCliDriverOptions {
    */
   cliSessionId?: string;
   /** Last runtime-fenced live Claude selection, including an unresumable rotation. */
-  claudeResumeSource?: import('@dutydeck/shared').DriverTranscriptSourceObservation;
+  claudeResumeSource?: import('@dutydeck/shared').DriverTranscriptSourceObservation & { emptyInitialLaunch?: true };
   nativeForkSessionId?: string;
   /** Composition root knows whether a relay answer is pending. */
   awaitingAnswer?: () => boolean;
@@ -285,7 +286,7 @@ export class PtyCliDriver implements AgentDriver {
   /** CLI 原生 session id：调用方注入的、或 resume 时从 CLI 落盘记录反查到的。
    *  一旦确定就缓存——反查要扫目录，同一会话不该反复付这个钱。 */
   private cliSessionId: string | undefined;
-  private claudeResumeSource?: import('@dutydeck/shared').DriverTranscriptSourceObservation;
+  private claudeResumeSource?: PtyCliDriverOptions['claudeResumeSource'];
   private claudeSourceConfirmed = true;
   private claudeNativeSelectionVerified = false;
   private idleRetirementArmed = false;
@@ -439,7 +440,7 @@ export class PtyCliDriver implements AgentDriver {
       return;
     }
     const nativeSessionId = persistent ? this.resumableNativeSession() : undefined;
-    if (persistent && this.claudeResumeSource && !nativeSessionId) {
+    if (persistent && this.claudeResumeSource && !nativeSessionId && !this.canStartEmptyClaudeSession()) {
       throw new DriverRecoveryError('The current Claude session has no verified resumable conversation; refusing to resume an older context');
     }
     if (persistent && !nativeSessionId && this.hasPinnedNativeSession()) {
@@ -1531,6 +1532,14 @@ export class PtyCliDriver implements AgentDriver {
     // Runtime alone may authorize idle retirement. If native history cannot
     // be resumed with actual on-disk evidence, keep the persistent pane.
     this.detachOnStop = this.backend.persistent?.preserveOnShutdown === true || preserveSession || !this.claudeSourceConfirmed || ((this.firstPromptSent || this.hasPinnedNativeSession()) && !this.resumableNativeSession());
+  }
+
+  private canStartEmptyClaudeSession(): boolean {
+    const source = this.claudeResumeSource;
+    if (!source?.emptyInitialLaunch || this.optsNativeForkSessionId) return false;
+    try {
+      return source.cwd === realpathSync.native(this.cwd) && source.dataRoot === realpathSync.native(claudeDataDir(this.spawnEnv()));
+    } catch { return false; }
   }
 
   private hasPinnedNativeSession(): boolean {

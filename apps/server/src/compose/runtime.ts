@@ -35,6 +35,24 @@ import type { ComposeContext } from './context.js';
 import type { LarkGroupManager } from '../lark/group-management.js';
 import type { LarkAgentToolsService } from '../lark/agent-tools.js';
 
+/** A first terminal may exit with a partial draft before Claude creates its transcript. */
+export function claudeResumeSource(repos: ComposeContext['repos'], sessionId: string) {
+  const history = repos.insight.listSources(sessionId).filter(source => source.client === 'claude');
+  const latest = history.filter(source => source.proofKind === 'launch_observed' && source.identityProof?.startsWith('pty-claude-process-v1:')).at(-1);
+  if (latest?.identityProof !== 'pty-claude-process-v1:pending' || history.some(source =>
+    source.proofKind !== 'launch_observed' || source.launchKind !== 'created' || source.cwd !== latest.cwd || source.dataRoot !== latest.dataRoot || source.nativeSessionId || source.verifiedPath
+    || source.identityProof && source.identityProof !== latest.identityProof)) return latest;
+
+  const retired = repos.execution.getResources(sessionId).filter(resource => resource.kind === 'local_only' && resource.observations.at(-1)?.state === 'gone');
+  if (!history.every(source => retired.some(resource => resource.resourceId === source.driverInstanceId && resource.runId === source.activeRunId))) return latest;
+  const empty = repos.execution.getSessionExecutions(sessionId).every(({ task, attempts, steering }) =>
+    task.digestVersion === 'v1' && !steering && attempts.every(attempt => attempt.submissionState === 'not_submitted'
+      || attempt.settlement?.kind === 'not_submitted'
+      || attempt.submissionState === 'intent_recorded' && attempt.reconcileReason?.code === 'DRIVER_INPUT_UNCONFIRMED'
+        && attempt.settlement?.kind === 'manual' && (attempt.settlement.decision.action === 'retry' || attempt.settlement.outcome === 'failed')));
+  return empty ? { ...latest, emptyInitialLaunch: true as const } : latest;
+}
+
 export function composeDrivers({ config, repos, env, log }: ComposeContext, herdr: HerdrSessions) {
   const primaryHerdrBackend = (sessionId: string) => new HerdrBackend(herdr.nameFor(`primary:${sessionId}`), {
     binary: primaryHerdrBinary(env), stateFile: join(dirname(config.databaseUrl), 'terminal-sessions', `${herdr.nameFor(`primary:${sessionId}`)}.json`),
@@ -43,8 +61,7 @@ export function composeDrivers({ config, repos, env, log }: ComposeContext, herd
   const terminalSettings = new TerminalSettings(repos.config, env);
   const ptyProvider = createPtyCliProvider({
     herdrBackend: primaryHerdrBackend,
-    claudeResumeSource: sessionId => repos.insight.listSources(sessionId).filter(source => source.client === 'claude'
-      && source.proofKind === 'launch_observed' && source.identityProof?.startsWith('pty-claude-process-v1:')).at(-1),
+    claudeResumeSource: sessionId => claudeResumeSource(repos, sessionId),
   });
   return { terminalSettings, ptyProvider };
 }
