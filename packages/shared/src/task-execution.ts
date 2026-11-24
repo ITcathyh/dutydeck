@@ -347,6 +347,7 @@ export interface ExecutionRepository {
   /** 所有会话里停在结果未知、等人处理的当前执行（任务与执行都是 reconcile_required）。 */
   getReconcileRequiredAttempts(): TaskAttempt[];
   getAttemptEvents(attemptId: string, window?: EventWindowOptions): AgentEvent[];
+  getLastAttemptOutputAt(attemptId: string): string | undefined;
   /** 一次执行的事件数与活动时间，按 attempt 索引只读 type、timestamp 两列。 */
   getAttemptActivity(sessionId: string, attemptId: string): AttemptActivity;
   /** 一次执行的工具调用与结果事件（按序号），按 attempt 索引读，不解析其他事件。 */

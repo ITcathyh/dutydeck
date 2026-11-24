@@ -54,8 +54,7 @@ export function unknownTaskFactLines(facts: UnknownTaskFacts) {
   return [
     `最后状态：结果未知，${reasons[facts.reasonCode ?? ''] ?? '执行结果没有确认'}`,
     `是否已提交给 Agent：${facts.kind === 'steering' ? '插话可能已送达，也可能没有'
-      // 提交回执没落库但已经有输出：Agent 收到并开始执行了。
-      : facts.submission !== 'acknowledged' && facts.lastOutputAt ? '已提交，Agent 已开始执行并有输出' : submissions[facts.submission ?? 'legacy_unknown']}`,
+      : submissions[facts.submission ?? 'legacy_unknown']}`,
     `最后输出：${facts.lastOutputAt ? formatUnknownTaskTime(facts.lastOutputAt) : facts.kind === 'steering' ? '插话没有单独的输出' : '这一轮没有输出'}`
   ];
 }

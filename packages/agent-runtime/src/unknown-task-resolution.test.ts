@@ -60,6 +60,7 @@ describe('resolving result-unknown tasks', () => {
     const attempt = h.repos.execution.getTaskExecution(h.first.id)!.currentAttempt!;
     expect(facts).toMatchObject({ taskId: h.first.id, status: 'reconcile_required', actionable: true, kind: 'attempt', target: attempt.attemptId,
       submission: attempt.submissionState, reasonCode: 'AGENT_IDLE_TIMEOUT', startedAt: attempt.createdAt });
+    expect(facts.lastOutputAt).toBeUndefined();
     expect(facts.resolution).toBeUndefined();
     expect((await h.runtime.inspectUnknownTask(h.session.id, h.second.id)).actionable).toBe(false);
   });

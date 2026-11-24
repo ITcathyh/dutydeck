@@ -452,6 +452,19 @@ describe('Claude composer ownership around the first terminal write', () => {
     expect(backend.writes).toEqual([prompt, 'Enter']);
   });
 
+  it('continues a multiline write when the updater reports failure below the mode footer', async () => {
+    const backend = new ComposerBackend();
+    const notice = '\n   ✘ Auto-update failed · Try claude doctor or npm i -g @anthropic-ai/claude-code';
+    let draft = '';
+    backend.onWrite = data => {
+      draft += data === 'Enter' ? '\n' : data;
+      backend.screen = box(draft) + notice;
+    };
+    await finish(writeClaudeFamilyInput(backend, 'first\nsecond'));
+    expect(backend.writes).toEqual(['first', '\\', 'Enter', 'second', 'Enter']);
+    expect(ownedClaudeComposer(box('first') + notice + ' Extra text', 'first')).toBe(false);
+  });
+
   it('accepts the native non-breaking prompt separator without trimming the draft', async () => {
     const prompt = '  business body ';
     const backend = new ComposerBackend();

@@ -199,12 +199,16 @@ const emptyComposerLine = (lines: string[], index: number) => lines[index] === '
  * 右侧可能并排「Not logged in · Run /login」「new task? /clear to save …」；粘贴后还可能出现瞬时的 paste again to expand。
  */
 const MODE_FOOTER_RE = /^(?:(?:⏵⏵|⏸) [a-z ]+ on\b|\? for shortcuts\b|paste again to expand\b)/;
+export function claudeModeFooterIndex(lines: string[]): number {
+  const last = lines.at(-1) ?? '';
+  return lines.length - (/^✔ /.test(last) || last === '✘ Auto-update failed · Try claude doctor or npm i -g @anthropic-ai/claude-code' ? 2 : 1);
+}
 /**
- * 屏幕底部是当前的空输入框：分隔线、空的 ❯、同样的分隔线，之后可有最多两行自定义 statusLine，再接权限模式状态栏及最多一行 ✔ 通知。
+ * 屏幕底部是当前的空输入框：分隔线、空的 ❯、同样的分隔线，之后可有最多两行自定义 statusLine，再接权限模式状态栏及最多一行已知的更新通知。
  * 只认底部这一个框，历史里的 ❯、没提交的草稿、页脚之后的正文都不算。
  */
 function emptyComposerAtBottom(lines: string[]): boolean {
-  const footer = /^✔ /.test(lines.at(-1) ?? '') ? lines.length - 2 : lines.length - 1;
+  const footer = claudeModeFooterIndex(lines);
   if (footer < 3 || !MODE_FOOTER_RE.test(lines[footer]!)) return false;
   for (let statusRows = 0; statusRows <= 2; statusRows++) {
     const border = footer - statusRows - 1;
@@ -251,7 +255,7 @@ function ownedMinimalComposer(lines: string[], expected: string, final: boolean,
 }
 
 function ownedComposerAtBottom(lines: string[], expected: string, final: boolean, rows = lines, wrapWidths?: number[]): boolean {
-  const footer = /^✔ /.test(lines.at(-1) ?? '') ? lines.length - 2 : lines.length - 1;
+  const footer = claudeModeFooterIndex(lines);
   if (footer < 3 || !MODE_FOOTER_RE.test(lines[footer]!)) return false;
   for (let statusRows = 0; statusRows <= 2; statusRows++) {
     const bottom = footer - statusRows - 1;
@@ -306,7 +310,7 @@ function ownedCompactPaletteAtBottom(lines: string[]): boolean {
 }
 
 function ownedCompactCommandMenuAtBottom(lines: string[]): boolean {
-  const footer = /^✔ /.test(lines.at(-1) ?? '') ? lines.length - 2 : lines.length - 1;
+  const footer = claudeModeFooterIndex(lines);
   if (!MODE_FOOTER_RE.test(lines[footer] ?? '')) return false;
   let selected = -1;
   for (let index = lines.length - 1; index >= 0; index--) {

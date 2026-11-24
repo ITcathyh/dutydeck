@@ -35,6 +35,7 @@ import { TmuxCapture, cleanAbandonedTmuxCapture } from './tmux-capture.js';
 import { statStart } from './proc-stat.js';
 import { unixSocketState } from './unix-socket.js';
 import { stripVTControlCharacters } from 'node:util';
+import stringWidth from 'string-width';
 import { chmod, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { existsSync, readFileSync, statSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
@@ -396,23 +397,35 @@ function dutydeckSessionId(ownerId: string | undefined, sessionName: string): st
 /**
  * Clean a submission capture without confusing terminal padding with input.
  * -J preserves trailing spaces. Non-cursor rows therefore lose right padding;
- * the ANSI cursor row keeps every character before the reverse-video cursor.
+ * the cursor row keeps the spaces before the cursor. Native coordinates
+ * are in terminal cells and refer to unjoined physical rows (-N).
  */
-export function cleanTmuxSubmissionCapture(partialAnsi: string, fullCapture: string, requireCursor = true): string | null {
+export function cleanTmuxSubmissionCapture(partialAnsi: string, fullCapture: string, requireCursor = true, nativeCursorX?: number): string | null {
   const rows = (capture: string) => (capture.endsWith('\n') ? capture.slice(0, -1) : capture).split('\n');
   const partialRows = rows(partialAnsi);
   const fullRows = rows(fullCapture);
   const cursorRow = partialRows.length - 1;
   if (cursorRow < 0 || cursorRow >= fullRows.length) return null;
-  const cursor = /\x1b\[([0-9;]*)m (?:\x1b\[([0-9;]*)m|$)/.exec(partialRows[cursorRow]!);
-  const sgrIncludes = (parameters: string | undefined, code: number) => parameters?.split(';').includes(String(code)) ?? false;
-  if (!cursor || !sgrIncludes(cursor[1], 7)
-    || cursor[2] !== undefined && !sgrIncludes(cursor[2], 0) && !sgrIncludes(cursor[2], 27)) return requireCursor ? null : fullCapture;
-  const beforeCursor = stripVTControlCharacters(partialRows[cursorRow]!.slice(0, cursor.index));
-  const afterCursor = stripVTControlCharacters(partialRows[cursorRow]!.slice(cursor.index + cursor[0].length));
-  if (!/^ *$/.test(afterCursor)) return null;
+  const ansiRow = partialRows[cursorRow]!;
   const capturedRow = fullRows[cursorRow]!;
-  if (!capturedRow.startsWith(beforeCursor) || !/^ +$/.test(capturedRow.slice(beforeCursor.length))) return null;
+  const cursor = /\x1b\[([0-9;]*)m (?:\x1b\[([0-9;]*)m|$)/.exec(ansiRow);
+  const sgrIncludes = (parameters: string | undefined, code: number) => parameters?.split(';').includes(String(code)) ?? false;
+  let beforeCursor: string;
+  if (cursor && sgrIncludes(cursor[1], 7) && (cursor[2] === undefined || sgrIncludes(cursor[2], 0) || sgrIncludes(cursor[2], 27))) {
+    beforeCursor = stripVTControlCharacters(ansiRow.slice(0, cursor.index));
+    const afterCursor = stripVTControlCharacters(ansiRow.slice(cursor.index + cursor[0].length));
+    if (!/^ *$/.test(afterCursor) || !capturedRow.startsWith(beforeCursor) || !/^ +$/.test(capturedRow.slice(beforeCursor.length))) return null;
+  } else if (nativeCursorX !== undefined) {
+    if (stripVTControlCharacters(ansiRow) !== capturedRow || !/^─{8,} *$/.test(fullRows[cursorRow + 1] ?? '')) return null;
+    const text = capturedRow.replace(/ +$/, '');
+    const spaces = nativeCursorX - stringWidth(text);
+    // A fresh Claude continuation has two columns of indent but no painted cells.
+    const blankContinuation = capturedRow === '' && nativeCursorX === 2;
+    if (!blankContinuation && (spaces < 0 || spaces > capturedRow.length - text.length)) return null;
+    beforeCursor = blankContinuation ? '' : text + ' '.repeat(spaces);
+  } else {
+    return requireCursor ? null : fullCapture;
+  }
   for (let index = 0; index < fullRows.length; index++) {
     fullRows[index] = index === cursorRow ? beforeCursor : fullRows[index]!.replace(/ +$/, '');
   }
@@ -830,19 +843,24 @@ export class TmuxBackend implements PersistentSessionBackend {
   private async captureSubmissionScreen(requireCursor: boolean): Promise<string | null> {
     if (this.exited) return null;
     try {
-      const cursor = (await runTmux(['display-message', '-p', '-t', this.sessionName, '#{cursor_y} #{cursor_flag}'])).trim();
-      const [cursorY, cursorFlag] = cursor.split(/\s+/).map(Number);
-      if (!Number.isInteger(cursorY) || cursorY! < 0 || (cursorFlag !== 0 && cursorFlag !== 1)) return null;
+      const cursorFormat = '#{cursor_y} #{cursor_flag} #{cursor_x}';
+      const cursor = (await runTmux(['display-message', '-p', '-t', this.sessionName, cursorFormat])).trim();
+      if (!/^\d+ [01] \d+$/.test(cursor)) return null;
+      const [cursorY, cursorFlag, cursorX] = cursor.split(' ').map(Number);
+      const nativeCursorX = requireCursor && cursorFlag === 1 ? cursorX : undefined;
+      const rowMode = nativeCursorX === undefined ? '-J' : '-N';
       const marker = randomBytes(16).toString('hex');
       const separator = `\n${marker}\n`;
       const captured = await runTmux([
-        'capture-pane', '-p', '-e', '-J', '-S', '-200', '-E', String(cursorY), '-t', this.sessionName, ';',
+        'capture-pane', '-p', '-e', rowMode, '-S', '-200', '-E', String(cursorY), '-t', this.sessionName, ';',
         'display-message', '-p', marker, ';',
-        'capture-pane', '-p', '-J', '-S', '-200', '-t', this.sessionName,
+        'capture-pane', '-p', rowMode, '-S', '-200', '-t', this.sessionName, ';',
+        'display-message', '-p', '-t', this.sessionName, `${marker} ${cursorFormat}`,
       ]);
       const boundary = captured.indexOf(separator);
-      if (boundary < 0) return null;
-      return cleanTmuxSubmissionCapture(captured.slice(0, boundary + 1), captured.slice(boundary + separator.length), requireCursor);
+      const suffix = `${marker} ${cursor}\n`;
+      if (boundary < 0 || !captured.endsWith(suffix)) return null;
+      return cleanTmuxSubmissionCapture(captured.slice(0, boundary + 1), captured.slice(boundary + separator.length, -suffix.length), requireCursor, nativeCursorX);
     } catch (error) {
       this.warnCaught('captureSubmissionScreen', error);
       return null;

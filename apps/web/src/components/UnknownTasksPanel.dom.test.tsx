@@ -12,7 +12,7 @@ const task = (status: string): Task => ({ id: 'task_1', sessionId: 's1', prompt:
 const unknown: UnknownTask = {
   taskId: 'task_1', status: 'reconcile_required', actionable: true, kind: 'attempt', target: 'attempt_1', submission: 'intent_recorded',
   reasonCode: 'PREVIOUS_RUNTIME_RESULT_UNKNOWN', prompt: '整理本周报警并回复群里',
-  factLines: ['最后状态：结果未知，服务重启切断了这一轮', '是否已提交给 Agent：已提交，Agent 已开始执行并有输出', '最后输出：2026/10/13 08:00:00（北京时间）']
+  factLines: ['最后状态：结果未知，服务重启切断了这一轮', '是否已提交给 Agent：已开始提交，没有收到 Agent 的确认', '最后输出：2026/10/13 08:00:00（北京时间）']
 };
 function mount(tasks: Task[], load: () => Promise<UnknownTask[]> = async () => [unknown], taskId?: string) {
   const list = vi.spyOn(api, 'unknownTasks').mockImplementation(load);

@@ -4,7 +4,7 @@ import { secretGuardActive } from '@dutydeck/shared/secret-guard';
 import { PromptNotWrittenError } from '@dutydeck/shared';
 import { ClaudeSettings } from './claude-settings.js';
 import { claudeSafePrompt } from './claude-prompt.js';
-import { ownedClaudeComposer, ownedClaudeCompactMenu } from './claude-family.js';
+import { claudeModeFooterIndex, ownedClaudeComposer, ownedClaudeCompactMenu } from './claude-family.js';
 import { ClaudeNativeSessionResolver, claudeResumeFromObservation, hasPinnedSession } from './claude-native-session.js';
 
 /** Claude 终端子进程的默认环境，Agent env 里的同名值优先。
@@ -17,7 +17,7 @@ const claudeAutoMemoryOffDefaults = (env: Record<string, string>): Record<string
   env.dutydeck_claude_auto_memory === 'off' ? { CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1' } : {};
 
 function maintenanceStatusEvidenceLines(lines: string[]): string[] {
-  const footer = /^✔ /.test(lines.at(-1) ?? '') ? lines.length - 2 : lines.length - 1;
+  const footer = claudeModeFooterIndex(lines);
   if (!/^(?:(?:⏵⏵|⏸) [a-z ]+ on\b|\? for shortcuts\b|paste again to expand\b)/.test(lines[footer] ?? '')) return lines;
   for (let statusRows = 0; statusRows <= 2; statusRows++) {
     const border = footer - statusRows - 1;

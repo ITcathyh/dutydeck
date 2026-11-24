@@ -72,12 +72,24 @@ describe('tmux submission cursor capture', () => {
     expect(cleanTmuxSubmissionCapture(`❯ old${cursor}\n`, '❯ new \n')).toBeNull();
   });
 
+  it('uses a visible native cursor in terminal cells and keeps only the typed trailing spaces', () => {
+    const row = '❯ 输入  ';
+    const full = row + '\n──────────\n? for shortcuts\n';
+    const ansi = '\x1b[39m' + row + '\n';
+    expect(cleanTmuxSubmissionCapture(ansi, full, true, 7)).toBe(full.replace('输入  ', '输入 '));
+    expect(cleanTmuxSubmissionCapture('❯ first\n\n', '❯ first\n\n──────────\n', true, 2)).toBe('❯ first\n\n──────────\n');
+    expect(cleanTmuxSubmissionCapture(ansi, full, true, 4)).toBeNull();
+    expect(cleanTmuxSubmissionCapture(ansi, full, true, 9)).toBeNull();
+    expect(cleanTmuxSubmissionCapture(ansi, full.replace('输入', '消息'), true, 7)).toBeNull();
+    expect(cleanTmuxSubmissionCapture(ansi, full.replace('──────────', 'more input'), true, 7)).toBeNull();
+  });
+
   it('does not downgrade strict input capture when tmux hides the hardware cursor', async () => {
     mockedRunCommand.mockImplementation(async (_command, args) => {
-      if (args.includes('#{cursor_y} #{cursor_flag}')) return '0 0\n';
+      if (args.includes('#{cursor_y} #{cursor_flag} #{cursor_x}')) return '0 0 7\n';
       const display = args.indexOf('display-message');
       const marker = args[display + 2]!;
-      return `❯ draft\n${marker}\n❯ draft \n`;
+      return `❯ draft\n${marker}\n❯ draft \n${marker} 0 0 7\n`;
     });
     const backend = new TmuxBackend('dutydeck-hidden-cursor-test');
     await expect(backend.captureInputSubmissionScreen()).resolves.toBeNull();

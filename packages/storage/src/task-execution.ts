@@ -874,6 +874,13 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
       const rows = cached(`SELECT * FROM events WHERE attempt_id=? AND sequence>? AND sequence<? ORDER BY sequence ${backwards ? 'DESC' : 'ASC'} LIMIT ?`).all(attemptId, window.afterSequence ?? 0, window.beforeSequence ?? Number.MAX_SAFE_INTEGER, limit);
       return (backwards ? rows.reverse() : rows).map(decodeEvent);
     },
+    getLastAttemptOutputAt(attemptId) {
+      const row = cached(`SELECT timestamp FROM events WHERE attempt_id=? AND (
+        type IN ('thinking','tool_call','tool_result','permission_request') OR
+        (type='text' AND json_extract(data,'$.role') IS NOT 'user')
+      ) ORDER BY sequence DESC LIMIT 1`).get(attemptId) as { timestamp: string } | undefined;
+      return row?.timestamp;
+    },
     getAttemptActivity(sessionId, attemptId) {
       id.parse(sessionId); id.parse(attemptId);
       const rows = cached('SELECT type, timestamp FROM events WHERE attempt_id=? AND session_id=? ORDER BY sequence').all(attemptId, sessionId) as Array<{ type: string; timestamp: string }>;

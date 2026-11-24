@@ -486,10 +486,10 @@ export class RecoveryService {
       : operation?.decisionId && ['delivered', 'not_delivered', 'abandoned'].includes(operation.state)
         ? { action: operation.state === 'delivered' ? 'completed' : operation.state === 'not_delivered' ? 'retry' : 'failed', decisionId: operation.decisionId, at: operation.updatedAt }
         : undefined;
-    const lastOutput = attempt ? [...this.deps.repos.execution.getAttemptEvents(attempt.attemptId)].reverse().find(event => event.type !== 'task' && event.type !== 'status') : undefined;
+    const lastOutputAt = attempt && this.deps.repos.execution.getLastAttemptOutputAt(attempt.attemptId);
     return { taskId, status: task.status, actionable: open !== undefined && open === targetId,
       ...(attempt ? { kind: 'attempt' as const, target: attempt.attemptId, submission: attempt.submissionState, startedAt: attempt.createdAt,
-        ...(attempt.reconcileReason ? { reasonCode: attempt.reconcileReason.code } : {}), ...(lastOutput ? { lastOutputAt: lastOutput.timestamp } : {}) }
+        ...(attempt.reconcileReason ? { reasonCode: attempt.reconcileReason.code } : {}), ...(lastOutputAt ? { lastOutputAt } : {}) }
         : operation ? { kind: 'steering' as const, target: operation.operationId, reasonCode: 'STEERING_DELIVERY_UNKNOWN', startedAt: operation.createdAt } : {}),
       ...(resolution ? { resolution } : {}) };
   }
