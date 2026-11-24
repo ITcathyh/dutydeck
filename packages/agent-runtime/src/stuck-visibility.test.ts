@@ -86,6 +86,28 @@ describe('a task held back by its repository is visible', () => {
     expect(await noticeEvents(h, two.id)).toEqual([]);
   });
 
+  it('runs a second topic once while the first topic in the same plain directory still needs recovery', async () => {
+    const h = await fixture(), cwd = await mkdtemp(join(tmpdir(), 'ordinary-topics-'));
+    cleanups.push(() => rm(cwd, { recursive: true, force: true }));
+    const topic = (id: string) => h.runtime.start({ agentId: 'fixture', cwd, source: 'lark', sourceId: `app:chat:group:thread:${id}` });
+    const first = await topic('first'), second = await topic('second');
+    const request = (sessionId: string, prompt: string) => ({
+      version: 1 as const, namespace: 'runtime' as const, sessionId, key: prompt, prompt, mode: 'queue' as const,
+      actor: { kind: 'channel' as const, appId: 'app', id: 'requester' }, options: {}, skills: [], sources: [], sourcePayload: null,
+    });
+    h.failures.set('lost', new Error('input unconfirmed'));
+    const old = await h.runtime.dispatchRequest(request(first.id, 'lost'));
+    await vi.waitFor(() => expect(h.repos.execution.getTaskExecution(old.id)?.task.status).toBe('reconcile_required'));
+    const incoming = request(second.id, 'next');
+    const next = await h.runtime.dispatchRequest(incoming);
+    expect((await h.runtime.dispatchRequest(incoming)).id).toBe(next.id);
+    await vi.waitFor(() => expect(h.repos.execution.getTaskExecution(next.id)?.task.status).toBe('completed'));
+    expect(h.sent).toEqual(['lost', 'next']);
+    expect(h.repos.execution.getTaskExecution(next.id)?.attempts).toHaveLength(1);
+    expect(h.repos.execution.getTaskExecution(old.id)?.task.status).toBe('reconcile_required');
+    expect(blockedLogs(h.warn)).toHaveLength(0);
+  });
+
   it('names the result-unknown task once per blocked period and resumes on its own after it is handled', async () => {
     const h = await fixture();
     const one = await h.runtime.start({ agentId: 'fixture', cwd: h.cwd }), two = await h.runtime.start({ agentId: 'fixture', cwd: h.cwd });

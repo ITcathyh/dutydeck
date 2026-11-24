@@ -2573,13 +2573,16 @@ export class PtyCliDriver implements AgentDriver {
     return '';
   }
 
-  private async beginExpandedSubmissionInput(target: SessionBackend & Partial<PtyLike>): Promise<() => Promise<void>> {
+  private async beginExpandedSubmissionInput(target: SessionBackend & Partial<PtyLike>, requestedColumns: number): Promise<() => Promise<void>> {
     const snapshot = this.snapshot, generation = this.wiringGeneration;
     const current = () => this.backend === target && this.snapshot === snapshot && this.wiringGeneration === generation;
     const size = await target.getPaneSize?.();
-    if (!size || size.rows >= 200) return async () => {};
-    await target.resize(size.cols, 200);
-    if (current()) snapshot?.resize(size.cols, 200);
+    if (!size) return async () => {};
+    const cols = Math.max(size.cols, Math.min(requestedColumns, 1024));
+    const rows = Math.max(size.rows, 200);
+    if (rows === size.rows && cols === size.cols) return async () => {};
+    await target.resize(cols, rows);
+    if (current()) snapshot?.resize(cols, rows);
     await new Promise<void>(resolve => setTimeout(resolve, 100));
     let restored = false;
     return async () => {
@@ -2664,7 +2667,7 @@ export class PtyCliDriver implements AgentDriver {
         owner === 'maintenance')),
     };
     if (terminalScreens[target.kind].paneGeometry && target.getPaneSize) {
-      proxy.beginExpandedInput = () => guarded(() => this.beginExpandedSubmissionInput(target));
+      proxy.beginExpandedInput = columns => guarded(() => this.beginExpandedSubmissionInput(target, columns));
     }
     if (target.sendText) proxy.sendText = text => guarded(() => target.sendText!(text), owner === 'maintenance' ? 'text' : undefined, true);
     if (target.sendSpecialKeys) proxy.sendSpecialKeys = (...keys) => guarded(() => target.sendSpecialKeys!(...keys), owner === 'maintenance' ? keys.includes('Enter') ? 'enter' : 'text' : undefined, true);

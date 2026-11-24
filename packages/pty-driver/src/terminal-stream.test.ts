@@ -199,9 +199,10 @@ describe('terminal initial screen', () => {
     const snapshot = (driver as any).snapshot;
     const originalResize = vi.spyOn(snapshot, 'resize');
     try {
-      const expanding = (driver as any).beginExpandedSubmissionInput(target);
+      const expanding = (driver as any).beginExpandedSubmissionInput(target, 300);
       await vi.advanceTimersByTimeAsync(100);
       const restore = await expanding;
+      expect(target.resize).toHaveBeenCalledWith(300, 200);
       const replacement = { ...target, resize: vi.fn(async () => {}) };
       const replacementSnapshot = { resize: vi.fn() };
       (driver as any).wiringGeneration++;

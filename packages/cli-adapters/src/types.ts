@@ -39,7 +39,7 @@ export interface PtyLike {
   /** 当前终端已渲染的完整屏幕。仅需要在启动交互前确认状态的适配器使用。 */
   readScreen?(): string | Promise<string>;
   /** Reserve a bounded input viewport before the first byte; returns the restore hook. */
-  beginExpandedInput?(): Promise<() => Promise<void>>;
+  beginExpandedInput?(columns: number): Promise<() => Promise<void>>;
   sendText?(text: string): void | boolean | Promise<void | boolean>;
   sendSpecialKeys?(...keys: string[]): void | boolean | Promise<void | boolean>;
   pasteText?(text: string): void | boolean | Promise<void | boolean>;

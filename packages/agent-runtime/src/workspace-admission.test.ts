@@ -239,6 +239,7 @@ it('does not deadlock two accepted sibling sessions whose startup screens have n
 
 it.each([undefined, ''])('reattaches the original idle Herdr terminal across restart without reusing its startup proof (model %j)',async model=>{
   const cwd=await mkdtemp(join(tmpdir(),'runtime-admission-attach-')),path=join(cwd,'state.db');
+  execFileSync('git',['-C',cwd,'init','-q']);
   const agent=agentConfigSchema.parse({id:'terminal',name:'Terminal',command:'fake',protocol:'pty-cli',cwd,permissionMode:'ask'});
   let repos=createRepositories(path,{newDatabaseAuthority:'ledger_v1'}),detached=false;
   let runtime=new DutydeckRuntime(repos,{ providers: defaultDriverProviders(),cleanupIntervalMs:0,driverIdleTimeoutMs:0,terminalBackend:async()=>'herdr',

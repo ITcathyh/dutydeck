@@ -3,7 +3,7 @@ import { assertConfigWrite } from './config-write.js';
 import type Database from 'better-sqlite3';
 import { createHash, randomUUID } from 'node:crypto';
 import {
-  backgroundSource,
+  backgroundSource, dutydeckSessionKinds,
   runtimeStateKeys, executionActorSchema, acceptedTaskInputSchema, isTerminalTaskStatus, acceptedTaskInputV2Schema, canonicalExecutionJson, taskExecutionSchemas, taskRequestV1Schema, steeringRecoveryDecisionSchema, steerableTaskNamespace, parseLarkSourceId, RuntimeError, now as timestamp,
   type AcceptedTask, type AcceptedTaskInput, type AgentEvent, type AttemptFence, type BoundExecutionRepository,
   type CommitResult, type DriverResource, type ExecutionBlocker, type ExecutionController, type ExecutionRepository,
@@ -228,13 +228,18 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
         && Boolean(s.error?.includes(LEGACY_RETIREMENT_NOTICE));
     } catch { return false; }
   };
-  const workspaceBlockers = (sessionId: string, checks: ResourceCheckRef[] = [], owner?: ExecutionController, freeze = false, preparation?: ExecutionWorkspaceIdentity): ExecutionBlocker[] => {
+  const ordinarySession = (id: string, source: string | null | undefined) =>
+    (source === null || source === 'web' || source === 'cli' || source === 'lark') && !dutydeckSessionKinds.collaboration.idPattern.test(id);
+  // A scheduled occurrence may share its origin conversation. Check the turn being admitted.
+  const ordinaryTask = (id: string) => Boolean(cached("SELECT 1 FROM task_requests WHERE task_id=? AND namespace IN ('runtime','lark')").get(id));
+  const workspaceBlockers = (sessionId: string, interactive: boolean, checks: ResourceCheckRef[] = [], owner?: ExecutionController, freeze = false, preparation?: ExecutionWorkspaceIdentity): ExecutionBlocker[] => {
     let identity: ExecutionWorkspaceIdentity;
     try { identity = preparation ?? workspaceIdentity(sessionId, freeze); }
     catch { return [{ code: 'WORKSPACE_RESOURCE_UNVERIFIABLE', sessionId }]; }
     const result: ExecutionBlocker[] = [];
     // 飞书记忆作业只写自己的记忆目录：不参与仓库互斥，只和在同一目录里执行的会话（包括其他记忆作业）互斥。
     const selfSource = preparation ? 'work_item' : (cached('SELECT source FROM sessions WHERE id=?').get(sessionId) as {source:string|null}|undefined)?.source;
+    const independentDirectory = interactive && identity.key.startsWith('directory:') && ordinarySession(sessionId, selfSource);
     const orchestrated = (source: string | null | undefined) => source === 'work_item' || source === backgroundSource.leader;
     // LIKE is ASCII case-insensitive and treats '_' as a wildcard. Preserve its candidates whenever
     // stop/verification evidence could make a LIKE-only orphan produce a blocker.
@@ -322,8 +327,15 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
         const storedConfigs = configsBySession.get(otherId) ?? [];
         const configuration = storedConfigs.find(row => row.key === runtimeStateKeys.driverConfiguration.key(otherId));
         const externalRows = storedConfigs.filter(row => row.key === runtimeStateKeys.driverStopBlock.key(otherId) || row.key === runtimeStateKeys.workspace.key(otherId) || row.key.startsWith(runtimeStateKeys.verification.sessionPrefix(otherId)));
-        const external = [...externalBlockers(otherId,externalRows),...(configuration?.value ? [{code:'DRIVER_CONFIGURATION_UNKNOWN',sessionId:otherId}] : [])];
-        if (!unresolved && !queued && !unknown && !steering.length && !unsafe.length && !external.length) continue;
+        // Only workspace maintenance and verification use the plain directory itself.
+        // A normal conversation owns its own terminal, pending input and task outcome.
+        const otherTask = unresolved?.taskId ?? unknown?.id ?? steering[0]?.taskId;
+        const independent = independentDirectory && ordinarySession(otherId, otherSource) && !notExited.some(r => r.kind === 'legacy')
+          && (!otherTask || ordinaryTask(otherTask));
+        const external = independent
+          ? externalBlockers(otherId,externalRows.filter(row => row.key !== runtimeStateKeys.driverStopBlock.key(otherId)))
+          : [...externalBlockers(otherId,externalRows),...(configuration?.value ? [{code:'DRIVER_CONFIGURATION_UNKNOWN',sessionId:otherId}] : [])];
+        if (!external.length && (independent || !unresolved && !queued && !unknown && !steering.length && !unsafe.length)) continue;
         let other: ExecutionWorkspaceIdentity;
         try { other = workspaceIdentity(otherId, freeze); }
         catch {
@@ -334,6 +346,7 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
           result.push({code:'WORKSPACE_RESOURCE_UNVERIFIABLE',sessionId:otherId});continue;
         }
         if (directoryOnly ? other.cwd.path !== identity.cwd.path : other.key !== identity.key) continue;
+        if (independent) { result.push(...external); continue; }
         // ORDER BY state selects active, legacy_unresolved and preparing before reconcile_required.
         const onlyUnknown = unresolved ? unresolved.state === 'reconcile_required' : Boolean(unknown);
         if (onlyUnknown && !orchestrated(selfSource) && !orchestrated(otherSource)
@@ -829,7 +842,7 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
       const owner = readController(context);
       const state = getTaskExecutionState(taskId); if (!state) return;
       const t = state.task;
-      return { ...state, blockers: [...blockers(t.sessionId), ...steeringBlockers(t.sessionId), ...(t.status === 'queued' ? workspaceBlockers(t.sessionId,context?.idleResources,owner) : []), ...inputBlockers(t)] };
+      return { ...state, blockers: [...blockers(t.sessionId), ...steeringBlockers(t.sessionId), ...(t.status === 'queued' ? workspaceBlockers(t.sessionId,ordinaryTask(t.id),context?.idleResources,owner) : []), ...inputBlockers(t)] };
     }).deferred(); },
     getAttempt(ref) {
       requireLedger();
@@ -847,10 +860,18 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
       for (const row of cached('SELECT json FROM task_steering_operations WHERE session_id=? ORDER BY rowid').all(sessionId)) { const value=rowJson<SteeringOperation>(row)!; bySteeringTask.set(value.taskId,value); }
       const sharedBlockers = [...blockers(sessionId), ...steeringBlockers(sessionId)];
       const tasks = (cached('SELECT * FROM tasks WHERE session_id=? ORDER BY created_at,id').all(sessionId) as Record<string, any>[]).map(row => decodeTask(row)!);
-      const admission = tasks.some(t => t.status === 'queued') ? workspaceBlockers(sessionId,context?.idleResources,owner) : [];
+      const admission = new Map<boolean, ExecutionBlocker[]>();
+      const queuedBlockers = (taskId: string) => {
+        const interactive = ordinaryTask(taskId);
+        const previous = admission.get(interactive);
+        if (previous) return previous;
+        const result = workspaceBlockers(sessionId,interactive,context?.idleResources,owner);
+        admission.set(interactive,result);
+        return result;
+      };
       return tasks.map(t => {
         const values = byTask.get(t.id) ?? [];
-        return { task: t, currentAttempt: values.find(a => a.attemptId === t.currentAttemptId), attempts: values, steering: bySteeringTask.get(t.id), blockers: [...sharedBlockers, ...(t.status === 'queued' ? admission : []), ...inputBlockers(t)] };
+        return { task: t, currentAttempt: values.find(a => a.attemptId === t.currentAttemptId), attempts: values, steering: bySteeringTask.get(t.id), blockers: [...sharedBlockers, ...(t.status === 'queued' ? queuedBlockers(t.id) : []), ...inputBlockers(t)] };
       });
     }).deferred(); },
     hasQueuedOrRunningTasks(sessionId) {
@@ -1013,7 +1034,7 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
           id.parse(cwd); parse(checksSchema,idleResources);
           const identity = resolveExecutionWorkspace(cwd);
           // Idle adapters without reliable background proof are retired by claimNext's caller.
-          return workspaceBlockers('',idleResources,owner,false,identity).every(block => block.code === 'WORKSPACE_PHYSICAL_RESOURCE_UNSAFE');
+          return workspaceBlockers('',false,idleResources,owner,false,identity).every(block => block.code === 'WORKSPACE_PHYSICAL_RESOURCE_UNSAFE');
         }); },
         claimNext(rawFence, idleResources = []) { return write(owner => {
           const f = readFence(rawFence); const s = session(f.sessionId);
@@ -1026,7 +1047,7 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
           if (!row) return;
           const t = task(row.id)!;
           parse(checksSchema,idleResources);
-          const admission = workspaceBlockers(f.sessionId,idleResources,owner,true);
+          const admission = workspaceBlockers(f.sessionId,ordinaryTask(t.id),idleResources,owner,true);
           if (admission.length) workspaceBlocked(f.sessionId, admission);
           assertWorkItemCapacity(f.sessionId,idleResources,owner);
           requireInputOptions(t.id);
@@ -1073,7 +1094,7 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
             if(a) fail('STEERING_TASK_HAS_ATTEMPT');
             if(getAcceptedTask(taskId)?.request?.namespace!==steerableTaskNamespace) fail('STEERING_TASK_OWNED');
             parse(checksSchema,idleResources);
-            const admission=workspaceBlockers(f.sessionId,idleResources,owner,true);
+            const admission=workspaceBlockers(f.sessionId,ordinaryTask(t.id),idleResources,owner,true);
             if(admission.length)workspaceBlocked(f.sessionId, admission);
             const target=attempt(input.target.attemptId);
             if(!target || target.taskId!==input.target.taskId || target.sessionId!==f.sessionId || target.runId!==f.runId || target.state!=='active' || target.submissionState==='not_submitted') fail('STEERING_TARGET_CONFLICT');

@@ -25,8 +25,8 @@ function fixture() {
   const git = (cwd:string,...args:string[]) => execFileSync('git',['-C',cwd,...args],{stdio:'pipe'});
   const repo = (name:string) => { const cwd=join(root,name);mkdirSync(cwd);git(cwd,'init','-q');git(cwd,'-c','user.name=Fixture','-c','user.email=fixture@example.invalid','commit','--allow-empty','-qm','baseline');return cwd; };
   const session = (id:string,cwd:string,source?:string) => { const f={sessionId:id,runId:'run-'+id};x.createSession({id,cwd,...(source ? {source} : {}),runId:f.runId,agentId:'fixture',state:'idle',createdAt:new Date().toISOString(),updatedAt:new Date().toISOString()});return f; };
-  const accept = (f:ReturnType<typeof session>,key='task',requestActor:TaskRequestV1['actor']={kind:'unspecified'}) => {
-    const request:TaskRequestV1={version:1,namespace:'runtime',sessionId:f.sessionId,key,prompt:key,mode:'queue',actor:requestActor,skills:[],options:{},sources:[],sourcePayload:null};
+  const accept = (f:ReturnType<typeof session>,key='task',requestActor:TaskRequestV1['actor']={kind:'unspecified'},namespace:TaskRequestV1['namespace']='runtime') => {
+    const request:TaskRequestV1={version:1,namespace,sessionId:f.sessionId,key,prompt:key,mode:'queue',actor:requestActor,skills:[],options:{},sources:[],sourcePayload:null};
     const content={version:2 as const,prompt:key,executionOptions:{permissionMode:'ask' as const},executionContext:{agentPrompt:key,...(requestActor.kind === 'unspecified' ? {} : {actorId:requestActor.id})},contentSources:[]};
     return x.acceptTask(f,request,{...content,digest:digest(content)} as AcceptedTaskInputV2,'back').task!;
   };
@@ -114,6 +114,50 @@ it('canonicalizes real Git worktrees, subdirectories and symlinks while allowing
   expect(claims.filter(result=>result.status==='fulfilled')).toHaveLength(1);
   expect(claims.filter(result=>result.status==='rejected')).toHaveLength(1);
 });
+it('admits another conversation in a plain directory while the original terminal and unknown attempt stay owned', async () => {
+  const h = fixture(), origin = h.session('first-topic', h.root, 'lark'), target = h.session('next-topic', h.root, 'lark');
+  h.accept(origin, 'first', actor);
+  const first = h.x.claimNext(origin)!.attempt!;
+  let driver = h.x.beforeCreate(origin, { resourceId: 'first-terminal', kind: 'local_only' });
+  driver = h.x.spawned(origin, driver.resourceId, driver.revision, { identityId: 'first', kind: 'local_only', locator: { driver: 'first' } });
+  driver = h.x.creationFinished(origin, driver.resourceId, driver.revision, 'created');
+  h.x.observed(origin, driver.resourceId, driver.revision, { observationId: 'live', identityId: 'first', state: 'live', observedAt: new Date().toISOString(), evidenceRef: 'fixture' });
+  const pending = h.x.markSubmissionPending(af(first), { submissionId: 'send', inputDigest: digest('first'), resourceRefs: [{ resourceId: driver.resourceId, identityId: 'first' }], authorizationRefs: [] }).attempt!;
+  const next = h.accept(target, 'second', actor);
+  expect(h.repos.execution.getTaskExecution(next.id)?.blockers).toEqual([]);
+  h.x.markReconcileRequired(af(pending), { reasonId: 'unconfirmed', code: 'DRIVER_INPUT_UNCONFIRMED', evidenceRefs: [] });
+  h.accept(origin, 'follow-up', actor);
+  expect(() => h.x.claimNext(origin)).toThrow(expect.objectContaining({ code: 'SESSION_EXECUTION_BUSY' }));
+  expect(h.x.canPrepareWorkspace(h.root)).toBe(false);
+  const key = 'runtime_verification:first-topic:check';
+  await h.repos.config.set(key, JSON.stringify({ sessionId: origin.sessionId, status: 'running' }));
+  expect(() => h.x.claimNext(target)).toThrow(expect.objectContaining({ code: 'WORKSPACE_RESOURCE_BLOCKED' }));
+  await h.repos.config.set(key, JSON.stringify({ sessionId: origin.sessionId, status: 'passed' }));
+  expect(h.x.claimNext(target)?.task.id).toBe(next.id);
+  expect(() => h.x.claimNext(target)).toThrow(expect.objectContaining({ code: 'SESSION_EXECUTION_BUSY' }));
+  expect(h.repos.execution.getTaskExecution(next.id)?.attempts).toHaveLength(1);
+  expect(h.repos.execution.getTaskExecution(first.taskId)?.task.status).toBe('reconcile_required');
+  expect(h.repos.execution.getResources(origin.sessionId)[0]?.observations.at(-1)?.state).toBe('live');
+});
+it('coordinates scheduled turns inside ordinary conversations without making their queued neighbors hold the directory', () => {
+  const h = fixture(), origin = h.session('origin', h.root), target = h.session('target', h.root);
+  h.accept(origin, 'first');
+  const running = h.x.claimNext(origin)!.attempt!;
+  const chat = h.accept(target, 'chat'), schedule = h.accept(target, 'schedule', actor, 'schedule');
+  const blocked = expect.arrayContaining([expect.objectContaining({ code: 'WORKSPACE_EXECUTION_BUSY', sessionId: origin.sessionId })]);
+  const projections = h.repos.execution.getSessionExecutions(target.sessionId);
+  expect(projections.find(p => p.task.id === chat.id)?.blockers).toEqual([]);
+  expect(projections.find(p => p.task.id === schedule.id)?.blockers).toEqual(blocked);
+  const admitted = h.x.claimNext(target)!.attempt!;
+  expect(admitted.taskId).toBe(chat.id);
+  h.x.settleAttempt(af(admitted), 'chat-ended', { kind: 'not_submitted', outcome: 'cancelled', reason: 'fixture' });
+  expect(() => h.x.claimNext(target)).toThrow(expect.objectContaining({ code: 'WORKSPACE_RESOURCE_BLOCKED' }));
+  h.x.settleAttempt(af(running), 'first-ended', { kind: 'not_submitted', outcome: 'cancelled', reason: 'fixture' });
+  expect(h.x.claimNext(target)!.task.id).toBe(schedule.id);
+  const later = h.accept(origin, 'later');
+  expect(h.repos.execution.getTaskExecution(later.id)?.blockers).toContainEqual(expect.objectContaining({ code: 'WORKSPACE_EXECUTION_BUSY', taskId: schedule.id }));
+});
+
 it('derives preexisting unknown ownership, keeps it through reopen and stop, and releases only on explicit recovery', () => {
   const h=fixture(), cwd=h.repo('repo'), origin=h.session('origin',cwd), target=h.session('target',cwd);
   const task=h.accept(origin);h.accept(target);
@@ -138,7 +182,7 @@ it('derives preexisting unknown ownership, keeps it through reopen and stop, and
 });
 it.each(['gone', 'one live', 'missing', 'preparing', 'active', 'steering unknown', 'stop block'] as const)(
   'checks physical exit and remaining holds when another session claims: %s', async scenario => {
-    const h = fixture(), origin = h.session('origin', h.root), target = h.session('target', h.root);
+    const h = fixture(), cwd = h.repo('shared'), origin = h.session('origin', cwd), target = h.session('target', cwd);
     h.accept(origin);
     let attempt = h.x.claimNext(origin)!.attempt!;
     const checks = [];
@@ -160,9 +204,9 @@ it.each(['gone', 'one live', 'missing', 'preparing', 'active', 'steering unknown
       if (scenario !== 'active') h.x.markReconcileRequired(af(attempt), { reasonId: 'lost', code: 'DISCONNECTED', evidenceRefs: [] });
     }
     if (scenario === 'stop block') await h.repos.config.set('runtime_driver_stop_block:origin', '{}');
-    expect(h.x.canPrepareWorkspace(h.root)).toBe(false);
+    expect(h.x.canPrepareWorkspace(cwd)).toBe(false);
     h.accept(origin, 'next');
-    expect(h.x.canPrepareWorkspace(h.root)).toBe(false);
+    expect(h.x.canPrepareWorkspace(cwd)).toBe(false);
     const task = h.accept(target);
     if (scenario === 'gone') {
       expect(() => h.x.claimNext(origin)).toThrow(expect.objectContaining({ code: 'SESSION_EXECUTION_BUSY' }));
@@ -446,7 +490,7 @@ it('validates chunk boundaries before workspace filtering and sees external conf
 });
 
 it('preserves multi-row blocker ownership and order across candidate chunks', () => {
-  const h=fixture(),target=h.session('target',h.root),task=h.accept(target),sql=new Database(h.path),at=new Date().toISOString();
+  const h=fixture(),cwd=h.repo('shared'),target=h.session('target',cwd),task=h.accept(target),sql=new Database(h.path),at=new Date().toISOString();
   const insertSession=sql.prepare('INSERT INTO sessions(id,agent_id,state,cwd,run_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?)');
   const insertTask=sql.prepare('INSERT INTO tasks(id,session_id,prompt,status,current_attempt_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?)');
   const insertAttempt=sql.prepare('INSERT INTO task_attempts(id,task_id,session_id,run_id,number,revision,state,submission_state,json) VALUES(?,?,?,?,?,?,?,?,?)');
@@ -456,7 +500,7 @@ it('preserves multi-row blocker ownership and order across candidate chunks', ()
   try {
     sql.transaction(()=>{for(let i=0;i<40;i++) {
       const id=`candidate-${String(i).padStart(2,'0')}`,runId=`run-${i}`,group=i%5;
-      insertSession.run(id,'fixture','idle',h.root,runId,at,at);
+      insertSession.run(id,'fixture','idle',cwd,runId,at,at);
       if(group===0||group===1) {
         if(group===0) {
           insertTask.run(`active-task-${i}`,id,'active','running',`active-attempt-${i}`,at,at);
@@ -498,7 +542,7 @@ it('preserves multi-row blocker ownership and order across candidate chunks', ()
     expect(claimError).toMatchObject({code:'WORKSPACE_RESOURCE_BLOCKED',message:'Workspace is held by another session',statusCode:409});
     expect(claimError.details).toEqual(expected);
     phase='prepare';
-    expect(h.x.canPrepareWorkspace(h.root)).toBe(false);
+    expect(h.x.canPrepareWorkspace(cwd)).toBe(false);
     expect(batches.length).toBeGreaterThan(0);
     expect(batches.every(row=>row.rows<=32)).toBe(true);
     expect(batches.filter(row=>row.phase!=='prepare'&&row.source.includes("SELECT ids.session_id,'queued' AS kind"))).toEqual([]);

@@ -423,7 +423,11 @@ export function cleanTmuxSubmissionCapture(partialAnsi: string, fullCapture: str
     const spaces = column - stringWidth(text);
     // A fresh Claude continuation has two columns of indent but no painted cells.
     const blankContinuation = physicalRow === '' && column === 2;
-    if (!blankContinuation && (spaces < 0 || spaces > physicalRow.length - text.length)) return null;
+    // tmux can omit unpainted trailing spaces even with -N. The visible
+    // cursor still measures them; keep the reconstructed text inside the box.
+    const paintedPadding = physicalRow.length - text.length;
+    const maxSpaces = paintedPadding || fullRows[cursorRow + 1]!.trimEnd().length - stringWidth(text);
+    if (!blankContinuation && (spaces < 0 || spaces > maxSpaces)) return null;
     const prefix = capturedRow.slice(0, capturedRow.length - physicalRow.length);
     beforeCursor = prefix + (blankContinuation ? '' : text + ' '.repeat(spaces));
   } else {

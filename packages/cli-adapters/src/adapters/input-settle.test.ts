@@ -378,6 +378,23 @@ describe('Claude composer ownership around the first terminal write', () => {
     expect(pasted.writes).toEqual(['first']);
   });
 
+  it('waits for the native cursor to reappear after a soft newline before writing the next line', async () => {
+    const backend = new ComposerBackend();
+    let draft = '';
+    backend.onWrite = data => {
+      if (data === 'Enter' && draft.endsWith('\\')) {
+        draft = draft.slice(0, -1) + '\n';
+        backend.screen = '';
+        setTimeout(() => { backend.screen = box(draft); }, 200);
+      } else if (data !== 'Enter') {
+        draft += data;
+        backend.screen = box(draft);
+      }
+    };
+    await finish(writeClaudeFamilyInput(backend, 'first\nsecond'));
+    expect(backend.writes).toEqual(['first', '\\', 'Enter', 'second', 'Enter']);
+  });
+
   it('reserves and restores the expanded input viewport around a successful write', async () => {
     const backend = new ComposerBackend();
     let draft = '';

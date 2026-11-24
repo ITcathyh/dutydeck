@@ -84,6 +84,12 @@ describe('tmux submission cursor capture', () => {
     expect(cleanTmuxSubmissionCapture(ansi, full.replace('──────────', 'more input'), true, { column: 7, physicalRow: row })).toBeNull();
   });
 
+  it('recovers unpainted trailing spaces from the visible cursor within the composer width', () => {
+    const row = '    输入', full = row + '\n──────────\n';
+    expect(cleanTmuxSubmissionCapture(row + '\n', full, true, { column: 9, physicalRow: row })).toBe(row + ' \n──────────\n');
+    expect(cleanTmuxSubmissionCapture(row + '\n', full, true, { column: 11, physicalRow: row })).toBeNull();
+  });
+
   it('preserves the joined draft when the native cursor is on a wrapped physical row', () => {
     const row = '❯ wrapped input 中文 ';
     expect(cleanTmuxSubmissionCapture(row + '\n', row + '\n──────────\n', true, { column: 4, physicalRow: '中文 ' }))

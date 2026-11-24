@@ -80,7 +80,10 @@ export async function writeClaudeFamilyInput(backend: PtyLike, prompt: string): 
   if (/[ \t]+\n/.test(prompt)) {
     throw new PromptNotWrittenError('Claude 硬换行前的尾随空白无法在最终输入视图中完整核对；本条消息没有写入。');
   }
-  const restoreViewport = await backend.beginExpandedInput?.();
+  // Claude wraps at word boundaries and can hide the space at a visual line break.
+  // Leave room for the full logical line and the native composer margins.
+  const columns = prompt.split('\n').reduce((max, line) => Math.max(max, Buffer.byteLength(line) + 6), 0);
+  const restoreViewport = await backend.beginExpandedInput?.(columns);
   try {
     await writeClaudeFamilyInputBody(backend, prompt);
   } finally {
@@ -121,7 +124,7 @@ async function writeClaudeFamilyInputBody(backend: PtyLike, prompt: string): Pro
     }
     let owned = await ownedClaudeComposerWithWrap(screen, expectedDraft, final);
     const deadline = Date.now() + INPUT_ECHO_TIMEOUT_MS;
-    while (final && !owned && Date.now() < deadline) {
+    while (!owned && Date.now() < deadline) {
       await delay(50);
       screen = await read();
       owned = await ownedClaudeComposerWithWrap(screen, expectedDraft, final);
