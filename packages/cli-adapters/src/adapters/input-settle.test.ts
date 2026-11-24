@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { DriverRecoveryError, PromptNotWrittenError } from '@dutydeck/shared';
-import { ownedClaudeComposer, ownedClaudeComposerWithWrap, writeClaudeFamilyInput } from './claude-family.js';
+import { chunkTextByUtf8Bytes, ownedClaudeComposer, ownedClaudeComposerWithWrap, writeClaudeFamilyInput } from './claude-family.js';
 import { createCodexAdapter } from './codex.js';
 import { INPUT_ECHO_SETTLE_MS, INPUT_ECHO_TIMEOUT_MS, INPUT_QUIET_MS, INPUT_QUIET_TIMEOUT_MS } from './input-settle.js';
 import type { PtyLike } from '../types.js';
@@ -346,6 +346,53 @@ describe('Claude composer ownership around the first terminal write', () => {
     await vi.advanceTimersByTimeAsync(15_000);
     expect(await outcome).toMatchObject({ name: 'DriverRecoveryError', code: 'DRIVER_INPUT_UNCONFIRMED' });
     expect(backend.writes).toEqual(['first']);
+  });
+
+  it('preserves every byte and avoids pausing in a slash name at any position in a chunk', () => {
+    for (let prefixLength = 0; prefixLength < 96; prefixLength++) {
+      const prefix = 'x'.repeat(prefixLength) + '。';
+      const line = prefix + '/charts/📊' + '界'.repeat(40) + ' /' + 'z'.repeat(130);
+      const chunks = chunkTextByUtf8Bytes(line);
+      expect(chunks.join('')).toBe(line);
+      expect(chunks.every(chunk => chunk.length > 0 && Buffer.byteLength(chunk) <= 96)).toBe(true);
+      let typed = '';
+      for (const chunk of chunks) {
+        typed += chunk;
+        expect(typed).not.toMatch(/。\/[a-z]+$/);
+      }
+    }
+  });
+
+  it('keeps inline slash completions out of the draft when typing a path across a chunk boundary', async () => {
+    const backend = new ComposerBackend();
+    const prefix = '界'.repeat(30) + ' ';
+    const prompt = prefix + '/charts/reports and /comp' + '\nnext';
+    let draft = '';
+    const submitted: string[] = [];
+    backend.onWrite = data => {
+      if (data === 'Enter') {
+        if (draft.endsWith('\\')) draft = draft.slice(0, -1) + '\n';
+        else submitted.push(draft);
+      } else {
+        expect(Buffer.byteLength(data)).toBeLessThanOrEqual(96);
+        draft += data;
+      }
+      // The native cursor sits before the displayed completion. Strict tmux capture returns no proof.
+      backend.screen = /\/(?:c|ch|cha|char|chart|charts|comp)$/.test(draft) ? '' : box(draft);
+    };
+    const pending = writeClaudeFamilyInput(backend, prompt);
+    void pending.catch(() => {});
+    await finish(pending);
+    expect(submitted).toEqual([prompt]);
+  });
+
+  it('does not press soft Enter until a slash name and its newline marker both echo', async () => {
+    const backend = new ComposerBackend();
+    backend.onWrite = () => { backend.screen = box('see /comp'); };
+    const outcome = writeClaudeFamilyInput(backend, 'see /comp\nnext').catch(error => error);
+    await vi.advanceTimersByTimeAsync(15_000);
+    expect(await outcome).toMatchObject({ code: 'DRIVER_INPUT_UNCONFIRMED' });
+    expect(backend.writes).toEqual(['see /comp\\']);
   });
 
   it('accepts its own chunked multiline echo and submits exactly once', async () => {

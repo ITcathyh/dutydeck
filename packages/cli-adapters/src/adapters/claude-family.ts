@@ -43,6 +43,10 @@ const CLAUDE_FAMILY_BACKGROUND_WAIT_RE =
  *  paste-burst 检测，所以每行都按小 chunk 分块键入。 */
 export const CLAUDE_INPUT_CHUNK_BYTES = 96;
 
+// A pause after a partial slash command can paint a suggestion past the cursor.
+// Keep the slash name and its following delimiter together whenever they fit.
+const slashSuffix = /(?:^|[\s。、？！])(\/[\w.:-]*)$/u;
+
 /** 按 UTF-8 字节预算切分，不切断 Unicode 码位。 */
 export function chunkTextByUtf8Bytes(text: string, maxBytes: number = CLAUDE_INPUT_CHUNK_BYTES): string[] {
   if (!Number.isSafeInteger(maxBytes) || maxBytes < 4) {
@@ -54,9 +58,11 @@ export function chunkTextByUtf8Bytes(text: string, maxBytes: number = CLAUDE_INP
   for (const char of text) {
     const charBytes = Buffer.byteLength(char, 'utf8');
     if (chunk && chunkBytes + charBytes > maxBytes) {
-      chunks.push(chunk);
-      chunk = '';
-      chunkBytes = 0;
+      const suffix = chunk.match(slashSuffix)?.[1] ?? '';
+      const carry = suffix.length + charBytes <= maxBytes ? suffix : '';
+      chunks.push(chunk.slice(0, chunk.length - carry.length));
+      chunk = carry;
+      chunkBytes = carry.length; // The carried slash name contains only ASCII.
     }
     chunk += char;
     chunkBytes += charBytes;
@@ -149,14 +155,18 @@ async function writeClaudeFamilyInputBody(backend: PtyLike, prompt: string): Pro
   const lines = prompt.split('\n');
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i]!;
-    for (const chunk of chunkTextByUtf8Bytes(line)) {
+    const softNewline = i < lines.length - 1;
+    const includeMarker = softNewline && slashSuffix.test(line);
+    for (const chunk of chunkTextByUtf8Bytes(includeMarker ? line + '\\' : line)) {
       await write(() => text(chunk), chunk);
       await tick();
     }
-    if (i < lines.length - 1) {
-      await write(() => text('\\'), '\\');
-      await tick();
-      await write(enter);
+    if (softNewline) {
+      if (!includeMarker) {
+        await write(() => text('\\'), '\\');
+        await tick();
+      }
+      await write(enter, '', includeMarker);
       expectedDraft += '\n';
       await tick();
     }

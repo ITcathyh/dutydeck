@@ -101,7 +101,7 @@ Dutydeck 自己生成的 Claude 凭据守卫（终端与内置 ACP）和计划�
 ### 终端任务状态与恢复
 
 Claude Code 终端会话优先使用 OSC 7501 状态信号判断忙碌、等待审批和完成；信号不可用时自动回退到屏幕识别，后续有效信号可重新接管；与本轮输入绑定、且写在最新忙态信号之后的原生终态（包括守护进程重启接回的轮次），或真实审批已裁决时，可解除丢失信号留下的忙态。
-Claude family 在 tmux、Herdr 和裸 PTY 上统一使用 keyed 输入：每个逻辑行按不超过 96 个 UTF-8 字节切块，不切断 Unicode 码位；普通长多行中的硬换行以“反斜杠 + Enter”构成 soft-newline，只有末尾显式 `submitInput()` 才是本轮最终 Enter，不使用整段括号粘贴触发 paste-burst 折叠。最终 Enter 必须看到本次 Dutydeck 写入的完整草稿，普通空格、tab 和硬换行都是正文；任意 prefix/suffix、空串或 `[Pasted text #N]` 外形都不能授权提交。首个业务字节之前的人工草稿、slash 菜单、权限/信任页或读屏失败属于 not-written，处理后可重试；从第一次真实写入尝试起，后续读屏、内容或 backend 结果无法确认时均为 unknown，不自动再 Enter、清空或重发。
+Claude family 在 tmux、Herdr 和裸 PTY 上统一使用 keyed 输入：每个逻辑行按不超过 96 个 UTF-8 字节切块，不切断 Unicode 码位。写到路径或斜杠命令时，只要首段和后一个字符能放进同一块，就一起键入，避免 Claude 在路径写到一半时显示命令补全。普通长多行中的硬换行以“反斜杠 + Enter”构成 soft-newline，只有末尾显式 `submitInput()` 才是本轮最终 Enter，不使用整段括号粘贴触发 paste-burst 折叠。最终 Enter 必须看到本次 Dutydeck 写入的完整草稿，普通空格、tab 和硬换行都是正文；任意 prefix/suffix、空串或 `[Pasted text #N]` 外形都不能授权提交。首个业务字节之前的人工草稿、slash 菜单、权限/信任页或读屏失败属于 not-written，处理后可重试；从第一次真实写入尝试起，后续读屏、内容或 backend 结果无法确认时均为 unknown，不自动再 Enter、清空或重发。
 Claude 自身可能先做 NFC，因此终端正文与原生回执的码点数量和 UTF-8 字节数可能变化；Dutydeck 存储的原始任务正文不变，这条 Claude 专属 sanitizer/NFC 路径也不在其他 Agent 上运行，NFD 文件名、哈希和精确码点匹配不能承诺逐字不变。共享 `wrapUntrusted` 的伪造边界 visible-space 变化会影响所有保存/派发调用方，包括其他调用它的 Agent；它只对“原文不是 marker、经 Claude 清理后才重建”的伪造 `UNTRUSTED_DATA` 边界插入可见空格。Dutydeck 自己原有 marker 和伪造边界之外的普通正文不被这条规则改写；未调用 `wrapUntrusted` 的 Agent 和正文不额外处理。该字符串保护不宣称模型一定会服从或已经遭到利用。
 
 Claude 家族终端沿用机器人的 `idleCompactEnabled` / `idleCompactHours` 设置：会话达到空闲阈值后，下一条消息先以维护输入执行原生 `/compact`，再提交这条消息。维护输入不创建业务轮次，也不产生业务 `completed`。写入前、转写追平后和最终按键前都会检查空输入框、后台工作、权限 Hook、待回答问题与人工等待；业务提交和另一次压缩不能同时取得终端所有权。
