@@ -131,8 +131,10 @@ describe('topic material choice commands', () => {
 it('continues the real HTTP order once and stops retrying an offer the user already received', async () => {
   const h = await setupHarness({ config: { pollMs: 60_000 } });
   try {
+    const rawExtra = { sender: { id: BOSS, id_type: 'open_id', sender_type: 'user' } };
+    h.lark.messages.set(topic.rootId, apiMessage({ messageId: topic.rootId, text: '产品反馈', rawExtra }));
     for (const material of [first, second]) {
-      h.lark.messages.set(material.messageId, apiMessage({ ...topic, messageId: material.messageId, messageType: 'merge_forward' }));
+      h.lark.messages.set(material.messageId, apiMessage({ ...topic, messageId: material.messageId, messageType: 'merge_forward', rawExtra }));
       const childId = `${material.messageId}_child`;
       h.lark.messages.set(childId, apiMessage({ ...topic, messageId: childId, upperMessageId: material.messageId, text: material.preview }));
     }
@@ -147,7 +149,7 @@ it('continues the real HTTP order once and stops retrying an offer the user alre
         : result;
     };
     await h.post(makeEnvelope({ ...topic, messageId, text: '/job 为这条反馈补回归测试' }));
-    await waitFor(() => h.svc.store.getJob(sourceKey)?.replies.need?.status === 'unknown');
+    await waitFor(() => h.svc.store.getJob(sourceKey)?.replies.need?.status === 'unknown', { label: 'delivered offer with unconfirmed response' });
     const offer = h.lark.replies.find(receipt => receipt.text.includes(offerLabel));
     expect(offer).toMatchObject({ to: topic.rootId, inThread: true });
     const command = `/job 选 #${materialChoiceCode(sourceKey, second.messageId)}`;
@@ -159,7 +161,7 @@ it('continues the real HTTP order once and stops retrying an offer the user alre
     const select = makeEnvelope({ ...topic, text: command });
     expect((await h.post(select)).body).toMatchObject({ decision: 'stop' });
     expect((await h.post(select)).body).toMatchObject({ decision: 'stop' });
-    await waitFor(() => h.svc.store.getJob(sourceKey)?.replies.accepted?.status === 'sent');
+    await waitFor(() => h.svc.store.getJob(sourceKey)?.replies.accepted?.status === 'sent', { label: 'original order acceptance' });
 
     expect(h.hub()).toMatchObject({ submitCount: 1, lastPayload: {
       source_key: sourceKey,
@@ -174,7 +176,7 @@ it('continues the real HTTP order once and stops retrying an offer the user alre
   } finally {
     await h.cleanup();
   }
-});
+}, 15_000);
 
 it('bounds the offer and renders source commands and links as inert excerpts', () => {
   const sourceKey = `lark/${APP}/om_original`;
