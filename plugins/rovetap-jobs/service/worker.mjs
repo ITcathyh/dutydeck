@@ -18,6 +18,9 @@ const QUIET_PHASES = new Set(['', 'todo', 'accepted', 'open', 'pending', 'new'])
 const DONE_PHASES = new Set(['done', 'succeeded', 'completed', 'complete', 'verified', 'closed']);
 const BAD_PHASES = new Set(['failed', 'error', 'cancelled', 'canceled', 'rejected']);
 const MAX_IDEMPOTENT_RETRIES = 6;
+// 飞书同一个 uuid 只在首次尝试后的 1 小时内去重（与 server reconciler 的投递窗口一致）：
+// 超窗再发，前一次若已送达就会在群里出现两条回执。
+const UUID_DEDUP_WINDOW_MS = 60 * 60_000;
 
 export class JobWorker {
   constructor({ config, store, sender, lark, logger = console }) {
@@ -62,7 +65,19 @@ export class JobWorker {
 
   isActionable(job) {
     if (ACTIVE_STAGES.has(job.stage)) return true;
-    return Object.values(job.replies ?? {}).some((r) => r.status === 'pending' || r.status === 'sending');
+    // 终局任务（done/failed/…）的回执也可能在退避重试：按 dueReply 判定是否真的到期。
+    return Object.values(job.replies ?? {}).some((reply) => this.dueReply(job, reply));
+  }
+
+  /**
+   * 只有发送前持久化的 firstAttemptAt 能证明首次尝试仍在飞书 uuid 的 1 小时
+   * 去重窗口内。旧记录没有这个字段，按“无法证明”处理，不放行重发。
+   */
+  withinUuidWindow(reply) {
+    const first = reply?.firstAttemptAt;
+    if (first === undefined || first === null) return false;
+    const at = typeof first === 'number' ? first : Date.parse(first);
+    return Number.isFinite(at) && Date.now() - at <= UUID_DEDUP_WINDOW_MS;
   }
 
   /** After a restart, 'sending' records may or may not have been delivered. */
@@ -70,10 +85,14 @@ export class JobWorker {
     await this.store.mutate((state) => {
       for (const job of Object.values(state.jobs)) {
         for (const reply of Object.values(job.replies ?? {})) {
-          if (reply.status === 'sending') {
-            reply.status = this.sender.idempotent ? 'pending' : 'unknown';
-            reply.recoveredAt = new Date().toISOString();
-          }
+          // 旧版本恢复过一次的在途 pending 也带 attempts>0，同样可能已经发出。
+          const inFlight = reply.status === 'sending'
+            || (reply.status === 'pending' && (reply.attempts ?? 0) > 0);
+          if (!inFlight) continue;
+          // 仅直连 API（同一持久 uuid）且 firstAttemptAt 证明仍在窗口内才重新排队；
+          // CLI 每次自铸 uuid，超窗或无 firstAttemptAt 的旧记录一律保留 unknown。
+          reply.status = this.sender.idempotent && this.withinUuidWindow(reply) ? 'pending' : 'unknown';
+          reply.recoveredAt = new Date().toISOString();
         }
         // A submit interrupted mid-spawn is treated as an uncertain write.
         if (job.stage === 'submitting') job.stage = 'unknown';
@@ -369,12 +388,16 @@ export class JobWorker {
   // ---- outbound -----------------------------------------------------------
 
   dueReply(job, reply) {
-    if (reply.status === 'pending') return true;
-    if (reply.status === 'sending') return true; // recovered only at boot; safety
-    if (reply.status === 'unknown' && this.sender.idempotent && (reply.attempts ?? 0) < MAX_IDEMPOTENT_RETRIES) {
-      return !reply.retryAt || Date.now() >= reply.retryAt;
-    }
-    return false;
+    // 没有任何发送痕迹的 pending 确定未发出，可以首发（firstAttemptAt 在发送前持久化）。
+    const untouchedPending = reply.status === 'pending'
+      && (reply.attempts ?? 0) === 0 && reply.firstAttemptAt == null;
+    if (untouchedPending) return true;
+    if (reply.status !== 'pending' && reply.status !== 'sending' && reply.status !== 'unknown') return false;
+    // 其余记录都意味着可能已经发出去过：CLI 无法用同一 uuid 去重，任何情况下都不重发；
+    // 直连 API 也只在 firstAttemptAt 证明的 1 小时窗口内重试，超窗/旧记录保持 unknown。
+    if (!this.sender.idempotent || !this.withinUuidWindow(reply)) return false;
+    if (reply.status === 'unknown' && (reply.attempts ?? 0) >= MAX_IDEMPOTENT_RETRIES) return false;
+    return !reply.retryAt || Date.now() >= reply.retryAt;
   }
 
   async flushDueReplies(sourceKey) {
@@ -383,7 +406,16 @@ export class JobWorker {
     for (const kind of Object.keys(job.replies)) {
       job = this.store.getJob(sourceKey);
       const reply = job.replies[kind];
-      if (!reply || !this.dueReply(job, reply)) continue;
+      if (!reply) continue;
+      if (!this.dueReply(job, reply)) {
+        // 没经过启动恢复就调度到时，被 CLI/窗口挡住的在途记录也要落为 unknown，不能一直停在 sending。
+        const inFlight = reply.status === 'sending'
+          || (reply.status === 'pending' && (reply.attempts ?? 0) > 0);
+        if (inFlight && (!this.sender.idempotent || !this.withinUuidWindow(reply))) {
+          await this.mutateJob(sourceKey, (j) => { j.replies[kind].status = 'unknown'; });
+        }
+        continue;
+      }
 
       const text = replyText(kind, job, this.config);
       if (!text) continue;
@@ -394,6 +426,8 @@ export class JobWorker {
         r.status = 'sending';
         r.attempts = (r.attempts ?? 0) + 1;
         r.lastAttemptAt = new Date().toISOString();
+        // 必须在真正发送前随事务落盘：重启后靠它证明仍在飞书 uuid 的 1 小时窗口内。
+        if (r.firstAttemptAt == null) r.firstAttemptAt = r.lastAttemptAt;
       });
 
       const result = await this.sender.send({ uuid: reply.uuid, replyTo, text });
