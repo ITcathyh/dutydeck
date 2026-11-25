@@ -10,6 +10,14 @@
 //  - if a submit's outcome is unknown (timeout / killed / malformed stdout /
 //    disconnect), the caller must NOT resubmit: reconcile with status by the
 //    same stable source key.
+//
+// Adjudication mirrors cmd/pairfob/project.go: a non-zero exit still carries
+// the one JSON envelope on stdout, so the envelope — not the exit code — decides.
+// Only an envelope whose error code is an explicit business refusal of this job
+// is 'rejected'. unknown_outcome, internal, usage/transport/config errors and
+// anything else that does not prove the hub refused (including success-shaped
+// data missing a non-empty task id / leader id / phase) are 'unknown': reconcile
+// by source key, never report rejection.
 
 import { execFile } from 'node:child_process';
 
@@ -23,27 +31,31 @@ function projectEnv(config) {
   return env;
 }
 
-/** Parse the promised single JSON object, tolerating a trailing log line. */
+/**
+ * Parse the promised stdout: exactly one JSON object (the project.go contract
+ * is one envelope per invocation, with logs on stderr). Output containing
+ * log lines, concatenated objects or other garbage is rejected rather than
+ * partially extracted: callers then treat the result as an unconfirmed receipt
+ * and reconcile by source key. A single native parse also avoids the quadratic
+ * cost of rescanning every closing brace in megabytes of garbage.
+ */
 export function parseEnvelope(stdout) {
-  if (typeof stdout !== 'string' || !stdout.trim()) return null;
+  if (typeof stdout !== 'string') return null;
   const text = stdout.trim();
+  if (!text) return null;
   try {
-    return JSON.parse(text);
+    const value = JSON.parse(text);
+    return value && typeof value === 'object' && !Array.isArray(value) ? value : null;
   } catch {
-    for (let i = text.length - 1; i >= 0; i -= 1) {
-      if (text[i] !== '}') continue;
-      try {
-        return JSON.parse(text.slice(text.indexOf('{'), i + 1));
-      } catch { /* keep scanning */ }
-    }
     return null;
   }
 }
 
 /**
  * Low-level execFile wrapper. Resolves `{code,stdout,stderr}` for any completed
- * process (including non-zero exit); rejects only when the process could not be
- * spawned at all or the call itself failed before a process outcome.
+ * process (including non-zero exit and timeout/signal kills); rejects only when
+ * the process could not be spawned at all or the call failed before a process
+ * outcome (ENOENT/EACCES and similar spawn errors).
  */
 function run(bin, args, { stdin, env, timeoutMs = 20_000, onSpawn } = {}) {
   return new Promise((resolve, reject) => {
@@ -55,17 +67,39 @@ function run(bin, args, { stdin, env, timeoutMs = 20_000, onSpawn } = {}) {
       (error, stdout, stderr) => {
         if (settled) return;
         settled = true;
+        const out = stdout?.toString?.() ?? error?.stdout?.toString?.() ?? '';
+        const err = stderr?.toString?.() ?? error?.stderr?.toString?.() ?? '';
         if (error) {
-          error.stdout = stdout?.toString?.() ?? '';
-          error.stderr = stderr?.toString?.() ?? '';
-          reject(error);
+          const completedNonZero = typeof error.code === 'number';
+          const killedByTimeout = error.killed === true || Boolean(error.signal);
+          if (!completedNonZero && !killedByTimeout) {
+            error.stdout = out;
+            error.stderr = err;
+            reject(error);
+            return;
+          }
+          resolve({
+            code: typeof error.code === 'number' ? error.code : null,
+            systemCode: typeof error.code === 'string' ? error.code : null,
+            signal: error.signal ?? null,
+            killed: Boolean(error.killed),
+            stdout: out,
+            stderr: err,
+          });
           return;
         }
-        resolve({ code: 0, stdout: stdout?.toString?.() ?? '', stderr: stderr?.toString?.() ?? '' });
+        resolve({ code: 0, systemCode: null, signal: null, killed: false, stdout: out, stderr: err });
       },
     );
     child.once('spawn', () => onSpawn?.());
-    if (stdin !== undefined) child.stdin?.end(stdin, 'utf8');
+    if (stdin !== undefined && child.stdin) {
+      // A short-lived CLI (e.g. /bin/false) can exit and close stdin while we
+      // are still writing; the resulting EPIPE must not become an unhandled
+      // stream 'error' that kills the plugin. The process outcome still arrives
+      // through the execFile callback and is classified as an unknown write.
+      child.stdin.on('error', () => { /* consumed by the execFile callback */ });
+      child.stdin.end(stdin, 'utf8');
+    }
   });
 }
 
@@ -75,10 +109,47 @@ function classifySpawnError(error) {
   return error && (error.code === 'ENOENT' || error.code === 'EACCES');
 }
 
+// Error codes that positively say the project side considered this submission
+// and refused to create the task (hub internal/hub_project_job_intake*.go and
+// the exit-4 family in cmd/pairfob/project.go). Deliberately an allowlist:
+// unknown/future codes stay reconcile-only instead of producing a false refusal.
+const EXPLICIT_REJECTION_CODES = new Set([
+  'rejected', // generic business refusal
+  'forbidden', // bad project credential, project disabled, source-key ownership mismatch
+  'conflict', // same source_key already stored with different content
+  'invalid_argument', // payload failed intake validation before any write
+  'too_large', // payload exceeded the intake limit before any write
+]);
+
+function nonEmptyField(value) {
+  return typeof value === 'string' && value.trim() ? value.trim() : '';
+}
+
+/**
+ * The promised success receipt is usable only when all three identity fields
+ * are non-empty. Returns trimmed ids/phase so blank padding cannot reach
+ * receipts or deep links.
+ */
+function readSuccessData(envelope) {
+  const d = envelope && envelope.ok === true ? envelope.data : null;
+  if (!d || typeof d !== 'object') return null;
+  const taskId = nonEmptyField(d.task_id);
+  const leaderId = nonEmptyField(d.leader_id);
+  const phase = nonEmptyField(d.phase);
+  if (!taskId || !leaderId || !phase) return null;
+  return { taskId, leaderId, phase, data: d };
+}
+
+function transportReason(result) {
+  if (result.killed || result.signal) return 'timeout_or_signal';
+  if (result.code !== 0) return `exit_${result.code ?? result.systemCode ?? 'error'}`;
+  return 'missing_ok_envelope';
+}
+
 /**
  * Submit one job.
  * @returns {Promise<
- *  {outcome:'ok', taskId:string, leaderId:string, phase?:string, data:object} |
+ *  {outcome:'ok', taskId:string, leaderId:string, phase:string, data:object} |
  *  {outcome:'rejected', code:string, message:string} |
  *  {outcome:'not_spawned', error:string} |
  *  {outcome:'unknown', reason:string, stdout?:string}>}
@@ -94,28 +165,34 @@ export async function submitProjectJob(options) {
     if (classifySpawnError(error)) {
       return { outcome: 'not_spawned', error: `${error.code}: ${error.message}` };
     }
-    // Timeout, signal kill, maxBuffer, or exit!=0: the hub may have committed.
-    return { outcome: 'unknown', reason: error.killed ? 'timeout_or_signal' : `exit_${error.code ?? 'error'}`, stdout: error.stdout ?? '' };
+    // Defensive: run() only rejects spawn-level failures. Anything else cannot
+    // prove the hub did not commit, so reconcile by source key.
+    return { outcome: 'unknown', reason: error.killed || error.signal ? 'timeout_or_signal' : `exit_${error.code ?? 'error'}`, stdout: error.stdout ?? '' };
   }
   const envelope = parseEnvelope(result.stdout);
-  if (envelope && envelope.ok === true && envelope.data && typeof envelope.data.task_id === 'string') {
-    return {
-      outcome: 'ok',
-      taskId: envelope.data.task_id,
-      leaderId: typeof envelope.data.leader_id === 'string' ? envelope.data.leader_id : '',
-      phase: typeof envelope.data.phase === 'string' ? envelope.data.phase : undefined,
-      data: envelope.data,
-    };
+
+  const success = readSuccessData(envelope);
+  if (success) return { outcome: 'ok', ...success };
+
+  if (envelope && envelope.ok === true) {
+    // ok:true but task/leader/phase missing or blank: the job may exist, and a
+    // status read by source key can still recover it. Never report rejection.
+    return { outcome: 'unknown', reason: 'incomplete_success_envelope', stdout: result.stdout };
   }
-  if (envelope && envelope.ok === false && envelope.error) {
-    return {
-      outcome: 'rejected',
-      code: String(envelope.error.code ?? 'unknown'),
-      message: String(envelope.error.message ?? 'project submit rejected'),
-    };
+
+  if (envelope && envelope.ok === false && envelope.error && typeof envelope.error === 'object') {
+    const code = String(envelope.error.code ?? 'unknown');
+    const message = String(envelope.error.message ?? 'project submit rejected');
+    if (EXPLICIT_REJECTION_CODES.has(code)) {
+      return { outcome: 'rejected', code, message };
+    }
+    // unknown_outcome / internal / usage / config / transport / unknown future
+    // codes: none proves an explicit refusal, so the caller only reconciles.
+    return { outcome: 'unknown', reason: `${code}: ${message}`, stdout: result.stdout };
   }
-  // Exit 0/non-zero without a verified success envelope: cannot know.
-  return { outcome: 'unknown', reason: 'missing_ok_envelope', stdout: result.stdout };
+
+  // Exit 0/non-zero without a verifiable envelope: cannot know the result.
+  return { outcome: 'unknown', reason: transportReason(result), stdout: result.stdout };
 }
 
 /**
@@ -132,26 +209,29 @@ export async function getProjectStatus(options) {
   try {
     result = await run(bin, args, { env: projectEnv({ socket, tokenFile, extraEnv }), timeoutMs });
   } catch (error) {
-    const envelope = parseEnvelope(error.stdout ?? '');
-    if (envelope && envelope.ok === false) {
-      const code = String(envelope.error?.code ?? '');
-      if (/not[_-]?found|no[_-]?such|missing/i.test(code)) return { outcome: 'not_found', code };
-      return { outcome: 'error', reason: `${code}: ${envelope.error?.message ?? ''}` };
-    }
     if (classifySpawnError(error)) return { outcome: 'error', reason: `not_spawned:${error.code}` };
+    // Defensive parse for any pre-outcome failure carrying an envelope.
+    const envelope = parseEnvelope(error.stdout ?? '');
+    const failure = classifyStatusFailure(envelope);
+    if (failure) return failure;
     return { outcome: 'error', reason: error.killed ? 'timeout' : `exit_${error.code ?? 'error'}` };
   }
   const envelope = parseEnvelope(result.stdout);
-  if (envelope && envelope.ok === true && envelope.data) {
-    const d = envelope.data;
-    if (typeof d.task_id === 'string' && typeof d.phase === 'string') {
-      return { outcome: 'ok', taskId: d.task_id, leaderId: typeof d.leader_id === 'string' ? d.leader_id : '', phase: d.phase, data: d };
-    }
-  }
-  if (envelope && envelope.ok === false) {
-    const code = String(envelope.error?.code ?? '');
-    if (/not[_-]?found|no[_-]?such|missing/i.test(code)) return { outcome: 'not_found', code };
-    return { outcome: 'error', reason: `${code}: ${envelope.error?.message ?? ''}` };
-  }
-  return { outcome: 'error', reason: 'malformed_status' };
+
+  const success = readSuccessData(envelope);
+  if (success) return { outcome: 'ok', ...success };
+
+  const failure = classifyStatusFailure(envelope);
+  if (failure) return failure;
+
+  // An ok:true envelope missing required fields is not a usable status; the
+  // caller backs off and reads again rather than adopting a partial identity.
+  return { outcome: 'error', reason: envelope && envelope.ok === true ? 'incomplete_status' : 'malformed_status' };
+}
+
+function classifyStatusFailure(envelope) {
+  if (!envelope || envelope.ok !== false) return null;
+  const code = String(envelope.error?.code ?? '');
+  if (/not[_-]?found|no[_-]?such|missing/i.test(code)) return { outcome: 'not_found', code: code || undefined };
+  return { outcome: 'error', reason: `${code}: ${envelope.error?.message ?? ''}` };
 }
