@@ -2,8 +2,8 @@ import { spawnSync, type SpawnSyncReturns } from 'node:child_process';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, relative } from 'node:path';
-import { describe, expect, it } from 'vitest';
-import { probeClaudeHookFailureBlock, protectedPathFinding, secretGuardActive, secretGuardFinding, secretGuardHookCommand, secretGuardToolMatcher } from '@dutydeck/shared/secret-guard';
+import { describe, expect, it, onTestFinished, vi } from 'vitest';
+import { liveRiskApproval, probeClaudeHookFailureBlock, protectedPathFinding, secretGuardActive, secretGuardFinding, secretGuardHookCommand, secretGuardToolMatcher } from '@dutydeck/shared/secret-guard';
 
 const home = '/home/alice';
 const bash = (command: string, cwd = '/work/repo') => secretGuardFinding({ tool_name: 'Bash', tool_input: { command }, cwd }, { home });
@@ -560,4 +560,22 @@ describe('Claude failure-block probe', () => {
       await expect(probeClaudeHookFailureBlock(options())).resolves.toBe(true);
     } finally { rmSync(root, { recursive: true, force: true }); }
   });
+});
+
+it('checks approval only at the exact HTTP(S) status URL supplied by the host, including a bound network interface', async () => {
+  const fetch = vi.fn(async (_url: URL) => Response.json({ approved: true }));
+  vi.stubGlobal('fetch', fetch);
+  onTestFinished(() => { vi.unstubAllEnvs(); vi.unstubAllGlobals(); });
+  const check = (url: string) => liveRiskApproval({ approvedAttempt: 'example_attempt', approvalCheckUrl: url + '/risk/status' });
+  for (const base of ['http://192.0.2.10:4310/tools', 'https://example.org/tools']) {
+    vi.stubEnv('dutydeck_group_tools_url', base);
+    expect(await check(base)).toBe(true);
+    expect(fetch.mock.lastCall?.[0].href).toBe(base + '/risk/status');
+    expect(await check(base + '/unbound')).toBe(false);
+  }
+  for (const base of ['ftp://example.org/tools', 'http://user@example.org/tools', 'https://user:example@example.org/tools']) {
+    vi.stubEnv('dutydeck_group_tools_url', base);
+    expect(await check(base)).toBe(false);
+  }
+  expect(fetch).toHaveBeenCalledTimes(2);
 });

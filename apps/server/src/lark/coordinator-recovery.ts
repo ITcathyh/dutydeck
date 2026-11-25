@@ -63,7 +63,7 @@ interface ReconcileDependencies {
     | 'applyReminderSettings' | 'authorizeFinalRelay' | 'currentAccess' | 'foreignActionConfirmed' | 'inbox'
     | 'isDeferredTask' | 'isInterruptOperatorAllowed' | 'isOperatorAllowed' | 'pins' | 'requesterOnlyReason'
     | 'requireExecution' | 'resolveSessionAgentName' | 'workflows'>;
-  intake: Pick<CoordinatorParts['intake'], 'handle' | 'recoverAcceptedCards' | 'scheduleTaskAgentPoll'>;
+  intake: Pick<CoordinatorParts['intake'], 'approvals' | 'handle' | 'recoverAcceptedCards' | 'scheduleTaskAgentPoll'>;
   routing: Pick<CoordinatorParts['routing'], 'sessionFor'>;
   runner: Pick<CoordinatorParts['runner'], 'runTurn'>;
 }
@@ -182,6 +182,7 @@ export class LarkCoordinatorRecovery {
           chatId: inbox.event.chatId, recordedAt: new Date().toISOString() });
       } catch (error) { unresolved++; this.reconcileAuthorizationRetry = true; this.state.log.warn({ error, messageId: mapping.externalId }, '授权依据补记待重试'); }
     }
+    unresolved += await this.parts.intake.approvals.reconcile(config);
     unresolved += await timeLoop('lark.reconcile.interactions', this.state.log, () => this.parts.core.workflows.reconcile(config.appId), undefined, config.appId);
     let textReceiptReader: Awaited<ReturnType<typeof explicitFinalTextReceiptReader>> | undefined;
     for (const record of await this.parts.core.workflows.list(config.appId)) {

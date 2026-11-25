@@ -180,3 +180,12 @@ it('refuses missing immutable turn credentials without reading a replacement tok
   expect(JSON.parse(out.join(''))).toMatchObject({ ok: false, error: { code: 'AGENT_TURN_REQUIRED', message: expect.stringContaining('本轮提供的完整 agent --turn') } });
   expect(fetcher).not.toHaveBeenCalled();
 });
+
+it('submits the original command as literal data using the bound risk request', async () => {
+  const summary = 'Publish the reviewed changes';
+  const command = 'publish "example changes"';
+  const pending = { pendingApproval: true, approvers: ['Administrator'] };
+  expect(await agent(['risk', 'request', '--summary', summary, '--command', command], pending)).toMatchObject({
+    url: '/risk/requests', method: 'POST', turn: 'signed-turn', calls: 1, body: { summary, command }, output: { ok: true, data: pending }
+  });
+});

@@ -611,6 +611,20 @@ describe('approve-reads 只读判定', () => {
     expect(events).toEqual([expect.objectContaining({ type: 'permission_request', data: expect.objectContaining({ id: 'risky_read', status: 'rejected' }) })]);
   });
 
+  it('keeps ACP rejection unchanged and checks credentials during an approved continuation', async () => {
+    const { adapter, runtime } = await setup({ permissionMode: 'full-trust' });
+    const base = { enabled: true, authorized: false, pattern: 'publish' };
+    const decide = (command: string) => runtime.options.onPermissionRequest(request('example', { kind: 'execute', rawInput: { command } }));
+    adapter.setRiskPolicy(base);
+    expect(await decide('publish example')).toEqual({ outcome: 'reject_once' });
+    adapter.setRiskPolicy({ ...base, approvedAttempt: 'attempt_example' });
+    expect(await decide('publish example')).toEqual({ outcome: 'allow_once' });
+    expect(await decide('cat .env')).toEqual({ outcome: 'reject_once' });
+    expect(await runtime.options.onPermissionRequest(request('credential_file', { kind: 'read', rawInput: { path: '.env' } }))).toEqual({ outcome: 'reject_once' });
+    adapter.setRiskPolicy(base);
+    expect(await decide('publish again')).toEqual({ outcome: 'reject_once' });
+  });
+
   it('ask 模式下声明为 read 的请求也要审批', async () => {
     const { runtime, events } = await setup({ permissionMode: 'ask' });
     expect(await settledNow(runtime.options.onPermissionRequest(request('ask_read', { kind: 'read', title: 'Read file' }, 'read')))).toBe('pending');

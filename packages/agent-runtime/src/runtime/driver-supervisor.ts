@@ -404,7 +404,18 @@ export class DriverSupervisor {
       catch (error) { this.deps.options.log?.warn({ sessionId, code: error instanceof RuntimeError ? error.code : 'IDLE_RETIREMENT_ERROR', error }, 'Idle driver check failed'); }
     }
   }
-  private async retireIdleDriver(sessionId: string, driver: AgentDriver, at: number, timeout: number) {
+  readonly pendingApprovalRetirements = new Set<string>();
+
+  retireForRiskContinuation(id: string, driver: AgentDriver, stillIdle: () => boolean) {
+    if (this.pendingApprovalRetirements.has(id)) return;
+    this.pendingApprovalRetirements.add(id);
+    // Stop or preparation can take longer than a card callback. Keep reconciling the durable deadline while it runs.
+    void this.retireIdleDriver(id, driver, Date.now(), 0, stillIdle)
+      .catch(error => this.deps.warnCaught('retireForRiskContinuation', id, error))
+      .finally(() => this.pendingApprovalRetirements.delete(id));
+  }
+
+  private async retireIdleDriver(sessionId: string, driver: AgentDriver, at: number, timeout: number, stillIdle?: () => boolean) {
     // Native background work counts as running for the restart drain too; it may stay silent past the timeout.
     // A stop-blocked driver belongs to its background recheck.
     if (this.mutations.attempts.has(sessionId) || this.stops.driver(sessionId) || this.deps.registry.method(driver, 'hasBackgroundWork')?.() || at - (this.lastActivity.get(sessionId) ?? at) < timeout) return;
@@ -414,10 +425,11 @@ export class DriverSupervisor {
     if (this.deps.registry.supports(driver, 'prepareForIdleRetirement') && !await driver.prepareForIdleRetirement()) {
       // 一直确认不了原生会话的多半卡在启动阶段，没有可续的上下文；原生记录留在磁盘上，回收只结束进程。
       const idleMs = at - (this.lastActivity.get(sessionId) ?? at);
-      if (idleMs < timeout + IDLE_RETIREMENT_UNPREPARED_MS) return;
+      if (stillIdle || idleMs < timeout + IDLE_RETIREMENT_UNPREPARED_MS) return;
       this.deps.options.log?.warn({ sessionId, code: 'IDLE_RETIREMENT_UNPREPARED', idleMs }, 'Retiring an idle driver whose native session could not be confirmed');
     }
     if (this.drivers.get(sessionId) !== driver || this.mutations.attempts.has(sessionId) || this.deps.registry.method(driver, 'hasBackgroundWork')?.() || this.mutations.owners.lifecycle(sessionId) !== lifecycle) return;
+    if (stillIdle && !stillIdle()) return;
     await this.finishIdleRetirement(sessionId, driver, lifecycle);
   }
   private async finishIdleRetirement(sessionId: string, driver: AgentDriver, lifecycle: Owner) {

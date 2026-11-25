@@ -58,7 +58,12 @@ export class SteeringService {
       const { session } = await this.deps.active(id);
       const task = this.deps.repos.execution.getTaskExecution(taskId)?.task;
       if (!task) throw new RuntimeError('QUEUED_TASK_NOT_FOUND', 'Queued task is missing', 404);
-      const committed = await this.mutations.write(id, async () => this.deps.wake(this.deps.bound().promoteQueued(this.deps.fence(session), taskId, expectedRevision ?? task.revision, { operationId, actor: this.deps.actor(session, actorId), interrupt: true })));
+      const committed = await this.mutations.write(id, async () => {
+        const owner = this.mutations.attempts.get(id);
+        const ref = owner && this.mutations.attemptRefs.get(owner);
+        if (ref && this.deps.repos.execution.getTaskExecution(ref.taskId)?.task.executionContext?.riskPolicy?.approvalRequestId) return { task };
+        return this.deps.wake(this.deps.bound().promoteQueued(this.deps.fence(session), taskId, expectedRevision ?? task.revision, { operationId, actor: this.deps.actor(session, actorId), interrupt: true }));
+      });
       await this.deps.projectQueue(id); await this.deps.applyQueueActions(session); this.deps.unblockQueue(id); this.deps.scheduleQueue(id);
       return this.deps.publicTask(committed.task!);
     }));
@@ -92,6 +97,7 @@ export class SteeringService {
       const target = running();
       if (!target || expectedTarget && (target.ref.taskId !== expectedTarget.taskId
         || expectedTarget.attemptId !== undefined && target.ref.attemptId !== expectedTarget.attemptId)) return skipped('promptRequired');
+      if (target.task.executionContext?.riskPolicy?.approvalRequestId || task.executionContext?.riskPolicy?.approvalRequestId) return skipped('incompatible');
       const input = this.deps.acceptedInput(task);
       if (task.currentAttemptId || digest(input.executionOptions) !== digest(this.deps.acceptedInput(target.task).executionOptions)
         || digest(task.executionContext?.riskPolicy ?? null) !== digest(target.task.executionContext?.riskPolicy ?? null)) return skipped('incompatible');

@@ -395,6 +395,7 @@ export class DutydeckRuntime {
       fence: (...args) => this.fence(...args),
       gate: this.gate,
       hasBinding: () => !!this.binding,
+      executionProcessesGone: id => this.recovery.executionProcessesGone(id),
       humanWaits: this.humanWaits,
       interruptOwnedAttempt: (...args) => this.interruptOwnedAttempt(...args),
       localResources: this.localResources,
@@ -1182,6 +1183,56 @@ export class DutydeckRuntime {
     this.agentChecks.set(agentId, check);
     return check;
   }
+  isRiskContinuation(id: string, taskId?: string) {
+    const task = this.activeTasks.get(id);
+    return Boolean(task?.executionContext?.riskPolicy?.approvalRequestId) && (taskId === undefined || task?.id === taskId);
+  }
+
+  async isRiskApprovalActive(id: string, taskId: string, attempt: string) {
+    const current = this.getActiveTaskContext(id);
+    if (current?.taskId !== taskId || !current.attemptId || this.shuttingDown) return false;
+    const task = this.activeTasks.get(id);
+    const policy = await this.options.policy.riskPolicy?.(id, task?.executionContext?.riskPolicy);
+    const latest = this.repos.execution.getTaskExecution(taskId);
+    return policy?.approvedAttempt === attempt && this.getActiveTaskContext(id)?.attemptId === current.attemptId
+      && latest?.currentAttempt?.attemptId === current.attemptId && latest.task.status === 'running' && latest.currentAttempt.state === 'active';
+  }
+
+  async riskContinuationReady(id: string, approval?: { queued: boolean; expiresAt: number }): Promise<boolean> {
+    const idle = () => (!approval || Date.now() < approval.expiresAt) && !this.shuttingDown && !this.isQueueHeld() && !this.recoveryInFlight(id) && !this.scheduler.sessionHeld(id)
+      && !this.humanWaits.awaitingAnswer(id) && !this.humanWaits.pendingPermissionCount(id)
+      && !this.repos.execution.getUnresolvedTasks(id).length;
+    if (!idle() || this.supervisor.pendingApprovalRetirements.has(id)) return false;
+    const session = await this.repos.sessions.get(id);
+    if (!session || session.archivedAt || !['idle', 'completed', 'interrupted'].includes(session.state) || !idle()) return false;
+    const queueClear = () => !this.repos.execution.hasQueuedOrRunningTasks(id, approval?.queued);
+    if (!queueClear()) return false;
+    if (this.scheduler.riskBackgroundCleared(id)) return true;
+    try {
+      if (!this.supervisor.drivers.has(id)) {
+        await this.recovery.observeAbandonedResources(session);
+        await this.recovery.retireDetachedPty(session);
+        if (!idle() || !queueClear()) return false;
+        if (this.recovery.executionProcessesGone(id)) return true;
+        // A surviving persistent terminal may still supply native background or retirement evidence.
+        await this.supervisor.getTerminalDriver(id);
+      }
+      if (!idle() || !queueClear()) return false;
+      if (this.scheduler.riskBackgroundCleared(id)) return true;
+      const driver = this.supervisor.drivers.get(id);
+      if (!driver) return false;
+      const mayRetire = () => idle() && queueClear() && this.supervisor.drivers.get(id) === driver
+        && !this.registry.method(driver, 'isDetachedForShutdown')?.() && !this.registry.method(driver, 'hasBackgroundWork')?.()
+        && this.registry.foregroundIdle(driver) && this.registry.method(driver, 'backgroundWorkCleared')?.() !== true;
+      if (!mayRetire()) return false;
+      this.supervisor.retireForRiskContinuation(id, driver, mayRetire);
+      return false;
+    } catch (error) {
+      this.warnCaught('riskContinuationReady', id, error);
+      return false;
+    }
+  }
+
   /**
    * 会话的 Agent 此刻是否停下：本进程还有这个会话的轮次在跑为 busy；驱动确认没有在途轮次为 idle；
    * 没有驱动时（比如服务重启后），执行进程都已确认退出或从没建起来也是 idle；驱动说不准、或还有没确认退出的进程（可能是还没接回的持久终端）为 unknown。

@@ -441,3 +441,19 @@ describe('agent commands during listener startup', () => {
     } finally { vi.useRealTimers(); await listener.close(); }
   });
 });
+
+it('checks the signed human turn before handing a risk request to the listener', async () => {
+  const f = await setup();
+  f.setActive({ taskId: 'task_example', attemptId: 'attempt_example', actorId: 'ou_requester' });
+  const handler = vi.fn(async () => ({ pendingApproval: true, approvers: ['Admin'] }));
+  f.tools.commands.set('cli_bot', vi.fn(), undefined, undefined, handler);
+  const data = { summary: 'Publish the reviewed changes', command: 'publish example' };
+  expect((await f.agent('POST', 'risk/requests', data, 'old-turn')).statusCode).toBe(403);
+  f.automated.add('task_example');
+  expect((await f.agent('POST', 'risk/requests', data)).statusCode).toBe(403);
+  f.automated.clear();
+  expect((await f.agent('POST', 'risk/requests', { ...data, actorId: 'ou_admin' })).statusCode).toBe(400);
+  expect(handler).not.toHaveBeenCalled();
+  expect((await f.agent('POST', 'risk/requests', data)).json()).toEqual({ pendingApproval: true, approvers: ['Admin'] });
+  expect(handler).toHaveBeenCalledWith({ ...data, sessionId: f.group.id, actorId: 'ou_requester', taskId: 'task_example', turnToken: f.currentTurn() });
+});

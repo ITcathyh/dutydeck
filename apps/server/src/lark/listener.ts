@@ -341,7 +341,7 @@ export class LarkLongConnectionListener implements LarkListener {
       (current, chatId, senderOpenId) => coordinator.trustsBotSender(current, chatId, senderOpenId));
     if (coordinator && this.options.agentCommands) {
       this.agentCommand = request => coordinator.agentCommand(request);
-      this.options.agentCommands.set(config.appId, this.agentCommand, request => coordinator.agentView(request), request => coordinator.agentSettings(request));
+      this.options.agentCommands.set(config.appId, this.agentCommand, request => coordinator.agentView(request), request => coordinator.agentSettings(request), request => coordinator.requestRiskApproval(request));
     }
     void this.options.participation?.recover(config.appId).catch(error => this.log.warn({ error, appId: config.appId }, '群观察恢复失败'));
     try { await coordinator?.startReconciliation(config); }

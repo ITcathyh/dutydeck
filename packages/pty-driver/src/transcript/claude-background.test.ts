@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { appendFileSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { ClaudeBackgroundTasks } from './claude-background.js';
 import { ClaudeTranscriptTailer, claudePendingBackgroundWork } from './claude.js';
 
 // Verbatim records from a Claude Code 2.1.280 session that launched one
@@ -26,6 +27,38 @@ describe('claudePendingBackgroundWork', () => {
 describe('ClaudeTranscriptTailer background work', () => {
   let directory: string | undefined;
   afterEach(() => { if (directory) rmSync(directory, { recursive: true, force: true }); });
+
+  it('waits for a native receipt even when the tool responds with unstructured text', () => {
+    const tracker = new ClaudeBackgroundTasks();
+    tracker.observe({ type: 'assistant', message: { content: [{ type: 'tool_use', name: 'Bash', id: 'call' }] } });
+    const message = { content: [{ type: 'tool_result', tool_use_id: 'call', content: 'finished' }] };
+    tracker.observe({ type: 'user', message });
+    expect(tracker.cleared()).toBe(false);
+    tracker.observe({ type: 'user', message, toolUseResult: { stdout: '', stderr: '', interrupted: false } });
+    expect(tracker.cleared()).toBe(true);
+  });
+
+  it('requires a complete, current native transcript before confirming background work has cleared', async () => {
+    directory = mkdtempSync(join(tmpdir(), 'approval-native-'));
+    const path = join(directory, 'session.jsonl');
+    writeFileSync(path, '');
+    const tailer = new ClaudeTranscriptTailer({ cwd: directory, transcriptPath: path });
+    const end = (id: string, count: number) => JSON.stringify({ type: 'system', subtype: 'turn_duration',
+      uuid: id, pendingBackgroundAgentCount: count, pendingWorkflowCount: 0 }) + '\n';
+    tailer.start();
+    try {
+      await tailer.flush();
+      expect(tailer.backgroundWorkCleared()).toBe(false);
+      appendFileSync(path, end('pending',1)); await tailer.flush();
+      expect(tailer.backgroundWorkCleared()).toBe(false);
+      appendFileSync(path, end('finished',0)); await tailer.flush();
+      expect(tailer.backgroundWorkCleared()).toBe(true);
+      appendFileSync(path, '{');
+      expect(tailer.backgroundWorkCleared()).toBe(false);
+      appendFileSync(path, '\n' + end('later',0)); await tailer.flush();
+      expect(tailer.backgroundWorkCleared()).toBe(false);
+    } finally { tailer.stop(); }
+  });
 
   it('reports what the latest turn ended with until a new prompt resets it', async () => {
     directory = mkdtempSync(join(tmpdir(), 'dutydeck-claude-background-'));

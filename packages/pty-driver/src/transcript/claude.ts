@@ -481,6 +481,8 @@ export class ClaudeTranscriptTailer implements TranscriptEventSource {
   private readonly locator?: ClaudeSessionTranscriptLocator;
   private backgroundWork = 0;
   private backgroundReported = false;
+  private backgroundCountValid = false;
+  private nativeScheduleSeen = false;
   private readonly backgroundTasks = new ClaudeBackgroundTasks();
   private observedInputId?: string;
   private readonly memoryCalls = new Map<string, string>();
@@ -576,6 +578,8 @@ export class ClaudeTranscriptTailer implements TranscriptEventSource {
       baselineMapping: true,
       mapEntry: (entry, baseline, position) => {
         const backgroundChanged = this.backgroundTasks.observe(entry, position);
+        if (entry?.turnOrigin === 'scheduled' || entry?.subtype === 'scheduled_task_fire' ||
+          Array.isArray(entry?.message?.content) && entry.message.content.some((block: any) => block.type === 'tool_use' && block.name === 'CronCreate')) this.nativeScheduleSeen = true;
         const nativeInput = claudeInputText(entry) !== undefined && entry.isSidechain !== true;
         const notification = entry.turnOrigin === 'task_notification' || entry.origin?.kind === 'task-notification';
         if (nativeInput && !notification) { this.observedInputId = entry.uuid; this.memoryCalls.clear(); this.backgroundReported = false; }
@@ -600,6 +604,8 @@ export class ClaudeTranscriptTailer implements TranscriptEventSource {
             this.durationUuids.add(entry.uuid);
             if (replay && !baseline) return backgroundChanged ? [{ type: 'status', data: this.backgroundTasks.snapshot() }] : undefined;
           }
+          this.backgroundCountValid = [entry.pendingBackgroundAgentCount, entry.pendingWorkflowCount].every(count =>
+            count === undefined || Number.isSafeInteger(count) && count >= 0);
           this.backgroundReported = true;
           if (baseline) this.backgroundWork = reportedBackground;
         }
@@ -973,6 +979,7 @@ export class ClaudeTranscriptTailer implements TranscriptEventSource {
     this.locator?.wake();
     return this.tailer.waitForInput(prompt, signal);
   }
+  backgroundWorkCleared(): boolean { return this.tailer.hasCompleteHistory() && !this.nativeScheduleSeen && this.backgroundCountValid && this.backgroundReported && this.pendingBackgroundWork() === 0 && this.backgroundTasks.cleared(); }
   pendingBackgroundWork(): number { return Math.max(this.backgroundWork, this.backgroundReported ? this.backgroundTasks.snapshot().count : 0); }
   hasIndependentBackgroundWork(): boolean { return this.backgroundWork === 0 && this.backgroundTasks.independent(); }
   get requiresTurnTerminal(): boolean { return this.durationMarkerSeen && this.terminalScope && !this.durationComplete; }

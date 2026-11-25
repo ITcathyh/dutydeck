@@ -110,7 +110,7 @@ export class LarkPluginResultAdapter implements PluginResultAdapter {
     if (!bot) throw new PluginResultError('RESULT_PERMISSION_DENIED');
     const client=this.options.client(bot), t=delivery.target;
     const target={chatId:String(t.chat_id),...(t.reply_message_id ? {replyMessageId:String(t.reply_message_id),replyInThread:t.reply_in_thread===true}:{}),allowReplyFallback:false};
-    const input={state:'running' as const,readOnly:true,taskId:String(t.origin_message_id),sessionId:delivery.sessionId,turn:Number(t.turn),taskName:'受控插件结果',statusLabel:'结果已生成',
+    const input={state:'running' as const,readOnly:true,taskId:String(t.lark_task_id ?? t.origin_message_id),sessionId:delivery.sessionId,turn:Number(t.turn),taskName:'受控插件结果',statusLabel:'结果已生成',
       elements:[{tag:'markdown',element_id:'final_output',content:`结果已生成，仅原请求者可查看。\n\n[查看和下载](${t.web_base}/plugin-results/${delivery.id})`}],idempotencyKey:delivery.providerKey};
     const silent={warn:(..._args:unknown[])=>{}};
     const sent=recoverOnly ? await readConfirmedLarkResult(client,target,input,silent,this.options.repositories.config)

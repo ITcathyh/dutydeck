@@ -22,6 +22,7 @@ interface SchedulerDependencies {
   fence: (session: Session) => SessionFence;
   gate: Pick<SessionGate, 'reasons'>;
   hasBinding(): boolean;
+  executionProcessesGone(id: string): boolean;
   humanWaits: HumanWaits;
   interruptOwnedAttempt(ref: AttemptRef & SessionFence, operationId: string): Promise<void>;
   localResources: LocalDriverLedger;
@@ -32,7 +33,7 @@ interface SchedulerDependencies {
   runTask(id: string, task: TaskRecord, attempt: TaskAttempt): Promise<PublicTaskRecord>;
   shuttingDown(): boolean;
   steeringActive(id: string): boolean;
-  supervisor: Pick<DriverSupervisor, 'drivers' | 'driverOperations' | 'retiringDrivers' | 'stopDriver'>;
+  supervisor: Pick<DriverSupervisor, 'drivers' | 'driverOperations' | 'retiringDrivers' | 'pendingApprovalRetirements' | 'stopDriver'>;
   verifyingSessions: Set<string>;
   wake: <T extends CommitResult>(result: T) => T;
   warnCaught: (location: string, sessionId: string | undefined, error: unknown) => void;
@@ -91,6 +92,14 @@ export class Scheduler {
   sessionHeld(id: string): boolean {
     return this.deps.gate.reasons(id, 'held', { firstOnly: true }).length > 0;
   }
+  riskBackgroundCleared(id: string) {
+    if (this.deps.supervisor.pendingApprovalRetirements.has(id)) return false;
+    const driver = this.deps.supervisor.drivers.get(id);
+    if (!driver) return this.deps.executionProcessesGone(id);
+    return this.deps.registry.method(driver, 'hasBackgroundWork')?.() !== true && !this.deps.supervisor.retiringDrivers.has(id) && !this.deps.supervisor.driverOperations.get(driver)?.size
+      && !this.deps.humanWaits.pendingPermissionCount(id) && !this.deps.registry.method(driver, 'isDetachedForShutdown')?.()
+      && this.deps.registry.foregroundIdle(driver) && this.deps.registry.method(driver, 'backgroundWorkCleared')?.() === true;
+  }
   /** Ephemeral proof from the original adapters; no idle evidence survives a runtime restart. */
   idleResourceChecks(): ResourceCheckRef[] {
     const checks: ResourceCheckRef[] = [];
@@ -146,7 +155,15 @@ export class Scheduler {
       const session = await this.mutations.wait(() => this.deps.repos.sessions.get(id));
       if (!session) return;
       let next: TaskRecord | undefined;
-      try { next = (await this.queuedTasks(id))[0]; }
+      let ordinaryWhileWaiting: string | undefined;
+      try {
+        const queue = await this.queuedTasks(id);
+        next = queue[0];
+        if (next?.executionContext?.riskPolicy?.approvalRequestId && !this.riskBackgroundCleared(id)) {
+          const ordinary = queue.find(task => !task.executionContext?.riskPolicy?.approvalRequestId);
+          if (ordinary) { next = ordinary; ordinaryWhileWaiting = ordinary.id; }
+        }
+      }
       catch (error) { this.deps.warnCaught('drainQueue.readQueuedTasks', id, error); this.queueBlocked.add(id); return; }
       if (next && this.deps.repos.execution.getAcceptedTask(next.id)?.input?.version !== 2) { this.queueBlocked.add(id); return; }
       const retry = next && this.deps.repos.execution.getTaskExecution(next.id)?.currentAttempt?.automaticRetry;
@@ -171,7 +188,8 @@ export class Scheduler {
       try {
         await this.mutations.write(id, async () => {
           if (this.deps.supervisor.retiringDrivers.has(id)) throw new RuntimeError('WORKSPACE_RESOURCE_BLOCKED', 'The original idle driver is still closing', 409);
-          claimed = this.wakeOptional(this.deps.bound().claimNext(this.deps.fence(session),this.idleResourceChecks()));
+          const cleared = next?.executionContext?.riskPolicy?.approvalRequestId && this.riskBackgroundCleared(id) ? next.id : undefined;
+          claimed = this.wakeOptional(this.deps.bound().claimNext(this.deps.fence(session), this.idleResourceChecks(), cleared, ordinaryWhileWaiting));
           if (claimed?.task && claimed.attempt) {
             token = this.mutations.turnOwner(id);
             this.mutations.attemptRefs.set(token, { sessionId: id, runId: claimed.attempt.runId, taskId: claimed.task.id, attemptId: claimed.attempt.attemptId });
@@ -179,6 +197,15 @@ export class Scheduler {
           }
         });
       } catch (error) {
+        if (error instanceof RuntimeError && error.code === 'RISK_APPROVAL_WAITING' && next) {
+          const timer = setTimeout(() => {
+            this.capacityTimers.delete(id);
+            this.mutations.run(undefined, () => this.scheduleQueue(id));
+          }, 1000);
+          timer.unref();
+          this.capacityTimers.set(id, { taskId: next.id, timer });
+          return;
+        }
         if (error instanceof RuntimeError && error.code === 'WORK_ITEM_CAPACITY_BLOCKED') {
           // A release may race the rejected claim's promise continuation. Recheck that wake once.
           this.blockOnResources(id, resourceRevision);

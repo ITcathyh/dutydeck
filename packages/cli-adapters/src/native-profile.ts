@@ -87,6 +87,7 @@ export interface TranscriptEventSource {
   /** Background sub-agents the CLI reported still running when its latest
    *  turn ended. Only sources whose transcript records it (Claude) implement this. */
   pendingBackgroundWork?(): number;
+  backgroundWorkCleared?(): boolean;
   hasIndependentBackgroundWork?(): boolean;
   /** Forget that report at a new prompt; the new turn's own end record decides. */
   resetBackgroundWork?(): void;

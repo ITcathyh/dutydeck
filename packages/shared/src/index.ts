@@ -271,6 +271,12 @@ export interface PermissionRequestData {
 }
 
 export interface ToolRiskPolicy {
+  /** Reference to the original request. The host must verify its decision and current execution before granting. */
+  approvalRequestId?: string;
+  /** Live fields are never part of the accepted task input. */
+  approvedAttempt?: string;
+  approvalCheckUrl?: string;
+  requestPrefix?: string;
   enabled: boolean;
   authorized: boolean;
   pattern: string;

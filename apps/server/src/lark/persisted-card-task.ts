@@ -16,6 +16,12 @@ export function parseOptionalCardTask(extra: string | null | undefined) {
   return extra ? parseCardTask(extra) : undefined;
 }
 
+// Only the host's approval continuation maps a synthetic task ID to the requester's original message.
+export function requestMessageId(externalId: string, saved: Pick<Partial<PersistedLarkCardTask>, 'anchor_message_id'>) {
+  const id = externalId.startsWith('risk_approval_') ? saved.anchor_message_id : externalId;
+  return id?.startsWith('om_') ? id : undefined;
+}
+
 export const persistedMessageAnchor = (saved: PersistedLarkCardTask, externalId: string) =>
   saved.anchor_message_id ?? saved.reply_message_id ?? externalId;
 

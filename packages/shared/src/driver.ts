@@ -170,6 +170,8 @@ export interface AgentDriver {
    * 结果未知的一轮靠它判断 Agent 是否已经停下。
    */
   isIdle?(): boolean;
+  /** Positive native evidence that background work has finished. Missing evidence cannot open an approval. */
+  backgroundWorkCleared?(): boolean;
   /** Positive idle or activity evidence, or why the driver cannot tell. */
   quiescence?(): { state: 'idle' | 'busy' | 'unknown'; evidence: string };
   /** Native background work can outlive the submitted main turn. */

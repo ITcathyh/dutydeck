@@ -38,7 +38,7 @@ export function normalizeCardCallback(raw: any) {
 
 /** dutydeck 内置按钮标记：命中的动作只能走内置处理，任何外部接收方都不得接管。 */
 export const isBuiltinCardAction = (value?: Record<string, unknown>): boolean =>
-  Boolean(value && Object.keys(value).some(key => key === 'task_id' || key === 'taskId' || key.startsWith('dutydeck_') || key === 'dockmux_workflow'));
+  Boolean(value && Object.keys(value).some(key => key === 'risk_request' || key === 'task_id' || key === 'taskId' || key.startsWith('dutydeck_') || key === 'dockmux_workflow'));
 
 /** 外部处理器认领规则：声明了 owner 或 legacyActions 的处理器只认领对应卡片；都未声明时是兜底处理器。 */
 export const cardActionMatchesHandler = (handler: { owner?: string; legacyActions?: string[] }, value?: Record<string, unknown>): boolean => {

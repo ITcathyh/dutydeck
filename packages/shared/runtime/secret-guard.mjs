@@ -1,5 +1,7 @@
 import { execFile } from 'node:child_process';
 import { accessSync, constants as fsConstants, readFileSync, realpathSync, statSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { mkdirSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, delimiter, dirname, extname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -180,13 +182,80 @@ export function secretGuardFinding(event, { home = process.env.HOME || homedir()
   return undefined;
 }
 
+// A receipt contains only a digest. Both the attempt token and the exact command must agree.
+function denialReceipt(root, sessionId, token, command) {
+  if (!root || !safeSessionComponent(sessionId) || !token || typeof command !== 'string') return undefined;
+  const digest = createHash('sha256').update(JSON.stringify([token, command])).digest('hex');
+  return join(resolve(root), '.dutydeck', 'security', 'sessions', sessionId + '.denials', digest);
+}
+
+export function recordRiskDenial(root, sessionId, policy, event) {
+  const input = event?.tool_input ?? event?.toolInput;
+  const token = policy?.requestPrefix?.match(/ agent --turn ([^ ]+)$/)?.[1];
+  const path = denialReceipt(root, sessionId, token, input?.cmd ?? input?.command ?? event?.command);
+  if (!path || secretGuardFinding(event)) return;
+  try {
+    mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+    writeFileSync(path, '', { mode: 0o600, flag: 'wx' });
+  } catch { /* Unavailable evidence cannot authorize a request. */ }
+}
+
+export function hasRiskDenial(root, sessionId, token, command) {
+  const path = denialReceipt(root, sessionId, token, command);
+  try { return Boolean(path && statSync(path).isFile()); } catch { return false; }
+}
+
+/** Only literal CLI arguments are data. Never exempt shell operators, expansions or another tool payload. */
+export function riskRequestInvocation(event, prefix) {
+  if (!prefix || typeof prefix !== 'string') return false;
+  const name = String(event?.tool_name ?? event?.toolName ?? '').toLowerCase();
+  const input = event?.tool_input ?? event?.toolInput;
+  if (!['bash','shell','exec_command','shell_command'].includes(name) || !input || typeof input !== 'object') return false;
+  if (!Object.keys(input).every(key => ['cmd','command','description','timeout','yield_time_ms','max_output_tokens','workdir'].includes(key))) return false;
+  if (input.workdir !== undefined && input.workdir !== event.cwd) return false;
+  if (input.cmd !== undefined && input.command !== undefined) return false;
+  const command = input.command ?? input.cmd;
+  const start = prefix + ' risk request ';
+  if (typeof command !== 'string' || !command.startsWith(start) || event.command !== undefined && event.command !== command) return false;
+  // Single/double quoted literals, including POSIX concatenated quotes for an apostrophe. Unquoted shell syntax is rejected.
+  const rest = command.slice(start.length);
+  const literal = /(?:'[^']*'|"[^"$`\\!]*"|\\'|[\p{L}\p{N}.,_:/@+=-])+/uy;
+  const words = [];
+  let cursor = 0;
+  while (cursor < rest.length) {
+    literal.lastIndex = cursor;
+    const match = literal.exec(rest);
+    if (!match) return false;
+    words.push(match[0]); cursor = literal.lastIndex;
+    if (cursor < rest.length && !/[ \t]/.test(rest[cursor])) return false;
+    while (/[ \t]/.test(rest[cursor] ?? '')) cursor++;
+  }
+  return words.length === 4 && ((words[0] === '--summary' && words[2] === '--command') || (words[0] === '--command' && words[2] === '--summary'));
+}
+
+/** A stale policy file (including while the daemon is down) cannot extend an approved attempt. */
+export async function liveRiskApproval(policy) {
+  if (!policy.approvedAttempt || !policy.approvalCheckUrl) return false;
+  try {
+    const address = process.env.dutydeck_group_tools_url + '/risk/status';
+    if (address !== policy.approvalCheckUrl) return false;
+    const endpoint = new URL(address);
+    if (!['http:', 'https:'].includes(endpoint.protocol) || endpoint.username || endpoint.password) return false;
+    const response = await fetch(endpoint, { redirect: 'error', signal: AbortSignal.timeout(1000),
+      headers: { authorization: 'Bearer ' + process.env.dutydeck_group_tools_token, 'x-dutydeck-work-turn': policy.approvedAttempt } });
+    return response.ok && (await response.json()).approved === true;
+  } catch { return false; }
+}
+
 /** 高危拦截的统一说明，接在拦截原因后面：不回显命令，只告诉 Agent 不要绕过、该找谁。 */
 const highRiskBlockedSuffix = '没有执行。不要重试同一命令或换写法绕过，请让有高危授权的人确认。';
 /** 高危正则没能跑完（超时、语法错误、隔离线程失败）时的说明：按拒绝处理，但不是权限问题，找授权人没用。 */
 const highRiskCheckFailedSuffix = '已按拒绝处理，没有执行。这是风险管控的检查本身出错，不是权限不够；请让管理员检查配置的高危操作正则。';
 /** 原因本身已以句末标点结尾时不再补句号，避免拼出“。。”。 */
 const sentence = text => /[。！？.!?]$/.test(text) ? text : `${text}。`;
-export const highRiskBlockedReason = reason => sentence(reason.trim()) + highRiskBlockedSuffix;
+export const highRiskBlockedReason = (reason, prefix) => sentence(reason.trim()) + (prefix
+  ? `没有执行。请用 ${prefix} risk request --summary … --command … 申请管理员批准；不重试或换方法绕过。`
+  : highRiskBlockedSuffix);
 export const highRiskCheckFailedReason = detail => sentence(detail) + highRiskCheckFailedSuffix;
 
 export function secretGuardReason(finding) {
@@ -273,7 +342,8 @@ export function secretGuardActive({ root, sessionId }) {
 const regexWorker = "const { parentPort, workerData } = require('node:worker_threads'); try { parentPort.postMessage({ matched: new RegExp(workerData.pattern, 'i').test(workerData.input) }); } catch (error) { parentPort.postMessage({ error: error instanceof Error ? error.message : String(error) }); }";
 
 /** 工具输入命中本轮高危正则时返回拒绝原因。正则在隔离线程里跑，超过 1 秒或出错按拒绝处理。 */
-async function highRiskReason(policy, event) {
+async function highRiskReason(policy, event, root, sessionId) {
+  if (riskRequestInvocation(event, policy.requestPrefix) || await liveRiskApproval(policy)) return '';
   if (!policy.pattern) return '';
   const input = strings({ tool_name: event?.tool_name ?? event?.toolName, tool_input: event?.tool_input ?? event?.toolInput, command: event?.command }).join('\n');
   return new Promise(resolve => {
@@ -281,7 +351,10 @@ async function highRiskReason(policy, event) {
     let settled = false;
     const finish = reason => { if (settled) return; settled = true; clearTimeout(timer); worker.removeAllListeners(); void worker.terminate(); resolve(reason); };
     const timer = setTimeout(() => finish(highRiskCheckFailedReason('高危正则匹配超过 1000ms，已终止')), 1000);
-    worker.once('message', result => finish(result.error ? highRiskCheckFailedReason(`高危正则无法使用：${result.error}`) : result.matched ? highRiskBlockedReason(policy.reason || '当前飞书发送人无权执行高危操作') : ''));
+    worker.once('message', result => {
+      if (result.matched && !result.error) recordRiskDenial(root, sessionId, policy, event);
+      finish(result.error ? highRiskCheckFailedReason(`高危正则无法使用：${result.error}`) : result.matched ? highRiskBlockedReason(policy.reason || '当前飞书发送人无权执行高危操作', policy.requestPrefix) : '');
+    });
     worker.once('error', error => finish(highRiskCheckFailedReason(`高危正则匹配的隔离线程失败：${error.message}`)));
     worker.once('exit', code => { if (code !== 0) finish(highRiskCheckFailedReason(`高危正则匹配的隔离线程异常退出：${code}`)); });
   });
@@ -306,7 +379,7 @@ async function runHook() {
   }
   if (!policy) return;
   const finding = secretGuardFinding(event);
-  const reason = finding ? secretGuardReason(finding) : await highRiskReason(policy, event);
+  const reason = finding ? secretGuardReason(finding) : await highRiskReason(policy, event, root, process.env.dutydeck_session_id);
   if (!reason) return;
   process.stdout.write(JSON.stringify({ hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: reason } }));
 }

@@ -45,6 +45,10 @@ export class DriverRegistry {
     const method: (...args: never[]) => unknown = driver[key]!;
     return method.bind(driver) as AgentDriver[K];
   }
+  foregroundIdle(driver: AgentDriver): boolean {
+    const quiescence = this.method(driver, 'quiescence');
+    return quiescence ? quiescence().state === 'idle' : this.method(driver, 'isIdle')?.() === true;
+  }
   create(agent: AgentConfig, session: Session, onEvent: DriverCreateInput['onEvent'], onExit: DriverCreateInput['onExit'], context: DriverCreateInput['context']) {
     const provider = this.for(session.protocol);
     if (!provider) throw new RuntimeError('DRIVER_UNAVAILABLE', `No driver provider for ${session.protocol}`, 503);

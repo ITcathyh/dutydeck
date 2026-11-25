@@ -192,7 +192,14 @@ export function composeRuntime({ config, repos, env, log, options, channel, life
         const background = await ports.collaboration().riskPolicy(sessionId, fallback);
         if (background) return background.policy;
         const binding = await ports.workItems().parentForSession(sessionId) ?? await ports.delegations().parentForSession(sessionId);
-        return binding ? workItemRiskPolicy(repos, groupManager, binding.parentSessionId, binding.actorId, fallback, env, workbenchHttp.fetch, capturedRiskPolicy(repos, binding.parentTaskId)) : groupManager.riskPolicy(sessionId, fallback);
+        if (binding) return workItemRiskPolicy(repos, groupManager, binding.parentSessionId, binding.actorId, fallback, env, workbenchHttp.fetch, capturedRiskPolicy(repos, binding.parentTaskId));
+        const active = runtime.getActiveTaskContext(sessionId);
+        if (!active?.attemptId) return groupManager.riskPolicy(sessionId, fallback);
+        const session = await repos.sessions.get(sessionId);
+        if (session?.source !== 'lark') return groupManager.riskPolicy(sessionId, fallback);
+        const host = capabilities.environmentFor(session);
+        return groupManager.riskPolicy(sessionId, fallback, { ...active, token: capabilities.finalTurnToken(sessionId, active.taskId, active.attemptId),
+          command: host.dutydeck_group_tools_command!, url: host.dutydeck_group_tools_url! });
       },
     },
     promptAssembler: {

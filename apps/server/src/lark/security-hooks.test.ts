@@ -1,7 +1,9 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { createServer } from 'node:http';
+import { hasRiskDenial, secretGuardScriptPath } from '@dutydeck/shared/secret-guard';
 import { spawn } from 'node:child_process';
-import { tmpdir } from 'node:os';
+import { networkInterfaces, tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import type { AgentConfig } from '@dutydeck/shared';
@@ -12,9 +14,9 @@ vi.mock('./codex-hook-readiness.js', () => ({ codexHookReadiness: async () => ({
 const workspaces: string[] = [];
 afterEach(async () => Promise.all(workspaces.splice(0).map(path => rm(path, { recursive: true, force: true }))));
 
-const runGuard = async (workspace: string, agentId: 'codex' | 'cursor', sessionId: string, event: unknown) => new Promise<{ code: number | null; output: string }>((resolve, reject) => {
-  const script = join(workspace, '.dutydeck', 'security', `dutydeck-lark-high-risk-guard-${agentId}.mjs`);
-  const child = spawn(process.execPath, [script], { env: { ...process.env, dutydeck_session_id: sessionId, DUTYDECK_POLICY_ROOT: workspace }, stdio: ['pipe', 'pipe', 'pipe'] });
+const runGuard = async (workspace: string, agentId: 'codex' | 'cursor' | 'process', sessionId: string, event: unknown, env: Record<string,string> = {}) => new Promise<{ code: number | null; output: string }>((resolve, reject) => {
+  const script = agentId === 'process' ? secretGuardScriptPath() : join(workspace, '.dutydeck', 'security', `dutydeck-lark-high-risk-guard-${agentId}.mjs`);
+  const child = spawn(process.execPath, [script], { env: { ...process.env, ...env, dutydeck_session_id: sessionId, DUTYDECK_POLICY_ROOT: workspace }, stdio: ['pipe', 'pipe', 'pipe'] });
   let output = ''; let error = '';
   child.stdout.on('data', chunk => { output += chunk; }); child.stderr.on('data', chunk => { error += chunk; });
   child.once('error', reject); child.once('close', code => error ? reject(new Error(error)) : resolve({ code, output }));
@@ -176,7 +178,7 @@ describe('Lark Agent security hooks', () => {
     const workspace = await mkdtemp(join(tmpdir(), 'dutydeck-hook-')); workspaces.push(workspace);
     expect(await installLarkHook('pi', workspace)).toMatchObject({ agentId: 'pi', supported: true, installed: true });
     const extension = await readFile(join(workspace, '.pi/extensions/dutydeck-high-risk-guard.ts'), 'utf8');
-    expect(extension).toContain('dutydeck-high-risk-guard-v6');
+    expect(extension).toContain('dutydeck-high-risk-guard-v7');
     expect(extension).toContain("pi.on('tool_call'");
     expect(await larkHookStatus('claudecode', workspace)).toMatchObject({ agentId: 'claude', supported: true, installed: false });
     expect(await larkHookStatus('cursoragent', workspace)).toMatchObject({ agentId: 'cursor', supported: true, installed: false });
@@ -269,4 +271,42 @@ describe('Lark Agent security hooks', () => {
     await expect(installLarkHook('gemini', workspace)).rejects.toMatchObject({ code: 'RISK_CONTROL_UNSUPPORTED', statusCode: 422 });
     expect(await larkHookStatus('gemini', workspace)).toMatchObject({ supported: false, installed: false, writable: false });
   });
+});
+
+it.each(['codex','process'] as const)('%s grants only regex exceptions while the attempt is live', async agent => {
+  const workspace = await mkdtemp(join(tmpdir(), 'approval-hook-')); workspaces.push(workspace);
+  if (agent === 'codex') await installLarkHook('codex', workspace);
+  const directory = join(workspace, '.dutydeck/security/sessions');
+  await mkdir(directory, { recursive: true });
+  const sessionId = 'ses_example';
+  const token = 'example-attempt';
+  const requestPrefix = 'dutydeck agent --turn ' + token;
+  const base = { enabled: true, authorized: false, pattern: 'publish', requestPrefix };
+  const policy = (fields = {}) => writeFile(join(directory, sessionId + '.json'), JSON.stringify({ ...base, ...fields }));
+  let active = true;
+  const server = createServer((req,res) => {
+    res.writeHead(200); res.end(JSON.stringify({ approved: req.url === '/risk/status' && req.headers['x-dutydeck-work-turn'] === token && active }));
+  });
+  const host = Object.values(networkInterfaces()).flat().find(net => net?.family === 'IPv4' && !net.internal)?.address ?? '127.0.0.1';
+  await new Promise<void>((resolve, reject) => server.once('error', reject).listen(0, host, resolve));
+  try {
+    const url = 'http://' + host + ':' + (server.address() as { port: number }).port;
+    const env = { dutydeck_group_tools_url: url, dutydeck_group_tools_token: 'fixture' };
+    const run = async (command: string) => (await runGuard(workspace, agent, sessionId, { cwd: workspace, tool_name: 'Bash', tool_input: { command } }, env)).output;
+    await policy();
+    expect(await run('publish example')).toContain(requestPrefix + ' risk request --summary');
+    expect(hasRiskDenial(workspace, sessionId, token, 'publish example')).toBe(true);
+    expect(await run(requestPrefix + " risk request --summary 'Reviewed change' --command 'publish example'")).toBe('');
+    const denied = await run('publish .env');
+    expect(denied).toContain('凭据保护'); expect(denied).not.toContain('risk request');
+    expect(hasRiskDenial(workspace, sessionId, token, 'publish .env')).toBe(false);
+    await policy({ pattern: '[' });
+    expect(await run('publish invalid')).not.toContain('risk request');
+    expect(hasRiskDenial(workspace, sessionId, token, 'publish invalid')).toBe(false);
+    await policy({ approvedAttempt: token, approvalCheckUrl: url + '/risk/status' });
+    expect(await run('publish other')).toBe('');
+    expect(await run('cat .env')).toContain('凭据保护');
+    active = false;
+    expect(await run('publish other')).toContain('permissionDecisionReason');
+  } finally { await new Promise<void>(resolve => server.close(() => resolve())); }
 });

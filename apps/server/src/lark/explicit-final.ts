@@ -6,14 +6,14 @@ import { larkFailureKind } from './api-gate.js';
 import { isLarkMessageUnupdatable } from './card-renderer.js';
 import { serialByKey, type ConfigRepository, type ChannelMapping } from '@dutydeck/shared';
 import type { PersistedLarkCardTask } from './coordinator.js';
-import { parseCardFields } from './persisted-card-task.js';
+import { parseCardFields, requestMessageId } from './persisted-card-task.js';
 import { isLarkFinalContentAuditRejected, recordLarkResultAuditRejection, prepareLarkResult, readConfirmedLarkResult, sendLarkResult, sendLarkDeliveryText, type DeliveryTarget } from './result-delivery.js';
 import { LarkServiceError, type LarkCardInput, type LarkCardService, type LarkWriteGuard } from './service.js';
 import type { LarkAgentSessionBinding } from './agent-tools.js';
 
 export interface ExplicitFinalScope {
   app_id: string; session_id: string; runtime_task_id: string; attempt_id: string;
-  origin_message_id: string; turn: number; chat_id: string; chat_type: 'group' | 'p2p';
+  origin_message_id: string; lark_task_id?: string; turn: number; chat_id: string; chat_type: 'group' | 'p2p';
   reply_message_id: string; reply_in_thread: boolean;
 }
 export interface ExplicitFinalContext { scope: ExplicitFinalScope; taskName: string }
@@ -42,14 +42,15 @@ export async function withExplicitFinalLock<T>(store: ConfigRepository | undefin
 
 // Routing comes only from the exact persisted mapping, never from agent text.
 export function explicitFinalContext(mapping: Pick<ChannelMapping, 'externalId' | 'sessionId'>, saved: Partial<PersistedLarkCardTask>, attemptId?: string): ExplicitFinalContext | undefined {
-  if (!attemptId || !saved.runtime_task_id || !saved.app_id || !saved.chat_id || !mapping.externalId.startsWith('om_')
+  const origin = requestMessageId(mapping.externalId, saved);
+  if (!attemptId || !saved.runtime_task_id || !saved.app_id || !saved.chat_id || !origin
     || !Number.isInteger(saved.turn) || !saved.task_name || !['group', 'p2p'].includes(saved.chat_type ?? '')) return;
   const reply = saved.reply_message_id ?? '';
-  if (saved.chat_type === 'group' && reply !== mapping.externalId) return;
-  if (saved.chat_type === 'p2p' && (reply || saved.reply_in_thread)) return;
+  if (saved.chat_type === 'group' && reply !== origin) return;
+  if (saved.chat_type === 'p2p' && (reply && (origin === mapping.externalId || reply !== origin) || saved.reply_in_thread)) return;
   return { taskName: saved.task_name, scope: {
     app_id: saved.app_id, session_id: mapping.sessionId, runtime_task_id: saved.runtime_task_id, attempt_id: attemptId,
-    origin_message_id: mapping.externalId, turn: saved.turn!, chat_id: saved.chat_id, chat_type: saved.chat_type as 'group' | 'p2p',
+    origin_message_id: origin, ...(origin !== mapping.externalId ? { lark_task_id: mapping.externalId } : {}), turn: saved.turn!, chat_id: saved.chat_id, chat_type: saved.chat_type as 'group' | 'p2p',
     reply_message_id: reply, reply_in_thread: saved.reply_in_thread === true
   } };
 }
@@ -161,7 +162,7 @@ export async function explicitFinalTextReceiptReader(store: ConfigRepository | u
 const log = { warn: (..._args: any[]) => {} };
 const finalInput = (record: FinalRecord) => ({
   state: 'running' as const, cardKind: 'result' as const, statusLabel: '答复已送达，执行尚未结束', readOnly: true,
-  taskId: record.scope.origin_message_id, taskName: record.task_name, sessionId: record.scope.session_id, turn: record.scope.turn,
+  taskId: record.scope.lark_task_id ?? record.scope.origin_message_id, taskName: record.task_name, sessionId: record.scope.session_id, turn: record.scope.turn,
   capabilities: { canCancelQueued: false, canInterrupt: false, canRetry: false, canRefresh: false, canVerify: false },
   elements: record.card_body?.elements ?? [{ tag: 'markdown', element_id: 'final_output', content: record.polished_content ?? record.content }],
   ...(record.card_body ? { cardBody: record.card_body } : {}), idempotencyKey: record.provider_uuid

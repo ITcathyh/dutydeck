@@ -27,6 +27,7 @@ export const isAutomatedRequest = (request?: { namespace: string; key: string })
 
 export interface AgentRequestToolsOptions {
   runtime: { getActiveTaskContext(sessionId: string): { taskId: string; actorId?: string; attemptId?: string } | undefined };
+  activeRiskApproval?(sessionId: string, taskId: string, attempt: string): Promise<boolean>;
   /** 定时或自动续作触发的一轮不能再代办，免得每次到点又建一个计划、又发一条命令。 */
   automatedTask(taskId: string): boolean;
   waitForListener?(appId: string): boolean | Promise<boolean>;
@@ -51,6 +52,16 @@ export async function registerAgentRequestTools(app: FastifyInstance, options: A
     await turnContext(request);
   };
   registerToolFamily<{ Params: { id: string; name: string }; Querystring: { page?: string }; Body: Record<string, unknown> | undefined }>(app, [toolNeeds.humanRequest, toolNeeds.scheduledRequest], {
+    riskStatus: async request => {
+      const { sessionId, taskId } = await turnContext(request);
+      return { approved: await options.activeRiskApproval?.(sessionId, taskId, String(request.headers['x-dutydeck-work-turn'])) === true };
+    },
+    'risk.request': async request => {
+      const { appId, ...turn } = await turnContext(request);
+      const body = z.object({ summary: z.string().trim().min(1).regex(/^[^\r\n]+$/, '请用一句话说明目的和原因'), command: z.string().min(1).refine(value => Boolean(value.trim())) }).strict().parse(request.body);
+      await requireListener(request, appId);
+      return options.tools.commands.riskRequest(appId, { ...turn, ...body, turnToken: String(request.headers['x-dutydeck-work-turn']) });
+    },
     'schedule.stop-self': async request => {
       z.object({}).strict().parse(request.body ?? {});
       const { sessionId, taskId, actorId } = await turnContext(request, true);

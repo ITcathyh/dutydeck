@@ -20,15 +20,39 @@ async function fixture(protocol: 'acp' | 'jsonl' | 'pipe') {
     permissionMode: protocol === 'acp' ? 'full-trust' : 'ask', timeout: 15, capabilities: { pause: false, resume: true }
   });
   const path = join(directory, 'state.db');
-  const open = async () => {
+  const open = async (approvalId?: string) => {
     const repos = createRepositories(path, { newDatabaseAuthority: 'ledger_v1' });
-    const runtime = new DutydeckRuntime(repos, { providers: defaultDriverProviders(), cleanupIntervalMs: 0 });
+    const runtime: DutydeckRuntime = new DutydeckRuntime(repos, { providers: defaultDriverProviders(), cleanupIntervalMs: 0,
+      resolveRiskPolicy: approvalId ? async (id, policy) => policy?.approvalRequestId === approvalId
+        ? { ...policy, approvedAttempt: runtime.getActiveTaskContext(id)?.attemptId } : policy : undefined });
     releases.push(async () => { await runtime.shutdown(); repos.close(); });
     await runtime.initialize([agent]); return { repos, runtime };
   };
   return { directory, agent, open };
 }
 describe('real native drivers behind the Runtime ledger', () => {
+  it('retires idle ACP for approval and reloads the original native session on the approved turn', async () => {
+    const h = await fixture('acp');
+    const { runtime, repos } = await h.open('example-approval');
+    const session = await runtime.start({ agentId: h.agent.id });
+    expect((await runtime.send(session.id, 'original')).status).toBe('completed');
+    await vi.waitFor(async () => expect(await runtime.riskContinuationReady(session.id)).toBe(true));
+    const executionProcesses = repos.execution.getResources(session.id).filter(resource => resource.kind === 'process' && resource.stage === 'created');
+    expect(executionProcesses.length).toBeGreaterThan(0);
+    expect(executionProcesses.every(resource => resource.observations.at(-1)?.state === 'gone')).toBe(true);
+    // Rechecking a session with no living process must not attach or start a driver.
+    const before = await readFile(join(h.directory, 'calls.jsonl'), 'utf8');
+    expect(await runtime.riskContinuationReady(session.id)).toBe(true);
+    expect(await readFile(join(h.directory, 'calls.jsonl'), 'utf8')).toBe(before);
+    const policy = { enabled: true, authorized: false, approvalRequestId: 'example-approval', pattern: 'publish' };
+    expect((await runtime.send(session.id, 'continue', 'continue', policy)).status).toBe('completed');
+    const calls = (await readFile(join(h.directory, 'calls.jsonl'), 'utf8')).trim().split('\n').map(line => JSON.parse(line));
+    expect(calls.filter(call => call.method === 'session/new')).toHaveLength(1);
+    expect(calls.filter(call => call.method === 'session/prompt')).toHaveLength(2);
+    const resumedCalls = calls.slice(before.trim().split('\n').length);
+    expect(resumedCalls.some(call => call.method === 'spawn')).toBe(true);
+    expect(resumedCalls.some(call => call.method === 'session/load')).toBe(true);
+  });
   it.each(['acp', 'jsonl', 'pipe'] as const)('%s retains ledger history through stop/resume, restart and Runtime reopen', async protocol => {
     const h = await fixture(protocol); const first = await h.open();
     const session = await first.runtime.start({ agentId: h.agent.id });
@@ -135,9 +159,11 @@ async function configurationFixture() {
   await writeFile(join(directory, 'agent.mjs'), configurationAgent);
   const agent = agentConfigSchema.parse({ id: 'configuration', name: 'Configuration', protocol: 'acp', command: process.execPath, args: [join(directory, 'agent.mjs')], cwd: directory,
     env: { configuration_directory: directory }, model: 'model-a', permissionMode: 'full-trust', timeout: 10, capabilities: { pause: false, resume: true } });
-  const open = async () => {
+  const open = async (approvalId?: string) => {
     const repos = createRepositories(join(directory, 'db'), { newDatabaseAuthority: 'ledger_v1' });
-    const runtime = new DutydeckRuntime(repos, { providers: defaultDriverProviders(), cleanupIntervalMs: 0 });
+    const runtime: DutydeckRuntime = new DutydeckRuntime(repos, { providers: defaultDriverProviders(), cleanupIntervalMs: 0,
+      resolveRiskPolicy: approvalId ? async (id, policy) => policy?.approvalRequestId === approvalId
+        ? { ...policy, approvedAttempt: runtime.getActiveTaskContext(id)?.attemptId } : policy : undefined });
     releases.push(async () => { await runtime.shutdown(); repos.close(); });
     await runtime.initialize([agent]); return { repos, runtime };
   };

@@ -68,7 +68,7 @@ export const larkGroupKey = (event: LarkMessageEvent, scopeId: string, appId: st
  * 会话的工具确认能否在飞书逐项审批：ACP 会话，或能接权限 hook 的终端模式 CLI（Claude 家族）。
  * 终端模式按会话所属 Agent 的适配器判断；运行时列不出 Agent 时按 Agent ID 当适配器。
  */
-async function larkApprovalSupported(runtime: LarkRuntime, session: Session) {
+async function larkApprovalSupported(runtime: Pick<LarkRuntime, 'listAgents'>, session: Session) {
   if (session.protocol === 'acp') return true;
   if (session.protocol !== 'pty-cli') return false;
   const agent = (await runtime.listAgents?.())?.find(item => item.id === session.agentId);
@@ -374,7 +374,7 @@ const routingRecoveryConfig = (config: StoredLarkConfig, session: Session): Stor
  * /new 要能真正结束它。取最近创建的一条，绝不跨话题/用户/App/Web 会话或归档会话。
  */
 export async function findPersistedLarkSession(
-  runtime: LarkRuntime,
+  runtime: Pick<LarkRuntime, 'listSessions'>,
   config: StoredLarkConfig,
   chatId: string,
   chatType: LarkMessageEvent['chatType'],
@@ -392,7 +392,7 @@ export async function findPersistedLarkSession(
  * 仍会被下一条普通消息选回来，「已结束当前会话」就成了假话。
  */
 export async function listPersistedLarkSessions(
-  runtime: LarkRuntime,
+  runtime: Pick<LarkRuntime, 'listSessions'>,
   config: StoredLarkConfig,
   chatId: string,
   chatType: LarkMessageEvent['chatType'],
@@ -626,7 +626,7 @@ export const takeLarkNewSessionNote = (session: Session) => {
  * 这个会话上的任务卡认回来。托管群、话题群（顶层本来就是话题作用域）与私聊都不涉及。
  */
 export async function findLarkThreadContinuation(
-  runtime: LarkRuntime,
+  runtime: Pick<LarkRuntime, 'listSessions' | 'listAgents'>,
   config: StoredLarkConfig,
   event: LarkMessageEvent,
   scopeId: string,

@@ -20,7 +20,7 @@ export function createPtyCliProvider(options?: PtyProviderOptions): DriverProvid
     capabilities(agent) {
       const remoteApproval = !!agent && supportsRemoteApproval({ ...agent, protocol: 'pty-cli' });
       return { persistentTerminal: true, permissionPosture: true, nativeFork: !!agent && supportsNativeFork(agent), remoteApproval,
-        operations: ['compact', 'checkpoint', 'canRecoverTurn', 'recover', 'isIdle', 'quiescence', 'hasBackgroundWork',
+        operations: ['compact', 'checkpoint', 'canRecoverTurn', 'recover', 'isIdle', 'quiescence', 'hasBackgroundWork', 'backgroundWorkCleared',
           'confirmTranscriptSource', 'idleCpuProof', 'beginIdleCpuRetirement', 'prepareForIdleRetirement',
           'prepareForDaemonShutdown', 'drainExitedOutput', 'isDetachedForShutdown', 'processIds', 'isStopped',
           'subscribeTranscriptSource', 'createTerminalStream', 'persistentTerminalIdentity', 'attachTerminal',

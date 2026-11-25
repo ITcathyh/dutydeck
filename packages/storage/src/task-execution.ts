@@ -874,8 +874,10 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
         return { task: t, currentAttempt: values.find(a => a.attemptId === t.currentAttemptId), attempts: values, steering: bySteeringTask.get(t.id), blockers: [...sharedBlockers, ...(t.status === 'queued' ? queuedBlockers(t.id) : []), ...inputBlockers(t)] };
       });
     }).deferred(); },
-    hasQueuedOrRunningTasks(sessionId) {
+    hasQueuedOrRunningTasks(sessionId, excludeWaitingApprovals = false) {
       requireLedger();
+      if (excludeWaitingApprovals) return Boolean(cached(`SELECT 1 FROM tasks WHERE session_id=? AND
+        (status='running' OR (status='queued' AND json_extract(execution_context,'$.riskPolicy.approvalRequestId') IS NULL)) LIMIT 1`).get(sessionId));
       return Boolean(cached("SELECT 1 FROM tasks WHERE session_id=? AND status IN ('queued','running') LIMIT 1").get(sessionId));
     },
     getUnresolvedTasks(sessionId) {
@@ -1021,13 +1023,15 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
           const cancelled = cancelCapacityRetries(f, 'new_input_superseded_capacity_retry');
           const time = timestamp();
           const taskId = executionTaskId(request.namespace, request.sessionId, request.key);
+          const exclusive = request.mode === 'interrupt' && cached("SELECT 1 FROM tasks WHERE session_id=? AND status='running' AND json_extract(execution_context,'$.riskPolicy.approvalRequestId') IS NOT NULL LIMIT 1").get(f.sessionId);
+          if (exclusive) position = 'back';
           const t: ExecutionTask = { id: taskId, sessionId: f.sessionId, prompt: input.prompt, executionContext: input.executionContext, status: 'queued', revision: 1, digestVersion: 'v1', queuePosition: nextPosition(f.sessionId, position), createdAt: time, updatedAt: time };
           cached('INSERT INTO tasks (id,session_id,prompt,status,execution_context,queue_position,revision,digest_version,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)').run(t.id,t.sessionId,t.prompt,t.status,json(t.executionContext),t.queuePosition!,t.revision,t.digestVersion,time,time);
           cached('INSERT INTO task_requests VALUES (?,?,?,?,?,?,?)').run(t.id,request.namespace,request.sessionId,request.key,hash(stable(request)),json(request),json(input));
           const events = [append(f, { id: `accepted:${t.id}`, type: 'task', data: { task: { id: t.id, status: t.status } } })];
           // Accepted task events have no Attempt but retain the Task identity.
           cached('UPDATE events SET task_id=? WHERE id=?').run(t.id,events[0]!.id); events[0]!.taskId = t.id;
-          if (request.mode === 'interrupt') queueAction(f,t,'accept',{ operationId: `accept_interrupt:${t.id}`, actor: request.actor, interrupt: true });
+          if (request.mode === 'interrupt' && !exclusive) queueAction(f,t,'accept',{ operationId: `accept_interrupt:${t.id}`, actor: request.actor, interrupt: true });
           return { ...result(f,t,undefined,[...cancelled.flatMap(item => item.events), ...events]), accepted: lookup(request)! };
         }); },
         canPrepareWorkspace(cwd, idleResources = []) { return write(owner => {
@@ -1036,7 +1040,7 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
           // Idle adapters without reliable background proof are retired by claimNext's caller.
           return workspaceBlockers('',false,idleResources,owner,false,identity).every(block => block.code === 'WORKSPACE_PHYSICAL_RESOURCE_UNSAFE');
         }); },
-        claimNext(rawFence, idleResources = []) { return write(owner => {
+        claimNext(rawFence, idleResources = [], clearedApprovalTaskId, ordinaryWhileWaiting) { return write(owner => {
           const f = readFence(rawFence); const s = session(f.sessionId);
           if (s.archivedAt || s.state === 'stopped') fail('SESSION_NOT_ACCEPTING');
           assertResources(f, undefined, owner);
@@ -1045,7 +1049,15 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
           if (unresolvedUnknownTask(f.sessionId)) fail('SESSION_EXECUTION_BUSY');
           const row = cached("SELECT id FROM tasks WHERE session_id=? AND status='queued' ORDER BY COALESCE(queue_position,0),created_at,rowid LIMIT 1").get(f.sessionId) as { id: string } | undefined;
           if (!row) return;
-          const t = task(row.id)!;
+          let t = task(row.id)!;
+          if (t.executionContext?.riskPolicy?.approvalRequestId && t.id !== clearedApprovalTaskId) {
+            // An approval still waiting for isolation may yield only to the first ordinary request, in FIFO order.
+            const ordinary = ordinaryWhileWaiting && cached(`SELECT id FROM tasks WHERE session_id=? AND status='queued'
+              AND json_extract(execution_context,'$.riskPolicy.approvalRequestId') IS NULL
+              ORDER BY COALESCE(queue_position,0),created_at,rowid LIMIT 1`).get(f.sessionId) as { id: string } | undefined;
+            if (!ordinary || ordinary.id !== ordinaryWhileWaiting) fail('RISK_APPROVAL_WAITING');
+            t = task(ordinary.id)!;
+          }
           parse(checksSchema,idleResources);
           const admission = workspaceBlockers(f.sessionId,ordinaryTask(t.id),idleResources,owner,true);
           if (admission.length) workspaceBlocked(f.sessionId, admission);

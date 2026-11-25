@@ -82,20 +82,26 @@ export function larkElapsedLabel(seconds: number): string {
   return minutes % 60 ? `${hours} 小时 ${minutes % 60} 分` : `${hours} 小时`;
 }
 
-const shanghaiParts = (at: Date) => {
+const cardTimeParts = (at: Date, timeZone?: string) => {
   const parts = Object.fromEntries(new Intl.DateTimeFormat('en-GB', {
-    timeZone: 'Asia/Shanghai', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hourCycle: 'h23'
+    timeZone, month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hourCycle: 'h23'
   }).formatToParts(at).map(part => [part.type, part.value]));
   return { day: `${parts.month}-${parts.day}`, clock: `${parts.hour}:${parts.minute}` };
 };
+
+/** 卡片上的日期和时间，使用服务进程时区。 */
+export function larkCardDateTime(at: number): string {
+  const { day, clock } = cardTimeParts(new Date(at));
+  return `${day} ${clock}`;
+}
 
 /** 「停在 HH:MM」；与当前不在同一天（上海时区）时带上日期。时间不可用时返回 undefined。 */
 export function larkStoppedAtLabel(at: string | number | Date | undefined, now: number = Date.now()): string | undefined {
   if (at === undefined) return undefined;
   const date = new Date(at);
   if (Number.isNaN(date.getTime())) return undefined;
-  const stopped = shanghaiParts(date);
-  return shanghaiParts(new Date(now)).day === stopped.day ? `停在 ${stopped.clock}` : `停在 ${stopped.day} ${stopped.clock}`;
+  const stopped = cardTimeParts(date, 'Asia/Shanghai');
+  return cardTimeParts(new Date(now), 'Asia/Shanghai').day === stopped.day ? `停在 ${stopped.clock}` : `停在 ${stopped.day} ${stopped.clock}`;
 }
 
 // 只是个栏目名、没有内容的行不当结论；超长结论转附件后卡上的节选标签同理。

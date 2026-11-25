@@ -1,3 +1,4 @@
+import { riskApprovalKey, riskContinuationText, riskOriginalSession, type RiskApproval } from './risk-approvals.js';
 import { allowedHighRiskActor } from '../policy/high-risk.js';
 import { sha256Hex as hash } from '../hash.js';
 import { access, stat } from 'node:fs/promises';
@@ -597,26 +598,61 @@ export class LarkGroupManager {
     await commit?.();
   }
 
-  async riskPolicy(sessionId: string, fallback?: ToolRiskPolicy): Promise<ToolRiskPolicy | undefined> {
+  async riskPolicy(sessionId: string, fallback?: ToolRiskPolicy, active?: { taskId: string; attemptId?: string; actorId?: string; token: string; command: string; url: string }): Promise<ToolRiskPolicy | undefined> {
+    // A parent, scheduler or old driver may supply a previously resolved fallback. Live grants never travel through it.
+    if (fallback) {
+      const { approvedAttempt: _grant, requestPrefix: _prefix, approvalCheckUrl: _url, ...base } = fallback;
+      fallback = base;
+    }
+    const accepted = active && this.repos.execution.getAcceptedTask(active.taskId);
+    const { policy, restricted } = await this.baseRiskPolicy(sessionId, accepted?.input?.executionContext.riskPolicy ?? fallback);
+    if (restricted || !policy?.enabled || !active?.actorId || !active.attemptId || accepted?.request?.actor.kind !== 'channel'
+      || accepted.request.actor.id !== active.actorId || accepted.task.sessionId !== sessionId || !accepted.request.key.startsWith('lark:')) return policy;
+    const session = await this.repos.sessions.get(sessionId);
+    if (session?.source !== 'lark' || session.archivedAt || ['stopped','failed'].includes(session.state)) return policy;
+    const appId = accepted.request.actor.appId;
+    const config = await readLarkConfig(this.repos.config, appId);
+    if (config?.riskControlMode !== 'enforced') return policy;
+    const prefix = `${active.command} agent --turn ${active.token}`;
+    const id = accepted.input?.executionContext.riskPolicy?.approvalRequestId;
+    if (!id) return policy.authorized ? policy : { ...policy, requestPrefix: prefix };
+    const key = riskApprovalKey(appId, id);
+    const raw = await this.repos.config.get(key);
+    const record = parse<RiskApproval>(raw);
+    const task = this.repos.execution.getTaskExecution(active.taskId);
+    if (!record?.decision?.approved || record.continuationTaskId !== active.taskId || record.sessionId !== sessionId || record.runId !== session.runId ||
+      record.actorId !== active.actorId || accepted.request.prompt !== riskContinuationText(record) || task?.task.status !== 'running'
+      || task.currentAttempt?.attemptId !== active.attemptId || !['preparing','active'].includes(task.currentAttempt.state)) return policy;
+    if (record.status === 'approved' && task.currentAttempt.number === 1) {
+      const effective = record.event.chatType === 'group' ? await this.resolved(config, record.event.chatId, true) : config;
+      if (!await riskOriginalSession(record, effective, { listSessions: () => this.repos.sessions.list(), listAgents: () => this.repos.agents.list() }, this.repos.channelMappings)
+        || record.expiresAt <= Date.now()) return policy;
+      const started: RiskApproval = { ...record, status: 'started', waiting: false, startedAttempt: active.attemptId };
+      if (!await this.repos.config.compareAndSet!(key, raw, JSON.stringify(started))) return this.riskPolicy(sessionId, fallback, active);
+    } else if (record.status !== 'started' || record.startedAttempt !== active.attemptId) return policy;
+    return { ...policy, authorized: false, approvedAttempt: active.token, approvalCheckUrl: active.url + '/risk/status' };
+  }
+
+  private async baseRiskPolicy(sessionId: string, fallback?: ToolRiskPolicy): Promise<{ policy?: ToolRiskPolicy; restricted?: boolean }> {
     const run = parse<RunContext>(await this.repos.config.get(runKey(sessionId)));
     if (!run) {
       const decision = await this.authorizeSession(sessionId, 'turn.append');
-      return decision && !decision.allowed ? { enabled: true, authorized: false, pattern: '.*', reason: decision.reason } : fallback;
+      return decision && !decision.allowed ? { restricted: true, policy: { enabled: true, authorized: false, pattern: '.*', reason: decision.reason } } : { policy: fallback };
     }
-    if (!run.activeOpenId) return { enabled: true, authorized: false, pattern: '.*', reason: '等待当前任务身份验证。' };
+    if (!run.activeOpenId) return { restricted: true, policy: { enabled: true, authorized: false, pattern: '.*', reason: '等待当前任务身份验证。' } };
     const config = await readLarkConfig(this.repos.config, run.appId);
     const talk = await this.authorizeSession(sessionId, 'turn.append');
-    if (!config || talk && !talk.allowed) return { enabled: true, authorized: false, pattern: '.*', reason: '群访问权限已撤销。' };
-    if (config.riskControlMode !== 'enforced') return undefined;
+    if (!config || talk && !talk.allowed) return { restricted: true, policy: { enabled: true, authorized: false, pattern: '.*', reason: '群访问权限已撤销。' } };
+    if (config.riskControlMode !== 'enforced') return {};
     const allowedByBot = await allowedHighRiskActor(config, run.activeOpenId, id => this.client(config).getUserEmails(id));
     const decision = await this.authorizeSession(sessionId, 'high_risk.execute');
-    return { enabled: true, authorized: allowedByBot && decision?.allowed === true, pattern: config.highRiskPattern, reason: '当前群成员没有高风险操作授权。' };
+    return { policy: { enabled: true, authorized: allowedByBot && decision?.allowed === true, pattern: config.highRiskPattern, reason: '当前群成员没有高风险操作授权。' } };
   }
 
-  async refreshPolicies(runtime: { listSessions(): Promise<Session[]>; setRiskPolicy(sessionId: string, policy?: ToolRiskPolicy): Promise<void> }) {
+  async refreshPolicies(runtime: { isRiskContinuation?(id: string): boolean; listSessions(): Promise<Session[]>; setRiskPolicy(sessionId: string, policy?: ToolRiskPolicy): Promise<void> }) {
     for (const session of await runtime.listSessions()) {
       if (session.source !== 'lark' || ['stopped', 'failed'].includes(session.state)) continue;
-      if (!await this.repos.config.get(runKey(session.id)) && !await this.authorizeSession(session.id, 'turn.append')) continue;
+      if (!runtime.isRiskContinuation?.(session.id) && !await this.repos.config.get(runKey(session.id)) && !await this.authorizeSession(session.id, 'turn.append')) continue;
       await runtime.setRiskPolicy(session.id, await this.riskPolicy(session.id));
     }
   }

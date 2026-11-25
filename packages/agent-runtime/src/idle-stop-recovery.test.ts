@@ -42,6 +42,64 @@ async function fixture() {
 }
 const warned = (log: { warn: ReturnType<typeof vi.fn> }, code: string) => log.warn.mock.calls.filter(([data]) => data.code === code);
 
+it('keeps risk approval waiting when idle retirement cannot confirm process exit', async () => {
+  const h = await fixture();
+  h.drivers[0]!.isIdle = () => true;
+  await vi.waitFor(async () => {
+    expect(await h.runtime.riskContinuationReady(h.session.id)).toBe(false);
+    expect(h.drivers[0]!.stop).toHaveBeenCalledOnce();
+  });
+  expect(h.runtime.getDriverStopBlock(h.session.id)).toBeDefined();
+  expect(await h.runtime.riskContinuationReady(h.session.id)).toBe(false);
+  expect(h.drivers).toHaveLength(1);
+});
+
+it('waits while terminal input has no confirmed result, even if the driver has no active send', async () => {
+  const h = await fixture();
+  const driver = h.drivers[0]!;
+  driver.isIdle = () => true;
+  driver.quiescence = () => ({ state: 'unknown', evidence: 'raw_input_unconfirmed' });
+  const prepare = vi.spyOn(driver, 'prepareForIdleRetirement');
+  expect(await h.runtime.riskContinuationReady(h.session.id)).toBe(false);
+  expect(prepare).not.toHaveBeenCalled();
+  expect(driver.stop).not.toHaveBeenCalled();
+  driver.quiescence = () => ({ state: 'idle', evidence: 'ready' });
+  h.state.exited = true;
+  await vi.waitFor(async () => expect(await h.runtime.riskContinuationReady(h.session.id)).toBe(true));
+  expect(driver.stop).toHaveBeenCalledOnce();
+});
+
+it.each(['queue', 'deadline', 'foreground', 'background-cleared'])('rechecks %s after preparing to retire without holding the card callback', async change => {
+  const h = await fixture();
+  const driver = h.drivers[0]!;
+  driver.isIdle = () => true;
+  let prepared!: (ready: boolean) => void;
+  driver.prepareForIdleRetirement = vi.fn(async () => true).mockImplementationOnce(() => new Promise(resolve => { prepared = resolve; }));
+  h.state.exited = true;
+  const approval = { queued: false, expiresAt: Date.now() + HOUR };
+  await vi.waitFor(async () => {
+    expect(await h.runtime.riskContinuationReady(h.session.id, approval)).toBe(false);
+    expect(driver.prepareForIdleRetirement).toHaveBeenCalledOnce();
+  });
+  expect(await h.runtime.riskContinuationReady(h.session.id, approval)).toBe(false);
+  if (change === 'queue') {
+    h.runtime.setQueueHeld(true);
+    await h.runtime.dispatch(h.session.id, 'ordinary');
+  } else if (change === 'background-cleared') {
+    driver.backgroundWorkCleared = () => true;
+  } else if (change === 'foreground') {
+    driver.quiescence = () => ({ state: 'unknown', evidence: 'raw_input_unconfirmed' });
+  } else {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(approval.expiresAt);
+  }
+  prepared(true);
+  await new Promise(resolve => setImmediate(resolve));
+  expect(driver.stop).not.toHaveBeenCalled();
+  if (change === 'queue') expect((await h.runtime.getTasks(h.session.id)).at(-1)?.status).toBe('queued');
+  if (change === 'background-cleared') expect(await h.runtime.riskContinuationReady(h.session.id, approval)).toBe(true);
+});
+
 it('an idle retirement whose exit is unverified reports a stop block, not a revoked session', async () => {
   const h = await fixture();
   await h.runtime.cleanupIdleDrivers(Date.now() + 100);

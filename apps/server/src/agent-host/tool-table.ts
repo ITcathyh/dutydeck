@@ -130,6 +130,7 @@ const numberFrom = (value?: string) => value === undefined ? undefined : Number(
 const integerFrom = (value: string) => typeof value === 'string' && /^(0|[1-9][0-9]*)$/.test(value) ? Number(value) : NaN;
 
 export const toolGroups: Record<string, [string, string?]> = {
+  'risk': ['Request administrator approval for the current task'],
   'schedule': ['Create, enable or disable schedules of this conversation'],
   'session': ['Start, resume or fork conversations in this chat'],
   'access': ['Change who in this group may talk to the bot'],
@@ -170,6 +171,12 @@ export const toolTable: readonly AgentTool[] = [
   { name: 'schedules', ...view,
     description: 'List schedules of this conversation',
     examples: ['schedules'] },
+  { name: 'risk.request', risk: 'write-confirm', need: toolNeeds.humanRequest, method: 'POST', path: '/risk/requests',
+    body: (_args, o) => ({ summary: o.summary, command: o.command }),
+    description: 'Ask the bot administrators to approve the high-risk operation for this request',
+    examples: ["risk request --summary 'Publish the reviewed changes' --command 'git push'"],
+    configure: command => command.requiredOption('--summary <text>', 'What needs to happen and why')
+      .requiredOption('--command <text>', 'Original command that was blocked') },
   { name: 'schedule.create', risk: 'write-confirm', need: toolNeeds.humanRequest, method: 'POST', path: '/schedules',
     body: (_args, o) => ({ prompt: o.prompt, name: o.name, every: o.every, cron: o.cron, at: o.at, mode: o.mode, until: o.until, deadline: o.deadline, ...(o.additional ? { additional: true } : {}) }),
     serverDryRun: true,
@@ -532,6 +539,7 @@ export function getTool(name: string) {
 
 // Existing HTTP operations with a separate legacy or plugin CLI, or no CLI.
 export const otherEndpoints = {
+  riskStatus: { method: 'GET', path: '/risk/status', need: toolNeeds.humanRequest },
   command: { method: 'POST', path: '/commands', need: toolNeeds.humanRequest },
   collaborationSettings: { method: 'PATCH', path: '/collaboration/settings', need: toolNeeds.collaboration },
   collaborationReplay: { method: 'POST', path: '/collaboration/replay', need: toolNeeds.collaboration },

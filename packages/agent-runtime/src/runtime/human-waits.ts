@@ -1,3 +1,4 @@
+import { secretGuardFinding, riskRequestInvocation } from '@dutydeck/shared/secret-guard';
 import type { DriverRegistry } from './driver-registry.js';
 import type { AsyncLocalStorage } from 'node:async_hooks';
 import { RuntimeError, agentCommandApprovalReason, errorMessage, freeTextInputMaxBytes, isAgentCommandAutoApproval, makeId, permissionDisplayText, type AgentDriver, type AgentEvent, type AttemptRef, type NormalizedDriverEvent, type PermissionRequestData, type RepositoryBundle, type Session, type SessionFence, type TaskRecord } from '@dutydeck/shared';
@@ -162,7 +163,11 @@ export class HumanWaits {
     try {
       const policy = this.deps.options.policy.riskPolicy
         ? await this.deps.options.policy.riskPolicy(sessionId, task.executionContext?.riskPolicy) : task.executionContext?.riskPolicy;
-      if (policy?.enabled && !policy.authorized && await testRegexWithTimeout(policy.pattern, command)) return false;
+      if (policy?.enabled && !policy.authorized) {
+        const event = { tool_name: 'Bash', tool_input: { command }, cwd: session.cwd };
+        if (secretGuardFinding(event)) return false;
+        if (!policy.approvedAttempt && !riskRequestInvocation(event, policy.requestPrefix) && await testRegexWithTimeout(policy.pattern, command)) return false;
+      }
     } catch { return false; }
     if (this.mutations.attempts.get(sessionId) !== owner || !this.mutations.valid(owner)) return false;
     this.deps.options.log?.info?.({ sessionId, taskId: task.id }, agentCommandApprovalReason);

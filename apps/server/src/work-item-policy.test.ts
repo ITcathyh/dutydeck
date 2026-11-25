@@ -75,3 +75,11 @@ describe('work item agent selection', () => {
     } finally { store.close(); }
   });
 });
+
+it('does not transfer an approved parent attempt to delegated work', () => {
+  const ordinary = { enabled: true, authorized: false, pattern: 'publish' };
+  const riskPolicy = { ...ordinary, approvalRequestId: 'request_example', approvedAttempt: 'attempt_example',
+    requestPrefix: 'dutydeck agent --turn example', approvalCheckUrl: 'http://localhost/example' };
+  const execution = { getAcceptedTask: () => ({ task: { executionContext: { riskPolicy } } }) };
+  expect(capturedRiskPolicy({ execution } as typeof repos, 'parent_example')).toEqual(ordinary);
+});

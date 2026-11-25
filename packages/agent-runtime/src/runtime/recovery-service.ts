@@ -185,9 +185,14 @@ export class RecoveryService {
     if (this.mutations.attempts.get(id) || this.deps.hasActiveTurn(id) || this.deps.hasDrain(id)) return 'busy';
     const driver = this.deps.drivers.get(id);
     if (driver) return !this.deps.registry.method(driver, 'isDetachedForShutdown')?.() && this.deps.registry.method(driver, 'isIdle')?.() ? 'idle' : 'unknown';
-    if (this.deps.gate.stops.driver(id)) return 'unknown';
-    return this.deps.repos.execution.getResources(id).every(resource => resource.kind === 'operation' || resource.purpose === 'acp_native_context'
-      || resource.stage === 'not_created' || resource.observations.at(-1)?.state === 'gone') ? 'idle' : 'unknown';
+    return this.executionProcessesGone(id) ? 'idle' : 'unknown';
+  }
+
+  executionProcessesGone(id: string): boolean {
+    if (this.deps.drivers.has(id) || this.deps.gate.stops.reason(id) || this.deps.driverRetiring(id)) return false;
+    return this.deps.repos.execution.getResources(id).every(resource => resource.kind === 'operation'
+      ? !['pending', 'unknown'].includes(resource.stage) || !!resource.creationClosure
+      : resource.purpose === 'acp_native_context' || resource.stage === 'not_created' || resource.observations.at(-1)?.state === 'gone');
   }
 
   /** A session with unresolved execution or unverifiable resources cannot resume its queue. */

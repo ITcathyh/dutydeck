@@ -30,6 +30,19 @@ const intent=(submissionId='send')=>({submissionId,inputDigest:hash('final'),res
 const complete=(submissionId='send')=>({kind:'driver_result' as const,submissionId,outcome:'completed' as const,outputDigest:hash('done'),stopReason:'end_turn',complete:true as const});
 
 describe('task execution ledger',()=>{
+  it('drains ordinary input in order while a queued approval waits for process isolation', () => {
+    const { x, repos } = ready();
+    const { digest, ...content } = input();
+    const approvedInput = { ...content, executionContext: { ...content.executionContext,
+      riskPolicy: { enabled: true, authorized: false, pattern: 'publish', approvalRequestId: 'example-request' } } };
+    const approved = x.acceptTask(f, request('approval'), { ...approvedInput, digest: hash(approvedInput) }, 'back').task!;
+    expect(repos.execution.hasQueuedOrRunningTasks(f.sessionId, true)).toBe(false);
+    const first = accepted(x, 'ordinary-one').task!, second = accepted(x, 'ordinary-two').task!;
+    expect(repos.execution.hasQueuedOrRunningTasks(f.sessionId, true)).toBe(true);
+    expect(() => x.claimNext(f, [], undefined, second.id)).toThrow('RISK_APPROVAL_WAITING');
+    expect(x.claimNext(f, [], undefined, first.id)?.task?.id).toBe(first.id);
+    expect(repos.execution.getTaskExecutionState(approved.id)?.attempts).toHaveLength(0);
+  });
   it('fully revalidates persisted safe resource history, including nonfinite JSON, native identity and provenance', () => {
     const path=disk(),{x,repos}=ready(path),task=accepted(x).task!;
     const history={sessionId:'history',runId:'history-run'};

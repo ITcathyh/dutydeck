@@ -52,7 +52,7 @@ const entries = [
   ...keys('lark/task-inbox', 'bot', ['lark.inbox.'], { ownerInKey: true, deletion: 'ignored-inbox', retention: 'ignored: 30 days; ignored bot body: 1 hour' }),
   ...keys('lark/memory', 'bot', ['lark.memory.', 'lark.memory.state.', 'lark.memory.ignore.'], { ownerInKey: true }),
   ...keys('lark/memory', 'session', ['lark.memory.turns.'], { ownerInKey: true }),
-  ...keys('lark', 'bot', ['lark.context.', 'lark.interaction.', 'lark.reaction.', 'lark.live-owner.', 'lark.welcomed.',
+  ...keys('lark', 'bot', ['lark.context.', 'lark.interaction.', 'lark.risk-approval.', 'lark.reaction.', 'lark.live-owner.', 'lark.welcomed.',
     'lark.verification_suggestion.', 'lark.verification_auto.', 'lark.pin.', 'lark.group-context.', 'lark.redispatch.', 'lark.relaunch.',
     'lark.relaunch_retained.', 'lark.settled.', 'lark.continue.', 'lark.result_follow_up.', 'lark.result_schedule.',
     'lark.reaction-trigger.', 'lark.pr_proposal.', 'lark.task_dashboard.', 'lark.taskagent.'], { ownerInKey: true }),

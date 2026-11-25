@@ -106,11 +106,12 @@ describe('Claude PermissionRequest hook over the session relay', () => {
     const toolsEnv = { dutydeck_group_tools_url: 'http://localhost/unused', dutydeck_group_tools_token: 'fixture-tools', dutydeck_group_tools_command: 'node /x/cli.js' };
     let enabled = true;
     let pattern = 'never_matches';
+    let approvedAttempt: string | undefined;
     const info = vi.fn();
     const runtime = new DutydeckRuntime(repos, { providers: defaultDriverProviders(), driverFactory: () => driver,
       probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }),
       sessionEnvironment: current => enabled && current.source === 'lark' ? toolsEnv : {},
-      resolveRiskPolicy: async () => ({ enabled: true, authorized: false, pattern }), log: { warn: vi.fn(), info } });
+      resolveRiskPolicy: async () => ({ enabled: true, authorized: false, pattern, approvedAttempt }), log: { warn: vi.fn(), info } });
     const agent: AgentConfig = { id: 'mock', name: 'Mock', command: process.execPath, args: [], protocol: 'acp',
       cwd, env: {}, permissionMode, timeout: 10, capabilities: { pause: false, resume: true }, builtin: false };
     const capabilities = new RelayCapabilityRegistry(repos.sessions, 'http://localhost', 'test-secret');
@@ -149,6 +150,11 @@ describe('Claude PermissionRequest hook over the session relay', () => {
     pattern = 'agent\\s+status';
     await held('node /x/cli.js agent status');
     expect(info).toHaveBeenCalledTimes(1);
+    approvedAttempt = 'attempt_example';
+    expect(decision(await run('node /x/cli.js agent status')).behavior).toBe('allow');
+    await held('node /x/cli.js agent status --task .env');
+    approvedAttempt = undefined;
+    await held('node /x/cli.js agent status');
   });
 
   it('accepts the permission route only with the session capability', async () => {

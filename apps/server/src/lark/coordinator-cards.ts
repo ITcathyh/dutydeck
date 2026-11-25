@@ -594,7 +594,8 @@ export class LarkCoordinatorCards {
       '以上是用户对这张卡的选择，不代表外部写入已经完成。写入前按原流程检索去重。只处理上述固定对象和所选选项；不要把确认应用到后续消息的对象。'
     ].join('\n\n');
     const event: LarkMessageEvent = { ...record.event, authorization: { strength: 'explicit', via: 'answer_reply' }, messageId: `confirmation_${record.id}`,
-      replyMessageId: record.event.threadId ? record.event.rootId ?? record.cardId : record.cardId, parentId: undefined,
+      replyMessageId: record.event.messageId.startsWith('risk_approval_') ? larkMessageAnchor(record.event)
+        : record.event.threadId ? record.event.rootId ?? record.cardId : record.cardId, parentId: undefined,
       createTime: String(Date.now()), senderOpenId: record.actorId, senderType: 'user', messageType: 'text',
       content: JSON.stringify({ text: `@_user_1 ${prompt}` }),
       mentions: [{ key: '@_user_1', name: config.name || 'Dutydeck', ...(this.state.botOpenId ? { openId: this.state.botOpenId } : {}), mentionedType: 'bot' }] };

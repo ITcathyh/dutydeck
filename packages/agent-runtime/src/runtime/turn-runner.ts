@@ -99,7 +99,9 @@ export class TurnRunner {
       await this.deps.authorize(id, task.executionContext?.actorId, true);
       await this.mutations.wait(() => this.deps.options.policy.authorize({ phase: 'prepare', session, task }));
       const driver = await this.configureTaskDriver(session, input.executionOptions);
-      await this.applyRiskPolicy(session, driver, task.executionContext?.riskPolicy);
+      const policy = await this.applyRiskPolicy(session, driver, task.executionContext?.riskPolicy);
+      if (task.executionContext?.riskPolicy?.approvalRequestId && !policy?.approvedAttempt)
+        throw new RuntimeError('RISK_APPROVAL_UNAVAILABLE', '高危审批已失效，无法启动续跑。', 409);
       const assembled = await this.mutations.wait(() => Promise.resolve(this.deps.options.prompts.atExecute(session, input.executionContext.agentPrompt, input.executionContext,
         { taskId: task.id, attemptId: ref.attemptId, actorId: task.executionContext?.actorId })));
       const prompt = typeof assembled === 'string' ? assembled : assembled.prompt;
@@ -191,7 +193,11 @@ export class TurnRunner {
         });
       }
     } finally {
-      await this.settlement.release(ref, 'ordinary');
+      try {
+        if (settledSession && task.executionContext?.riskPolicy?.approvalRequestId && this.mutations.valid(token)) {
+          await this.applyRiskPolicy(settledSession, this.deps.supervisor.drivers.get(id), task.executionContext.riskPolicy);
+        }
+      } finally { await this.settlement.release(ref, 'ordinary'); }
     }
     if (ended) await this.deps.options.events.publish({ type: 'turn.ended', session: ended, taskId: task.id }).catch(() => {});
     return this.settlement.taskResult(task, settledSession);
@@ -241,8 +247,9 @@ export class TurnRunner {
             this.deps.events.restoreAttemptTools(attempt.attemptId);
             attached = true;
             for (const event of buffered.splice(0)) emit(event);
-            notifyAttached();
           });
+          if (task.executionContext?.riskPolicy?.approvalRequestId) await this.applyRiskPolicy(session, driver, task.executionContext.riskPolicy);
+          notifyAttached();
         }));
         if (!attached) return;
         // recover 采纳提交后（资源 live、driver 已入 this.deps.supervisor.drivers）flush 启动期 pending 观察。
@@ -259,7 +266,11 @@ export class TurnRunner {
       } finally {
         // 未采纳的临时 driver 不进 this.deps.supervisor.drivers，其来源订阅在此取消，杜绝迟到回调。
         if (!attached) this.deps.unsubscribeInsightSources(driver);
-        await this.settlement.release(ref, 'recovered');
+        try {
+          if (attached && task.executionContext?.riskPolicy?.approvalRequestId && this.mutations.valid(token)) {
+            await this.applyRiskPolicy(session, driver, task.executionContext.riskPolicy);
+          }
+        } finally { await this.settlement.release(ref, 'recovered'); }
         if (attached && !this.deps.shuttingDown()) await this.mutations.scoped(session.id, async () => {
           await this.deps.scheduler.projectQueue(session.id); this.deps.scheduler.unblockQueue(session.id); this.deps.scheduler.scheduleQueue(session.id);
         });
@@ -294,12 +305,17 @@ export class TurnRunner {
     return existing;
   }
   async applyRiskPolicy(session: Session, driver: AgentDriver | undefined, policy?: ToolRiskPolicy) {
+    const owner = this.mutations.attempts.get(session.id);
     if (this.deps.options.policy.riskPolicy) policy = await this.mutations.wait(() => this.deps.options.policy.riskPolicy!(session.id, policy));
     this.mutations.check();
-    await this.mutations.write(session.id, async () => { this.deps.registry.method(driver, 'setRiskPolicy')?.(policy); });
+    await this.mutations.write(session.id, async () => {
+      if (this.mutations.attempts.get(session.id) === owner) this.deps.registry.method(driver, 'setRiskPolicy')?.(policy);
+    });
     const directory = join(session.cwd, '.dutydeck', 'security', 'sessions');
     await this.mutations.wait(() => mkdir(directory, { recursive: true }));
-    await this.mutations.write(session.id, async () => {
+    return this.mutations.write(session.id, async () => {
+      // A refresh begun in an earlier turn cannot publish its credentials or permissions into the next one.
+      if (this.mutations.attempts.get(session.id) !== owner) return undefined;
       // Hooks read this file concurrently: never expose a partial write, and replace a symlink rather than follow it.
       const target = join(directory, `${session.id}.json`);
       const temp = `${target}.${process.pid}.${randomUUID()}.tmp`;
@@ -310,6 +326,7 @@ export class TurnRunner {
         // best-effort: the temporary file may already be gone.
         await unlink(temp).catch(() => {}); throw error;
       }
+      return policy;
     });
   }
   async changeDriverConfiguration(session: Session, driver: AgentDriver, targetOptions: (current: ExecutionOptions) => ExecutionOptions, defaults?: Partial<ExecutionOptions>, forceNativeProof=false) {

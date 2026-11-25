@@ -8,7 +8,7 @@ import { secretGuardScriptPath } from '@dutydeck/shared/secret-guard';
 import { codexHookReadiness } from './codex-hook-readiness.js';
 import { LarkServiceError } from './service.js';
 
-const guardVersion = 'dutydeck-high-risk-guard-v6';
+const guardVersion = 'dutydeck-high-risk-guard-v7';
 
 type HookAgentId = 'codex' | 'claude' | 'trae' | 'cursor' | 'pi';
 type HookAdapter = {
@@ -95,7 +95,7 @@ let guard;
 const secretReason = await import(${JSON.stringify(pathToFileURL(secretGuardScriptPath()).href)})
   .then(module => { guard = module; const finding = guard.secretGuardFinding(event); return finding ? guard.secretGuardReason(finding) : ''; })
   .catch(() => 'Dutydeck 凭据保护规则加载失败，已拦截');
-if (!secretReason && !policy.pattern) process.exit(0);
+if (!secretReason && (!policy.pattern || guard.riskRequestInvocation(event, policy.requestPrefix) || await guard.liveRiskApproval(policy))) process.exit(0);
 const values = [];
 const flatten = value => {
   if (typeof value === 'string') values.push(value);
@@ -115,7 +115,8 @@ const risky = secretReason ? true : await new Promise(resolve => {
   worker.once('exit', code => { if (code !== 0) { matchError = '高危正则匹配的隔离线程异常退出：' + code; finish(true); } });
 });
 if (!risky) process.exit(0);
-const reason = secretReason || (matchError ? guard.highRiskCheckFailedReason(matchError) : guard.highRiskBlockedReason(String(policy.reason || '当前飞书发送人无权执行高危操作')));
+if (!secretReason && !matchError) guard.recordRiskDenial(root, sessionId, policy, event);
+const reason = secretReason || (matchError ? guard.highRiskCheckFailedReason(matchError) : guard.highRiskBlockedReason(String(policy.reason || '当前飞书发送人无权执行高危操作'), policy.requestPrefix));
 ${deny}
 `;
 }
@@ -153,10 +154,12 @@ export default function (pi: any) {
       .then(module => { guard = module; const finding = guard.secretGuardFinding({ tool_name: event.toolName, tool_input: event.input, cwd: ctx?.cwd || process.cwd() }); return finding ? guard.secretGuardReason(finding) : ''; })
       .catch(() => 'Dutydeck 凭据保护规则加载失败，已拦截');
     if (secretReason) return { block: true, reason: secretReason };
-    if (!policy.pattern) return undefined;
+    if (!policy.pattern || guard.riskRequestInvocation({ tool_name: event.toolName, tool_input: event.input }, policy.requestPrefix)
+      || await guard.liveRiskApproval(policy)) return undefined;
     const result = await matches(policy.pattern, JSON.stringify({ tool_name: event.toolName, tool_input: event.input }));
     if (!result.risky) return undefined;
-    return { block: true, reason: result.error ? guard.highRiskCheckFailedReason(result.error) : guard.highRiskBlockedReason(String(policy.reason || '当前飞书发送人无权执行高危操作')) };
+    if (!result.error) guard.recordRiskDenial(root, sessionId, policy, { tool_name: event.toolName, tool_input: event.input, cwd: ctx?.cwd });
+    return { block: true, reason: result.error ? guard.highRiskCheckFailedReason(result.error) : guard.highRiskBlockedReason(String(policy.reason || '当前飞书发送人无权执行高危操作'), policy.requestPrefix) };
   });
 }
 `;

@@ -1,6 +1,6 @@
 // Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
 
-exports[`preserves the complete help output and approval decision of each Agent command and legacy alias > complete help including examples and inherited options 1`] = `"15565b40b197965245ad0042fe9a930b8cb9d4221aac42a3c469638db5c4ce0f"`;
+exports[`preserves the complete help output and approval decision of each Agent command and legacy alias > complete help including examples and inherited options 1`] = `"977d0473992b74d5d349a0c5ec43be85f1e9c9db0b7fefa31f9355f3161a9dca"`;
 
 exports[`preserves the complete help output and approval decision of each Agent command and legacy alias > runtime approval matcher 1`] = `
 {
@@ -69,6 +69,8 @@ exports[`preserves the complete help output and approval decision of each Agent 
   "agent --turn sample queue top": true,
   "agent --turn sample repair": true,
   "agent --turn sample retry": true,
+  "agent --turn sample risk": true,
+  "agent --turn sample risk request": true,
   "agent --turn sample schedule": true,
   "agent --turn sample schedule create": true,
   "agent --turn sample schedule disable": true,

@@ -2002,7 +2002,16 @@ describe('Lark message coordinator', () => {
     expect(runtime.send.mock.calls[0]?.[1]).toBe('请 rm -rf 临时目录');
     expect(runtime.send.mock.calls[0]?.[2]).toContain('[Dutydeck 安全策略 · 自动注入]');
     expect(runtime.send.mock.calls[0]?.[2]).not.toContain('这些限制由 Dutydeck 在工具层执行');
-    expect(runtime.send.mock.calls[0]?.[2]).toContain('不要换方法重试');
+    const safetyPrompt = runtime.send.mock.calls[0]?.[2] as string;
+    if (riskControlMode === 'guidance') expect(safetyPrompt).toContain('不要换方法重试');
+    else {
+      expect(safetyPrompt).toContain('不要预先判断会被拦而放弃，也不要通过脚本、子进程、MCP 或其他等价方式绕过');
+      expect(safetyPrompt).toContain('包括没有给出原因');
+      expect(safetyPrompt).toContain('risk request --summary');
+      expect(safetyPrompt).toContain('批准后会自动继续');
+      expect(safetyPrompt).toContain('凭据保护和正则检查超时或出错不能申请');
+      expect(safetyPrompt).toContain('不换命令、路径或身份绕过，也不重试');
+    }
     expect(runtime.send.mock.calls[0]?.[2]).toContain('[Dutydeck 预注入 Prompt]\n始终使用中文回答。');
     expect(runtime.send.mock.calls[0]?.[2]).toContain('请 rm -rf 临时目录');
     if (riskControlMode === 'enforced') expect(runtime.send.mock.calls[0]?.[3]).toEqual(expect.objectContaining({ enabled: true, authorized: false, actorEmail: 'user@example.com' }));

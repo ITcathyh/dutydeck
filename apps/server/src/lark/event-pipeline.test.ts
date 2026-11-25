@@ -115,7 +115,7 @@ describe('ordered event pipeline through the real SDK and HTTP', () => {
     const called = vi.fn();
     const url = await stub((_request, response, body) => { called(); reply(response, { event_id: body.event.event_id, decision: 'stop' }); });
     const h = await harness([handler('catch-all', url)]);
-    const values = [{ task_id: 't', action: 'cancel' }, { taskId: 't', action: 'retry' }, { dutydeck_confirm: 'confirm' }, { dutydeck_help_page: '1' }, { dockmux_workflow: 'approve' }];
+    const values = [{ task_id: 't', action: 'cancel' }, { taskId: 't', action: 'retry' }, { dutydeck_confirm: 'confirm' }, { dutydeck_help_page: '1' }, { dockmux_workflow: 'approve' }, { risk_request: 'task_example', decision: 'approve' }];
     for (const [index, value] of values.entries()) await h.invoke(click(value, `ev_builtin_${index}`));
     await h.invoke(click(values[0], 'ev_builtin_0'));
     for (const value of values) expect(await h.invoke(click({ ...value, owner: 'sample-service' }))).toMatchObject({ toast: { type: 'error' } });

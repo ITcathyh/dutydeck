@@ -1,3 +1,4 @@
+import { inheritedRiskPolicy } from './policy/high-risk.js';
 import { promptDigest } from './prompt-context.js';
 import { sha256Hex as hash } from './hash.js';
 import { analyzeWorkPlanRevision, canonicalExecutionJson, errorMessage as errorText, now as time, canonicalPlanJson, createWorkItemSchema, reviseWorkPlanSchema, workRevisionConfirmationReasons, type ReviseWorkPlanInput, type WorkRevisionImpact, type WorkRevisionPreview, executionActorSchema, installationOwnerTaskActor, parseLarkSourceId, RuntimeError, serialByKey, timeLoop, type LoopTimingLog, taskAdmissionV1Schema, taskRequestV1Schema, workPlanSchema, workReviewVerdictSchema, type CreateWorkItemInput, type ExecutionActor, type PermissionMode, type RepositoryBundle, type Session, type TaskAdmissionV1, type TaskRecord, type TaskRequestV1, type ToolRiskPolicy, type PendingWorkRevision, type WorkItem, type WorkPlan, type WorkStep, type WorkTemplate } from '@dutydeck/shared';
@@ -294,7 +295,7 @@ export class WorkItemService {
       const timestamp = time();
       const item: WorkItem = { id, parentSessionId, title: input.plan.title, goal: input.goal, revision: 1, status: gated ? 'awaiting_confirmation' : 'running', plan: input.plan, steps: input.plan.steps.map(step => ({ id: step.id, status: 'pending', attempts: [] })), createdAt: timestamp, updatedAt: timestamp, delivery: { status: this.options.deliver ? 'pending' : 'not_requested', attempts: 0 },
         planVersion: 1, planHistory: [{ version: 1, plan: input.plan, createdAt: timestamp, source: 'create' }] };
-      const record: StoredWork = { item, actorId: actorId!, actor, inputHash, confirmationRequired: gated, parentFingerprint: this.parentFingerprint(parent), cwd: parent.cwd, agents, stoppedAttempts: [], riskPolicy: parentTask?.executionContext?.riskPolicy, promptPolicyVersion: parentTask?.executionContext?.promptPolicyVersion ?? 'legacy-v1', ...(taskId ? { parentTaskId: taskId } : {}) };
+      const record: StoredWork = { item, actorId: actorId!, actor, inputHash, confirmationRequired: gated, parentFingerprint: this.parentFingerprint(parent), cwd: parent.cwd, agents, stoppedAttempts: [], riskPolicy: inheritedRiskPolicy(parentTask?.executionContext?.riskPolicy), promptPolicyVersion: parentTask?.executionContext?.promptPolicyVersion ?? 'legacy-v1', ...(taskId ? { parentTaskId: taskId } : {}) };
       await this.options.prepareDelivery?.(parentSessionId, id, input.idempotencyKey);
       await this.access(parentSessionId, actorId);
       if (admissionChecks) {

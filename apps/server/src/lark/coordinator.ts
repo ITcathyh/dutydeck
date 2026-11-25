@@ -201,6 +201,10 @@ export class LarkMessageCoordinator {
     return this.components.intake.handle(event, config, recovering, adopted, retrying, captured, adoption);
   }
 
+  requestRiskApproval(request: import('./agent-command.js').LarkRiskRequest) {
+    return this.components.intake.requestRiskApproval(request);
+  }
+
   agentCommand(request: LarkAgentCommandRequest): Promise<Record<string, unknown>> {
     return this.components.intake.agentCommand(request);
   }

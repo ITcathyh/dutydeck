@@ -65,6 +65,8 @@ function terminalTaskNotification(entry: any): { text: string; state: string } |
 /** Native Claude task lifecycle metadata; tool-result prose is never a launch receipt. */
 export class ClaudeBackgroundTasks {
   private readonly calls = new Map<string, { name: string; originInputId?: string }>();
+  private readonly unconfirmedLaunches = new Map<string, string>();
+  private launchHistoryIncomplete = false;
   private readonly tasks = new Map<string, Task>();
   private readonly runs = new Map<string, Run>();
   private readonly observedPositions = new Set<string>();
@@ -150,15 +152,33 @@ export class ClaudeBackgroundTasks {
       if (this.notification) this.notificationEntries.add(entry.uuid);
       else this.inputEntries.add(entry.uuid);
     }
-    if (!lifecycleOnly && entry.type === 'assistant' && Array.isArray(content) && !this.notification) {
-      for (const block of content) if (block.type === 'tool_use' && typeof block.id === 'string') this.calls.set(block.id, { name: block.name, originInputId: this.inputId });
-      if (entry.message?.stop_reason === 'end_turn' && content.some((block: any) => block.type === 'text' && block.text?.trim())) this.ended = true;
+    if (!lifecycleOnly && entry.type === 'assistant' && Array.isArray(content)) {
+      for (const block of content) {
+        if (block.type !== 'tool_use' || typeof block.id !== 'string') continue;
+        if (['Bash', 'Agent', 'Task', 'Monitor', 'SendMessage'].includes(block.name)) {
+          if (this.unconfirmedLaunches.size >= 1000) this.launchHistoryIncomplete = true;
+          else this.unconfirmedLaunches.set(block.id, block.name);
+        }
+        if (!this.notification) this.calls.set(block.id, { name: block.name, originInputId: this.inputId });
+      }
+      if (!this.notification && entry.message?.stop_reason === 'end_turn' && content.some((block: any) => block.type === 'text' && block.text?.trim())) this.ended = true;
     }
     if (!lifecycleOnly && entry.type === 'user' && Array.isArray(content)) {
       const result = entry.toolUseResult;
       for (const block of content) {
+        if (block.type !== 'tool_result') continue;
+        const name = this.unconfirmedLaunches.get(block.tool_use_id);
+        if (block.is_error) {
+          this.unconfirmedLaunches.delete(block.tool_use_id);
+          continue;
+        }
+        if (!result || typeof result !== 'object') continue;
+        // Only structured native receipts can establish a foreground completion.
+        if ((name === 'Bash' && !('backgroundTaskId' in result) && typeof result.stdout === 'string' && typeof result.stderr === 'string' && typeof result.interrupted === 'boolean')
+          || ((name === 'Agent' || name === 'Task') && result.status === 'completed' && result.isAsync !== true)
+          || (name === 'SendMessage' && result.success === false)) this.unconfirmedLaunches.delete(block.tool_use_id);
         const call = this.calls.get(block.tool_use_id);
-        if (block.type !== 'tool_result' || block.is_error || !call || !result || typeof result !== 'object') continue;
+        if (!call) continue;
         let task: { id: string; kind: Task['kind']; expiresAt?: number } | undefined;
         let resumed = false;
         if (['Agent', 'Task'].includes(call.name) && result.isAsync === true && typeof result.agentId === 'string') task = { id: result.agentId, kind: 'agent' };
@@ -181,6 +201,7 @@ export class ClaudeBackgroundTasks {
             if (atMs !== undefined && (run.sinceMs === undefined || atMs > run.sinceMs)
               && (run.endedAtMs === undefined || atMs > run.endedAtMs)
               && (existing?.state === 'running' || !existing || run.endedAtMs !== undefined)) {
+              this.unconfirmedLaunches.delete(block.tool_use_id);
               this.tasks.set(task.id, {
                 ...task, toolUseId: existing ? existing.toolUseId : block.tool_use_id,
                 originInputId: call.originInputId, state: 'running',
@@ -188,6 +209,7 @@ export class ClaudeBackgroundTasks {
               this.runs.set(task.id, { ...run, sinceMs: atMs, active: [...run.active, { sinceMs: atMs, resumed: true }] });
             }
           } else {
+            this.unconfirmedLaunches.delete(block.tool_use_id);
             this.tasks.set(task.id, { ...task, toolUseId: block.tool_use_id, originInputId: call.originInputId, state: 'running' });
             this.runs.set(task.id, { ...run, sinceMs: atMs, active: [{ sinceMs: atMs, resumed: false }] });
           }
@@ -296,6 +318,10 @@ export class ClaudeBackgroundTasks {
     return { state: 'background_work', count: tasks.filter(task => task.state === 'running').length, mainTurnEnded: this.ended, tasks };
   }
   isNotificationContinuation(): boolean { return this.notification; }
+  /** A monitor deadline alone cannot establish that its native process has stopped. */
+  cleared(): boolean {
+    return !this.launchHistoryIncomplete && !this.unconfirmedLaunches.size && [...this.tasks.values()].every(task => task.state !== 'running');
+  }
   independent(): boolean { return this.ended && this.snapshot().count > 0; }
 }
 import { createHash } from 'node:crypto';

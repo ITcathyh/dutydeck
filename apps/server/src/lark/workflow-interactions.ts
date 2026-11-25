@@ -1,4 +1,4 @@
-import type { LarkPermissionControl, LarkQueries, LarkRecovery } from './runtime.js';
+import type { LarkPermissionControl, LarkQueries, LarkRecovery, LarkRuntimeReliability } from './runtime.js';
 import { clearTaskReportSafely } from '@dutydeck/shared';
 import { formatUnknownTaskTime as deadlineText } from '../task-resolution.js';
 import { larkMessageAnchor } from './message-anchor.js';
@@ -359,7 +359,7 @@ export class LarkWorkflowInteractions {
   private readonly planTimers = new Map<string, NodeJS.Timeout>();
   constructor(
     private readonly store: ConfigRepository,
-    private readonly runtime: LarkPermissionControl & Pick<LarkQueries, 'getEvents' | 'getTasks' | 'isQueueHeld' | 'getTurnStall'> & Pick<LarkRecovery, 'getTaskRecovery'>,
+    private readonly runtime: LarkPermissionControl & Pick<LarkQueries, 'getEvents' | 'getTasks' | 'isQueueHeld' | 'getTurnStall'> & Pick<LarkRecovery, 'getTaskRecovery'> & Pick<LarkRuntimeReliability, 'isRiskContinuation'>,
     private readonly service: LarkCardService,
     private readonly broker: RelayAskBroker | undefined,
     private readonly authorize: (record: LarkInteraction, actor: string, action: PolicyAction) => Promise<boolean>,
@@ -1428,6 +1428,10 @@ export class LarkWorkflowInteractions {
       }
     }
   }
+  private requireContinuationRequester(record: LarkInteraction, actor: string) {
+    if (record.kind === 'ask' && actor !== record.event.senderOpenId && this.runtime.isRiskContinuation?.(record.sessionId, record.taskId))
+      throw new LarkServiceError('LARK_INTERACTION_DENIED', '只有原请求发起人可以回答本次高危操作续跑中的提问。', 403);
+  }
   private async respondNow(input: Parameters<LarkWorkflowInteractions['respond']>[0]) {
     const raw = await this.store.get(prefix(input.appId) + input.requestId);
     if (!raw || !input.actorId) throw stale();
@@ -1436,6 +1440,7 @@ export class LarkWorkflowInteractions {
     if (input.callback && (input.cardId !== record.cardId || input.generation !== record.boot)) throw stale();
     const expectedKind = input.action === 'answer' ? 'ask' : ['approve', 'reject', 'allow_session', 'allow_workspace'].includes(input.action) ? 'permission' : input.action.startsWith('plan_') ? 'plan' : 'result';
     if (record.kind !== expectedKind) throw stale();
+    this.requireContinuationRequester(record, input.actorId);
     if (record.durable) return this.respondConfirmation(record, input);
     if (input.action === 'allow_session') {
       if (!record.sessionAllowKey) throw new LarkServiceError('LARK_SESSION_ALLOW_UNAVAILABLE', '这条命令不能设为本会话允许，请点「允许本次」。', 400);
@@ -1539,7 +1544,10 @@ export class LarkWorkflowInteractions {
     try {
       // The authoritative broker/runtime repeats the single-consumer and liveness check.
       if (input.action === 'answer') await this.broker!.answer(record.nativeId, answerText, { sessionId: record.sessionId, handledBy: input.actorId,
-        beforeClaim: async () => { if (!await this.authorize(record, input.actorId!, 'turn.append')) throw new LarkServiceError('LARK_INTERACTION_DENIED', '当前账号无权回答此任务。', 403); } });
+        beforeClaim: async () => {
+          this.requireContinuationRequester(record, input.actorId!);
+          if (!await this.authorize(record, input.actorId!, 'turn.append')) throw new LarkServiceError('LARK_INTERACTION_DENIED', '当前账号无权回答此任务。', 403);
+        } });
       else {
         const resolved = rejectReasonText
           ? await this.runtime.resolvePermission!(record.sessionId, record.nativeId, false, rejectReasonText)

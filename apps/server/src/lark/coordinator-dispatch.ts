@@ -7,6 +7,7 @@ import { toRecord } from './turn-record.js';
 import { readTaskReportSafely } from '@dutydeck/shared';
 import { taskReportCardElements } from './task-report-card.js';
 import { larkAgentUnavailableReason, larkFallbackHasActivity } from './agent-fallback.js';
+import { riskMessageId, readRiskApproval } from './risk-approvals.js';
 import { allowedHighRiskActor } from '../policy/high-risk.js';
 import { recordTaskAuthorization } from '../task-authorization.js';
 import { larkMessageAnchor } from './message-anchor.js';
@@ -229,6 +230,7 @@ export class LarkCoordinatorDispatch {
     // 前面真的有东西才谈得上插队：只有自己一条时 steerQueued 无事可做，
     // 调了它再把异常写成「提升失败」，会把一个本来正常的情形说成出了问题。
     const tasks = this.state.runtime.getTasks ? await this.state.runtime.getTasks(sessionId).catch(() => []) : [];
+    if (this.state.runtime.isRiskContinuation?.(sessionId) || tasks.some(item => item.status === 'running' && item.executionContext?.riskPolicy?.approvalRequestId)) return { note: '管理员批准的本次请求正在执行，消息已按普通顺序排队。' };
     const unknownNote = `插话投递结果未知。${larkSteeringUnknownNote}`;
     if (target.status === 'reconcile_required' || tasks.find(item => item.id === target.id)?.status === 'reconcile_required') return { note: unknownNote };
     const ahead = tasks.filter(item => item.id !== target.id && (item.status === 'queued' || item.status === 'running'));
@@ -436,6 +438,7 @@ export class LarkCoordinatorDispatch {
       if (item.group === task.group) previous = item;
     }
     const sessionId = previous?.sessionId;
+    if (sessionId && this.state.runtime.isRiskContinuation?.(sessionId) || task.id.startsWith('risk_approval_') || previous?.id.startsWith('risk_approval_')) return;
     if (!previous || !sessionId || !previous.runtimeTaskId || previous.state !== 'queued' || previous.turn !== 1 || previous.steer || previous.busySupplement || task.busySupplement || previous.promoted
       || previous.redispatch || previous.epoch !== task.epoch || !task.event.senderOpenId || previous.event.senderOpenId !== task.event.senderOpenId
       || task.group.sessionId !== sessionId || task.group.retiredSessionIds?.has(sessionId) || task.launchOptions || task.redispatch
@@ -736,7 +739,7 @@ export class LarkCoordinatorDispatch {
       return false;
     };
     if (restored) return notRecovered('restored_turn');
-    if (task.inbox?.event.messageId.startsWith('confirmation_')) return notRecovered('confirmation_original_session_required');
+    if (/^(?:confirmation_|risk_approval_)/.test(task.inbox?.event.messageId ?? '')) return notRecovered('confirmation_original_session_required');
     if (task.launcherRecoveryAttempted) return notRecovered('already_attempted');
     if (!task.runtimeTaskId) return notRecovered('runtime_task_missing');
     if (this.state.stopped) return notRecovered('coordinator_stopped');
@@ -817,7 +820,7 @@ export class LarkCoordinatorDispatch {
     const turn = task.turn;
     if (!fallback || fallback === session.agentId || task.fallbackAttempted || task.fallbackHasActivity || restored
       || task.interruptRequested || this.state.stopped || task.launchOptions
-      || task.inbox?.event.messageId.startsWith('confirmation_') || task.epoch !== (group.epoch ?? 0)
+      || /^(?:confirmation_|risk_approval_)/.test(task.inbox?.event.messageId ?? '') || task.epoch !== (group.epoch ?? 0)
       || group.sessionId !== session.id) return false;
     // Do not abandon, cancel, or transfer anyone else's pending work in this scope.
     const binding = await this.state.cardMappings.get(`lark-launch:${config.appId}`, session.sourceId!);
@@ -1001,12 +1004,19 @@ export class LarkCoordinatorDispatch {
       await failBeforeRun('访问被拒绝', withGroupMention('**当前账号不在机器人白名单中。**\n\n如需使用，请联系机器人管理员添加你。'), `fail_acl_${event.messageId}_${currentTurn}`, 'access_denied');
       return;
     }
-    const highRiskAuthorized = botSender ? false : !riskControlEnabled ? allowed
+    const approvalId = task.inbox?.workflowRequestId;
+    const continuation = approvalId && event.messageId === riskMessageId(approvalId) ? await readRiskApproval(this.state.workflowOptions.store, config.appId, approvalId) : undefined;
+    if (approvalId && event.messageId === riskMessageId(approvalId) && (!continuation || config.riskControlMode !== 'enforced' || !['approved','started'].includes(continuation.status)
+      || continuation.status === 'approved' && continuation.expiresAt <= Date.now() || continuation.sessionId !== task.inbox?.sessionId || continuation.actorId !== event.senderOpenId)) return;
+    const groupRisk = config.riskControlMode === 'enforced' && event.chatType === 'group' && config.managedGroup
+      ? await this.state.groupManager?.authorize(config.appId, event.chatId, event.senderOpenId, 'high_risk.execute', group.sessionId, { taskRequesterOpenId: event.senderOpenId }) : undefined;
+    const highRiskAuthorized = groupRisk?.allowed === false ? false : botSender ? false : !riskControlEnabled ? allowed
       : await allowedHighRiskActor({ highRiskAllowedUsers, highRiskAllowedEmails }, event.senderOpenId, lookupEmails, this.state.log);
     const actorEmail = actorEmails?.[0];
     const riskPolicy: ToolRiskPolicy | undefined = config.riskControlMode === 'enforced' ? {
       enabled: true,
-      authorized: highRiskAuthorized,
+      authorized: continuation ? false : highRiskAuthorized,
+      ...(continuation ? { approvalRequestId: continuation.taskId } : {}),
       pattern: highRiskPattern,
       ...(actorEmail ? { actorEmail } : {}),
       reason: '当前飞书发送人不在高危操作允许名单中'
@@ -1616,7 +1626,7 @@ export class LarkCoordinatorDispatch {
     await contributors.preparePrompt();
     const { agentPrompt, promptParts } = await composeLarkDispatchPrompt({
       session, config, event, ...contributors.prompt,
-      silentProgress, highRiskPattern: riskControlEnabled && !highRiskAuthorized ? highRiskPattern : undefined,
+      silentProgress, approvedContinuation: Boolean(continuation), highRiskPattern: riskControlEnabled && !highRiskAuthorized && !continuation ? highRiskPattern : undefined,
       redispatch: task.redispatch, plan: planTask !== undefined, materialPrompt, materialParts
     });
 

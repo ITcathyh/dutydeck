@@ -97,6 +97,8 @@ export class JsonlTailer implements TranscriptEventSource {
   private pendingBytes = 0;
   private pendingPosition: TranscriptPosition | undefined;
   private fileEpoch = 0;
+  private lastParsedPosition?: TranscriptPosition;
+  private incompleteHistory = false;
   private generation = 0;
   private work: Promise<void> = Promise.resolve();
   private polling = false;
@@ -189,6 +191,13 @@ export class JsonlTailer implements TranscriptEventSource {
     return this.currentPath
       ? { path: this.currentPath, offset: this.completedOffset }
       : { offset: 0 };
+  }
+
+  hasCompleteHistory(): boolean {
+    const end = this.captureWatermark();
+    const last = this.lastParsedPosition;
+    return !!this.timer && !this.failure && !this.incompleteHistory && !!end && !!last && last.path === end.path &&
+      last.dev === end.dev && last.ino === end.ino && this.completedOffset === end.offset && !this.pendingBytes;
   }
 
   captureWatermark(): TranscriptPosition | undefined {
@@ -389,6 +398,7 @@ export class JsonlTailer implements TranscriptEventSource {
     }
     if (size < this.offset) {
       this.fileEpoch++;
+      this.incompleteHistory = true;
       this.toolEvents.clear();
       this.resetMapping?.();
       this.offset = this.completedOffset = this.pendingStartOffset = 0;
@@ -455,9 +465,11 @@ export class JsonlTailer implements TranscriptEventSource {
     try {
       entry = JSON.parse(line);
     } catch {
-      return; // Malformed line — skip silently.
+      this.incompleteHistory = true;
+      return; // Ordinary transcript projection can skip a malformed line.
     }
-    if (!entry || typeof entry !== 'object') return;
+    if (!entry || typeof entry !== 'object') { this.incompleteHistory = true; return; }
+    this.lastParsedPosition = position;
     let recordIdentity: string | undefined;
     if (this.followGenerations) {
       const hash = createHash('sha256').update(this.generationRecordKey?.(entry, rawLine) ?? rawLine).digest('hex');

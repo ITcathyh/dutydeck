@@ -1,4 +1,4 @@
-import { installationOwnerTaskActor, type StoredLarkConfig } from '@dutydeck/shared';
+import { installationOwnerTaskActor, type ToolRiskPolicy, type StoredLarkConfig } from '@dutydeck/shared';
 
 export const defaultHighRiskPattern = String.raw`(?:^|[\s;&|])(?:sudo|rm|shred|dd|mkfs|diskutil|launchctl|kill|pkill|lark-?cli|larkcli|bits-?cli|bitscli|bytedcli|ssh|scp|rsync|osascript)\b|\bgit\s+(?:push|reset|clean|checkout)\b|\b(?:npm|pnpm|yarn)\s+(?:publish|unpublish)\b|\bcurl\b[^\n]*(?:-X|--request)\s*(?:POST|PUT|PATCH|DELETE)\b`;
 
@@ -21,4 +21,11 @@ export async function allowedHighRiskActor(
     if (onLookupError === 'throw') throw error;
     return false;
   }
+}
+
+/** Delegated work carries the actor's ordinary policy. An approval belongs to the original attempt only. */
+export function inheritedRiskPolicy(policy?: ToolRiskPolicy): ToolRiskPolicy | undefined {
+  if (!policy) return undefined;
+  const { approvalRequestId, approvedAttempt, approvalCheckUrl, requestPrefix, ...ordinary } = policy;
+  return ordinary;
 }

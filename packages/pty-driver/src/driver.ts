@@ -1250,6 +1250,8 @@ export class PtyCliDriver implements AgentDriver {
     return this.adapter.isIdleScreen(screen) ? { state: 'idle', evidence: 'idle_composer' } : { state: 'unknown', evidence: 'composer_not_recognized' };
   }
 
+  backgroundWorkCleared(): boolean { return this.transcript?.backgroundWorkCleared?.() === true; }
+
   hasBackgroundWork(): boolean {
     return !this.stopped && (this.transcript?.pendingBackgroundWork?.() ?? 0) > 0;
   }

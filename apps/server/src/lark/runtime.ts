@@ -81,6 +81,8 @@ export interface LarkQueries {
 export type LarkRuntimeReliability = {
   getAgentAvailability?(agentId: string): { reason: string; remedy: string; at: string } | undefined;
   checkAgentAvailability?(agentId: string, options?: { force?: boolean }): Promise<{ reason: string; remedy: string; at: string } | undefined>;
+  isRiskContinuation?(sessionId: string, taskId?: string): boolean;
+  riskContinuationReady?(sessionId: string, approval?: { queued: boolean; expiresAt: number }): boolean | Promise<boolean>;
   inspectAgentQuiescence?(sessionId: string): 'idle' | 'busy' | 'unknown';
   settleIdleAttempt?(sessionId: string, input: { taskId: string; decisionId: string; outcome: 'unknown' | 'interrupted' | 'failed'; evidenceRefs: string[] },
     actor: { kind: 'installation_owner'; id: 'installation_owner' }): Promise<unknown>;

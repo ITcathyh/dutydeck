@@ -41,6 +41,7 @@ export const agentQuickstart = `QUICKSTART（给 Agent）
   回答你的提问：直接在话题里回复。
 
 常用
+  dutydeck agent risk request --summary '<目的和原因>' --command '<原命令>'  私聊请管理员批准本次请求
   dutydeck agent status                                        本会话的 Agent、模型、工作区、运行状态和排队
   dutydeck agent session resume [--id <编号>]  恢复本话题最近关闭的会话（先发确认卡）
   dutydeck agent session fork [--task '<任务>']  带上下文在新话题开分身（先发确认卡）

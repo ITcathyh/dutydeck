@@ -80,7 +80,10 @@ export async function composeHttp({ config, env, repos, options, log, channel, l
       return {
         status: 'ready',
         handle: {
-          stream,
+          stream: { ...stream, write: data => {
+            if (runtime.isRiskContinuation(sessionId)) throw new RuntimeError('RISK_CONTINUATION_ACTIVE', '高危审批续跑期间暂不接受追加输入。', 409);
+            return stream.write(data);
+          } },
           onExit(callback) {
             const unsubscribe = runtime.onDriverExit(sessionId, code => {
               unsubscribe();
@@ -171,7 +174,7 @@ export async function composeHttp({ config, env, repos, options, log, channel, l
     identityPreflight: { repositories: repos, authorize: foundationManagementAuthorizer, probe: identityPreflightProbe, now: options.identityPreflight?.now },
     schedule: { repositories: repos, authorize: foundationManagementAuthorizer, uiEntryReady: true, collaborationExecutorWired: true },
     workItemTools: { runtime, work: workItems, tools: agentTools, delegations },
-    agentRequests: { runtime, tools: agentTools, automation, automatedTask: isAutomatedTask, prepareDelivery: automationIntegration.prepareTaskDelivery, sendConfirmation: automationIntegration.sendScheduleRequest },
+    agentRequests: { runtime, activeRiskApproval: (id, taskId, attempt) => runtime.isRiskApprovalActive(id, taskId, attempt), tools: agentTools, automation, automatedTask: isAutomatedTask, prepareDelivery: automationIntegration.prepareTaskDelivery, sendConfirmation: automationIntegration.sendScheduleRequest },
     // 与 coordinator 的记忆存储同一个 configs 仓库（listener 的 workflowStore 就是 repos.config）。
     memoryTools: { tools: agentTools, store: memoryStore, runtime },
     memoryManagement: {

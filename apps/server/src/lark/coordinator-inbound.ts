@@ -7,6 +7,7 @@ import { storedButtons } from './handlers/stored-buttons.js';
 import { taskButtons } from './handlers/task-buttons.js';
 import { resolveCallback } from './handlers/callbacks.js';
 import { turnDecisionKey } from './recovery-decision.js';
+import { LarkRiskApprovals, riskContinuationText, riskMessageId } from './risk-approvals.js';
 import { fromRecord } from './turn-record.js';
 import { annotateDisposition, type Disposition } from './disposition.js';
 import { larkMessageAnchor } from './message-anchor.js';
@@ -54,7 +55,7 @@ import { connectLarkOpenPlatformSession } from './open-platform-session.js';
 import { findLarkThreadContinuation, larkGroupKey, larkSessionConfigKey, parsePrompt, resolveLarkScopeId, sameWorkspace } from './session-resolver.js';
 import type { LarkMessageEvent } from './listener.js';
 import type { LarkGroup, LarkTask, PersistedLarkCardTask } from './coordinator.js';
-import { parseCardTask, parseOptionalCardTask } from './persisted-card-task.js';
+import { parseCardTask, parseOptionalCardTask, requestMessageId } from './persisted-card-task.js';
 import { type LarkCommandPrompt, larkCardChannel, larkHumanTaskAllowed, type LarkRelaunchClaim, larkTaskTitle, sendTaskCard } from './coordinator-core.js';
 import { larkCancelledBeforeSubmit, larkTurnRequest, larkTurnRequestKey } from './coordinator-dispatch.js';
 import { planReplyAction } from './plan-flow.js';
@@ -144,7 +145,22 @@ interface IntakeDependencies {
 }
 
 export class LarkCoordinatorInbound {
-  constructor(private readonly state: CoordinatorState, private readonly parts: IntakeDependencies) {}
+  constructor(private readonly state: CoordinatorState, private readonly parts: IntakeDependencies) {
+    this.approvals = new LarkRiskApprovals(state, async (record, config) => {
+      const prompt = riskContinuationText(record);
+      const event: LarkMessageEvent = { ...record.event, messageId: riskMessageId(record.taskId), replyMessageId: larkMessageAnchor(record.event),
+        content: JSON.stringify({ text: prompt }), messageType: 'text', parentId: undefined, authorization: { strength: 'explicit', via: 'answer_reply' } };
+      await parts.core.inbox.seed(record.appId, event, { prompt, scopeId: record.scopeId, resources: [] }, { sessionId: record.sessionId, workflowRequestId: record.taskId });
+      void this.handle(event, config, true, true).catch(error => state.log.warn({ error, taskId: record.taskId }, '高危审批续跑投递待对账'));
+    });
+  }
+  readonly approvals: LarkRiskApprovals;
+  async requestRiskApproval(request: import('./agent-command.js').LarkRiskRequest) {
+    const { config, requested, scopeId } = await this.agentCommandOrigin(request);
+    const result = await this.approvals.request(request, config, requested, scopeId);
+    this.parts.reconcile.scheduleReconcile();
+    return result;
+  }
 
   async initializeWorkflows(config: StoredLarkConfig) {
     this.state.reconcileConfig = config;
@@ -976,7 +992,7 @@ export class LarkCoordinatorInbound {
     const { addressed, participation: participationInput } = wakeSignals(wakeFacts);
     // 真人发言让同话题的机器人连续回合清零：判为不接的消息也算，所以在唤醒过滤之前做。
     if (event.chatType === 'group' && !botSender && event.senderOpenId && !scenario) this.state.workflowOptions.participation?.noteHumanMessage(config.appId, event);
-    const participation = scenario ? undefined : await this.state.workflowOptions.participation?.handle(event, config, { ...participationInput, botOpenId: this.state.botOpenId, trustedBot });
+    const participation = scenario || persisted?.workflowRequestId && persisted.event.messageId === riskMessageId(persisted.workflowRequestId) ? undefined : await this.state.workflowOptions.participation?.handle(event, config, { ...participationInput, botOpenId: this.state.botOpenId, trustedBot });
     if (this.state.handledMessages.has(event.messageId)) return;
     const wake = decideWake(wakeFacts, participation);
     if (!wake.wake) { await note(wake.reason === 'not_addressed' && botSender ? 'bot_message' : wake.reason); return; }
@@ -1081,8 +1097,16 @@ export class LarkCoordinatorInbound {
         prompt = resumed;
       }
       const workflowScope: { id: string; prompt?: string } = { id: scopeId };
-      if (!inbox?.request && (await this.routeWorkflow(event, config, prompt, workflowScope)
-        || await this.routePendingAsk(event, config, prompt, resources, workflowScope, inbox, recovering))) {
+      const receivingSession = this.state.groups.get(larkGroupKey(event, scopeId, config.appId))?.sessionId;
+      const quotedExclusive = quotedWorkflow && this.state.runtime.isRiskContinuation?.(quotedWorkflow.sessionId);
+      const exclusive = quotedExclusive || (receivingSession && this.state.runtime.isRiskContinuation?.(receivingSession));
+      const replyCommand = quotedExclusive && parseSlashCommand(prompt);
+      const currentAskReply = quotedExclusive && quotedWorkflow.kind === 'ask' && quotedWorkflow.state === 'pending' && !quotedWorkflow.durable
+        && event.senderType === 'user' && event.senderOpenId && event.senderOpenId === quotedWorkflow.event.senderOpenId
+        && quotedWorkflow.taskId && this.state.runtime.isRiskContinuation?.(quotedWorkflow.sessionId, quotedWorkflow.taskId)
+        && (!replyCommand || !resolveLarkCommand(replyCommand) || (replyCommand.name === 'answer' && replyCommand.args[0] === quotedWorkflow.id));
+      if (!inbox?.request && ((!exclusive || currentAskReply) && await this.routeWorkflow(event, config, prompt, workflowScope)
+        || !exclusive && await this.routePendingAsk(event, config, prompt, resources, workflowScope, inbox, recovering))) {
         if (inbox) await this.parts.core.inbox.update(inbox, { state: 'accepted', reason: 'workflow_handled' });
         await clearAcknowledgement();
         return;
@@ -1117,7 +1141,7 @@ export class LarkCoordinatorInbound {
         if (inbox) await this.parts.core.inbox.update(inbox, { state: 'accepted', ...((await this.parts.core.inbox.reload(inbox))?.reason !== 'command_rejected' ? { reason: 'command_handled' as const } : {}) });
         return;
       }
-      const busy = config.busyTriage === true && !recovering && !inbox?.request && !commandRoute && !control
+      const busy = config.busyTriage === true && !(group.sessionId && this.state.runtime.isRiskContinuation?.(group.sessionId)) && !recovering && !inbox?.request && !commandRoute && !control
         && !prompt.trimStart().startsWith('/') && event.senderType === 'user' && event.senderOpenId
         && !quotedWorkflow && !scenario && !event.scenario && !larkTaskAgentGuid(event.messageId)
         ? await this.routeBusyMessage(event, config, prompt, group, scopeId).catch(error => {
@@ -1888,8 +1912,8 @@ export class LarkCoordinatorInbound {
       const saved = mapping.sessionId === request.sessionId ? parseOptionalCardTask(mapping.extra) : undefined;
       if (saved?.runtime_task_id === request.taskId && saved.scope_id) { origin = { externalId: mapping.externalId, saved }; break; }
     }
-    const raw = origin?.externalId.startsWith('om_') ? await store.get(`lark.inbox.${current.appId}.${origin.externalId}`) : undefined;
-    const requested = raw ? (JSON.parse(raw) as LarkInboxRecord).event : undefined;
+    const messageId = origin && requestMessageId(origin.externalId, origin.saved);
+    const requested = messageId ? (await this.parts.core.inbox.lookup(current.appId, messageId))?.event : undefined;
     if (!origin || !requested) throw new RuntimeError('AGENT_COMMAND_ORIGIN_MISSING', '找不到这一轮的飞书消息，不能代办命令。', 409);
     const { saved } = origin;
     const config = saved.chat_type === 'group' && this.state.groupManager ? await this.state.groupManager.resolved(current, saved.chat_id) : current;
@@ -2208,6 +2232,12 @@ export class LarkCoordinatorInbound {
     try {
       const workflow = value as Record<string, unknown> | null;
       if (workflow && typeof workflow === 'object') {
+        if (typeof workflow.risk_request === 'string' && this.state.reconcileConfig) {
+          const appId = this.state.reconcileConfig.appId;
+          return readLarkConfig(this.state.workflowOptions.store, appId).then(config => config?.listening
+            ? this.approvals.decide(config, workflow.risk_request as string, workflow.decision, operatorOpenId, context)
+            : { type: 'warning', content: '审批暂不可用' }).finally(() => this.parts.reconcile.scheduleReconcile());
+        }
         const callback = resolveCallback(workflow);
         if (callback) {
           const [key, , handle] = callback;

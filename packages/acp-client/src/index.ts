@@ -1,3 +1,4 @@
+import { recordRiskDenial, riskRequestInvocation, secretGuardFinding } from '@dutydeck/shared/secret-guard';
 import { privateSessionStore, privateWorkspaceDirectory } from './native-session-store.js';
 export { readNativeCreationRecord } from './native-session-store.js';
 import { createHash } from 'node:crypto';
@@ -454,7 +455,13 @@ export class AcpxAdapter implements AgentDriver {
       catch (error) { this.warnCaught('decidePermission.resolveRiskPolicy', error); return { outcome: 'reject_once' }; }
     }
     if (!active()) return { outcome: 'reject_once' };
-    if (riskPolicy?.enabled && !riskPolicy.authorized) {
+    const riskEvent = { tool_name: raw.toolCall?.kind === 'execute' ? 'Bash' : raw.toolCall?.title, tool_input: raw.toolCall?.rawInput ?? raw.toolCall?.input, cwd: this.agent.cwd };
+    if (riskPolicy?.enabled && !riskPolicy.authorized && riskPolicy.approvedAttempt) {
+      const protectedInput = flattenRiskText(raw.toolCall);
+      if (protectedInput === undefined || secretGuardFinding(riskEvent) ||
+        secretGuardFinding({ tool_name: 'Bash', tool_input: { command: protectedInput }, cwd: this.agent.cwd })) return { outcome: 'reject_once' };
+    }
+    if (riskPolicy?.enabled && !riskPolicy.authorized && !riskPolicy.approvedAttempt && !riskRequestInvocation(riskEvent, riskPolicy.requestPrefix)) {
       if (candidate === undefined) {
         this.options.onEvent({ type: 'permission_request', data: { id, toolCallId: raw.toolCall?.toolCallId, title: `操作参数嵌套过深或过大，无法做高危检查，已拒绝：${facts.title}`, options: [], status: 'rejected' } });
         return { outcome: 'reject_once' };
@@ -463,6 +470,7 @@ export class AcpxAdapter implements AgentDriver {
         const matches = await this.whileActive(() => testRegexWithTimeout(riskPolicy!.pattern, candidate));
         if (!active()) return { outcome: 'reject_once' };
         if (matches) {
+          recordRiskDenial(this.agent.cwd ?? process.cwd(), this.options.context?.sessionId ?? this.agent.env.dutydeck_session_id, riskPolicy, riskEvent);
           this.options.onEvent({ type: 'permission_request', data: { id, toolCallId: raw.toolCall?.toolCallId, title: `高危操作已被 Dutydeck 拦截：${facts.title}`, options: [], status: 'rejected' } });
           return { outcome: 'reject_once' };
         }
