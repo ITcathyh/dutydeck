@@ -11,7 +11,7 @@
 // The JSON file is an internal implementation detail, not an external API.
 
 import { randomUUID } from 'node:crypto';
-import { mkdir, open, rename, readFile, rm } from 'node:fs/promises';
+import { chmod, mkdir, open, rename, readFile, rm } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 
 export const STATE_VERSION = 1;
@@ -81,13 +81,22 @@ export async function writeJsonAtomic(file, value) {
   const tmp = join(dir, `.${file.split('/').pop()}.tmp-${process.pid}-${++tmpCounter}`);
   let handle;
   try {
-    handle = await open(tmp, 'wx');
+    // The payload can contain raw chat text, so the temp file is owner-only.
+    // open's mode is an upper bound; fchmod pins exact 0600 against any umask.
+    handle = await open(tmp, 'wx', 0o600);
+    await handle.chmod(0o600);
     await handle.writeFile(JSON.stringify(value, null, 2));
     await handle.sync();
-  } finally {
+    await handle.close();
+    handle = undefined;
+    // rename keeps the temp inode and its 0600 mode, replacing any old file.
+    await rename(tmp, file);
+  } catch (error) {
     await handle?.close().catch(() => {});
+    // Never leave a temp file containing raw chat text behind on failure.
+    await rm(tmp, { force: true }).catch(() => {});
+    throw error;
   }
-  await rename(tmp, file);
   await fsyncDirectory(dir);
 }
 
@@ -109,6 +118,9 @@ export class JobStore {
         || !state.events || !state.messageIndex || !state.jobs) {
         throw new Error(`unrecognized state file shape/version: ${file}`);
       }
+      // Files written by older builds may be world-readable; they already hold
+      // raw chat text, so tighten them as soon as the store opens.
+      await chmod(file, 0o600);
     } catch (error) {
       if (error && error.code === 'ENOENT') state = freshState();
       else throw error; // fail loud rather than restart "empty" and risk duplicate orders
@@ -119,12 +131,20 @@ export class JobStore {
   /**
    * Run a synchronous, serial read-modify-write transaction and durably persist
    * it. `fn(state)` must not await; return value is resolved to the caller.
+   *
+   * `fn` runs against a detached copy: until its result is fsynced and renamed
+   * into place, readers keep seeing the last durable state. A failed write (or a
+   * throwing `fn`) discards the copy, so retrying the same message re-applies
+   * the whole transaction instead of observing a half-committed memory state.
    */
   mutate(fn) {
     if (this.closed) return Promise.reject(new Error('store closed'));
     const run = this.chain.then(async () => {
-      const result = fn(this.state);
-      await writeJsonAtomic(this.file, this.state);
+      const draft = structuredClone(this.state);
+      const result = fn(draft);
+      await writeJsonAtomic(this.file, draft);
+      // Make the transaction visible in memory only after fsync + rename.
+      this.state = draft;
       return result;
     });
     // Keep the chain alive even if one transaction fails.
