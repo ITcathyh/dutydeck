@@ -78,7 +78,6 @@ console.log(i.bot.open_id);'
     "socket": "/home/dutydeck/.local/state/rovetap-hub/project-job.sock",
     "tokenFile": "/home/dutydeck/.local/state/rovetap-hub/project-jobs/rovetap.token"
   },
-  "webBaseUrl": "https://rovetap.example.com/workbench",
   "reply": { "mode": "lark-api" }
 }
 ```
@@ -92,7 +91,7 @@ console.log(i.bot.open_id);'
 - `listen.port` 默认 `0` 是随机端口，eventHandlers 需要稳定 URL，所以**固定一个空闲 loopback 端口**；host 保持 `127.0.0.1`。`listen.host` 只接受本机回环（`127.x.x.x`、`::1`、`localhost`），填 `0.0.0.0` 或局域网地址会在启动时直接报错退出。
 - `pairfob.bin` 必须绝对路径且当前用户可执行；`pairfob.project` 与 `hub project-job enable --project` 一致；`pairfob.tokenFile` 是必需的项目令牌文件（也可用环境变量 `ROVETAP_PROJECT_TOKEN_FILE`，但宿主会清洗 service 环境，建议显式写配置），socket 建议一并显式填写。
 - **启动即校验必需项**：缺少 `appSecret(File)`、`pairfob.bin`、`pairfob.tokenFile`（或文件不可读/为空、bin 不可执行）时，service 不会带病运行，而是在 stderr 打印 `[rovetap-jobs] failed to start: <含配置键名与路径的原因>` 并以状态码 1 退出；按提示补配置后重启即可，不会出现 `/job` 被 stop 却永远没有回执。
-- `webBaseUrl` 填工作台**普通地址**（origin+路径）。误粘带 token 的配对/登录链接时，原 query/fragment 会被清除；含 `user:pass@` userinfo 时不生成链接——敏感段不会进飞书。最终链接固定为 `<origin/路径>?task=<taskId>&leader=<leaderId>`。
+- `webBaseUrl` 可留空。需要可选任务入口时，填写已连接总机的 RoveTap 环境所用的 HTTPS 工作台地址，只填来源和路径。插件清除原地址的查询和片段，拒绝含用户信息的地址，并追加 `?task=<taskId>&leader=<leaderId>`。请使用普通工作台地址，配对凭据留在 RoveTap 客户端内。
 - 其他可选项（`projectAliases`、`reply.mode=dutydeck-cli`、`lark.baseUrl`、`limits` 等）以 `service/config.mjs` 的默认值为准。
 
 ## 3. 安装、启动并绑定 eventHandlers
@@ -136,7 +135,8 @@ unset HANDLER_TOKEN
 - **裸 `/job`**：只要飞书把群消息投递给应用（已发布 `im:message.group_msg`）即可识别，不依赖 `selfOpenId`。
 - **`@机器人 /job ...`**：只有 @ 的 open_id 与配置的可信 `selfOpenId` 精确匹配事件 `mentions` 时，前导 @ 才会被消去并识别。未配或不匹配（@ 的是别人、文本看起来像 `@_user_1` 但没有对应事件提及）时，本插件回 `continue`，消息按普通 @ 机器人进入 Dutydeck，不会产生 RoveTap 单。
 - `/job` 必须在消息开头；句中出现的 `/job` 是普通文本。`/job @未知别名 ...` 会回执「不明确的项目」并停止传播；裸的非别名词按指令正文处理；空指令用默认文案。
-- 正常路径：材料核对、建单成功后，原话题出现「✅ RoveTap 项目已接单」（含任务号与可选链接），随后 doing/done/failed 等阶段只通知变化；缺材料/无权限时收到对应引导。Dutydeck 不会另起 Agent 回答该命令。
+- 材料核对、建单成功后，原话题出现「✅ RoveTap 项目已接单」，并给出任务号和标题开头。在已连接总机的 RoveTap 桌面首页进入「项目」，打开对应项目下的「项目 leader」，在「搜索任务」输入回执中的标题开头，再点开匹配的任务。处理进展继续回到原话题。缺少材料或权限时，话题会收到相应提示。
+- 配置 `webBaseUrl` 后，回执还会提供一个仅在已连接总机的 RoveTap 环境可用的任务入口。普通飞书内置浏览器如果没有这条连接，打开后会停在连接页。此时回到已连接的 RoveTap 按标题找任务即可。
 
 ## 材料与权限边界
 
@@ -185,7 +185,7 @@ pnpm exec vitest run plugins/rovetap-jobs/test
 | `@机器人 /job` 变成 Dutydeck 普通对话 | `selfOpenId` 未配/填错，或 @ 的不是该应用机器人；用 2.2 的命令取 `bot.open_id`，改配置后重启 service。 |
 | 401 / 403 `app_mismatch` | handlerToken 两边不一致；`appId` 与被绑机器人不一致。 |
 | 回执要求引用 | 按提示引用那条反馈再发 `/job`：多条转发、话题枚举不完整、引用被删/跨话题/无文字都会这样，属设计行为。 |
-| 回执无任务链接 | 未配 `webBaseUrl`，或其含 userinfo 被拒绝；改成普通 HTTPS 工作台地址后重启 service。 |
+| 回执无任务入口，或链接打开后停在连接页 | 打开已连接总机的 RoveTap，在项目任务列表中对照回执里的标题开头。接单与后续阶段仍可在原话题查看。 |
 | pairfob 一直核对 | `pairfob.bin` 绝对路径可执行、hub 已重启、socket/tokenFile 与 `hub project-job enable` 输出一致；用 `project status --key <source-key>` 只读核对，不要换新键重发。若话题已收到 `configuration_error`/`not_found`/`conflict` 说明，则属明确终局，按提示修配置或绑定后重新发 `/job`；`unreachable` 会自动退避重提，无需人工重发。 |
 | 重启瞬间 eventHandlers 收到 503 `shutting_down` | 旧代仍在排空并独占固定端口，503 明确可重投，Dutydeck/飞书重投后由持久收件箱去重；排空结束端口释放，新代才能绑定，属正常无损重启。 |
 | service 反复退出 | 看宿主/unit stderr 的 `[rovetap-jobs] failed to start: ...`（不含密钥）：配置缺 `appSecret`/`pairfob.bin`/`pairfob.tokenFile`、token 文件或 bin 路径不可用、`listen.host` 非回环都会在启动时这样指出键名/路径。连续崩溃超上限后 supervisor 停止自动重启，修复后 `dutydeck restart` 或 `POST /api/plugins/rovetap-jobs/service/restart`（安装管理员）。 |

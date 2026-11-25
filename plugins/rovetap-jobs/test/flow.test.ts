@@ -45,17 +45,25 @@ describe('rovetap-jobs  happy path / contract', () => {
     expect(accepted.to).toBe('om_root'); // anchored to topic root
     expect(accepted.inThread).toBe(true);
     expect(accepted.uuid).toBeTruthy();
-    expect(accepted.text).toContain('pt_000001');
-    expect(accepted.text).toContain('pl_leader_1');
+    expect(accepted.text).toContain('任务号：pt_000001');
+    expect(accepted.text).toContain('标题开头：复现并修复草稿丢失，补回归测试。');
+    expect(accepted.text).toContain('已连接总机的 RoveTap 项目任务列表');
+    expect(accepted.text).toContain('进展会回到本话题');
+    expect(accepted.text).toContain('项目任务入口（仅在已连接总机的 RoveTap 环境可用）');
     expect(accepted.text).toContain('https://rove.example.com/?task=pt_000001&leader=pl_leader_1');
   });
 
-  it('uses the default instruction and default project for a bare /job', async () => {
-    h = await setupHarness();
+  it('uses the default instruction and helps find a bare /job task without a web link', async () => {
+    h = await setupHarness({ config: { webBaseUrl: '' } });
     seedQuotedText('om_fwd2', '材料正文');
     await h.post(makeEnvelope({ messageId: 'om_bare', parentId: 'om_fwd2', threadId: 'omt_1', rootId: 'om_root', text: '/job' }));
-    await waitFor(() => h!.hub()?.submitCount === 1);
+    await waitFor(() => h!.lark.replies.some((reply) => reply.text.includes('项目已接单')));
     expect(h.hub().lastPayload.instruction).toBe('请项目 leader 跟进这条反馈。');
+    const accepted = h.lark.replies.find((reply) => reply.text.includes('项目已接单'));
+    expect(accepted.text).toContain('任务号：pt_000001');
+    expect(accepted.text).toContain('标题开头：请项目 leader 跟进这条反馈。');
+    expect(accepted.text).toContain('在已连接总机的 RoveTap 项目任务列表中按标题开头找到这条任务');
+    expect(accepted.text).not.toMatch(/https?:\/\//);
   });
 
   it('announces doing then done phases exactly once', async () => {

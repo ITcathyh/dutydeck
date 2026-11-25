@@ -269,6 +269,8 @@ dutydeck settings bot set cli_xxx 'eventHandlers=[{"id":"rovetap-jobs","eventTyp
 
 提交前连接项目失败时，插件退避后使用已保存的原指令和材料重试。提交结果未知时，插件按原来源键查询结果。
 
+飞书接单回执提供任务号和标题开头，后续进展继续回原话题。在已连接总机的 RoveTap 桌面端，从「项目」进入对应项目下的「项目 leader」，在「搜索任务」输入回执中的标题开头，再点开匹配的任务。可选的 `webBaseUrl` 只在已有总机连接的 RoveTap 环境中打开项目详情。普通飞书内置浏览器没有这条连接时会停在连接页。
+
 ## 受控插件结果
 
 可信 `providers` 插件可通过 `api.registerResultTool({ name, description, inputSchema, execute })` 注册导出工具：`inputSchema.parse(input)` 校验参数，`execute(input, { invocationId, requester, signal })` 返回 `Promise<{ files: Array<{ name: string, data: Uint8Array }> }>`。工具返回文件名与字节，不提供文件路径、接收人或模型可见正文。宿主保存字节并发固定查看回执，模型只收到 `deliveryId`、`status`、`fileCount`；`delivered` 仅表示通知送达，不表示下载成功或整轮任务完成。

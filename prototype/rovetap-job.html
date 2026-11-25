@@ -1441,9 +1441,14 @@ pairfob project status --project rovetap --key &lt;来源键&gt;</pre
               另按稳定来源键唯一建单，重复且内容一致时取回原任务，键相同但输入不同则报冲突。
             </li>
             <li>
-              建单成功返回 <code>task_id</code> 和 <code>leader_id</code>。用已配置的工作台地址拼出现有网页路由
-              <code>?task=pt_…&amp;leader=pl_…</code>，用户登录 RoveTap
-              后打开同一件任务。拿到已落库的回执才在飞书显示“项目已接单”。总机进入 doing 时回报“项目正在处理”，详情可查看是否正在等待人回复。
+              建单成功后，飞书回执显示任务号和标题开头。在已连接总机的 RoveTap 桌面端，从「项目」进入对应项目下的「项目 leader」，
+              在「搜索任务」输入回执中的标题开头，再点开匹配的任务。
+              进展继续回到原话题。总机进入 doing 时回报“项目正在处理”，详情可查看是否正在等待人回复。
+            </li>
+            <li>
+              设置 <code>webBaseUrl</code> 后可附上 <code>?task=pt_…&amp;leader=pl_…</code> 的任务入口。
+              该入口依赖现有的总机连接。普通飞书内置浏览器没有这条连接时会停在连接页，此时回到已连接的 RoveTap 查看任务。
+              原型中的“模拟打开项目任务”按钮用于演示任务详情。
             </li>
             <li>
               CLI
@@ -1626,6 +1631,10 @@ pairfob project status --project rovetap --key &lt;来源键&gt;</pre
       function hubTask() {
         return state.hubTasks.find((t) => t.key === state.order?.key);
       }
+      function taskTitle(instruction, limit = 200) {
+        const line = instruction.replace(/[\x00-\x1f\x7f\u0085\u2028\u2029]+/gu, " ").trim();
+        return [...line].slice(0, limit).join("").trimEnd() || "外部项目委托";
+      }
       function statusLabel() {
         return !state.order
           ? "待发送"
@@ -1761,10 +1770,15 @@ pairfob project status --project rovetap --key &lt;来源键&gt;</pre
             "receipt",
           );
         const task = hubTask();
-        const link = button("detail", "打开项目任务", "out", "text-btn");
+        const link = button("detail", "模拟打开项目任务", "out", "text-btn");
         let messages = msg(
           "Dutydeck",
-          '<b>项目已接单</b> · RoveTap<br><span class="taskid">' + esc(task.id) + "</span>" + link,
+          '<b>项目已接单</b> · RoveTap<br>任务号：<span class="taskid">' +
+            esc(task.id) +
+            "</span><br>标题开头：" +
+            esc(taskTitle(task.instruction, 60)) +
+            "<br>请在已连接总机的 RoveTap 项目任务列表中按标题开头找到这条任务。进展会回到本话题。" +
+            link,
           "receipt",
         );
         if (task.phase !== "accepted") messages += msg("Dutydeck", "leader 已派工，执行会话已开始。", "receipt");
@@ -1881,7 +1895,7 @@ pairfob project status --project rovetap --key &lt;来源键&gt;</pre
             meta("任务编号", hubTask().id) +
             field("最新进展", track(hubTask()), "") +
             '<div class="field">' +
-            button("detail", "打开 RoveTap 任务", "out", "btn soft wide") +
+            button("detail", "模拟打开 RoveTap 任务", "out", "btn soft wide") +
             "</div>";
         $("inspector").innerHTML = html;
       }
@@ -1922,6 +1936,7 @@ pairfob project status --project rovetap --key &lt;来源键&gt;</pre
         if (!o || !state.known) return;
         const s = sources[o.ref],
           phase = o.phase;
+        const title = taskTitle(o.instruction);
         const next =
           phase === "accepted"
             ? button("start", "模拟 leader 开工", "right", "btn primary")
@@ -1945,7 +1960,7 @@ pairfob project status --project rovetap --key &lt;来源键&gt;</pre
           '<aside class="task-rail"><div class="project">' +
           mark("rove") +
           '<div><b>RoveTap</b><small>项目 leader</small></div></div><p class="rail-label">项目任务 · 1</p><div class="current-task">' +
-          esc(s.title) +
+          esc(title) +
           "</div></aside>";
         dialog(
           "项目任务清单",
@@ -1959,7 +1974,7 @@ pairfob project status --project rovetap --key &lt;来源键&gt;</pre
               phase === "accepted" ? "" : "green",
             ) +
             '</div><div class="detail-title">' +
-            esc(s.title) +
+            esc(title) +
             "</div>" +
             field("发起人的委托", esc(o.instruction), "tasktext") +
             field("转发材料 · " + esc(s.name), esc(s.text)) +

@@ -270,6 +270,8 @@ Two boundaries come up often. The first is @-mentions and visibility: a bare `/j
 
 When the project connection fails before submission, the plugin waits and retries with the original saved command and material. An unknown submission outcome triggers a status lookup by the original key.
 
+The acceptance reply includes a task number and the beginning of the task title. In the RoveTap desktop client connected to the hub, go to **Projects**, open **Project leader** under the relevant project, and enter the title prefix from the reply in **Search tasks**. Open the matching task. Progress updates continue in the original topic. An optional `webBaseUrl` opens the task only in a RoveTap environment with an existing hub connection. Feishu's in-app browser shows the connection screen when it has no such connection.
+
 ## Controlled plugin results
 
 A trusted `providers` plugin registers exports through `api.registerResultTool({ name, description, inputSchema, execute })`. `inputSchema.parse(input)` validates arguments; `execute(input, { invocationId, requester, signal })` returns `Promise<{ files: Array<{ name: string, data: Uint8Array }> }>`. Tools return names and bytes without filesystem paths, recipients or a model-visible body. The host stores bytes and sends a fixed viewing notice. The model receives only `deliveryId`, `status` and `fileCount`; `delivered` confirms the notice, not a download or overall task completion.

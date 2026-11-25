@@ -64,6 +64,7 @@ describe('receipts do not leak pairing-url segments', () => {
       webBaseUrl: 'https://rove.example.com?pairing_token=SECRET_TOKEN_123#f=SECRET_FRAG_456',
     } as any;
     const text = replyText('phase:done', job, config);
+    expect(text).toContain('项目任务入口（仅在已连接总机的 RoveTap 环境可用）');
     expect(text).toContain('https://rove.example.com/?task=pt_1&leader=pl_1');
     expect(text).not.toContain('SECRET_TOKEN_123');
     expect(text).not.toContain('SECRET_FRAG_456');
@@ -76,5 +77,17 @@ describe('receipts do not leak pairing-url segments', () => {
     expect(text).not.toContain('p4ssw0rd');
     expect(text).not.toContain('operator');
     expect(text).not.toContain('http');
+  });
+
+  it('uses a single 60-code-point title prefix from the instruction, even for a long multiline command', () => {
+    const instruction = `梳理草稿\n\r\t补齐复现步骤\u2028${'🧪'.repeat(100)}后续说明`;
+    const text = replyText('accepted', { ...job, instruction }, {});
+    const prefix = '梳理草稿 补齐复现步骤 ';
+    const titleLine = `标题开头：${prefix}${'🧪'.repeat(60 - [...prefix].length)}`;
+
+    expect(text.split('\n')).toContain(titleLine);
+    expect(text).toContain('任务号：pt_1');
+    expect(text).not.toContain('后续说明');
+    expect(text).not.toMatch(/https?:\/\//);
   });
 });

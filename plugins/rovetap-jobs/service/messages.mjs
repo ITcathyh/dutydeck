@@ -6,6 +6,7 @@ import { buildTaskUrl } from './weblink.mjs';
 import { ROVE_ENTRY_CODEPOINTS } from './materials.mjs';
 
 const PROJECT_LABEL = 'RoveTap';
+const TITLE_PREFIX_LENGTH = 60;
 
 export function replyText(kind, job, config) {
   if (kind === 'denial') return denialText(job, config);
@@ -75,15 +76,18 @@ function needText(reason, detail) {
 }
 
 function acceptedText(job, config) {
-  const id = job?.pairfob?.taskId ? `\n任务：${job.pairfob.taskId}` : '';
-  const url = safeUrl(config.webBaseUrl, job?.pairfob?.taskId, job?.pairfob?.leaderId);
-  const link = url ? `\n打开项目任务：${url}` : '';
-  return `✅ ${PROJECT_LABEL} 项目已接单，leader 将跟进这条委托。${id}${link}`;
+  const id = job?.pairfob?.taskId ? `\n任务号：${job.pairfob.taskId}` : '';
+  // RoveTap starts the task title with the instruction, with control breaks
+  // folded to spaces. Keep a short prefix as a locator in the project list.
+  const title = [...(job?.instruction ?? '').replace(/[\x00-\x1f\x7f\u0085\u2028\u2029]+/gu, ' ').trim()]
+    .slice(0, TITLE_PREFIX_LENGTH).join('').trimEnd();
+  const titleLine = title ? `\n标题开头：${title}` : '';
+  const locate = title ? '按标题开头找到这条任务' : '查看项目任务';
+  return `✅ ${PROJECT_LABEL} 项目已接单。${id}${titleLine}\n请在已连接总机的 RoveTap 项目任务列表中${locate}。进展会回到本话题。${taskEntryText(job, config)}`;
 }
 
 function phaseText(phase, job, config) {
-  const url = safeUrl(config.webBaseUrl, job?.pairfob?.taskId, job?.pairfob?.leaderId);
-  const link = url ? `\n${url}` : '';
+  const link = taskEntryText(job, config);
   switch (String(phase).toLowerCase()) {
     case 'doing':
       // The upstream `doing` projection can also cover waiting for a human.
@@ -105,6 +109,11 @@ function phaseText(phase, job, config) {
     default:
       return `ℹ️ ${PROJECT_LABEL} 项目阶段更新：${phase}。${link}`;
   }
+}
+
+function taskEntryText(job, config) {
+  const url = safeUrl(config.webBaseUrl, job?.pairfob?.taskId, job?.pairfob?.leaderId);
+  return url ? `\n项目任务入口（仅在已连接总机的 RoveTap 环境可用）：${url}` : '';
 }
 
 function safeUrl(base, taskId, leaderId) {
