@@ -1,9 +1,9 @@
-// Operator/user-facing Chinese copy for thread receipts. Kept free of secrets
-// and of untrusted-material interpretation: forwarded text is only ever sent to
-// pairfob as data, never evaluated here.
+// Operator/user-facing Chinese copy for thread receipts. Material excerpts
+// use a single line of quoted text inside each receipt.
 
 import { buildTaskUrl } from './weblink.mjs';
 import { ROVE_ENTRY_CODEPOINTS } from './materials.mjs';
+import { materialChoiceCode, MAX_MATERIAL_CHOICES } from './commands.mjs';
 
 const PROJECT_LABEL = 'RoveTap';
 
@@ -31,7 +31,8 @@ function taskTitleFragment(instruction) {
 
 export function replyText(kind, job, config) {
   if (kind === 'denial') return denialText(job, config);
-  if (kind === 'need') return needText(job?.reasonCode, job?.reasonDetail);
+  if (kind === 'need:selected') return '所选材料已无法核验，原委托没有提交。请重新引用要处理的消息，再发送 /job。';
+  if (kind === 'need') return materialChoiceText(job, config) || needText(job?.reasonCode, job?.reasonDetail);
   if (kind === 'pending') {
     return '委托已记录。' + PROJECT_LABEL + ' 接单结果暂时未知，我会按原来源键只读核对，不会重复建单。';
   }
@@ -54,6 +55,10 @@ function denialText(job, config) {
       const limit = config?.limits?.maxInstructionChars ?? ROVE_ENTRY_CODEPOINTS;
       return `指令过长：指令上限为 ${limit} 个 Unicode 码点（汉字、字母、emoji 均按码点计；上游固定上限 ${ROVE_ENTRY_CODEPOINTS}，本实例只能调小）。请精简后重新发送 /job。`;
     }
+    case 'selection_usage':
+      return '请选择回执中一整行「/job 选 #短码」，其中短码是 10 位十六进制字符。';
+    case 'selection_unavailable':
+      return '该材料选项不可用。只有原发令者能在原话题中选择，短码在选材后或超过 24 小时失效。若未完成选材，请重新引用材料，再发送 /job。';
     default:
       return '该 /job 命令未被接受。';
   }
@@ -96,37 +101,72 @@ function needText(reason, detail) {
   }
 }
 
+function quotedPreview(text) {
+  if (typeof text !== 'string') return '';
+  // Keep each excerpt on its own line, including in the CLI's Markdown card.
+  const plain = text.replace(/\p{Cf}/gu, '').replace(/[\s\p{Cc}]+/gu, ' ').trim()
+    .replace(/[<>\[\]`*_~|\\@]/g, char => String.fromCharCode(char.charCodeAt(0) + 0xfee0))
+    .replace(/\/job/gi, match => `／${match.slice(1)}`)
+    .replace(/:\/\//g, '：／／');
+  const chars = [...plain];
+  return chars.length > 64 ? chars.slice(0, 64).join('') + '…' : plain;
+}
+
+function materialChoiceText(job, config) {
+  if (!job?.materialChoices?.length) return '';
+  const choices = job.materialChoices.slice(0, MAX_MATERIAL_CHOICES).map(({ messageId, preview }) =>
+    `材料「${quotedPreview(preview)}」\n/job 选 #${materialChoiceCode(job.sourceKey, messageId)}`);
+  const instruction = quotedPreview(job.instruction);
+  const mention = config?.selfOpenId ? '\n若群里需要 @机器人，发送时请先 @本机器人。' : '';
+  return [
+    '这次委托需要你确认材料。',
+    ...(instruction ? [`原委托「${instruction}」`] : []),
+    '原发令者可在 24 小时内把以下一条命令复制到当前话题，继续同一条派单。',
+    ...choices,
+    `也可以引用材料后重新发 /job。${mention}`,
+  ].join('\n');
+}
+
 function acceptedText(job, config) {
-  const id = job?.pairfob?.taskId ? `\n任务号：${job.pairfob.taskId}` : '';
   const fragment = taskTitleFragment(job?.instruction);
   const titleLine = fragment ? `\n标题片段：${fragment}` : '';
   const locate = fragment ? '其他客户端可按标题片段查找。' : '';
-  return `✅ ${PROJECT_LABEL} 项目已接单。${id}${titleLine}\n请在已连接总机的 RoveTap 中查看。新版桌面看板优先用完整任务号。${locate}进展会回到本话题。${taskEntryText(job, config)}`;
+  return `✅ ${PROJECT_LABEL} 项目已接单。${taskNumber(job)}${titleLine}${materialSummary(job)}\n请在已连接总机的 RoveTap 中查看。新版桌面看板优先用完整任务号。${locate}进展会回到本话题。${taskEntryText(job, config)}`;
 }
 
 function phaseText(phase, job, config) {
+  const context = taskNumber(job) + materialSummary(job);
   const link = taskEntryText(job, config);
   switch (String(phase).toLowerCase()) {
     case 'doing':
       // The upstream `doing` projection can also cover waiting for a human.
       // Say only that the project is processing; never claim a worker/leader
       // dispatch that the phase does not prove.
-      return `🛠 ${PROJECT_LABEL}：项目正在处理（doing）。`;
+      return `🛠 ${PROJECT_LABEL}：项目正在处理（doing）。${context}`;
     case 'done':
     case 'succeeded':
     case 'completed':
     case 'complete':
     case 'verified':
-      return `✅ ${PROJECT_LABEL}：任务已完成（${phase}），可在项目中查看验收结果。${link}`;
+      return `✅ ${PROJECT_LABEL}：任务已完成（${phase}），可在项目中查看验收结果。${context}${link}`;
     case 'failed':
     case 'error':
-      return `⚠️ ${PROJECT_LABEL}：任务进入失败状态（${phase}），请在项目中查看。${link}`;
+      return `⚠️ ${PROJECT_LABEL}：任务进入失败状态（${phase}），请在项目中查看。${context}${link}`;
     case 'cancelled':
     case 'canceled':
-      return `ℹ️ ${PROJECT_LABEL}：任务已取消（${phase}）。${link}`;
+      return `ℹ️ ${PROJECT_LABEL}：任务已取消（${phase}）。${context}${link}`;
     default:
-      return `ℹ️ ${PROJECT_LABEL} 项目阶段更新：${phase}。${link}`;
+      return `ℹ️ ${PROJECT_LABEL} 项目阶段更新：${phase}。${context}${link}`;
   }
+}
+
+function taskNumber(job) {
+  return job?.pairfob?.taskId ? `\n任务号：${job.pairfob.taskId}` : '';
+}
+
+function materialSummary(job) {
+  const summary = quotedPreview(job?.material?.text);
+  return summary ? `\n随单材料摘要：「${summary}」` : '';
 }
 
 function taskEntryText(job, config) {

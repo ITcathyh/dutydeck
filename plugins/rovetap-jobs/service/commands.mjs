@@ -8,7 +8,10 @@
 // This file is dependency-free ESM so the packaged plugin service can run on
 // plain Node >=22 without an install/build step.
 
+import { createHash } from 'node:crypto';
+
 export const DEFAULT_INSTRUCTION = '请项目 leader 跟进这条反馈。';
+export const MAX_MATERIAL_CHOICES = 5;
 
 /**
  * Feishu text messages render mentions as placeholders such as `@_user_1`.
@@ -63,6 +66,7 @@ const TARGET_TOKEN = /^@?([A-Za-z0-9_-]+)(?=\s|$)/;
  *
  * @returns {{kind:'not-command'} |
  *           {kind:'job', alias:string, instruction:string, explicitTarget:boolean} |
+ *           {kind:'select-material', code:string|null} |
  *           {kind:'unknown-project', token:string}}
  *
  * Mirrors the approved prototype semantics:
@@ -89,6 +93,13 @@ export function parseJobCommand(rawText, options = {}) {
   const anchor = JOB_ANCHOR.exec(s);
   if (!anchor) return { kind: 'not-command' };
   let rest = s.slice(anchor[0].length).trim();
+
+  // Reserve only the marked form, so instructions such as “选 Rust” keep
+  // their meaning. A copied but malformed #code must never dispatch a job.
+  if (/^选\s+#/.test(rest)) {
+    const code = /^选\s+#([0-9a-f]{10})$/i.exec(rest)?.[1];
+    return { kind: 'select-material', code: code?.toLowerCase() ?? null };
+  }
 
   const aliases = new Set(
     [options.defaultAlias ?? 'rovetap', ...(Array.isArray(options.aliases) ? options.aliases : [])]
@@ -123,6 +134,10 @@ export function parseJobCommand(rawText, options = {}) {
 function job(alias, rest, explicitTarget) {
   const instruction = rest && rest.trim() ? rest.trim() : DEFAULT_INSTRUCTION;
   return { kind: 'job', alias, instruction, explicitTarget };
+}
+
+export function materialChoiceCode(sourceKey, messageId) {
+  return createHash('sha256').update(JSON.stringify([sourceKey, messageId])).digest('hex').slice(0, 10);
 }
 
 /** Extract plain text from a Feishu `text` or simple `post` message content. */
