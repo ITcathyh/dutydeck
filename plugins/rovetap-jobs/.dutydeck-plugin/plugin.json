@@ -1,6 +1,6 @@
 {
   "name": "rovetap-jobs",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "可选的飞书 /job 派单接收器：在 Dutydeck 常规 Agent 处理前截获命令，核验引用/转发材料，按稳定来源键向 RoveTap 项目 leader 建单，并在原话题回执与同步阶段。独立 service 进程，不另起 Agent。",
   "apiVersion": 1,
   "service": {

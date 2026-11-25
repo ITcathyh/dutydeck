@@ -1,6 +1,6 @@
 {
   "name": "dutydeck-plugin-rovetap-jobs",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "description": "Optional Lark /job to RoveTap project leader intake receiver for Dutydeck.",
