@@ -247,6 +247,11 @@ export class JobWorker {
     };
   }
 
+  #pairfobOptions(job) {
+    const { bin, project, socket, tokenFile, env, timeoutMs } = this.config.pairfob;
+    return { bin, project: job.alias || project, socket, tokenFile, extraEnv: env, timeoutMs };
+  }
+
   async submitStep(sourceKey) {
     const job = this.store.getJob(sourceKey);
     if (job?.nextRunAt && Date.now() < job.nextRunAt) return;
@@ -271,15 +276,7 @@ export class JobWorker {
       j.submit.at = new Date().toISOString();
     });
 
-    const result = await submitProjectJob({
-      bin: this.config.pairfob.bin,
-      project: job.alias || this.config.pairfob.project,
-      payload,
-      socket: this.config.pairfob.socket,
-      tokenFile: this.config.pairfob.tokenFile,
-      extraEnv: this.config.pairfob.env,
-      timeoutMs: this.config.pairfob.timeoutMs,
-    });
+    const result = await submitProjectJob({ ...this.#pairfobOptions(job), payload });
 
     if (result.outcome === 'ok') {
       await this.mutateJob(sourceKey, (j, state) => {
@@ -341,15 +338,7 @@ export class JobWorker {
     // Same schedule gate for direct callers. The immediate call after a real
     // unknown submit persists nextRunAt=0 and therefore still runs at once.
     if (job.nextRunAt && Date.now() < job.nextRunAt) return;
-    const status = await getProjectStatus({
-      bin: this.config.pairfob.bin,
-      project: job.alias || this.config.pairfob.project,
-      sourceKey,
-      socket: this.config.pairfob.socket,
-      tokenFile: this.config.pairfob.tokenFile,
-      extraEnv: this.config.pairfob.env,
-      timeoutMs: this.config.pairfob.timeoutMs,
-    });
+    const status = await getProjectStatus({ ...this.#pairfobOptions(job), sourceKey });
 
     if (status.outcome === 'ok') {
       await this.adoptStatus(sourceKey, status);
@@ -384,15 +373,7 @@ export class JobWorker {
   async pollPhaseStep(sourceKey) {
     const job = this.store.getJob(sourceKey);
     if (job.nextPollAt && Date.now() < job.nextPollAt) return;
-    const status = await getProjectStatus({
-      bin: this.config.pairfob.bin,
-      project: job.alias || this.config.pairfob.project,
-      sourceKey,
-      socket: this.config.pairfob.socket,
-      tokenFile: this.config.pairfob.tokenFile,
-      extraEnv: this.config.pairfob.env,
-      timeoutMs: this.config.pairfob.timeoutMs,
-    });
+    const status = await getProjectStatus({ ...this.#pairfobOptions(job), sourceKey });
     if (status.outcome !== 'ok') {
       await this.mutateJob(sourceKey, (j) => { j.nextPollAt = Date.now() + this.backoff(j.reconcileAttempts ?? 1); });
       return;

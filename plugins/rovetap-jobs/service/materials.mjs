@@ -152,25 +152,7 @@ export async function resolveMaterial({ client, event, maxChars = ROVE_ENTRY_COD
   const limit = effectiveCodePointLimit(maxChars);
 
   // 1) Explicit quote / parent reference: re-fetch and verify before reading.
-  if (parentId) {
-    let items;
-    try {
-      items = await client.getMessageItems(parentId);
-    } catch (error) {
-      return classifyReadError(error);
-    }
-    const parent = (items ?? []).find((i) => i && i.messageId === parentId) ?? null;
-    if (!parent) return need('inaccessible', { detail: 'reference_not_readable' });
-    if (parent.deleted === true) return need('inaccessible', { detail: 'deleted' });
-
-    const scope = verifyScope(parent, event);
-    if (!scope.ok) return need(scope.reason, { detail: scope.detail });
-
-    const text = verifiedText(parent, items, limit);
-    const problem = textBodyProblem(text);
-    if (problem) return need('no_text', { detail: problem });
-    return { status: 'ok', material: { messageId: parentId, text } };
-  }
+  if (parentId) return readVerifiedMaterial(client, parentId, event, limit, 'reference_not_readable');
 
   // 2) No quote. Discovery is allowed ONLY inside a native `omt_` topic. A root
   //    id (`om_`) without an `omt_` thread would require a chat-wide scan, which
@@ -226,7 +208,7 @@ export async function resolveMaterial({ client, event, maxChars = ROVE_ENTRY_COD
     const earlier = candidates.filter((c) => parseMessageTime(c.createTime) < anchor.time);
     if (earlier.length === 0) return need('none', { detail: 'no_forward_before_command' });
     if (earlier.length > 1) return need('multiple', { candidateCount: earlier.length });
-    return verifyCandidate(client, earlier[0], event, limit);
+    return readVerifiedMaterial(client, earlier[0].messageId, event, limit, 'candidate_detail_missing');
   }
 
   // Anchor time is definitively unavailable (e.g. missing on the event and
@@ -267,17 +249,17 @@ async function resolveCommandTime(client, event, listed) {
   }
 }
 
-/** Re-fetch the sole candidate and run the same proof chain as an explicit quote. */
-async function verifyCandidate(client, candidate, event, limit) {
+/** Read material only from the verified message detail. */
+async function readVerifiedMaterial(client, messageId, event, limit, missingDetail) {
   let items;
   try {
-    items = await client.getMessageItems(candidate.messageId);
+    items = await client.getMessageItems(messageId);
   } catch (error) {
     return classifyReadError(error);
   }
   // No fallback to the list object: list content is only a placeholder hint.
-  const verified = (items ?? []).find((i) => i && i.messageId === candidate.messageId) ?? null;
-  if (!verified) return need('inaccessible', { detail: 'candidate_detail_missing' });
+  const verified = (items ?? []).find((i) => i && i.messageId === messageId) ?? null;
+  if (!verified) return need('inaccessible', { detail: missingDetail });
   if (verified.deleted === true) return need('inaccessible', { detail: 'deleted' });
 
   const scope = verifyScope(verified, event);
@@ -286,7 +268,7 @@ async function verifyCandidate(client, candidate, event, limit) {
   const text = verifiedText(verified, items, limit);
   const problem = textBodyProblem(text);
   if (problem) return need('no_text', { detail: problem });
-  return { status: 'ok', material: { messageId: candidate.messageId, text } };
+  return { status: 'ok', material: { messageId, text } };
 }
 
 function classifyReadError(error) {
