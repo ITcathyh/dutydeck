@@ -171,6 +171,12 @@ node plugins/rovetap-jobs/service/main.mjs --config "$DATA_DIR/config.json"
 pnpm exec vitest run plugins/rovetap-jobs/test
 ```
 
+## 原话题回执
+
+飞书 reply API 沿用每条回执持久保存的 UUID。重试须使用原发送后端和同一个 UUID，并且每次请求须在首次尝试起一小时内发出。获取凭据和限流退避都计入这段时间。若首次走 `dutydeck-cli`，CLI 会自行生成 UUID。送达结果未知时保留该状态。旧记录若缺少发送后端或 UUID 的证据，也保留为未知。
+
+请在支持话题回复的群启用插件。在首次回复明确遇到合并转发根消息不可回复（230072）时，插件使用同一个 UUID 回复原话题内的 `/job` 命令。整个群不支持话题回复（230071）时，回执记为发送失败。
+
 ## 排错速查
 
 | 现象 | 检查 |

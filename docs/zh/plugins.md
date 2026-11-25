@@ -244,6 +244,8 @@ dutydeck settings bot set <appId> leaderSkill=leader-guide/leader
 
 仓库自带、需显式安装的 `plugins/rovetap-jobs` 是一个 auto service：把派单群里的 `/job [项目] [指令]` 经 `eventHandlers` 截获（识别后回 `stop`，普通消息回 `continue`），用机器人凭证回读引用或话题内唯一转发/合并转发材料，再通过本机 `pairfob project submit/status` 向固定项目 leader 建单，并在原话题回执与同步阶段。它不另起 Agent，也没有第三方运行时依赖。完整可操作说明（含配置键表与排错）见 [plugins/rovetap-jobs/README.md](../../plugins/rovetap-jobs/README.md)。
 
+请在支持话题回复的群启用插件。飞书返回群不支持话题回复（230071）时，回执记为发送失败。
+
 最短接入次序，细节以插件 README 为准：
 
 ```bash

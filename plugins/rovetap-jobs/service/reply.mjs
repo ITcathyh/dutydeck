@@ -27,7 +27,7 @@ function execFileText(bin, args, timeoutMs) {
     execFile(bin, args, { timeout: timeoutMs, maxBuffer: 1024 * 1024, windowsHide: true }, (error, stdout, stderr) => {
       resolve({
         error,
-        code: error?.code === undefined ? 0 : (typeof error.code === 'number' ? error.code : 1),
+        code: error ? error.code : 0,
         stdout: stdout?.toString?.() ?? '',
         stderr: stderr?.toString?.() ?? '',
       });
@@ -50,10 +50,10 @@ export class ReplySender {
     this.idempotent = this.mode === 'lark-api';
   }
 
-  async send({ uuid, replyTo, text }) {
+  async send({ uuid, replyTo, text, deadlineAt }) {
     if (this.mode === 'lark-api') {
       if (!this.lark) return { outcome: 'failed', reason: 'lark client unavailable' };
-      return this.lark.replyText({ replyToMessageId: replyTo, text, uuid, inThread: true });
+      return this.lark.replyText({ replyToMessageId: replyTo, text, uuid, inThread: true, deadlineAt });
     }
     return this.#sendCli({ text, replyTo });
   }
@@ -67,13 +67,15 @@ export class ReplySender {
       const messageId = envelope.data?.message_id ?? envelope.messageId;
       return messageId ? { outcome: 'sent', messageId } : { outcome: 'unknown', reason: 'missing_message_id' };
     }
-    const code = envelope?.error?.code ?? '';
+    const code = envelope?.ok === false && envelope.error?.code;
     if (result.code === 5 || code === 'unknown_outcome') {
       return { outcome: 'unknown', reason: 'dutydeck_unknown_outcome' };
     }
     if (result.error?.code === 'ENOENT' || result.error?.code === 'EACCES') {
       return { outcome: 'failed', reason: `cli_${result.error.code}` };
     }
-    return { outcome: 'failed', reason: code || `exit_${result.code}` };
+    if (typeof code === 'string' && code) return { outcome: 'failed', reason: code };
+    // A killed CLI or a missing response cannot rule out a sent receipt.
+    return { outcome: 'unknown', reason: 'cli_missing_receipt' };
   }
 }

@@ -89,6 +89,35 @@ describe('worker receipt anchor fallback (230072 merge_forward root)', () => {
     expect(reply.targetMessageId).toBeUndefined();
   });
 
+  it('ends as failed without any redirect on 230071 (whole chat does not support topics)', async () => {
+    const threadUnsupported = { outcome: 'failed', code: 230071, reason: 'bad_request' };
+    const h = makeHarness([threadUnsupported]);
+
+    await h.worker.flushDueReplies('k1');
+
+    expect(h.calls).toHaveLength(1);
+    expect(h.calls[0].replyTo).toBe('om_merge_root');
+    const reply = h.job.replies.accepted;
+    expect(reply.status).toBe('failed');
+    expect(reply.code).toBe(230071);
+    expect(reply.targetMessageId).toBeUndefined();
+  });
+
+  it('keeps the original anchor when 230072 arrives after a possibly successful send', async () => {
+    const h = makeHarness([unknown, unavailable, sent]);
+    await h.worker.flushDueReplies('k1');
+    h.job.replies.accepted.retryAt = 0;
+    await h.worker.flushDueReplies('k1');
+    expect(h.job.replies.accepted.status).toBe('unknown');
+    expect(h.job.replies.accepted.targetMessageId).toBeUndefined();
+    h.job.replies.accepted.retryAt = 0;
+    await h.worker.flushDueReplies('k1');
+    expect(h.calls.map(({ replyTo, uuid }) => [replyTo, uuid])).toEqual(
+      Array(3).fill(['om_merge_root', 'uuid-1']),
+    );
+    expect(h.job.replies.accepted.status).toBe('sent');
+  });
+
   it('does not loop when the redirect target itself is unavailable', async () => {
     const h = makeHarness([unavailable, unavailable]);
     await h.worker.flushDueReplies('k1');

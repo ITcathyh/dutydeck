@@ -9,11 +9,13 @@
 //
 // `baseUrl` is configurable so isolated e2e can point at a fake Lark server.
 
+import { addAbortListener } from 'node:events';
+
 export class LarkApiError extends Error {
   constructor(kind, message, details = {}) {
     super(message);
     this.name = 'LarkApiError';
-    this.kind = kind; // auth | not_found | forbidden | bad_request | server | network | rate_limited | sending
+    this.kind = kind;
     Object.assign(this, details);
   }
 }
@@ -27,9 +29,30 @@ const MESSAGE_SENDING_CODE = 230049;
 const TOKEN_INVALID_CODES = new Set([99991663, 99991661, 99991668]);
 const NOT_FOUND_CODES = new Set([230002, 230001]);
 // 回复接口明确表示锚点不可再回复（已撤回/话题不存在/不可见/类型不支持/
-// 230071-230072 群或合并消息不支持话题回复/即将自毁）。只有这类确定性拒绝
-// 才允许把回执改向到原 /job 消息。
-export const REPLY_TARGET_UNAVAILABLE_CODES = new Set([230011, 230019, 230050, 230054, 230071, 230072, 230111]);
+// 230072 合并消息等具体锚点不支持话题回复、230111 消息即将自毁）。只有这类
+// 确定性拒绝才允许把回执在同话题内改向到原 /job 消息。
+export const REPLY_TARGET_UNAVAILABLE_CODES = new Set([230011, 230019, 230050, 230054, 230072, 230111]);
+// 230071 applies to the entire chat and cannot be resolved with another anchor.
+const THREAD_UNSUPPORTED_CODE = 230071;
+const SEND_DEADLINE_REASON = '飞书回执已超过首次发送起 1 小时的绝对期限，截止后不再发送';
+
+function deadlineReached(deadlineAt) {
+  return deadlineAt !== undefined && Date.now() >= deadlineAt;
+}
+
+// The token request may have been started by a material read with a different
+// deadline. Bound each caller's wait without cancelling the shared request.
+async function waitForToken(flight, signal) {
+  let listener;
+  try {
+    const aborted = new Promise((_resolve, reject) => {
+      listener = addAbortListener(signal, () => reject(signal.reason));
+    });
+    return await Promise.race([flight, aborted]);
+  } finally {
+    listener?.[Symbol.dispose]();
+  }
+}
 
 function sleepMs(ms, signal) {
   return new Promise((resolve) => {
@@ -69,18 +92,18 @@ export class LarkApiClient {
     this.tokenFlight = null;
   }
 
-  async tenantToken(signal) {
+  async tenantToken(signal, deadlineAt) {
     if (this.token && Date.now() < this.tokenExpiresAt) return this.token;
     if (!this.tokenFlight) {
-      this.tokenFlight = this.#fetchToken(signal).finally(() => { this.tokenFlight = null; });
+      this.tokenFlight = this.#fetchToken(signal, deadlineAt).finally(() => { this.tokenFlight = null; });
     }
     return this.tokenFlight;
   }
 
-  async #fetchToken(externalSignal) {
+  async #fetchToken(externalSignal, deadlineAt) {
     if (!this.appSecret) throw new LarkApiError('auth', '缺少 lark.appSecret/appSecretFile，无法读取飞书材料');
     const payload = await this.request('/open-apis/auth/v3/tenant_access_token/internal/', {
-      method: 'POST', token: false, body: { app_id: this.appId, app_secret: this.appSecret }, externalSignal,
+      method: 'POST', token: false, body: { app_id: this.appId, app_secret: this.appSecret }, externalSignal, deadlineAt,
     });
     const token = payload.tenant_access_token ?? payload.data?.tenant_access_token;
     if (!token) throw new LarkApiError('auth', '飞书未返回 tenant_access_token');
@@ -100,6 +123,7 @@ export class LarkApiClient {
     let tokenRetried = false;
     let rateAttempts = 0;
     for (;;) {
+      if (deadlineReached(options.deadlineAt)) throw new LarkApiError('deadline', SEND_DEADLINE_REASON);
       try {
         return await this.#attempt(path, options);
       } catch (error) {
@@ -113,7 +137,10 @@ export class LarkApiClient {
           rateAttempts += 1;
           const backoff = error.retryAfterMs
             ?? Math.min(8_000, this.retryBaseMs * 2 ** (rateAttempts - 1));
-          await sleepMs(backoff, options.externalSignal);
+          const waitMs = options.deadlineAt === undefined
+            ? backoff
+            : Math.max(0, Math.min(backoff, options.deadlineAt - Date.now()));
+          await sleepMs(waitMs, options.externalSignal);
           continue;
         }
         throw error;
@@ -123,16 +150,32 @@ export class LarkApiClient {
 
   /** One full attempt: the timeout covers fetch AND reading the whole body. */
   async #attempt(path, options) {
+    if (deadlineReached(options.deadlineAt)) throw new LarkApiError('deadline', SEND_DEADLINE_REASON);
     const controller = new AbortController();
     let timedOut = false;
     // Armed until the body is fully consumed: response.text() can stall or fail
-    // mid-stream after headers have already arrived.
-    const timer = setTimeout(() => { timedOut = true; controller.abort(new Error('timeout')); }, this.timeoutMs);
+    // mid-stream after headers have already arrived. Clamp the per-attempt timeout
+    // to the absolute delivery deadline so a near-expiry send cannot linger past it.
+    const delay = options.deadlineAt === undefined
+      ? this.timeoutMs
+      : Math.max(1, Math.min(this.timeoutMs, options.deadlineAt - Date.now()));
+    const timer = setTimeout(() => {
+      timedOut = true;
+      controller.abort(deadlineReached(options.deadlineAt)
+        ? new LarkApiError('deadline', SEND_DEADLINE_REASON)
+        : new LarkApiError('network', '飞书请求失败：timeout'));
+    }, delay);
     const onExternalAbort = () => controller.abort(options.externalSignal?.reason);
     options.externalSignal?.addEventListener?.('abort', onExternalAbort, { once: true });
+    if (options.externalSignal?.aborted) onExternalAbort();
     try {
       const headers = { 'Content-Type': 'application/json; charset=utf-8' };
-      if (options.token !== false) headers.Authorization = `Bearer ${await this.tenantToken(options.externalSignal)}`;
+      if (options.token !== false) {
+        const flight = this.tenantToken(options.externalSignal, options.deadlineAt);
+        headers.Authorization = `Bearer ${await waitForToken(flight, controller.signal)}`;
+      }
+      // Token acquisition and backoff both count against this actual send.
+      if (deadlineReached(options.deadlineAt)) throw new LarkApiError('deadline', SEND_DEADLINE_REASON);
       let response;
       try {
         response = await this.fetch(`${this.baseUrl}${path}`, {
@@ -190,6 +233,9 @@ export class LarkApiClient {
     if (code === 99991672) {
       return new LarkApiError('forbidden', `飞书业务错误 ${code}: ${payload.msg ?? ''}`, details);
     }
+    if (code === THREAD_UNSUPPORTED_CODE) {
+      return new LarkApiError('bad_request', `飞书群不支持话题回复 (${code})`, details);
+    }
     if (REPLY_TARGET_UNAVAILABLE_CODES.has(code)) {
       return new LarkApiError('bad_request', `飞书回复目标不可回复 (${code})`, { ...details, replyTargetUnavailable: true });
     }
@@ -245,10 +291,11 @@ export class LarkApiClient {
    * the caller and reused across retries. Returns `{messageId}` or classifies
    * uncertainty so the caller can protect the outbound record.
    */
-  async replyText({ replyToMessageId, text, uuid, inThread = true }) {
+  async replyText({ replyToMessageId, text, uuid, inThread = true, deadlineAt }) {
     try {
       const payload = await this.request(`/open-apis/im/v1/messages/${encodeURIComponent(replyToMessageId)}/reply`, {
         method: 'POST',
+        deadlineAt,
         body: {
           msg_type: 'text',
           content: JSON.stringify({ text }),
@@ -262,7 +309,9 @@ export class LarkApiClient {
     } catch (error) {
       // These may have reached Feishu (or were rejected only by the rate gate):
       // the worker protects the outbound record and retries the SAME uuid.
-      const unknownKinds = new Set(['network', 'server', 'auth', 'rate_limited', 'sending']);
+      // 'deadline' means the 1h absolute window ran out around token/backoff/POST;
+      // an in-flight request might still have landed, so it stays unknown.
+      const unknownKinds = new Set(['network', 'server', 'auth', 'rate_limited', 'sending', 'deadline']);
       if (error instanceof LarkApiError && unknownKinds.has(error.kind)) {
         return {
           outcome: 'unknown',
