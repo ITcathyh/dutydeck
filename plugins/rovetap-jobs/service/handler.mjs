@@ -85,21 +85,14 @@ export function checkTransportAuth({ authorization, body }, config) {
   return null;
 }
 
-function sameTopic(job, env) {
-  // Older records use the root ID as threadId when the native ID was absent.
-  const threadId = job.threadId === job.rootId ? null : job.threadId;
-  if (threadId && env.threadId && threadId !== env.threadId) return false;
-  if (job.rootId && env.rootId && job.rootId !== env.rootId) return false;
-  return Boolean((threadId && threadId === env.threadId) || (job.rootId && job.rootId === env.rootId));
-}
-
 function findMaterialSelection(state, env, appId, code) {
   const now = Date.now();
   let match;
   for (const job of Object.values(state.jobs)) {
     if (job.stage !== 'needs_input' || job.selectedMaterialId || job.pairfob || job.submit?.state !== 'idle'
       || job.appId !== appId || job.chatId !== env.chatId || job.commanderOpenId !== env.senderOpenId
-      || !sameTopic(job, env) || !(job.materialChoicesExpireAt > now) || !Array.isArray(job.materialChoices)) continue;
+      || job.threadId !== env.threadId || (job.rootId && env.rootId && job.rootId !== env.rootId)
+      || !(job.materialChoicesExpireAt > now) || !Array.isArray(job.materialChoices)) continue;
     for (const choice of job.materialChoices.slice(0, MAX_MATERIAL_CHOICES)) {
       if (materialChoiceCode(job.sourceKey, choice.messageId) !== code) continue;
       if (match) return undefined; // A short-code collision cannot resolve a job.
@@ -166,7 +159,10 @@ export async function receiveEnvelope({ body, authorization }, { config, store, 
     }
 
     if (parsed.kind === 'select-material' && stage === 'queued') {
-      const selected = parsed.code ? findMaterialSelection(state, env, config.appId, parsed.code) : undefined;
+      // A flat group quote can carry the topic root ID. Only the native topic
+      // ID on this authenticated selection event proves it is a topic reply.
+      const inTopic = env.threadId.startsWith('omt_') && env.threadId.length > 4;
+      const selected = parsed.code && inTopic ? findMaterialSelection(state, env, config.appId, parsed.code) : undefined;
       if (selected) {
         const { job, messageId } = selected;
         job.selectedMaterialId = messageId;
@@ -181,7 +177,8 @@ export async function receiveEnvelope({ body, authorization }, { config, store, 
         return { mode: 'material-selected', decision: 'stop', sourceKey: job.sourceKey };
       }
       stage = 'denied';
-      reasonCode = parsed.code ? 'selection_unavailable' : 'selection_usage';
+      reasonCode = inTopic ? 'selection_unavailable' : 'selection_topic_required';
+      if (!parsed.code) reasonCode = 'selection_usage';
       wantsReply = true;
     }
 
