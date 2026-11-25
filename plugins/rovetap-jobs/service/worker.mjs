@@ -121,6 +121,9 @@ export class JobWorker {
         return this.submitStep(sourceKey);
       case 'submitting':
       case 'unknown':
+        // nextRunAt is the durable reconcile backoff; ticks, kicks and a fresh
+        // post-restart worker all wait for it before another status lookup.
+        if (job.nextRunAt && Date.now() < job.nextRunAt) return;
         await this.mutateJob(sourceKey, (j) => { j.stage = 'unknown'; });
         return this.reconcileStep(sourceKey);
       case 'live':
@@ -294,6 +297,10 @@ export class JobWorker {
 
   async reconcileStep(sourceKey) {
     const job = this.store.getJob(sourceKey);
+    if (!job) return;
+    // Same schedule gate for direct callers. The immediate call after a real
+    // unknown submit persists nextRunAt=0 and therefore still runs at once.
+    if (job.nextRunAt && Date.now() < job.nextRunAt) return;
     const status = await getProjectStatus({
       bin: this.config.pairfob.bin,
       project: job.alias || this.config.pairfob.project,
@@ -315,8 +322,13 @@ export class JobWorker {
       await this.mutateJob(sourceKey, (j, state) => {
         j.stage = 'unknown';
         j.reconcileAttempts = (j.reconcileAttempts ?? 0) + 1;
-        // After the first unsuccessful read, tell the user we are still checking.
-        if (j.reconcileAttempts >= 1) this.store.outbound(state, sourceKey, 'pending').status = 'pending';
+        // The "still checking" reminder is one durable outbound record, created
+        // as 'pending' by outbound(). Never reset 'sent' (would re-notify) or
+        // 'unknown' (bypasses the same-uuid retry backoff) back to pending.
+        const pendingReply = this.store.outbound(state, sourceKey, 'pending');
+        if (pendingReply.status !== 'sent' && pendingReply.status !== 'unknown') {
+          pendingReply.status = 'pending';
+        }
         j.nextRunAt = Date.now() + this.backoff(j.reconcileAttempts);
       });
       await this.flushDueReplies(sourceKey);
