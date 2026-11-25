@@ -267,6 +267,8 @@ dutydeck settings bot set cli_xxx 'eventHandlers=[{"id":"rovetap-jobs","eventTyp
 
 两个最常遇到的边界。其一是 @ 与可见性：裸 `/job` 只要事件能投递到应用即可识别，不依赖 `selfOpenId`；`@机器人 /job` 只有在配置的可信 `selfOpenId` 与事件 `mentions` 里的 `open_id` 精确匹配时才被接受，未配置或不匹配时该消息继续走 Dutydeck。因此飞书应用只有 @ 消息权限时，要先在配置里填 `selfOpenId`（用同一应用凭证调 `GET /open-apis/bot/v3/info` 取 `bot.open_id`），否则请用裸 `/job` 并开通发布 `im:message.group_msg`。其二是材料：只接受一个有证据证明同群同话题的来源——显式引用回读优先；无引用时仅在原生 `omt_` 话题能完整枚举且恰有一条更早的 `merge_forward` 时自动采用，多条、翻页不完整、归属缺失、跨群跨话题，或命令时间（取自真实事件的 `message.create_time`）与候选时间无法证明先后、候选晚于命令，都转为要求显式引用，不会绿灯信任命令之后才到的材料。指令与材料各有 4000 Unicode 码点上限，`limits.maxInstructionChars` 与 `limits.maxMaterialChars` 都只能调小。配置侧 `listen.host` 只允许本机回环地址；缺少读取材料用的 `appSecret`、`pairfob.bin` 或 pairfob 项目 token 文件等必需项时，服务启动即失败并在 stderr 指出对应的配置键或路径，不会收下 `/job` 后永远没有回执。
 
+提交前连接项目失败时，插件退避后使用已保存的原指令和材料重试。提交结果未知时，插件按原来源键查询结果。
+
 ## 受控插件结果
 
 可信 `providers` 插件可通过 `api.registerResultTool({ name, description, inputSchema, execute })` 注册导出工具：`inputSchema.parse(input)` 校验参数，`execute(input, { invocationId, requester, signal })` 返回 `Promise<{ files: Array<{ name: string, data: Uint8Array }> }>`。工具返回文件名与字节，不提供文件路径、接收人或模型可见正文。宿主保存字节并发固定查看回执，模型只收到 `deliveryId`、`status`、`fileCount`；`delivered` 仅表示通知送达，不表示下载成功或整轮任务完成。

@@ -36,13 +36,14 @@ interface Ctx {
 
 let ctx: Ctx | undefined;
 
-async function setup(options: { idempotent?: boolean; sendResult?: any } = {}): Promise<Ctx> {
+async function setup(options: { idempotent?: boolean; sendResult?: any; lark?: object } = {}): Promise<Ctx> {
   const dir = await mkdtemp(join(tmpdir(), 'rvj-reconcile-'));
   const store = await JobStore.open(dir);
   const config: any = {
     appId: APP,
     webBaseUrl: 'https://rove.example.com',
     pairfob: { bin: '/bin/true', project: 'rovetap', socket: '', tokenFile: '', timeoutMs: 500, env: {} },
+    limits: { maxMaterialChars: 4_000, threadScan: 5 },
     // Large base gives every backoff a multi-second margin, so a blocked call
     // cannot slip through merely because the test machine was slow.
     retryBaseMs: 1_000,
@@ -60,7 +61,7 @@ async function setup(options: { idempotent?: boolean; sendResult?: any } = {}): 
     }),
   };
   const silent = { info() {}, warn() {}, error() {}, debug() {} };
-  const worker = new JobWorker({ config, store, sender, lark: {}, logger: silent });
+  const worker = new JobWorker({ config, store, sender, lark: options.lark ?? {}, logger: silent });
   ctx = { dir, store, sender, worker, config };
   return ctx;
 }
@@ -73,6 +74,7 @@ afterEach(async () => {
     ctx = undefined;
   }
   vi.resetAllMocks();
+  vi.useRealTimers();
 });
 
 function seedJob(store: JobStore, stage = 'ready') {
@@ -83,7 +85,8 @@ function seedJob(store: JobStore, stage = 'ready') {
     job.threadId = 'omt_1';
     job.commanderOpenId = 'ou_boss';
     job.instruction = '跟进这条反馈';
-    job.material = { messageId: 'om_material', text: '材料正文' };
+    job.parentId = 'om_material';
+    job.material = stage === 'queued' ? null : { messageId: 'om_material', text: '材料正文' };
     job.stage = stage;
     if (stage === 'unknown') job.submit.state = 'unknown';
     state.jobs[KEY] = job;
@@ -241,25 +244,28 @@ describe('rovetap pending reminder is armed once and delivery state is protected
     expect(c.sender.calls).toHaveLength(0);
   });
 
-  it('NOT_FOUND 核对不把窗口内等待 retryAt 的 sending 记录重置为 pending', async () => {
+  it.each([false, true])('NOT_FOUND 保留投递状态、UUID 和退避时间（恢复=%s）', async (recover) => {
     const c = await setup({ idempotent: true });
     await seedJob(c.store, 'unknown');
     const uuid = 'fixed-sending-uuid';
+    const retryAt = Date.now() + 60_000;
     await c.store.mutate((state) => {
       const reply = c.store.outbound(state, KEY, 'pending');
       reply.uuid = uuid;
       reply.status = 'sending';
       reply.attempts = 1;
       reply.firstAttemptAt = new Date().toISOString();
-      reply.retryAt = Date.now() + 60_000; // backoff not due: flush must not touch it
+      reply.firstBackend = 'lark-api';
+      reply.firstUuidHeld = true;
+      reply.retryAt = retryAt;
     });
 
+    if (recover) await c.worker.recoverInFlightReplies();
     await c.worker.kick(KEY);
 
-    const reply: any = c.store.getJob(KEY).replies.pending;
-    expect(reply.status).toBe('sending'); // not downgraded to 'pending' by reconcile
-    expect(reply.uuid).toBe(uuid);
-    expect(reply.attempts).toBe(1);
+    expect(c.store.getJob(KEY).replies.pending).toMatchObject({
+      status: recover ? 'unknown' : 'sending', uuid, attempts: 1, retryAt,
+    });
     expect(c.sender.calls).toHaveLength(0);
   });
 
@@ -409,29 +415,103 @@ describe('阶段/去重/回执与终态同事务提交，重启后原话题收�
 });
 
 describe('submit 明确错误的退避重试与终局反馈', () => {
-  it('unreachable（拨号失败、未写字节）：材料保留、退回 queued 退避，到期可用同一 payload 再提交', async () => {
-    pf.submitProjectJob.mockResolvedValueOnce({ outcome: 'unreachable', code: 'unreachable', message: 'no socket' });
-    const c = await setup();
-    await seedJob(c.store, 'ready');
-
+  it.each([
+    { outcome: 'unreachable', change: 'edited', restart: false },
+    { outcome: 'unreachable', change: 'deleted', restart: true },
+    { outcome: 'not_spawned', change: 'edited', restart: true },
+  ])('retries a proven unsent submit with the saved payload ($outcome, $change, restart=$restart)', async ({ outcome, change, restart }) => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    const material = {
+      messageId: 'om_material', chatId: 'oc_dispatch', threadId: 'omt_1',
+      messageType: 'text', content: JSON.stringify({ text: '最初的引用内容' }),
+    };
+    const getMessageItems = vi.fn().mockResolvedValue([material]);
+    const lark = { getMessageItems };
+    const c = await setup({ lark });
+    pf.submitProjectJob
+      .mockResolvedValueOnce({ outcome, message: 'request never sent' })
+      .mockResolvedValueOnce({ outcome: 'ok', taskId: 'pt_u', leaderId: 'pl_u', phase: 'todo' });
+    await seedJob(c.store, 'queued');
     await c.worker.kick(KEY);
-    let job: any = c.store.getJob(KEY);
-    expect(job.stage).toBe('queued');
-    expect(job.submit.state).toBe('unreachable');
-    expect(job.nextRunAt).toBeGreaterThan(Date.now());
-    expect(job.material).toMatchObject({ messageId: 'om_material' });
-    expect(pf.submitProjectJob).toHaveBeenCalledTimes(1);
+
+    const job = c.store.getJob(KEY);
+    const retryAt = job.nextRunAt;
     const firstPayload = pf.submitProjectJob.mock.calls[0][0].payload;
+    expect(job.submit.state).toBe(outcome);
+    expect(retryAt).toBeGreaterThan(Date.now());
+    expect(firstPayload.materials).toEqual([{ message_id: 'om_material', text: '最初的引用内容' }]);
+    getMessageItems.mockResolvedValue(change === 'edited'
+      ? [{ ...material, content: JSON.stringify({ text: '后来编辑的内容' }) }]
+      : [{ ...material, deleted: true }]);
 
-    // 不经过会重新读 Lark 材料的 queued 步骤，直接在材料已就绪的 ready 态安全重提。
-    await c.store.mutate((state) => { state.jobs[KEY].stage = 'ready'; state.jobs[KEY].nextRunAt = 0; });
-    pf.submitProjectJob.mockResolvedValueOnce({ outcome: 'ok', taskId: 'pt_u', leaderId: 'pl_u', phase: 'todo' });
-    await c.worker.submitStep(KEY);
+    if (restart) {
+      await c.worker.stop();
+      await c.store.close();
+      c.store = await JobStore.open(c.dir);
+      c.worker = new JobWorker({ config: c.config, store: c.store, sender: c.sender, lark });
+      await c.worker.recoverInFlightReplies();
+    }
 
+    vi.setSystemTime(retryAt - 1);
+    await c.worker.kick(KEY);
+    expect(pf.submitProjectJob).toHaveBeenCalledTimes(1);
+    vi.setSystemTime(retryAt);
+    await c.worker.kick(KEY);
+
+    expect(getMessageItems).toHaveBeenCalledTimes(1);
+    expect(pf.getProjectStatus).not.toHaveBeenCalled();
     expect(pf.submitProjectJob).toHaveBeenCalledTimes(2);
-    const secondOptions = pf.submitProjectJob.mock.calls[1][0];
-    expect(secondOptions.payload).toEqual(firstPayload); // 原消息与已解析材料不变
+    const secondPayload = pf.submitProjectJob.mock.calls[1][0].payload;
+    expect(JSON.stringify(secondPayload)).toBe(JSON.stringify(firstPayload));
     expect(c.store.getJob(KEY).pairfob.taskId).toBe('pt_u');
+  });
+
+  it('a retry with an unknown outcome reconciles the original key without submitting again', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    pf.submitProjectJob
+      .mockResolvedValueOnce({ outcome: 'unreachable', code: 'unreachable' })
+      .mockResolvedValueOnce({ outcome: 'unknown', reason: 'reply lost' });
+    pf.getProjectStatus.mockResolvedValue({ outcome: 'not_found', code: 'not_found' });
+    const c = await setup();
+    await seedJob(c.store);
+    await c.worker.kick(KEY);
+
+    vi.setSystemTime(c.store.getJob(KEY).nextRunAt);
+    await c.worker.kick(KEY);
+    expect(c.store.getJob(KEY).stage).toBe('unknown');
+    expect(pf.getProjectStatus).toHaveBeenCalledTimes(1);
+
+    vi.setSystemTime(c.store.getJob(KEY).nextRunAt);
+    await c.worker.kick(KEY);
+    expect(pf.submitProjectJob).toHaveBeenCalledTimes(2);
+    expect(pf.getProjectStatus).toHaveBeenCalledTimes(2);
+    expect(pf.getProjectStatus.mock.calls.map(([options]) => options.sourceKey)).toEqual([KEY, KEY]);
+  });
+
+  it('recovers the saved material in a queued retry written by the previous version', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    const getMessageItems = vi.fn();
+    const c = await setup({ lark: { getMessageItems } });
+    await c.store.mutate((state) => {
+      const job = newJobRecord({ sourceKey: KEY, appId: APP, eventId: 'ev_legacy', messageId: MESSAGE });
+      Object.assign(job, {
+        material: { messageId: 'om_material', text: '已保存的原文' },
+        instruction: '跟进这条反馈',
+        nextRunAt: Date.now(),
+      });
+      Object.assign(job.submit, { state: 'unreachable', attempts: 1 });
+      state.jobs[KEY] = job;
+    });
+    pf.submitProjectJob.mockResolvedValueOnce({ outcome: 'ok', taskId: 'pt_u', leaderId: 'pl_u', phase: 'todo' });
+
+    await c.worker.recoverInFlightReplies();
+    await c.worker.kick(KEY);
+    expect(getMessageItems).not.toHaveBeenCalled();
+    expect(pf.submitProjectJob).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+      payload: expect.objectContaining({
+        source_key: KEY, materials: [{ message_id: 'om_material', text: '已保存的原文' }],
+      }),
+    }));
   });
 
   it.each(['configuration_error', 'not_found', 'conflict'])(

@@ -152,7 +152,7 @@ unset HANDLER_TOKEN
 
 HTTP 层只做鉴权、解析和一条原子持久事务（`$DATA_DIR/rovetap-jobs-state.json`）后立即回执，pairfob 调用与飞书回复都在后台 worker。对照真实 `cmd/pairfob/project.go` 的 code/exit，提交结果分三类处理：
 
-- **确定一个字节都没发出**：CLI 根本没拉起（如 `pairfob.bin` 路径错误），或信封为 `unreachable`（Go 侧只在拨 unix socket 失败、尚未写请求时给出，exit 1）。已解析材料保留，任务退回队列按指数退避后**用同一 payload 重新 submit**。
+- **确定一个字节都没发出**：CLI 未启动，或连接 Unix socket 失败并返回 `unreachable`。任务保持待提交。退避到期后，沿用已保存的指令和材料提交。飞书原文后来被编辑或撤回，或插件进程重启，重试仍使用同一请求。
 - **明确终局拒绝/配置错误**：`configuration_error`（socket/令牌配置问题，exit 2）、`not_found`（提交时绑定的 project leader 不存在），以及 `forbidden`/`conflict`/`invalid_argument` 等 exit 4 明确裁决。任务置为 `failed`，原话题收到带错误码、可据此找管理员处理的说明，**不再自行 submit 或 status 核对**。注意 `status` 查询返回的 `not_found` 语义不同：可能只是枢纽尚未可见，仍按未知路径退避核对，不会据此判失败。
 - **结果未知**：`unknown_outcome`（exit 5，写字节后断线/超时/回执残缺）、进程被杀、stdout 无法辨认、`internal`/`usage` 等不能证明枢纽拒绝的码，**绝不重复 submit**，而是用稳定来源键（`app_id + message_id`）调 `pairfob project status --key` 核对；进程重启会把中断中的提交（`submitting`）转入核对。
 

@@ -27,6 +27,10 @@ function replyDeadlineAt(firstAttemptAt) {
   return time + UUID_DEDUP_WINDOW_MS;
 }
 
+function submitWasNotSent(outcome) {
+  return outcome === 'not_spawned' || outcome === 'unreachable';
+}
+
 export class JobWorker {
   constructor({ config, store, sender, lark, logger = console }) {
     this.config = config;
@@ -149,6 +153,8 @@ export class JobWorker {
         return;
       case 'queued':
       case 'resolving':
+        // Older persisted jobs could be queued behind a proven-unsent submit.
+        if (job.material && submitWasNotSent(job.submit.state)) return this.submitStep(sourceKey);
         return this.resolveMaterialStep(sourceKey);
       case 'ready':
         return this.submitStep(sourceKey);
@@ -243,6 +249,7 @@ export class JobWorker {
 
   async submitStep(sourceKey) {
     const job = this.store.getJob(sourceKey);
+    if (job?.nextRunAt && Date.now() < job.nextRunAt) return;
     if (!job?.material) {
       await this.mutateJob(sourceKey, (j) => { j.stage = 'queued'; });
       return;
@@ -257,6 +264,7 @@ export class JobWorker {
     const fingerprint = createHash('sha256').update(JSON.stringify(payload), 'utf8').digest('hex');
     await this.mutateJob(sourceKey, (j) => {
       j.stage = 'submitting';
+      j.nextRunAt = 0;
       j.fingerprint = fingerprint;
       j.submit.state = 'spawning';
       j.submit.attempts += 1;
@@ -301,13 +309,13 @@ export class JobWorker {
       return;
     }
 
-    if (result.outcome === 'not_spawned' || result.outcome === 'unreachable') {
+    if (submitWasNotSent(result.outcome)) {
       // Both are proven never written: a spawn-level ENOENT/EACCES, or the real
       // pairfob CLI's 'unreachable' envelope, which cmd/pairfob/project.go
       // emits only when dialing the socket failed before any byte was sent.
       // Keep the resolved material and back off to a safe resubmission.
       await this.mutateJob(sourceKey, (j) => {
-        j.stage = 'queued';
+        j.stage = 'ready';
         j.submit.state = result.outcome;
         j.submit.message = result.message ?? result.error ?? result.code ?? result.outcome;
         j.nextRunAt = Date.now() + this.backoff(j.submit.attempts);
