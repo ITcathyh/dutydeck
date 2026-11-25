@@ -3,7 +3,7 @@ import { draftFromBot, saveBodyFromDraft, msFromSeconds, secondsFromMs, type Sha
 import { ReplyPolishSettings } from './ReplyPolishSettings';
 import { ReactionTriggerSetting } from './ReactionTriggerSetting';
 import { BotPromptHistory } from './BotPromptHistory';
-import { botSettingFields, type BotSettingField, focusSettingField } from '../settings-search';
+import { botSettingFields, type BotSettingField, focusSettingFieldWhenAvailable } from '../settings-search';
 import { AgentModelSettings } from './AgentModelSettings';
 import { OptionalModelOverrides } from './OptionalModelOverrides';
 import type { SettingsLeaveGuard } from './ControlCenterModal';
@@ -336,14 +336,7 @@ export function LarkConfigModal({ agents, target, field, onLeaveGuardChange, onC
   }, [field, current?.appId, hydratedVersion]);
   useEffect(() => {
     if (!destination || !current || !hydratedVersion || step !== destination.step || !form.current) return;
-    const root = form.current;
-    const focus = () => focusSettingField(root, destination.anchor);
-    if (focus()) return;
-    if ('parent' in destination) focusSettingField(root, botSettingFields[destination.parent].anchor);
-    // Model controls can arrive after the bot configuration. Stop after finding the exact field.
-    const observer = new MutationObserver(() => { if (focus()) observer.disconnect(); });
-    observer.observe(root, { childList: true, subtree: true });
-    return () => observer.disconnect();
+    return focusSettingFieldWhenAvailable(form.current, destination.anchor, 'parent' in destination ? botSettingFields[destination.parent].anchor : undefined);
   }, [field, current?.appId, hydratedVersion, step]);
   const requestClose = useCallback(() => {
     const incompleteDraft = Boolean(current && !current.setupComplete && !current.credentialUnavailable);

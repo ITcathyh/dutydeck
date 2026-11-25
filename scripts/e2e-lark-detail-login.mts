@@ -14,7 +14,7 @@ import { readLarkConfig, saveLarkConfig } from '../apps/server/src/lark/config.j
 import { type LarkMessageEvent, type PersistedLarkCardTask } from '../apps/server/src/lark/listener.js';
 import { LarkMessageCoordinator } from '../apps/server/src/lark/coordinator.js';
 import { buildLarkCard } from '../apps/server/src/lark/service.js';
-import { ArtifactLogger, captureBrowserArtifacts, getGitMetadata, installTermination, resolveArtifactDir, withTimeout } from './lark-e2e-shared.mts';
+import { ArtifactLogger, captureBrowserArtifacts, createCleanup, getGitMetadata, installTermination, resolveArtifactDir } from './lark-e2e-shared.mts';
 
 const scenario = 'e2e-lark-detail-login';
 const startTime = Date.now();
@@ -33,27 +33,15 @@ let app: Awaited<ReturnType<typeof buildApp>> | undefined;
 let coordinator: LarkMessageCoordinator | undefined;
 let browser: import('@playwright/test').Browser | undefined;
 let context: import('@playwright/test').BrowserContext | undefined;
-let cleanupPromise: Promise<void> | undefined;
-let cleanupFailure: Error | undefined;
-
-const doCleanup = async (isFailure: boolean) => {
-  if (cleanupPromise) return cleanupPromise;
-  cleanupPromise = (async () => {
-    const step = async (label: string, work: () => Promise<unknown> | unknown) => {
-      try { await withTimeout(Promise.resolve().then(work), 10_000, label); }
-      catch (error: any) { if (!cleanupFailure) cleanupFailure = error; }
-    };
-    await step('captureBrowserArtifacts', () => captureBrowserArtifacts(browser, context, artifactDir, { isFailure }));
-    await step('browser.close', () => browser?.close());
-    await step('coordinator.stop', () => coordinator?.stop());
-    await step('app.close', () => app?.close());
-    await step('runtime.shutdown', () => runtime?.shutdown());
-    await step('repos.close', () => repos?.close());
-    await step('rm', () => directory && rm(directory, { recursive: true, force: true }));
-    await logger.flush().catch(() => {});
-  })();
-  return cleanupPromise;
-};
+const doCleanup = createCleanup(async (isFailure, step) => {
+  await step('captureBrowserArtifacts', () => captureBrowserArtifacts(browser, context, artifactDir, { isFailure }));
+  await step('browser.close', () => browser?.close());
+  await step('coordinator.stop', () => coordinator?.stop());
+  await step('app.close', () => app?.close());
+  await step('runtime.shutdown', () => runtime?.shutdown());
+  await step('repos.close', () => repos?.close());
+  await step('rm', () => directory && rm(directory, { recursive: true, force: true }));
+}, logger);
 
 async function writeResultFile(passedFlag: boolean, err?: Error) {
   await writeFile(resolve(artifactDir, 'result.json'), JSON.stringify({
@@ -65,7 +53,7 @@ async function writeResultFile(passedFlag: boolean, err?: Error) {
 }
 
 const termination = installTermination(scenario, 150_000, async err => {
-  await doCleanup(true);
+  const cleanupFailure = await doCleanup(true);
   await writeResultFile(false, err);
   return { cleanupFailed: Boolean(cleanupFailure) };
 });
@@ -207,7 +195,7 @@ async function runTest() {
 try {
   await runTest();
   termination.checkAborted();
-  await doCleanup(false);
+  const cleanupFailure = await doCleanup(false);
   if (cleanupFailure) throw new Error(`Cleanup failed after run: ${cleanupFailure.message}`);
   termination.dispose();
   await writeResultFile(true);

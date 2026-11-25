@@ -13,7 +13,7 @@ import { resetComposerDrafts } from './composer-draft';
 const timelineRenders = vi.hoisted(() => [] as TimelineViewProps[]);
 vi.mock('./composer-utils', async importOriginal => {
   const original = await importOriginal<typeof import('./composer-utils')>();
-  return { ...original, currentContextStats: vi.fn(original.currentContextStats), commandsFromEvents: vi.fn(original.commandsFromEvents) };
+  return { ...original, currentContextStats: vi.fn(original.currentContextStats), commandsFromEvent: vi.fn(original.commandsFromEvent) };
 });
 vi.mock('./useSessionStream', () => ({ useSessionStream: () => ({ transport: 'open', content: 'ready' }) }));
 vi.mock('./components/TimelineView', async importOriginal => {
@@ -122,7 +122,7 @@ it('memoizes event derivations across input and inspection while refreshing live
   render(<QueryClientProvider client={client}><App/></QueryClientProvider>);
   await screen.findByRole('textbox', { name: '消息' });
   await waitFor(() => expect(client.isFetching()).toBe(0));
-  const count = () => [vi.mocked(composerUtils.currentContextStats).mock.calls.length, vi.mocked(composerUtils.commandsFromEvents).mock.calls.length];
+  const count = () => [vi.mocked(composerUtils.currentContextStats).mock.calls.length, vi.mocked(composerUtils.commandsFromEvent).mock.calls.length];
   const beforeInput = count();
   fireEvent.change(screen.getByRole('textbox', { name: '消息' }), { target: { value: '/before' } });
   expect(await screen.findByRole('button', { name: /\/before.*initial command/ })).toBeTruthy();

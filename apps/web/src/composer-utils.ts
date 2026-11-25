@@ -65,14 +65,19 @@ export function contextStatsFromEvents(events: DockEvent[] = []): ContextStats {
   return { used, size, ...(observedAt ? { observedAt } : {}), ...(hasUsage ? { compacted } : {}), ...(used !== undefined && size ? { percentage: Math.min(100, used / size * 100) } : {}) };
 }
 
-export function commandsFromEvents(events: DockEvent[] = []) {
+type CommandsEvent = Omit<DockEvent, 'data'> & { data: { availableCommands: Array<{ name?: unknown; description?: unknown } | null> } };
+
+export function findLatestCommandsEvent(events: DockEvent[]): CommandsEvent | undefined {
   for (let index = events.length - 1; index >= 0; index--) {
     const event = events[index]!;
-    if (event.type === 'status' && event.data?.state === 'commands' && Array.isArray(event.data.availableCommands)) {
-      return event.data.availableCommands.flatMap((command: any) => typeof command?.name === 'string' ? [{ name: command.name.replace(/^\//, ''), description: typeof command.description === 'string' ? command.description : '' }] : []);
-    }
+    if (event.type === 'status' && event.data?.state === 'commands' && Array.isArray(event.data.availableCommands)) return event;
   }
-  return [];
+}
+
+export function commandsFromEvent(event: CommandsEvent | undefined) {
+  return event?.data.availableCommands.flatMap(command => typeof command?.name === 'string'
+    ? [{ name: command.name.replace(/^\//, ''), description: typeof command.description === 'string' ? command.description : '' }]
+    : []) ?? [];
 }
 
 export function currentContextStats(events: DockEvent[], snapshot?: import('@dutydeck/shared').ContextUsage): ContextStats {

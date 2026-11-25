@@ -10,6 +10,7 @@ import { MattersService } from '../matters.js';
 // 只 mock runtime 的测试证明不了任何事。
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import '../../../../tests/support/fast-wait-for.js';
+import { initGitWorkspace } from '../../../../tests/support/git-workspace.js';
 import { execFileSync } from 'node:child_process';
 import { writeFileSync } from 'node:fs';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
@@ -209,8 +210,7 @@ describe('/status 写明以谁的身份执行', () => {
     const worktrees = await mkdtemp(join(tmpdir(), 'dutydeck-lark-worktrees-'));
     cleanups.push(() => rm(worktrees, { recursive: true, force: true }));
     const h = await harness({ workspaceRoot: worktrees });
-    execFileSync('git', ['init', '-q', h.cwd]);
-    execFileSync('git', ['-C', h.cwd, '-c', 'user.name=Test', '-c', 'user.email=test@example.test', 'commit', '--allow-empty', '-qm', 'initial']);
+    initGitWorkspace(h.cwd);
     await h.coordinator.handle(event('om_task', '/new --workspace worktree -- 独立任务'), h.config);
     // 新建 worktree 要跑 git，比普通任务入队慢。
     await vi.waitFor(async () => expect((await h.runtime.getTasks(await h.sessionId())).some(task => task.prompt.includes('独立任务'))).toBe(true), { timeout: 10_000 });
@@ -698,11 +698,13 @@ describe('恢复已关闭会话与并行分身', () => {
 
   it.each([undefined, 'om_prior_confirmation'])('ACP 分身用交接，保留原会话正在执行的任务和排队内容（原锚点=%s）', async replyMessageId => {
     const h = await harness({ reportIdle: true, answer: true });
+    // 普通目录允许对话并行。用同一个 Git 工作区验证分身排队。
+    initGitWorkspace(h.cwd);
     await h.dispatch('om_task', '第一条任务'); await h.waitRunning('第一条任务');
     await h.dispatch('om_queue', '排队任务');
     const id = await h.sessionId(); const before = await h.runtime.getTasks(id); const source = await h.runtime.getSession(id);
     h.config.defaultAgentWeights = [{ agentId: 'spare', weight: 100 }];
-    await h.coordinator.handle(event('om_fork', '/fork 检查另一种实现', { ...(replyMessageId ? { replyMessageId } : {}) }), h.config);
+    await h.coordinator.handle(event('om_fork', '/fork --workspace shared -- 检查另一种实现', { ...(replyMessageId ? { replyMessageId } : {}) }), h.config);
     expect(h.markdownOf(h.lastReceipt())).toContain('已在新话题开分身');
     // 原会话还在执行，updatedAt 会随事件变化；其余字段（状态、绑定、配置）必须不变。
     expect({ ...(await h.runtime.getSession(id)), updatedAt: undefined }).toEqual({ ...source, updatedAt: undefined });
@@ -726,8 +728,7 @@ describe('恢复已关闭会话与并行分身', () => {
 
   it('Claude 有落盘上下文时传递原生分身 ID，并默认独立 worktree', async () => {
     const h = await harness({ native: true, configPatch: { permissionMode: 'full-trust' } });
-    execFileSync('git', ['init', '-q', h.cwd]);
-    execFileSync('git', ['-C', h.cwd, '-c', 'user.name=Test', '-c', 'user.email=test@example.test', 'commit', '--allow-empty', '-qm', 'initial']);
+    initGitWorkspace(h.cwd);
     await h.dispatch('om_task', '源任务'); await h.waitRunning('源任务');
     const id = await h.sessionId();
     const nativeId = pinnedSessionUuid(id);

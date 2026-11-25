@@ -24,7 +24,7 @@ import { parseLarkNewSession } from './new-session.js';
 import { buildLarkTaskDashboard, pageLarkTaskDashboard, type LarkTaskDashboardDecision, type LarkTaskDashboardEntry } from './task-dashboard.js';
 import { collectInbox } from '../inbox.js';
 import { isRunnable } from '../ci-common.js';
-import { describeScheduleTrigger, scenarioPolicyVersion, parseLarkSourceId, resolveParticipation, RuntimeError, timeLoop, type ChannelMapping, type PolicyAction, type Session } from '@dutydeck/shared';
+import { describeScheduleTrigger, scenarioPolicyVersion, parseLarkSourceId, resolveParticipation, RuntimeError, serialByKey, timeLoop, type ChannelMapping, type PolicyAction, type Session } from '@dutydeck/shared';
 import { decideWake, isExplicitWake, wakeSignals, type WakeFacts } from './wake-decision.js';
 import { directScenarioPrompt } from './scenario-direct.js';
 import { larkScenarioAdoptionOf } from './scenario-legacy.js';
@@ -742,7 +742,7 @@ export class LarkCoordinatorInbound {
     return this.handle(event, config, false, true, undefined, undefined, adoption);
   }
 
-  private readonly intakeTails = new Map<string, Promise<void>>();
+  private readonly intakeTails = new Map<string, Promise<unknown>>();
   /** 每个机器人上次清理已忽略记录的时间，以及是否已排了下一次。 */
   private readonly ignoredPrunes = new Map<string, { lastRunAt: number; pending: boolean }>();
 
@@ -755,12 +755,7 @@ export class LarkCoordinatorInbound {
   }
 
   private enqueueInbound(chatId: string, operation: () => Promise<void>) {
-    const prior = this.intakeTails.get(chatId) ?? Promise.resolve();
-    const next = prior.then(() => new Promise<void>(resolve => setImmediate(resolve))).then(operation);
-    const settled = next.catch(() => {});
-    this.intakeTails.set(chatId, settled);
-    void settled.then(() => { if (this.intakeTails.get(chatId) === settled) this.intakeTails.delete(chatId); });
-    return next;
+    return serialByKey(this.intakeTails, chatId, () => new Promise<void>(resolve => setImmediate(resolve)).then(operation));
   }
 
   handleEdited(event: LarkMessageEvent, config: StoredLarkConfig) {

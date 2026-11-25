@@ -8,7 +8,7 @@ import {
   ArtifactLogger,
   captureBrowserArtifacts,
   closeToasts,
-  withTimeout,
+  createCleanup,
   installTermination,
 } from './lark-e2e-shared.mts';
 
@@ -34,48 +34,16 @@ const artifactDir = await resolveArtifactDir('e2e-lark-management');
 const logger = new ArtifactLogger(artifactDir);
 const gitMeta = await getGitMetadata();
 
-let cleanupPromise: Promise<void> | undefined;
-let cleanupFailure: Error | undefined;
-
-const doCleanup = async (isFailure: boolean) => {
-  if (cleanupPromise) return cleanupPromise;
-  cleanupPromise = (async () => {
-    try {
-      await withTimeout(
-        captureBrowserArtifacts(browser, context, artifactDir, { isFailure }),
-        10_000,
-        'captureBrowserArtifacts'
-      );
-    } catch (e: any) {
-      if (!cleanupFailure) cleanupFailure = e;
-    }
-    try {
-      if (page && !page.isClosed()) await withTimeout(page.close(), 5_000, 'page.close');
-    } catch (e: any) {
-      if (!cleanupFailure) cleanupFailure = e;
-    }
-    try {
-      if (context) await withTimeout(context.close(), 5_000, 'context.close');
-    } catch (e: any) {
-      if (!cleanupFailure) cleanupFailure = e;
-    }
-    try {
-      if (browser) await withTimeout(browser.close(), 5_000, 'browser.close');
-    } catch (e: any) {
-      if (!cleanupFailure) cleanupFailure = e;
-    }
-    try {
-      if (harness) await withTimeout(harness.close(), 10_000, 'harness.close');
-    } catch (e: any) {
-      if (!cleanupFailure) cleanupFailure = e;
-    }
-    await logger.flush().catch(() => {});
-  })();
-  return cleanupPromise;
-};
+const doCleanup = createCleanup(async (isFailure, step) => {
+  await step('captureBrowserArtifacts', () => captureBrowserArtifacts(browser, context, artifactDir, { isFailure }));
+  await step('page.close', () => page && !page.isClosed() ? page.close() : undefined, 5_000);
+  await step('context.close', () => context?.close(), 5_000);
+  await step('browser.close', () => browser?.close(), 5_000);
+  await step('harness.close', () => harness?.close());
+}, logger);
 
 const termination = installTermination('e2e-lark-management', 180_000, async err => {
-  await doCleanup(true);
+  const cleanupFailure = await doCleanup(true);
   await writeResultFile(false, err);
   return { cleanupFailed: Boolean(cleanupFailure) };
 });
@@ -478,7 +446,7 @@ async function runTest() {
 try {
   await runTest();
   termination.checkAborted();
-  await doCleanup(false);
+  const cleanupFailure = await doCleanup(false);
   if (cleanupFailure) {
     throw new Error(`Cleanup failed after run: ${cleanupFailure.message}`);
   }

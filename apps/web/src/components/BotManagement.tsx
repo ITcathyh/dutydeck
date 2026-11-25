@@ -3,7 +3,7 @@ import { draftFromBot, saveBodyFromDraft } from '../bot-settings-form';
 import { ReplyPolishSettings } from './ReplyPolishSettings';
 import { ReactionTriggerSetting } from './ReactionTriggerSetting';
 import { InboxDispositions } from './InboxDispositions';
-import { botDetailFields, focusSettingField } from '../settings-search';
+import { botDetailFields, focusSettingFieldWhenAvailable } from '../settings-search';
 import { AgentModelSettings } from './AgentModelSettings';
 import { OptionalModelOverrides } from './OptionalModelOverrides';
 import type { LarkSetupTarget } from '../app-route';
@@ -173,13 +173,7 @@ export function BotManagement({
 
   useEffect(() => {
     if (!activeBot || !destination || !root.current) return;
-    const element = root.current;
-    const focus = () => focusSettingField(element, destination.anchor);
-    if (focus()) return;
-    if ('parent' in destination) focusSettingField(element, botDetailFields[destination.parent].anchor);
-    const observer = new MutationObserver(() => { if (focus()) observer.disconnect(); });
-    observer.observe(element, { childList: true, subtree: true });
-    return () => observer.disconnect();
+    return focusSettingFieldWhenAvailable(root.current, destination.anchor, 'parent' in destination ? botDetailFields[destination.parent].anchor : undefined);
   }, [activeBot?.appId, field]);
 
   // 获得当前 activeBot 的 draft

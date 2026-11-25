@@ -1,6 +1,6 @@
 import type { CoordinatorState } from './coordinator-state.js';
 import type { CoordinatorParts } from './coordinator-parts.js';
-import { parseLarkSourceId, type PolicyAction, type Session, type TaskRecord } from '@dutydeck/shared';
+import { parseLarkSourceId, serialByKey, type PolicyAction, type Session, type TaskRecord } from '@dutydeck/shared';
 import { isRunnable } from '../ci-common.js';
 import { eventsForRuntimeTask, renderLarkResultElements, terminalTaskStates } from './card-renderer.js';
 import { safeLarkWebUrl } from './card-actions.js';
@@ -26,15 +26,8 @@ interface RoutingDependencies {
 export class LarkSessionRouting {
   constructor(private readonly state: CoordinatorState, private readonly parts: RoutingDependencies) {}
 
-  private readonly launchBindingTails = new Map<string, Promise<void>>();
   /** 同一 scope 的启动绑定先读后写串行执行：/new 写事项边界与 /model、/effort 切换后改绑定不能交错，否则后写的一方会抹掉先写的标记。 */
-  private withLaunchBinding<T>(sourceId: string, operation: () => Promise<T>): Promise<T> {
-    const next = (this.launchBindingTails.get(sourceId) ?? Promise.resolve()).then(operation);
-    const settled = next.then(() => {}, () => {});
-    this.launchBindingTails.set(sourceId, settled);
-    void settled.then(() => { if (this.launchBindingTails.get(sourceId) === settled) this.launchBindingTails.delete(sourceId); });
-    return next;
-  }
+  private readonly launchBindingTails = new Map<string, Promise<unknown>>();
 
   /**
    * 只读定位当前 App + chat + scope 的持久化会话。
@@ -118,7 +111,7 @@ export class LarkSessionRouting {
     if (boundarySession) try {
       const sourceId = larkSourceId(config, event.chatId, event.chatType, scopeId);
       const mappings = this.state.cardMappings;
-      await this.withLaunchBinding(sourceId, async () => {
+      await serialByKey(this.launchBindingTails, sourceId, async () => {
         const binding = await mappings.get(`lark-launch:${config.appId}`, sourceId);
         const extra = binding?.extra ? JSON.parse(binding.extra) : {};
         await mappings.save({ id: `lark-launch:${sourceId}`, channel: `lark-launch:${config.appId}`, externalId: sourceId,
@@ -183,7 +176,7 @@ export class LarkSessionRouting {
     const mappings = this.state.cardMappings, sourceId = session.sourceId;
     try {
       // 与 /new 写事项边界串行：/new 已结束这条会话时不再改绑定，否则会抹掉它刚写的边界。
-      return await this.withLaunchBinding(sourceId, async () => {
+      return await serialByKey(this.launchBindingTails, sourceId, async () => {
         const live = await this.state.runtime.getSession(session.id);
         if (!isRunnable(live)) return true;
         const channel = `lark-launch:${config.appId}`;

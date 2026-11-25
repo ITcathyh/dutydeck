@@ -6,6 +6,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { initGitWorkspace } from '../../../../tests/support/git-workspace.js';
 import { createRepositories } from '@dutydeck/storage';
 import { DutydeckRuntime } from '@dutydeck/runtime';
 import type { AgentConfig, DriverContext, DriverFactory } from '@dutydeck/shared';
@@ -79,8 +80,11 @@ const groupMessage = (id: string): LarkMessageEvent => ({
   mentions: [{ key: '@_user_1', name: 'Dutydeck', openId: 'ou_bot' }]
 });
 
-async function setup(prepareError: Error | ((sessionId: string) => Promise<void>), managedGroup = false, fallback = false) {
-  const cwd = await mkdtemp(join(tmpdir(), 'dd-launcher-changed-'));
+async function setup(prepareError: Error | ((sessionId: string) => Promise<void>), managedGroup = false, fallback = false, workspace: 'directory' | 'git' = 'directory') {
+  const directory = await mkdtemp(join(tmpdir(), 'dd-launcher-changed-'));
+  cleanups.push(async () => { await rm(directory, { recursive: true, force: true }); });
+  const cwd = workspace === 'git' ? join(directory, 'repo') : directory;
+  if (workspace === 'git') initGitWorkspace(cwd);
   const config: StoredLarkConfig = {
     appId: 'app', appSecret: 'fixture', name: 'Dutydeck', workspace: cwd, defaultAgentId: 'launcher-fixture', ...(fallback ? { fallbackAgentId: 'spare' } : {}),
     fullTrustConfirmed: true, listening: true, preInjectPrompt: '', structuredAskCards: false, groupCardMention: false,
@@ -93,7 +97,7 @@ async function setup(prepareError: Error | ((sessionId: string) => Promise<void>
     id: 'launcher-fixture', name: 'Fixture', command: 'unused', args: [], protocol: 'acp', cwd, env: {},
     permissionMode: 'full-trust', timeout: 0, capabilities: { pause: false, resume: true }, builtin: false
   };
-  const repos = createRepositories(join(cwd, 'state.db'), { newDatabaseAuthority: 'ledger_v1' });
+  const repos = createRepositories(join(directory, 'state.db'), { newDatabaseAuthority: 'ledger_v1' });
   await repos.config.set(larkBotsConfigKey, JSON.stringify([config]));
 
   const issued: any[] = [];
@@ -121,6 +125,7 @@ async function setup(prepareError: Error | ((sessionId: string) => Promise<void>
     providers: defaultDriverProviders(),
     matterTracking: new MattersService(repos),
     driverIdleTimeoutMs: 0,
+    workspaceRoot: join(directory, 'worktrees'),
     probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }),
     driverFactory: factory,
     ...(managedGroup ? { authorizeExecution: (sessionId: string, actorId?: string) => groupManager!.prepareTurn(sessionId, actorId) } : {})
@@ -152,7 +157,7 @@ async function setup(prepareError: Error | ((sessionId: string) => Promise<void>
   };
   return {
     cwd, config, repos, runtime, coordinator, issued, service, prepared, sent, until, factory, agent, groupManager, log,
-    async teardown() { coordinator.stop(); await runtime.shutdown(); repos.close(); await rm(cwd, { recursive: true, force: true }); },
+    async teardown() { coordinator.stop(); await runtime.shutdown(); repos.close(); },
     async runTurn(id: string, patch: Partial<LarkMessageEvent> = {}) {
       await coordinator.handle({ ...groupMessage(id), ...patch }, config);
       // 结果卡自带 sessionId，等它出现后再查 runtime task，避免在会话尚未创建时读取。
@@ -379,7 +384,7 @@ it('旧会话未确认停止时阻挡新会话，确认停止后原请求只提�
     // 当前轮已进入准备阶段再补入旧进程的持久化阻塞，确保本轮仍触发启动器错误。
     await h.repos.config.set(`runtime_driver_stop_block:${sessionId}`, stopBlock(sessionId));
     throw new Error(LAUNCHER_ERROR);
-  });
+  }, false, false, 'git');
   cleanups.push(() => h.teardown());
   const old = await h.runTurn('om_retained_history');
   const oldRecord = await h.repos.tasks.get!(old.task.id);

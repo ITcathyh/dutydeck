@@ -34,20 +34,13 @@ import { dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import { BACKGROUND_FOLLOWUP, type NormalizedDriverEvent } from '@dutydeck/shared';
 import { pinnedSessionUuid } from '@dutydeck/cli-adapters';
 import { claudeProjectDir, claudeProjectDirCandidates, type CliPathEnv } from '../cli-paths.js';
-import { byMtimeDesc, parseJsonlObjects, readHead, walkFiles } from '../session-id/fs-scan.js';
+import { claudeMarkerCandidates, claudePinnedTranscriptPaths, findClaudeMarkerEntry } from '../claude-transcript-files.js';
 import { buildSessionMarker, isUsableMarker } from '../session-id/marker.js';
 import { JsonlTailer, type TranscriptCursor, type TranscriptEventSource, type TranscriptPosition, type TranscriptCompactionObservation } from './tail.js';
 import { claudeInputText } from './input-receipt.js';
-import { userEntryMentionsMarker } from './claude-content.js';
 import { ClaudeSubagentReader } from './claude-subagents.js';
 import { ClaudeBackgroundTasks } from './claude-background.js';
 
-/** Head window per candidate when scanning for the marker. It rides the FIRST
- *  user prompt, so a small window suffices and a long conversation is never
- *  read in full. Matches session-id/claude.ts. */
-const MARKER_HEAD_BYTES = 256 * 1024;
-/** Newest-first cap on candidates scanned across a cwd's project dirs. */
-const MAX_MARKER_CANDIDATES = 40;
 /** A live tailer whose transcript is missing scans for the marker on every poll for this long after
  *  start or a new input, then at 1 s doubling to 30 s. Missing means Claude has not taken the prompt
  *  yet (a startup dialog, say); the pinned file itself is still checked on every poll. */
@@ -151,9 +144,7 @@ function resolveClaudeSessionTranscript(projectDirs: readonly string[], sessionI
  *  copy is live, so the caller must not guess (or fall back to a scan that
  *  would pick one by mtime). */
 function pinnedClaudeTranscript(projectDirs: readonly string[], sessionId: string): string | null | undefined {
-  const pinned = pinnedSessionUuid(sessionId);
-  if (!pinned) return undefined;
-  const found = projectDirs.map(dir => join(dir, `${pinned}.jsonl`)).filter(path => existsSync(path));
+  const found = claudePinnedTranscriptPaths(projectDirs, pinnedSessionUuid(sessionId));
   return found.length > 1 ? null : found[0];
 }
 
@@ -162,13 +153,10 @@ function pinnedClaudeTranscript(projectDirs: readonly string[], sessionId: strin
 function findJsonlByMarker(dirs: readonly string[], sessionId: string, heads?: MarkerHeads): string | undefined {
   if (!isUsableMarker(sessionId)) return undefined;
   const marker = buildSessionMarker(sessionId);
-  const candidates = dirs.flatMap(dir => walkFiles(dir, { maxDepth: 0, accept: name => name.endsWith('.jsonl') }))
-    .sort(byMtimeDesc)
-    .slice(0, MAX_MARKER_CANDIDATES);
-  for (const { path, mtimeMs, size } of candidates) {
+  for (const { path, mtimeMs, size } of claudeMarkerCandidates(dirs)) {
     const cached = heads?.get(path);
     const match = cached && cached.mtimeMs === mtimeMs && cached.size === size ? cached.match
-      : parseJsonlObjects(readHead(path, MARKER_HEAD_BYTES)).some(entry => userEntryMentionsMarker(entry, marker));
+      : findClaudeMarkerEntry(path, marker, 'head') !== undefined;
     heads?.set(path, { mtimeMs, size, match });
     if (match) return path;
   }

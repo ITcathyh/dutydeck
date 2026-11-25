@@ -162,13 +162,7 @@ export interface AcpLaunchObservationInput {
   cwd: string;
 }
 
-export interface AcpNativeObservationInput {
-  client: InsightClient;
-  launchKind: LaunchKind;
-  /** 与本次追加对应的 launch 观察是否在真实 spawn 边界冻结。 */
-  observed: boolean;
-  dataRoot: string;
-  cwd: string;
+export interface AcpNativeObservationInput extends AcpLaunchObservationInput {
   /** native.confirmed 成功后 prepareSubmission 给出的来源关联；取不到则省略。 */
   nativeContextRef?: unknown;
   /** 只有 ACP _meta 显式给出的 Agent/CLI session ID 才能放这里。 */
@@ -177,10 +171,9 @@ export interface AcpNativeObservationInput {
 
 let observationSeq = 0;
 
-/** Driver 侧观察：去掉 runtime 填充的 session/run/driver/sourceKey 字段。 */
-export function buildLaunchObservation(input: AcpLaunchObservationInput): DriverTranscriptSourceObservation {
+function observationBase(input: AcpLaunchObservationInput) {
   const proofKind: ProofKind = input.observed ? 'launch_observed' : 'inferred';
-  return freezeObservation({
+  return {
     observationId: `acp-src-${++observationSeq}-${crypto.randomUUID()}`,
     client: input.client,
     launchKind: input.launchKind,
@@ -188,20 +181,18 @@ export function buildLaunchObservation(input: AcpLaunchObservationInput): Driver
     capturedAt: new Date().toISOString(),
     dataRoot: input.dataRoot,
     cwd: input.cwd
-  });
+  };
+}
+
+/** Driver 侧观察：去掉 runtime 填充的 session/run/driver/sourceKey 字段。 */
+export function buildLaunchObservation(input: AcpLaunchObservationInput): DriverTranscriptSourceObservation {
+  return freezeObservation(observationBase(input));
 }
 
 /** onPrepared 中 native.confirmed 成功后的身份追加观察。 */
 export function buildNativeObservation(input: AcpNativeObservationInput): DriverTranscriptSourceObservation {
-  const proofKind: ProofKind = input.observed ? 'launch_observed' : 'inferred';
   return freezeObservation({
-    observationId: `acp-src-${++observationSeq}-${crypto.randomUUID()}`,
-    client: input.client,
-    launchKind: input.launchKind,
-    proofKind,
-    capturedAt: new Date().toISOString(),
-    dataRoot: input.dataRoot,
-    cwd: input.cwd,
+    ...observationBase(input),
     ...(input.nativeContextRef !== undefined ? { nativeContextRef: input.nativeContextRef } : {}),
     nativeSessionId: input.agentSessionId ?? null,
     identityProof: input.agentSessionId ? 'acpx_agent_session_meta' : null,
