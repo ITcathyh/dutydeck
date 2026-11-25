@@ -93,7 +93,7 @@ function needText(reason, detail) {
     return `话题里有多条消息，请引用要处理的那条回复，再发送 /job。${NEW_TOPIC_HELP}`;
   }
   if (reason === 'none' && detail === 'root_attribution_missing') {
-    return '没能确认话题的第一条消息。请把目标反馈单独转发成一个新话题，在那里发送 /job。';
+    return '没有找到可核对的话题起始消息。请把目标反馈单独转发成一个新话题，在那里发送 /job。';
   }
   switch (reason) {
     case 'multiple':
