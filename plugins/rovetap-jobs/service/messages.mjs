@@ -45,8 +45,8 @@ function rejectedText(job) {
       return `⚠️ ${PROJECT_LABEL} 派单服务配置有误${suffix}，本次委托没有发出。请联系管理员核对 pairfob socket 与令牌文件配置；系统不会自行重复提交。`;
     case 'not_found':
       return `⚠️ ${PROJECT_LABEL} 项目 leader 绑定不存在${suffix}，本次委托未能建单。请联系管理员核对项目与 leader 绑定后重新发送 /job。`;
-    case 'project_closed':
-      return `⚠️ ${PROJECT_LABEL} 项目已关闭${suffix}，不再接受新委托；如需继续请联系管理员。系统不会自行重复提交。`;
+    case 'conflict':
+      return `⚠️ ${PROJECT_LABEL} 没有接受这条委托${suffix}。请管理员核对项目 leader 是否已关闭，或这条消息是否已用于不同的委托。`;
     default:
       return `${PROJECT_LABEL} 建单未被接受${suffix}。请联系管理员核对；系统不会自行重复提交。`;
   }

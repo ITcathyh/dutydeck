@@ -7,7 +7,6 @@
   "files": [
     ".dutydeck-plugin",
     "service",
-    "README.md",
-    "README.en.md"
+    "README.md"
   ]
 }

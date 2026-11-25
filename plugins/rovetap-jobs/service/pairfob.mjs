@@ -125,7 +125,6 @@ const EXPLICIT_REJECTION_CODES = new Set([
   'invalid_argument', // payload failed intake validation before any write
   'too_large', // payload exceeded the intake limit before any write
   'not_found', // submit-time binding miss, e.g. configured project leader does not exist
-  'project_closed', // project alias is closed and accepts no new jobs
   'configuration_error', // local socket/token configuration invalid (exit 2)
 ]);
 

@@ -61,7 +61,7 @@ function submit(input) {
     case 'submit-notfound4':
       return emit({ ok: false, error: { code: 'not_found', message: 'configured project leader does not exist' } }, 4);
     case 'project-closed4':
-      return emit({ ok: false, error: { code: 'project_closed', message: 'project alias is closed' } }, 4);
+      return emit({ ok: false, error: { code: 'conflict', message: 'project leader is closed' } }, 4);
     case 'weird4':
       return emit({ ok: false, error: { code: 'future_code', message: 'unknown to this adapter' } }, 4);
     case 'forbidden4':
@@ -278,7 +278,7 @@ describe('submitProjectJob rejection vs reconcile-only', () => {
     ['invalid0', 'invalid_argument'],
     ['config2', 'configuration_error'],
     ['submit-notfound4', 'not_found'],
-    ['project-closed4', 'project_closed'],
+    ['project-closed4', 'conflict'],
   ])('reports explicit terminal verdict %s as rejected with code and message', async (caseName, code) => {
     const r = await submit(caseName);
     expect(r.outcome).toBe('rejected');

@@ -153,7 +153,7 @@ unset HANDLER_TOKEN
 HTTP 层只做鉴权、解析和一条原子持久事务（`$DATA_DIR/rovetap-jobs-state.json`）后立即回执，pairfob 调用与飞书回复都在后台 worker。对照真实 `cmd/pairfob/project.go` 的 code/exit，提交结果分三类处理：
 
 - **确定一个字节都没发出**：CLI 根本没拉起（如 `pairfob.bin` 路径错误），或信封为 `unreachable`（Go 侧只在拨 unix socket 失败、尚未写请求时给出，exit 1）。已解析材料保留，任务退回队列按指数退避后**用同一 payload 重新 submit**。
-- **明确终局拒绝/配置错误**：`configuration_error`（socket/令牌配置问题，exit 2）、`not_found`（提交时绑定的 project leader 不存在）、`project_closed`，以及 `forbidden`/`conflict`/`invalid_argument` 等 exit 4 明确裁决。任务置为 `failed`，原话题收到带错误码、可据此找管理员处理的说明，**不再自行 submit 或 status 核对**。注意 `status` 查询返回的 `not_found` 语义不同：可能只是枢纽尚未可见，仍按未知路径退避核对，不会据此判失败。
+- **明确终局拒绝/配置错误**：`configuration_error`（socket/令牌配置问题，exit 2）、`not_found`（提交时绑定的 project leader 不存在），以及 `forbidden`/`conflict`/`invalid_argument` 等 exit 4 明确裁决。任务置为 `failed`，原话题收到带错误码、可据此找管理员处理的说明，**不再自行 submit 或 status 核对**。注意 `status` 查询返回的 `not_found` 语义不同：可能只是枢纽尚未可见，仍按未知路径退避核对，不会据此判失败。
 - **结果未知**：`unknown_outcome`（exit 5，写字节后断线/超时/回执残缺）、进程被杀、stdout 无法辨认、`internal`/`usage` 等不能证明枢纽拒绝的码，**绝不重复 submit**，而是用稳定来源键（`app_id + message_id`）调 `pairfob project status --key` 核对；进程重启会把中断中的提交（`submitting`）转入核对。
 
 发现新阶段（含 done/failed/cancelled 终态）时，阶段值、`sentPhases` 去重、待发阶段回执与 accepted/终态在**同一个 `store.mutate` 事务**落库，确认持久化后才发送；即使在落库后、发送前崩溃，重启也会从同一份状态把接单与完成等回执补齐，且同一阶段只通知一次。飞书回复默认走带持久 `uuid` 的 reply API，在 1 小时 uuid 去重窗口内重试不重复发帖。
@@ -180,7 +180,7 @@ pnpm exec vitest run plugins/rovetap-jobs/test
 | 401 / 403 `app_mismatch` | handlerToken 两边不一致；`appId` 与被绑机器人不一致。 |
 | 回执要求引用 | 按提示引用那条反馈再发 `/job`：多条转发、话题枚举不完整、引用被删/跨话题/无文字都会这样，属设计行为。 |
 | 回执无任务链接 | 未配 `webBaseUrl`，或其含 userinfo 被拒绝；改成普通 HTTPS 工作台地址后重启 service。 |
-| pairfob 一直核对 | `pairfob.bin` 绝对路径可执行、hub 已重启、socket/tokenFile 与 `hub project-job enable` 输出一致；用 `project status --key <source-key>` 只读核对，不要换新键重发。若话题已收到 `configuration_error`/`not_found`/`project_closed` 说明，则属明确终局，按提示修配置或绑定后重新发 `/job`；`unreachable` 会自动退避重提，无需人工重发。 |
+| pairfob 一直核对 | `pairfob.bin` 绝对路径可执行、hub 已重启、socket/tokenFile 与 `hub project-job enable` 输出一致；用 `project status --key <source-key>` 只读核对，不要换新键重发。若话题已收到 `configuration_error`/`not_found`/`conflict` 说明，则属明确终局，按提示修配置或绑定后重新发 `/job`；`unreachable` 会自动退避重提，无需人工重发。 |
 | 重启瞬间 eventHandlers 收到 503 `shutting_down` | 旧代仍在排空并独占固定端口，503 明确可重投，Dutydeck/飞书重投后由持久收件箱去重；排空结束端口释放，新代才能绑定，属正常无损重启。 |
 | service 反复退出 | 看宿主/unit stderr 的 `[rovetap-jobs] failed to start: ...`（不含密钥）：配置缺 `appSecret`/`pairfob.bin`/`pairfob.tokenFile`、token 文件或 bin 路径不可用、`listen.host` 非回环都会在启动时这样指出键名/路径。连续崩溃超上限后 supervisor 停止自动重启，修复后 `dutydeck restart` 或 `POST /api/plugins/rovetap-jobs/service/restart`（安装管理员）。 |
 

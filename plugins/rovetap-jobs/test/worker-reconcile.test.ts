@@ -434,7 +434,7 @@ describe('submit 明确错误的退避重试与终局反馈', () => {
     expect(c.store.getJob(KEY).pairfob.taskId).toBe('pt_u');
   });
 
-  it.each(['configuration_error', 'not_found', 'project_closed'])(
+  it.each(['configuration_error', 'not_found', 'conflict'])(
     '%s 是明确终局：stage=failed、原话题收到带码反馈，且不做 status 核对',
     async (code) => {
       pf.submitProjectJob.mockResolvedValueOnce({ outcome: 'rejected', code, message: 'hub verdict' });
