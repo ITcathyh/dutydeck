@@ -122,6 +122,7 @@ export function makeEnvelope(o: Record<string, any> = {}) {
     ...(o.rootId !== undefined ? { root_id: o.rootId } : {}),
     ...(o.parentId !== undefined ? { parent_id: o.parentId } : {}),
     ...(o.mentions !== undefined ? { mentions: o.mentions } : {}),
+    ...(o.messageExtra ?? {}),
   };
   return {
     version: 1, app_id: o.outerAppId ?? APP, handler_id: 'h1', event_type: 'im.message.receive_v1',

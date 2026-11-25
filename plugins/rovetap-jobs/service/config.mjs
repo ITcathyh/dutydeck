@@ -108,6 +108,9 @@ export async function loadConfig(path) {
     configPath: path,
     dataDir,
     appId,
+    // Trusted bot open_id used to authenticate event mentions: only a mention
+    // whose id.open_id equals this is stripped before /job parsing. Leave
+    // empty to accept bare `/job` only; @-prefixed messages then continue.
     selfOpenId: str(raw.selfOpenId ?? raw.botOpenId),
     handlerToken,
     allowedChatIds: new Set(arr(raw.allowedChatIds ?? raw.dispatchChatIds)),

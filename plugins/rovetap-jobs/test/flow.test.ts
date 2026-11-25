@@ -250,3 +250,61 @@ describe('rovetap-jobs  material selection', () => {
     expect(h.hub()).toBeNull();
   });
 });
+
+describe('rovetap-jobs  command addressing: only bare /job or a real self @mention', () => {
+  it('starts for an event mention whose open_id matches configured selfOpenId', async () => {
+    h = await setupHarness();
+    seedQuotedText('om_fwd_selfat', '材料正文');
+    const res = await h.post(makeEnvelope({
+      eventId: 'ev_selfat', messageId: 'om_selfat',
+      parentId: 'om_fwd_selfat', threadId: 'omt_1', rootId: 'om_root',
+      text: '@_user_1 /job rovetap 处理这个',
+      mentions: [{ key: '@_user_1', name: 'RoveTapJobs', id: { open_id: 'ou_bot' } }],
+    }));
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ event_id: 'ev_selfat', decision: 'stop' });
+    await waitFor(() => h!.hub()?.submitCount === 1, { label: 'self-mention submit' });
+    expect(h.hub().lastPayload.instruction).toBe('处理这个');
+  });
+
+  it('continues without any job for messages not addressed to this bot', async () => {
+    h = await setupHarness();
+    const cases: Array<{ label: string; patch: Record<string, unknown> }> = [
+      {
+        label: 'leading real mention of another person',
+        patch: {
+          text: '@_user_1 /job do it',
+          mentions: [{ key: '@_user_1', name: '张三', id: { open_id: 'ou_zhang' } }],
+        },
+      },
+      {
+        label: 'placeholder key authenticated as another bot',
+        patch: {
+          text: '@_user_1 /job do it',
+          mentions: [{ key: '@_user_1', name: 'OtherBot', id: { open_id: 'ou_other_bot' } }],
+        },
+      },
+      { label: 'forged placeholder with no event mentions', patch: { text: '@_user_1 /job do it' } },
+      { label: 'literal bot-looking name as plain text', patch: { text: '@RoveTapJobs /job do it' } },
+      { label: 'slash look-alike /job/foo', patch: { text: '/job/foo' } },
+      { label: 'punctuation-glued /job,do', patch: { text: '/job,do' } },
+      { label: 'merge_forward content carrying /job', patch: { messageType: 'merge_forward', content: '{"title":"合并转发 /job x"}' } },
+      { label: 'image message', patch: { messageType: 'image', content: '{"image_key":"k"}' } },
+      { label: 'rich-text post containing /job', patch: { messageType: 'post', content: JSON.stringify({ zh_cn: { content: [[{ tag: 'text', text: '/job do it' }]] } }) } },
+      { label: 'text with explicit forward_from provenance', patch: { text: '/job do it', messageExtra: { forward_from: 'om_old_forward' } } },
+      { label: 'text with forward descriptor object', patch: { text: '/job do it', messageExtra: { forward: { sender_open_id: 'ou_x' } } } },
+    ];
+
+    for (let i = 0; i < cases.length; i += 1) {
+      const c = cases[i];
+      const res = await h.post(makeEnvelope({
+        eventId: `ev_addr_${i}`, messageId: `om_addr_${i}`,
+        parentId: undefined, threadId: undefined, rootId: undefined,
+        ...c.patch,
+      }));
+      expect(res.body, c.label).toMatchObject({ decision: 'continue' });
+    }
+    expect(h.svc.store.listJobs()).toHaveLength(0);
+    expect(h.hub()).toBeNull();
+  });
+});

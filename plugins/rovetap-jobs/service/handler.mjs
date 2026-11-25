@@ -11,7 +11,7 @@
 // human in the bound group who lacks permission gets an explanatory reply.
 
 import { timingSafeEqual } from 'node:crypto';
-import { parseJobCommand, renderMentionText, extractMessageText } from './commands.mjs';
+import { parseJobCommand, renderMentionText, extractMessageText, isForwardedMessage } from './commands.mjs';
 import { sourceKeyFor, newJobRecord } from './store.mjs';
 
 export function bearerMatches(headerValue, expectedToken) {
@@ -24,7 +24,7 @@ export function bearerMatches(headerValue, expectedToken) {
 }
 
 /** Accept both the Dutydeck pipeline envelope and a direct flattened event. */
-export function normalizeEnvelope(body) {
+export function normalizeEnvelope(body, selfOpenId = '') {
   if (!body || typeof body !== 'object') return null;
   const envelope = body.event && typeof body.event === 'object'
     ? body
@@ -38,8 +38,14 @@ export function normalizeEnvelope(body) {
   const mentions = Array.isArray(message.mentions) ? message.mentions
     : Array.isArray(event.mentions) ? event.mentions : [];
 
-  const rawContent = extractMessageText(message.message_type, message.content);
-  const renderedText = renderMentionText(rawContent, mentions, undefined);
+  const messageType = typeof message.message_type === 'string' ? message.message_type : 'text';
+  // Only the sender's own newly typed text can be a command. Rich text and
+  // other non-text messages (post/image/file/merge_forward/...) and messages
+  // carrying forward provenance yield no command text, so they continue
+  // through Dutydeck instead of being claimed as /job.
+  const commandText = messageType === 'text' && !isForwardedMessage(message)
+    ? renderMentionText(extractMessageText(messageType, message.content), mentions, selfOpenId)
+    : '';
 
   return {
     outerAppId: typeof envelope.app_id === 'string' ? envelope.app_id : '',
@@ -53,11 +59,11 @@ export function normalizeEnvelope(body) {
     messageId: typeof message.message_id === 'string' ? message.message_id : '',
     chatId: typeof message.chat_id === 'string' ? message.chat_id : '',
     chatType: typeof message.chat_type === 'string' ? message.chat_type : '',
-    messageType: typeof message.message_type === 'string' ? message.message_type : 'text',
+    messageType,
     parentId: typeof message.parent_id === 'string' ? message.parent_id : '',
     rootId: typeof message.root_id === 'string' ? message.root_id : '',
     threadId: typeof message.thread_id === 'string' ? message.thread_id : '',
-    rawText: renderedText,
+    rawText: commandText,
   };
 }
 
@@ -84,7 +90,7 @@ export async function receiveEnvelope({ body, authorization }, { config, store, 
   const authError = checkTransportAuth({ authorization, body }, config);
   if (authError) return authError;
 
-  const env = normalizeEnvelope(body);
+  const env = normalizeEnvelope(body, config.selfOpenId);
   if (!env || !env.eventId) return { status: 400, body: { error: { code: 'bad_event', message: 'missing event/event_id' } } };
 
   const aliases = [...config.projectAliases];

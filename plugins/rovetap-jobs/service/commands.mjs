@@ -17,12 +17,16 @@ export const DEFAULT_INSTRUCTION = '请项目 leader 跟进这条反馈。';
  * `@project` target.
  *
  * Returns the display text with placeholders replaced:
- *  - a mention whose open_id equals `selfOpenId` is removed (the addressed bot);
- *  - any other mention becomes `@<name>` (whitespace removed so it is one token).
+ *  - a mention whose open_id equals the trusted `selfOpenId` is removed (the
+ *    addressed bot);
+ *  - any other known mention becomes `@<name>` (whitespace removed so it is
+ *    one token), which keeps blocking the /job anchor when it leads;
+ *  - a placeholder with no matching event mention is left verbatim, so text
+ *    that merely looks like a mention can never be stripped.
  *
- * The caller decides `selfOpenId` from trusted configuration. When it is not
- * known, ALL leading mention tokens are instead skipped by parseJobCommand, so
- * a leading `@bot /job` still parses.
+ * `selfOpenId` comes from trusted configuration. When it is empty no mention
+ * is proven to be self, so @-prefixed forms do not parse; a bare `/job` still
+ * does.
  */
 export function renderMentionText(text, mentions, selfOpenId) {
   if (typeof text !== 'string') return '';
@@ -49,8 +53,9 @@ export function renderMentionText(text, mentions, selfOpenId) {
   return out;
 }
 
-const LEADING_MENTION = /^(?:@_user_\d+|@[^\s@]+)[ \t]+/;
-const JOB_ANCHOR = /^\/job(?![A-Za-z0-9_-])/i;
+// `/job` must be followed by whitespace or end-of-text: `/jobs`, `/jobx`,
+// `/job/foo` and `/job,` are different text, not a command with an argument.
+const JOB_ANCHOR = /^\/job(?=\s|$)/i;
 const TARGET_TOKEN = /^@?([A-Za-z0-9_-]+)(?=\s|$)/;
 
 /**
@@ -61,7 +66,10 @@ const TARGET_TOKEN = /^@?([A-Za-z0-9_-]+)(?=\s|$)/;
  *           {kind:'unknown-project', token:string}}
  *
  * Mirrors the approved prototype semantics:
- *  - optional leading run of @mention tokens (the addressed bot), then `/job`;
+ *  - the trusted self mention is stripped beforehand by renderMentionText;
+ *    after that only whitespace may precede `/job`. Any remaining leading
+ *    `@token` (another person/bot, or an unauthenticated look-alike) makes the
+ *    message `not-command`;
  *  - `/job rovetap …` or `/job @rovetap …` selects the project;
  *  - a leading `@something` after /job is always a project token; anything but a
  *    configured alias is an ambiguous/unknown project (caller stops propagation);
@@ -69,22 +77,14 @@ const TARGET_TOKEN = /^@?([A-Za-z0-9_-]+)(?=\s|$)/;
  *    `/job fix the draft bug` uses the default project;
  *  - empty instruction -> the default instruction.
  *
- * Only a `/job` anchored at the start (after mentions/whitespace) is a command.
- * An ordinary sentence that merely contains `/job` mid-text is `not-command`
- * and must continue through Dutydeck normally.
+ * Only a `/job` anchored at the start (after whitespace/a stripped self
+ * mention) is a command. An ordinary sentence that merely contains `/job`
+ * mid-text is `not-command` and must continue through Dutydeck normally.
  */
 export function parseJobCommand(rawText, options = {}) {
   if (typeof rawText !== 'string') return { kind: 'not-command' };
-  let s = rawText.trim();
+  const s = rawText.trim();
   if (!s) return { kind: 'not-command' };
-
-  // Skip any leading `@token ` run (covers `@_user_1 /job`, `@Bot /job`, and
-  // even `@a @b /job`). These tokens do not confer authority.
-  for (;;) {
-    const m = LEADING_MENTION.exec(s);
-    if (!m) break;
-    s = s.slice(m[0].length).replace(/^\s+/, '');
-  }
 
   const anchor = JOB_ANCHOR.exec(s);
   if (!anchor) return { kind: 'not-command' };
@@ -156,4 +156,22 @@ export function extractMessageText(messageType, content) {
     return parts.join('\n');
   }
   return '';
+}
+
+/**
+ * Whether an inbound event message itself carries forward provenance.
+ *
+ * `merge_forward` is the reliable platform type for merged/chat-record
+ * forwards and is handled by the caller via message_type. The explicit
+ * descriptors below mirror materials.mjs and only matter on shapes that
+ * expose them; a single forwarded text message can arrive as an ordinary
+ * `text` event with no provenance, which the platform does not let us tell
+ * apart from freshly typed text.
+ */
+export function isForwardedMessage(message) {
+  if (!message || typeof message !== 'object') return false;
+  return message.forward === true
+    || (message.forward && typeof message.forward === 'object')
+    || Boolean(message.forward_from)
+    || Boolean(message.origin && typeof message.origin === 'object' && message.origin.message_id);
 }
