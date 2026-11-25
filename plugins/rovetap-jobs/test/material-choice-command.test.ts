@@ -63,7 +63,7 @@ describe('topic material choice commands', () => {
     expect(reply.split('\n')).toContain(command);
     expect(reply).not.toContain(materialChoiceCode(earlier, first.messageId));
 
-    const chosen = await deliver(makeEnvelope({ rootId: topic.rootId, messageId: 'om_choice', text: command }));
+    const chosen = await deliver(makeEnvelope({ threadId: topic.threadId, messageId: 'om_choice', text: command }));
     expect(chosen.kickSourceKey).toBe(original);
     expect(store.getJobByMessage('om_choice')).toMatchObject({
       sourceKey: original, messageId: 'om_original', instruction: '请补回归测试', selectedMaterialId: first.messageId, stage: 'queued',
@@ -71,6 +71,23 @@ describe('topic material choice commands', () => {
     });
     expect(store.getJob(earlier)).toMatchObject({ stage: 'needs_input' });
     expect(store.listJobs()).toHaveLength(2);
+  });
+
+  it('refuses a flat group quote of the same root, so the real topic can still select', async () => {
+    const original = await offer('om_original');
+    const before = structuredClone(store.getJob(original));
+    const text = `/job 选 #${materialChoiceCode(original, first.messageId)}`;
+    const flat = makeEnvelope({ rootId: topic.rootId, parentId: topic.rootId, messageId: 'om_flat_choice', text });
+    const denied = await deliver(flat);
+    expect(denied.body).toEqual({ event_id: flat.event.event_id, decision: 'stop' });
+    const rejected = store.getJobByMessage('om_flat_choice');
+    expect(rejected).toMatchObject({ stage: 'denied', reasonCode: 'selection_topic_required', replyAnchor: 'om_flat_choice' });
+    expect(replyText('denial', rejected, config)).toContain('打开原话题');
+    expect(store.getJob(original)).toEqual(before);
+
+    const accepted = await deliver(makeEnvelope({ ...topic, messageId: 'om_topic_choice', text }));
+    expect(accepted.kickSourceKey).toBe(original);
+    expect(store.getJob(original)).toMatchObject({ selectedMaterialId: first.messageId, stage: 'queued' });
   });
 
   it('declines invalid, expired, wrong-actor and wrong-topic choices in the inbound topic', async () => {
@@ -156,6 +173,13 @@ it('continues the real HTTP order once and stops retrying an offer the user alre
     expect(offer.text.split('\n')).toContain(command);
     expect(h.hub()).toBeNull();
 
+    const before = structuredClone(h.svc.store.getJob(sourceKey));
+    const flat = makeEnvelope({ rootId: topic.rootId, parentId: topic.rootId, messageId: 'om_flat_choice', text: command });
+    expect((await h.post(flat)).body).toMatchObject({ decision: 'stop' });
+    await waitFor(() => h.lark.replies.some(receipt => receipt.to === 'om_flat_choice' && receipt.text.includes('打开原话题')));
+    expect(h.svc.store.getJob(sourceKey)).toEqual(before);
+    expect(h.hub()).toBeNull();
+
     // A kick from the selection would retry this offer immediately without suppression.
     await h.svc.store.mutate((state: any) => { state.jobs[sourceKey].replies.need.retryAt = 0; });
     const select = makeEnvelope({ ...topic, text: command });
@@ -168,7 +192,7 @@ it('continues the real HTTP order once and stops retrying an offer the user alre
       instruction: '为这条反馈补回归测试',
       materials: [{ message_id: second.messageId, text: second.preview }],
     } });
-    expect(h.svc.store.listJobs()).toHaveLength(1);
+    expect(h.svc.store.listJobs().map(job => job.sourceKey)).toEqual([sourceKey, sourceKeyFor(APP, 'om_flat_choice')]);
     expect(h.lark.replies.filter(receipt => receipt.uuid === offer.uuid)).toHaveLength(1);
     expect(h.svc.store.getJob(sourceKey).replies.need).toMatchObject({
       status: 'unknown', attempts: 1, uuid: offer.uuid, supersededAt: expect.any(String),
@@ -196,5 +220,17 @@ it('bounds the offer and renders source commands and links as inert excerpts', (
     expect(receipt).toContain(`任务号：${job.pairfob.taskId}`);
     expect(receipt).toContain('随单材料摘要：「已核对内容');
     expect(receipt).not.toContain('/job 选 #fffffffffe');
+  }
+});
+
+it('offers a fresh topic when discovery cannot choose, or a text explanation for unreadable material', () => {
+  for (const [reasonCode, reasonDetail] of [
+    ['multiple', null], ['incomplete', 'scan_window_truncated'],
+    ['none', 'topic_root_not_only_source'], ['none', 'root_attribution_missing'],
+  ]) {
+    expect(replyText('need', { reasonCode, reasonDetail }, config)).toContain('把目标反馈单独转发成一个新话题，在那里发送 /job');
+  }
+  for (const reasonCode of ['inaccessible', 'no_text']) {
+    expect(replyText('need', { reasonCode }, config)).toContain('补一条文字说明，引用说明后再发送 /job');
   }
 });

@@ -6,6 +6,7 @@ import { ROVE_ENTRY_CODEPOINTS } from './materials.mjs';
 import { materialChoiceCode, MAX_MATERIAL_CHOICES } from './commands.mjs';
 
 const PROJECT_LABEL = 'RoveTap';
+const NEW_TOPIC_HELP = '也可以把目标反馈单独转发成一个新话题，在那里发送 /job。';
 
 function taskTitleFragment(instruction) {
   if (typeof instruction !== 'string') return '';
@@ -57,6 +58,8 @@ function denialText(job, config) {
     }
     case 'selection_usage':
       return '请选择回执中一整行「/job 选 #短码」，其中短码是 10 位十六进制字符。';
+    case 'selection_topic_required':
+      return '请打开原话题，在话题回复框里重新发送选择命令。';
     case 'selection_unavailable':
       return '该材料选项不可用。只有原发令者能在原话题中选择，短码在选材后或超过 24 小时失效。若未完成选材，请重新引用材料，再发送 /job。';
     default:
@@ -86,15 +89,23 @@ function needText(reason, detail) {
   if (reason === 'none' && detail === 'no_forward_before_command') {
     return '话题里能识别到的转发晚于你的 /job 命令，不能自动当作本次材料。请直接引用那条反馈（或更早的材料），再发送 /job。';
   }
+  if (reason === 'none' && detail === 'topic_root_not_only_source') {
+    return `话题里有多条消息，请引用要处理的那条回复，再发送 /job。${NEW_TOPIC_HELP}`;
+  }
+  if (reason === 'none' && detail === 'root_attribution_missing') {
+    return '没能确认话题的第一条消息。请把目标反馈单独转发成一个新话题，在那里发送 /job。';
+  }
   switch (reason) {
     case 'multiple':
-      return '当前话题里有多条可识别的转发，请**引用**你要交给项目 leader 的那一条，再发送 /job。';
+      return `当前话题里有多条可识别的转发，请引用要交给项目 leader 的那一条，再发送 /job。${NEW_TOPIC_HELP}`;
+    case 'incomplete':
+      return `没能核对完整的话题消息。请引用要处理的那条回复，再发送 /job。${NEW_TOPIC_HELP}`;
     case 'cross_scope':
       return '引用的消息不属于当前群或话题，已拒绝。请引用本群/本话题内已核对的反馈，系统不会猜测同事的原私聊。';
     case 'inaccessible':
-      return '用机器人权限读不到被引用的消息（可能已删除，或缺少消息读取权限）。请重新引用或把内容转发到本话题后再试。';
+      return '机器人读不到这条消息。请重新引用或把内容转发到本话题后再试。原消息已无法打开时，可以补一条文字说明，引用说明后再发送 /job。';
     case 'no_text':
-      return '这条材料没有可读取的文字。首版只接收文字、图文或合并转发正文中的文本，请引用含文字的反馈。';
+      return '这条材料没有可读取的文字。请引用含文字的反馈，或补一条文字说明，引用说明后再发送 /job。';
     case 'none':
     default:
       return '当前话题没有找到可派的转发材料。请引用那条反馈后发送 /job，或先把它转发到本话题；存在多条转发时请显式引用其中一条。';
@@ -123,7 +134,7 @@ function materialChoiceText(job, config) {
     ...(instruction ? [`原委托「${instruction}」`] : []),
     '原发令者可在 24 小时内把以下一条命令复制到当前话题，继续同一条派单。',
     ...choices,
-    `也可以引用材料后重新发 /job。${mention}`,
+    `如果不方便使用短码，请引用话题内的目标回复后重新发 /job。${NEW_TOPIC_HELP}${mention}`,
   ].join('\n');
 }
 
