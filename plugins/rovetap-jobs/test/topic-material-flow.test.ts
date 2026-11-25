@@ -1,6 +1,7 @@
 import { EventDispatcher, LoggerLevel } from '@larksuiteoapi/node-sdk';
 import { afterEach, describe, expect, it } from 'vitest';
 import { runLarkEventPipeline } from '../../../apps/server/src/lark/event-pipeline';
+import { materialChoiceCode } from '../service/commands.mjs';
 import { createService } from '../service/main.mjs';
 import { JobStore } from '../service/store.mjs';
 import { APP, BOSS, COMMAND_CREATE_TIME, TOKEN, apiMessage, makeEnvelope, setupHarness, waitFor, type Harness } from './helpers/harness';
@@ -10,6 +11,10 @@ const rootId = 'om_root';
 const messageId = 'om_command';
 const eventType = 'im.message.receive_v1';
 const user = { sender: { id: BOSS, id_type: 'open_id', sender_type: 'user' } };
+const commanderOpenId = 'ou_commander';
+const commander = { sender: { id: 'cli_commander', id_type: 'app_id', sender_type: 'app', tenant_key: 'tenant_main' } };
+const receiver = { sender: { id: APP, id_type: 'app_id', sender_type: 'app', tenant_key: 'tenant_main' } };
+const botCommand = { senderType: 'app', openId: commanderOpenId };
 const log = { info() {}, warn() {}, error() {} };
 let h: Harness | undefined;
 let resumed: Awaited<ReturnType<typeof createService>> | undefined;
@@ -31,8 +36,8 @@ function seedReply(id: string, text: string, patch: Record<string, unknown> = {}
   }));
 }
 
-function seedMerged(id: string, text: string, root = false) {
-  const wrapper = { messageType: 'merge_forward', content: 'Merged and Forwarded Message' };
+function seedMerged(id: string, text: string, root = false, rawExtra: Record<string, unknown> = user) {
+  const wrapper = { messageType: 'merge_forward', content: 'Merged and Forwarded Message', rawExtra };
   if (root) seedRoot('', wrapper);
   else seedReply(id, '', wrapper);
   h!.lark.messages.set(`${id}_child`, apiMessage({ messageId: `${id}_child`, chatId: 'oc_private', upperMessageId: id, text }));
@@ -42,7 +47,7 @@ async function deliver(patch: Record<string, unknown> = {}) {
   const { event } = makeEnvelope({ messageId, rootId, threadId, parentId: rootId, text: '/job', ...patch });
   const config = {
     appId: APP,
-    eventHandlers: [{ id: 'rovetap-jobs', eventTypes: [eventType], url: h!.svc.url, token: TOKEN }],
+    eventHandlers: [{ id: 'rovetap-jobs', eventTypes: [eventType], url: resumed?.url ?? h!.svc.url, token: TOKEN }],
   } satisfies Parameters<typeof runLarkEventPipeline>[0];
   const dispatcher = new EventDispatcher({ loggerLevel: LoggerLevel.error }).register({
     [eventType]: (data) => runLarkEventPipeline(config, eventType, data, globalThis.fetch, log),
@@ -226,6 +231,120 @@ describe('RoveTap material from real-shaped topic replies', () => {
     const updated = h.svc.store.getJobByMessage(messageId);
     expect(updated.materialChoices).toEqual([]);
     expect(updated.replies['need:selected']).toBeDefined();
+    expect(h.hub()).toBeNull();
+  });
+});
+
+describe('RoveTap material from an authorized bot commander', () => {
+  it('uses the bot’s earlier text root and ignores the receiver’s receipt', async () => {
+    h = await setupHarness({ config: { commanderOpenIds: [commanderOpenId] } });
+    seedRoot('bot 转发的原文', { rawExtra: commander });
+    seedReply('om_receipt', '项目已接单', { rawExtra: receiver });
+    seedReply(messageId, '/job', { rawExtra: commander, createTime: COMMAND_CREATE_TIME });
+    await deliver(botCommand);
+    expect(await submittedMaterial()).toEqual([{ message_id: rootId, text: 'bot 转发的原文' }]);
+    expect(h.hub().lastPayload.actor).toEqual({ app_id: APP, open_id: commanderOpenId });
+  });
+
+  it('finds the bot’s native merge forward under another bot’s root', async () => {
+    h = await setupHarness({ config: { commanderOpenIds: [commanderOpenId] } });
+    seedRoot('话题标题', { rawExtra: receiver });
+    seedMerged('om_forward', '合并转发原文', false, commander);
+    seedMerged('om_other_forward', '其他机器人转发', false, receiver);
+    seedMerged('om_peer_tenant_forward', '同应用另一租户转发', false, {
+      sender: { ...commander.sender, tenant_key: 'tenant_other' },
+    });
+    seedReply(messageId, '/job', { rawExtra: commander, createTime: COMMAND_CREATE_TIME });
+    await deliver(botCommand);
+    expect(await submittedMaterial()).toEqual([{ message_id: 'om_forward', text: '合并转发原文' }]);
+  });
+
+  it('lets the same bot select a plain forwarded reply while ignoring a receipt and prior commands', async () => {
+    h = await setupHarness({ config: { commanderOpenIds: [commanderOpenId] } });
+    seedRoot('话题标题', { rawExtra: receiver });
+    seedReply('om_single_forward', '逐条转发原文', { rawExtra: commander });
+    seedReply('om_old_job', '@_user_1 /job 旧任务', { rawExtra: commander });
+    seedReply('om_receipt', '项目已接单', { rawExtra: receiver });
+    seedReply(messageId, '/job 保留原指令', { rawExtra: commander, createTime: COMMAND_CREATE_TIME });
+    await deliver({ ...botCommand, text: '/job 保留原指令' });
+    await waitFor(() => h!.svc.store.getJobByMessage(messageId)?.stage === 'needs_input');
+    const job = h.svc.store.getJobByMessage(messageId);
+    expect(job.materialChoices).toEqual([{ messageId: 'om_single_forward', preview: '逐条转发原文' }]);
+    expect(h.hub()).toBeNull();
+
+    const choice = materialChoiceCode(job.sourceKey, 'om_single_forward');
+    await deliver({ ...botCommand, messageId: 'om_select', text: `/job 选 #${choice}` });
+    expect(await submittedMaterial()).toEqual([{ message_id: 'om_single_forward', text: '逐条转发原文' }]);
+    expect(h.hub().lastPayload.instruction).toBe('保留原指令');
+  });
+
+  it('recovers a bot choice after restart and recall of the original command', async () => {
+    h = await setupHarness({ config: { commanderOpenIds: [commanderOpenId] } });
+    seedRoot('话题标题', { rawExtra: receiver });
+    seedReply('om_forward', '逐条转发原文', { rawExtra: commander });
+    seedReply(messageId, '/job 保留原指令', { rawExtra: commander, createTime: COMMAND_CREATE_TIME });
+    await deliver({ ...botCommand, text: '/job 保留原指令' });
+    await waitFor(() => h!.svc.store.getJobByMessage(messageId)?.stage === 'needs_input');
+    const job = h.svc.store.getJobByMessage(messageId);
+    expect(job.materialChoices).toEqual([{ messageId: 'om_forward', preview: '逐条转发原文' }]);
+    await h.svc.stop();
+
+    h.lark.messages.delete(messageId);
+    seedReply('om_forward', '恢复时重新读取的原文', { rawExtra: commander });
+    resumed = await createService(h.config, { logger: log });
+    const choice = materialChoiceCode(job.sourceKey, 'om_forward');
+    await deliver({ ...botCommand, messageId: 'om_select', text: `/job 选 #${choice}` });
+    expect(await submittedMaterial()).toEqual([{ message_id: 'om_forward', text: '恢复时重新读取的原文' }]);
+    expect(h.hub().lastPayload).toMatchObject({ source_key: job.sourceKey, instruction: '保留原指令' });
+  });
+
+  it('counts only verified material when several earlier commands are in the topic', async () => {
+    h = await setupHarness({ config: { commanderOpenIds: [commanderOpenId] } });
+    seedRoot('话题标题', { rawExtra: receiver });
+    seedMerged('om_forward', '唯一的合并转发', false, commander);
+    for (let i = 0; i < 5; i++) {
+      seedReply(`om_old_job_${i}`, '@_user_1 /job 旧派单', { rawExtra: commander });
+    }
+    seedReply(messageId, '/job', { rawExtra: commander, createTime: COMMAND_CREATE_TIME });
+    await deliver(botCommand);
+    expect(await submittedMaterial()).toEqual([{ message_id: 'om_forward', text: '唯一的合并转发' }]);
+  });
+
+  it('asks for an explicit reference when a possible bot candidate lacks sender attribution', async () => {
+    h = await setupHarness({ config: { commanderOpenIds: [commanderOpenId] } });
+    seedRoot('真人发的话题标题');
+    seedMerged('om_forward', '不完整的转发', false, { sender: { sender_type: 'app' } });
+    seedReply(messageId, '/job', { rawExtra: commander, createTime: COMMAND_CREATE_TIME });
+    await deliver(botCommand);
+    await waitFor(() => h!.svc.store.getJobByMessage(messageId)?.stage === 'needs_input');
+    expect(h.svc.store.getJobByMessage(messageId)).toMatchObject({
+      reasonCode: 'incomplete', reasonDetail: 'candidate_sender_unknown',
+    });
+    expect(h.lark.requests.some((request) => request.method === 'GET' && request.path.endsWith('/om_forward'))).toBe(true);
+    expect(h.hub()).toBeNull();
+  });
+
+  it('requires an explicit reference when a command returns only an open ID and the receiver’s ID is unknown', async () => {
+    h = await setupHarness({ config: { selfOpenId: '', commanderOpenIds: [commanderOpenId] } });
+    const openIdSender = { sender: { id: commanderOpenId, id_type: 'open_id', sender_type: 'bot' } };
+    seedRoot('接单回执', { rawExtra: openIdSender });
+    seedReply(messageId, '/job', { rawExtra: openIdSender, createTime: COMMAND_CREATE_TIME });
+    await deliver(botCommand);
+    await waitFor(() => h!.svc.store.getJobByMessage(messageId)?.stage === 'needs_input');
+    expect(h.svc.store.getJobByMessage(messageId)).toMatchObject({
+      reasonCode: 'incomplete', reasonDetail: 'command_sender_unknown',
+    });
+    expect(h.hub()).toBeNull();
+  });
+
+  it('excludes the receiving bot’s own messages from automatic discovery even if it can issue a command', async () => {
+    const selfOpenId = 'ou_bot';
+    h = await setupHarness({ config: { selfOpenId, commanderOpenIds: [selfOpenId] } });
+    seedRoot('项目已接单', { rawExtra: receiver });
+    seedReply(messageId, '/job', { rawExtra: receiver, createTime: COMMAND_CREATE_TIME });
+    await deliver({ ...botCommand, openId: selfOpenId });
+    await waitFor(() => h!.svc.store.getJobByMessage(messageId)?.stage === 'needs_input');
+    expect(h.svc.store.getJobByMessage(messageId).reasonDetail).toBe('topic_root_not_material');
     expect(h.hub()).toBeNull();
   });
 });

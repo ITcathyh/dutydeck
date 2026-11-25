@@ -64,7 +64,7 @@ export function textBodyProblem(text) {
 /**
  * Only a native merged-forward message is a provable forward through the Open
  * API. Forwarded single messages can appear as the same text types as typed
- * messages, so a plausible text reply always needs human confirmation.
+ * messages, so a plausible text reply always needs an explicit choice.
  */
 export function isForwardCandidate(message) {
   return Boolean(message && message.messageType === 'merge_forward');
@@ -157,12 +157,13 @@ export async function resolveMaterial({ client, event, maxChars = ROVE_ENTRY_COD
   const limit = effectiveCodePointLimit(maxChars);
   let rootId = event.rootId || null;
   let topicId = nativeTopicId(event.threadId);
+  let command;
   event = { ...event, threadId: topicId };
 
   // With the root missing, a topic reply's parent is ambiguous until we can
   // prove which message is the root from the command's own detail.
   if (topicId && !rootId && commandMessageId) {
-    const command = await readVerifiedMessage(client, commandMessageId, event, 'command_detail_missing');
+    command = await readVerifiedMessage(client, commandMessageId, event, 'command_detail_missing');
     if (command.status === 'error') return command;
     if (command.status === 'ok') {
       rootId = command.target.rootId;
@@ -186,7 +187,7 @@ export async function resolveMaterial({ client, event, maxChars = ROVE_ENTRY_COD
   }
   if (!topicId) {
     if (!commandMessageId) return need('none', { detail: 'no_topic' });
-    const command = await readVerifiedMessage(client, commandMessageId, { chatId }, 'command_detail_missing');
+    command = await readVerifiedMessage(client, commandMessageId, { chatId }, 'command_detail_missing');
     if (command.status === 'error') return command;
     if (command.status !== 'ok') return need('none', { detail: 'no_topic' });
     if (topicConflicts(command.target, event)) return need('cross_scope', { detail: 'topic_mismatch' });
@@ -209,6 +210,29 @@ export async function resolveMaterial({ client, event, maxChars = ROVE_ENTRY_COD
   event = { ...event, threadId: topicId };
   const topic = { threadId: topicId, rootId };
 
+  const botCommand = isBotSender(event.commanderSenderType);
+  // A choice offer already bound the author's identity and the command's
+  // timestamp. The selected message still needs the current OpenAPI detail.
+  let botAuthor = selectedMaterialId ? event.materialBotAuthor : undefined;
+  if (botCommand && botAuthor === undefined) {
+    // History identifies bots by app ID, whereas the authorized event carries
+    // the receiver-scoped open ID. Anchor the app ID to this command itself.
+    command ??= await readVerifiedMessage(client, commandMessageId, event, 'command_detail_missing');
+    if (command.status !== 'ok') return command;
+    const sender = command.target.sender;
+    if (!isBotSender(sender?.sender_type) || !sender.id
+      || (sender.id_type !== 'app_id'
+        && (sender.id_type !== 'open_id' || sender.id !== event.commanderOpenId || !event.selfOpenId))) {
+      return need('incomplete', { detail: 'command_sender_unknown' });
+    }
+    botAuthor = null;
+    if (sender.id_type === 'app_id' && sender.id !== event.appId) {
+      botAuthor = { appId: sender.id, tenantKey: sender.tenant_key, openId: event.commanderOpenId };
+    } else if (sender.id_type === 'open_id' && sender.id !== event.selfOpenId) {
+      botAuthor = { openId: sender.id };
+    }
+  }
+
   if (selectedMaterialId) {
     const anchor = await resolveCommandTime(client, event, []);
     if (anchor.abort) return anchor.abort;
@@ -216,7 +240,7 @@ export async function resolveMaterial({ client, event, maxChars = ROVE_ENTRY_COD
     const selected = selectedMaterialId === rootId ? root
       : await readVerifiedMessage(client, selectedMaterialId, event, 'selected_detail_missing');
     const result = materialFromRead(selected, limit, topic);
-    if (result.status === 'ok' && (selectedMaterialId === commandMessageId || !isChoice(selected.target, anchor.time))) {
+    if (result.status === 'ok' && (selectedMaterialId === commandMessageId || !isChoice(selected.target, anchor.time, botAuthor))) {
       return need('inaccessible', { detail: 'selected_no_longer_eligible' });
     }
     return result;
@@ -259,13 +283,12 @@ export async function resolveMaterial({ client, event, maxChars = ROVE_ENTRY_COD
     && (!m.chatId || m.chatId === chatId) && !topicConflicts(m, event),
   ).map((m) => [m.messageId, m])).values()];
   const candidates = (isForwardCandidate(root.target) ? [root.target, ...replies] : replies)
-    .filter((m) => supportsMaterial(m) && !m.deleted && !isNonHuman(m));
+    .filter((m) => supportsMaterial(m) && !m.deleted && materialSender(m, botAuthor) !== 'other');
   const anchor = await resolveCommandTime(client, event, listed);
   if (anchor.abort) return anchor.abort;
   if (anchor.time == null) return need('incomplete', { detail: 'command_time_unknown' });
   if (candidates.some((m) => parseMessageTime(m.createTime) == null)) return need('incomplete', { detail: 'candidate_time_unknown' });
   const earlier = candidates.filter((m) => predates(m, anchor.time));
-  if (earlier.length > MAX_MATERIAL_CHOICES) return need('multiple', { candidateCount: earlier.length });
 
   const reads = [];
   for (const candidate of earlier) {
@@ -277,26 +300,28 @@ export async function resolveMaterial({ client, event, maxChars = ROVE_ENTRY_COD
       return need('incomplete', { detail: 'candidate_type_changed' });
     }
     if (!predates(read.target, anchor.time)) return need('incomplete', { detail: 'candidate_time_unknown' });
-    if (isNonHuman(read.target) || isJobMessage(read.target)) continue;
-    if (!isForwardCandidate(read.target) && read.target.sender?.sender_type !== 'user') {
+    const sender = materialSender(read.target, botAuthor);
+    if (sender === 'other' || isJobMessage(read.target)) continue;
+    if (sender === 'unknown' && (botCommand || !isForwardCandidate(read.target))) {
       return need('incomplete', { detail: 'candidate_sender_unknown' });
     }
     const problem = textBodyProblem(verifiedText(read.target, read.items));
     if (problem) return need('no_text', { detail: problem });
     reads.push(read);
+    if (reads.length > MAX_MATERIAL_CHOICES) return need('multiple', { candidateCount: reads.length });
   }
 
   if (reads.some((read) => isForwardCandidate(read.target))) {
     if (reads.length === 1) return materialFromRead(reads[0], limit, topic);
-    return withChoices(need('multiple', { candidateCount: reads.length }), reads, anchor.time, topic);
+    return withChoices(need('multiple', { candidateCount: reads.length }), reads, anchor.time, topic, botAuthor);
   }
   if (reads.length) {
-    return withChoices(need('none', { detail: 'topic_root_not_only_source' }), [root, ...reads], anchor.time, topic);
+    return withChoices(need('none', { detail: 'topic_root_not_only_source' }), [root, ...reads], anchor.time, topic, botAuthor);
   }
   if (candidates.some(isForwardCandidate) && !earlier.some(isForwardCandidate)) {
     return need('none', { detail: 'no_forward_before_command' });
   }
-  if (replies.some((m) => !supportsMaterial(m) && !m.deleted && !isNonHuman(m)
+  if (replies.some((m) => !supportsMaterial(m) && !m.deleted && materialSender(m, botAuthor) !== 'other'
     && (parseMessageTime(m.createTime) ?? 0) <= anchor.time)) {
     return need('none', { detail: 'topic_root_not_only_source' });
   }
@@ -305,9 +330,10 @@ export async function resolveMaterial({ client, event, maxChars = ROVE_ENTRY_COD
   const rootTime = parseMessageTime(root.target.createTime);
   if (rootTime == null) return need('incomplete', { detail: 'candidate_time_unknown' });
   if (rootTime >= anchor.time) return need('none', { detail: 'no_forward_before_command' });
+  const rootSender = materialSender(root.target, botAuthor);
+  if (botCommand && rootSender === 'unknown') return need('incomplete', { detail: 'candidate_sender_unknown' });
   const result = materialFromRead(root, limit, topic);
-  if (result.status === 'ok' && (root.target.upperMessageId || isJobMessage(root.target)
-    || isNonHuman(root.target))) {
+  if (result.status === 'ok' && (root.target.upperMessageId || isJobMessage(root.target) || rootSender === 'other')) {
     return need('none', { detail: 'topic_root_not_material' });
   }
   return result;
@@ -322,9 +348,27 @@ function supportsMaterial(message) {
   return isForwardCandidate(message) || MATERIAL_TEXT_TYPES.has(message.messageType);
 }
 
-function isNonHuman(message) {
-  const sender = message.sender?.sender_type;
-  return Boolean(sender && sender !== 'user');
+function isBotSender(type) {
+  return type === 'app' || type === 'bot';
+}
+
+function materialSender(message, botAuthor) {
+  const sender = message.sender;
+  if (!sender?.sender_type) return 'unknown';
+  if (sender.sender_type === 'user') return 'eligible';
+  if (!botAuthor || !isBotSender(sender.sender_type)) return 'other';
+  if (!sender.id) return 'unknown';
+  if (sender.id_type === 'open_id' && botAuthor.openId) {
+    return sender.id === botAuthor.openId ? 'eligible' : 'other';
+  }
+  if (sender.id_type === 'app_id' && botAuthor.appId) {
+    if (sender.id !== botAuthor.appId) return 'other';
+    // An app can be installed in different tenants. History can omit its key,
+    // but the detail must tie the candidate to the same installation.
+    if (!sender.tenant_key || !botAuthor.tenantKey) return 'unknown';
+    return sender.tenant_key === botAuthor.tenantKey ? 'eligible' : 'other';
+  }
+  return 'unknown';
 }
 
 function isJobMessage(message) {
@@ -332,15 +376,15 @@ function isJobMessage(message) {
     && /^(?:@\S+\s+)*\/job(?=\s|$)/iu.test(extractMessageText('text', message.content).trim());
 }
 
-function isChoice(message, commandTime) {
+function isChoice(message, commandTime, botAuthor) {
   return supportsMaterial(message) && predates(message, commandTime) && !message.deleted && !message.upperMessageId
-    && message.sender?.sender_type === 'user' && !isJobMessage(message);
+    && materialSender(message, botAuthor) === 'eligible' && !isJobMessage(message);
 }
 
-function withChoices(result, reads, commandTime, topic) {
+function withChoices(result, reads, commandTime, topic, botAuthor) {
   const choices = [];
   for (const { target, items } of reads) {
-    if (!isChoice(target, commandTime)) continue;
+    if (!isChoice(target, commandTime, botAuthor)) continue;
     const text = verifiedText(target, items);
     if (textBodyProblem(text)) continue;
     const chars = Array.from(text.replace(MENTION_PLACEHOLDER, '').replace(/\s+/gu, ' ').trim());
@@ -350,7 +394,8 @@ function withChoices(result, reads, commandTime, topic) {
     choices.push({ messageId: target.messageId, preview });
   }
   return choices.length && choices.length <= MAX_MATERIAL_CHOICES
-    ? { ...result, ...topic, commandCreateTime: String(commandTime), choices } : result;
+    ? { ...result, ...topic, commandCreateTime: String(commandTime), choices, materialBotAuthor: botAuthor }
+    : result;
 }
 
 /**

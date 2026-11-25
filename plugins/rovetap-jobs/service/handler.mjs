@@ -3,12 +3,13 @@
 // This is the security boundary. Trust order:
 //   1. handler bearer (shared secret with Dutydeck eventHandlers)
 //   2. outer app_id exactly equals the configured bot app
-//   3. sender is a real human user with an open_id
+//   3. sender is a user or bot with an open_id from the event
 //   4. chat is an explicitly bound dispatch group
 //   5. commander open_id is explicitly allowed
 // Failures at 1-2 are transport-level rejects. Failures at 3-5 are recognized
-// `/job` commands that we stop (so Dutydeck never spawns an agent); only a real
-// human in the bound group who lacks permission gets an explanatory reply.
+// `/job` commands that we stop (so Dutydeck never spawns an agent). An
+// unlisted user in the bound group gets an explanatory reply. Unlisted bots
+// are declined silently to avoid automated reply loops.
 
 import { timingSafeEqual } from 'node:crypto';
 import { parseJobCommand, renderMentionText, extractMessageText, isForwardedMessage, materialChoiceCode, MAX_MATERIAL_CHOICES } from './commands.mjs';
@@ -39,7 +40,7 @@ export function normalizeEnvelope(body, selfOpenId = '') {
     : Array.isArray(event.mentions) ? event.mentions : [];
 
   const messageType = typeof message.message_type === 'string' ? message.message_type : 'text';
-  // Only the sender's own newly typed text can be a command. Rich text and
+  // Only text sent directly by the sender can be a command. Rich text and
   // other non-text messages (post/image/file/merge_forward/...) and messages
   // carrying forward provenance yield no command text, so they continue
   // through Dutydeck instead of being claimed as /job.
@@ -127,12 +128,14 @@ export async function receiveEnvelope({ body, authorization }, { config, store, 
   let stage = 'queued';
   let reasonCode = null;
   let wantsReply = false;
-  if (env.senderType !== 'user' || !env.senderOpenId) {
-    stage = 'denied'; reasonCode = 'non_user'; wantsReply = false;
+  const userSender = env.senderType === 'user';
+  const botSender = env.senderType === 'app' || env.senderType === 'bot';
+  if ((!userSender && !botSender) || !env.senderOpenId) {
+    stage = 'denied'; reasonCode = 'invalid_sender';
   } else if (!env.chatId || !config.allowedChatIds.has(env.chatId)) {
-    stage = 'denied'; reasonCode = 'chat_not_allowed'; wantsReply = false;
+    stage = 'denied'; reasonCode = 'chat_not_allowed';
   } else if (!config.commanderOpenIds.has(env.senderOpenId)) {
-    stage = 'denied'; reasonCode = 'forbidden'; wantsReply = true;
+    stage = 'denied'; reasonCode = 'forbidden'; wantsReply = userSender;
   } else if (parsed.kind === 'unknown-project') {
     stage = 'needs_input'; reasonCode = 'unknown_project'; wantsReply = true;
   }
@@ -192,6 +195,7 @@ export async function receiveEnvelope({ body, authorization }, { config, store, 
       commandCreateTime: env.createTime === null || env.createTime === undefined ? null : String(env.createTime),
       replyAnchor: parsed.kind === 'select-material' ? env.messageId : env.rootId || env.messageId,
       commanderOpenId: env.senderOpenId || null,
+      commanderSenderType: env.senderType,
       rawText: env.rawText,
       instruction: parsed.kind === 'job' ? parsed.instruction : '',
       alias: parsed.kind === 'job' ? parsed.alias : config.pairfob.project,

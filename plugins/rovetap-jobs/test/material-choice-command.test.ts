@@ -34,9 +34,10 @@ describe('topic material choice commands', () => {
     { body, authorization: `Bearer ${TOKEN}` }, { config, store },
   );
 
-  async function offer(messageId: string, instruction = '复现反馈并回报', expiresAt = Date.now() + 60_000) {
-    await deliver(makeEnvelope({ ...topic, messageId, text: `/job ${instruction}` }));
+  async function offer(messageId: string, instruction = '复现反馈并回报', expiresAt = Date.now() + 60_000, senderType = 'user') {
+    await deliver(makeEnvelope({ ...topic, messageId, senderType, text: `/job ${instruction}` }));
     const key = sourceKeyFor(APP, messageId);
+    expect(store.getJob(key)).toMatchObject({ stage: 'queued', commanderOpenId: BOSS, commanderSenderType: senderType });
     await store.mutate(state => {
       Object.assign(state.jobs[key], {
         stage: 'needs_input', reasonCode: 'multiple', materialChoices: [first, second], materialChoicesExpireAt: expiresAt,
@@ -55,15 +56,15 @@ describe('topic material choice commands', () => {
     expect(parseJobCommand('/job choose a test case')).toMatchObject({ kind: 'job', instruction: 'choose a test case' });
   });
 
-  it('chooses the original record among several offers with the same materials', async () => {
-    const earlier = await offer('om_earlier', '调查问题');
-    const original = await offer('om_original', '请补回归测试');
+  it.each(['user', 'app', 'bot'])('chooses the original record among multiple offers from the same %s', async (senderType) => {
+    const earlier = await offer('om_earlier', '调查问题', undefined, senderType);
+    const original = await offer('om_original', '请补回归测试', undefined, senderType);
     const reply = replyText('need', store.getJob(original), config);
     const command = `/job 选 #${materialChoiceCode(original, first.messageId)}`;
     expect(reply.split('\n')).toContain(command);
     expect(reply).not.toContain(materialChoiceCode(earlier, first.messageId));
 
-    const chosen = await deliver(makeEnvelope({ threadId: topic.threadId, messageId: 'om_choice', text: command }));
+    const chosen = await deliver(makeEnvelope({ threadId: topic.threadId, messageId: 'om_choice', senderType, text: command }));
     expect(chosen.kickSourceKey).toBe(original);
     expect(store.getJobByMessage('om_choice')).toMatchObject({
       sourceKey: original, messageId: 'om_original', instruction: '请补回归测试', selectedMaterialId: first.messageId, stage: 'queued',
@@ -95,7 +96,7 @@ describe('topic material choice commands', () => {
     const original = await offer('om_original');
     const valid = `/job 选 #${materialChoiceCode(original, first.messageId)}`;
     const cases = [
-      { text: valid, openId: OTHER },
+      { text: valid, openId: OTHER, senderType: 'app' },
       { text: valid, chatId: 'oc_other' },
       { text: valid, threadId: 'omt_other' },
       { text: valid, rootId: 'om_other' },

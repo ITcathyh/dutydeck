@@ -18,23 +18,29 @@ const seedTopic = (threadId: string) => {
 };
 
 describe('rovetap-jobs  happy path / contract', () => {
-  it('persists inbox, calls the real-arg-array CLI with the contract payload, replies in thread with link', async () => {
-    h = await setupHarness();
+  it.each([
+    { senderType: 'user', openId: BOSS },
+    { senderType: 'app', openId: 'ou_dispatch_app' },
+    { senderType: 'bot', openId: 'ou_dispatch_bot' },
+  ])('submits the verified actor and replies in thread for $senderType', async ({ senderType, openId }) => {
+    h = await setupHarness({ config: { commanderOpenIds: [BOSS, openId] } });
     seedQuotedText();
 
     const res = await h.post(makeEnvelope({
       eventId: 'ev_happy', messageId: 'om_happy', parentId: 'om_fwd1', threadId: 'omt_1', rootId: 'om_root',
+      senderType, openId,
       text: '/job rovetap 复现并修复草稿丢失，补回归测试。',
     }));
 
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ event_id: 'ev_happy', decision: 'stop' });
+    expect(h.svc.store.getJobByMessage('om_happy')).toMatchObject({ commanderOpenId: openId, commanderSenderType: senderType });
 
     await waitFor(() => h!.hub()?.submitCount === 1, { label: 'one submit' });
     const payload = h.hub().lastPayload;
     expect(payload).toMatchObject({
       source_key: `lark/${APP}/om_happy`,
-      actor: { app_id: APP, open_id: BOSS },
+      actor: { app_id: APP, open_id: openId },
       thread_id: 'omt_1',
       instruction: '复现并修复草稿丢失，补回归测试。',
     });
@@ -183,21 +189,44 @@ describe('rovetap-jobs  authorization and rejection', () => {
     expect(h.hub()).toBeNull();
   });
 
-  it('silently stops in a non-dispatch chat (no outbound, no order)', async () => {
+  it.each(['user', 'app', 'bot'])('silently stops an authorized %s in a non-dispatch chat', async (senderType) => {
     h = await setupHarness();
-    const res = await h.post(makeEnvelope({ eventId: 'ev_chat', messageId: 'om_chat', chatId: 'oc_random' }));
+    const res = await h.post(makeEnvelope({ eventId: 'ev_chat', messageId: 'om_chat', chatId: 'oc_random', senderType }));
     expect(res.body.decision).toBe('stop');
-    await waitFor(() => h!.svc.store.getJobByMessage('om_chat')?.stage === 'denied');
+    const denied = h.svc.store.getJobByMessage('om_chat');
+    expect(denied).toMatchObject({ stage: 'denied', reasonCode: 'chat_not_allowed' });
+    expect(denied.replies).toEqual({});
     expect(h.lark.replies).toHaveLength(0);
     expect(h.hub()).toBeNull();
   });
 
-  it('stops silently for a bot sender', async () => {
+  it.each(['app', 'bot'])('silently stops an unlisted %s even if its message mentions an authorized sender', async (senderType) => {
     h = await setupHarness();
-    const res = await h.post(makeEnvelope({ eventId: 'ev_bot', messageId: 'om_botsender', senderType: 'app', openId: 'ou_app' }));
+    const res = await h.post(makeEnvelope({
+      eventId: 'ev_bot', messageId: 'om_botsender', senderType, openId: 'ou_unlisted_bot',
+      text: '/job rovetap 请 @_user_1 看这条反馈。',
+      mentions: [{ key: '@_user_1', id: { open_id: BOSS } }],
+    }));
     expect(res.body.decision).toBe('stop');
-    await waitFor(() => h!.svc.store.getJobByMessage('om_botsender')?.stage === 'denied');
+    const denied = h.svc.store.getJobByMessage('om_botsender');
+    expect(denied).toMatchObject({ stage: 'denied', reasonCode: 'forbidden' });
+    expect(denied.replies).toEqual({});
     expect(h.lark.replies).toHaveLength(0);
+    expect(h.hub()).toBeNull();
+  });
+
+  it.each([
+    { senderType: 'app', openId: '' },
+    { senderType: 'system', openId: BOSS },
+  ])('silently rejects $senderType with an invalid sender identity', async (sender) => {
+    h = await setupHarness();
+    const res = await h.post(makeEnvelope({ messageId: 'om_invalid_sender', ...sender }));
+    expect(res.body.decision).toBe('stop');
+    const denied = h.svc.store.getJobByMessage('om_invalid_sender');
+    expect(denied).toMatchObject({ stage: 'denied', reasonCode: 'invalid_sender' });
+    expect(denied.replies).toEqual({});
+    expect(h.lark.replies).toHaveLength(0);
+    expect(h.hub()).toBeNull();
   });
 
   it('rejects bad bearer with 401 and mismatched outer app with 403', async () => {

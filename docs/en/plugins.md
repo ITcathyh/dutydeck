@@ -244,6 +244,8 @@ Start, stop, restart and automatic restart requests for the same plugin service 
 
 `plugins/rovetap-jobs` is a repository-shipped plugin you install explicitly. Its auto service intercepts `/job [project] [instruction]` messages from dispatch groups through `eventHandlers` (it replies `stop` for recognized commands and `continue` for ordinary traffic), reads verifiable material in the topic with the bot's own credentials, creates a job for a fixed project leader through local `pairfob project submit/status`, and posts acceptance and phase updates back into the original topic. It starts no extra Agent and has no third-party runtime dependencies. The full operator guide, including the config key reference and troubleshooting, is [`plugins/rovetap-jobs/README.md`](../../plugins/rovetap-jobs/README.md) (Chinese).
 
+People and bots share the `commanderOpenIds` allowlist. To authorize a bot, use the `ou_...` ID that the receiving app sees in `sender.sender_id.open_id` on a message event. The bot can forward a message into a group listed in `allowedChatIds` and reply to the forwarded copy with `@receiving-bot /job` using its own credentials. Acceptance and progress updates appear in that topic.
+
 Enable the plugin in chats that support topic replies. If Feishu reports that the chat lacks topic support (230071), the receipt is marked as failed.
 
 Shortest working sequence; see the plugin README for details:

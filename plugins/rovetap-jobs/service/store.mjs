@@ -42,6 +42,7 @@ export function newJobRecord({ sourceKey, appId, eventId, messageId }) {
     // temporal anchor for no-quote material discovery.
     commandCreateTime: null,
     commanderOpenId: null,
+    commanderSenderType: null,
     rawText: '',
     instruction: '',
     alias: null,

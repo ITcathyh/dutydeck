@@ -87,7 +87,7 @@ console.log(i.bot.open_id);'
 - `appId`：被绑定 eventHandlers 的机器人 app；处理器校验信封外层 `app_id` 必须与它一致。
 - `handlerToken(File)`：与第 3 步 eventHandlers token 相同的 bearer。
 - `appSecret(File)`：回读材料和默认 `lark-api` 回执都要用。
-- **限群与授权只说一次**：`allowedChatIds`（`oc_...`）和 `commanderOpenIds`（`ou_...`）都要显式填，空数组等于全部拒绝。非允许群的命令静默停止；白名单外真人会在话题收到无权限说明；非真人发送者拒绝且不回复。群 ID/成员可用 `dutydeck settings group sync/list/members`（必要时加 `--database`）查询。
+- `allowedChatIds` 指定派单群（`oc_...`）。`commanderOpenIds` 指定谁能在这些群里发令，真人和机器人共用这份名单。两项都要配置。给机器人授权时，填写接收应用在飞书消息事件 `sender.sender_id.open_id` 中看到的发送方 ID（`ou_...`）。未授权的真人会在派单群收到提示，未授权的机器人会被静默忽略。
 - `listen.port` 默认 `0` 是随机端口，eventHandlers 需要稳定 URL，所以**固定一个空闲 loopback 端口**；host 保持 `127.0.0.1`。`listen.host` 只接受本机回环（`127.x.x.x`、`::1`、`localhost`），填 `0.0.0.0` 或局域网地址会在启动时直接报错退出。
 - `pairfob.bin` 必须绝对路径且当前用户可执行；`pairfob.project` 与 `hub project-job enable --project` 一致；`pairfob.tokenFile` 是必需的项目令牌文件（也可用环境变量 `ROVETAP_PROJECT_TOKEN_FILE`，但宿主会清洗 service 环境，建议显式写配置），socket 建议一并显式填写。
 - **启动即校验必需项**：缺少 `appSecret(File)`、`pairfob.bin`、`pairfob.tokenFile`（或文件不可读/为空、bin 不可执行）时，service 不会带病运行，而是在 stderr 打印 `[rovetap-jobs] failed to start: <含配置键名与路径的原因>` 并以状态码 1 退出；按提示补配置后重启即可，不会出现 `/job` 被 stop 却永远没有回执。
@@ -126,7 +126,7 @@ unset HANDLER_TOKEN
 
 ## 4. 授权群里发令验证
 
-在 `allowedChatIds` 的群里，先把反馈转发到群内，再打开该消息的话题，用 `commanderOpenIds` 内的账号发送：
+在派单群里转发反馈，打开该消息的话题，用已授权的真人或机器人账号发送下面的命令。机器人可以使用自己的飞书凭证，在话题里直接回复转发副本。
 
 ```text
 /job rovetap 请跟进这条反馈

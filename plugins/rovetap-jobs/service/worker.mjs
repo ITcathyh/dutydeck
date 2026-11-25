@@ -199,6 +199,11 @@ export class JobWorker {
       chatId: job.chatId, threadId: job.threadId,
       rootId: job.rootId, parentId: job.parentId, messageId: job.messageId,
       selectedMaterialId: job.selectedMaterialId,
+      materialBotAuthor: job.materialBotAuthor,
+      commanderSenderType: job.commanderSenderType,
+      commanderOpenId: job.commanderOpenId,
+      appId: job.appId,
+      selfOpenId: this.config.selfOpenId,
       commandCreateTime: job.commandCreateTime ?? null,
     };
 
@@ -217,6 +222,7 @@ export class JobWorker {
         j.stage = 'ready';
         j.reasonCode = null;
         j.materialChoices = [];
+        delete j.materialBotAuthor;
         j.materialChoicesExpireAt = null;
       });
       return this.submitStep(sourceKey);
@@ -231,6 +237,8 @@ export class JobWorker {
         j.rootId = result.rootId ?? j.rootId;
         j.commandCreateTime = result.commandCreateTime ?? j.commandCreateTime;
         j.materialChoices = result.choices ?? [];
+        if (result.materialBotAuthor === undefined) delete j.materialBotAuthor;
+        else j.materialBotAuthor = result.materialBotAuthor;
         j.materialChoicesExpireAt = j.materialChoices.length ? Date.now() + MATERIAL_CHOICES_TTL_MS : null;
         this.store.outbound(state, sourceKey, j.selectedMaterialId ? 'need:selected' : 'need').status = 'pending';
       });
