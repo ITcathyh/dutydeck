@@ -6,7 +6,17 @@ import { buildTaskUrl } from './weblink.mjs';
 import { ROVE_ENTRY_CODEPOINTS } from './materials.mjs';
 
 const PROJECT_LABEL = 'RoveTap';
-const TITLE_PREFIX_LENGTH = 60;
+
+function taskTitleFragment(instruction) {
+  if (typeof instruction !== 'string') return '';
+  // Match RoveTap's pjiTaskTitle, including Go's Unicode whitespace trimming.
+  const joined = instruction.replace(/[\x00-\x1f\x7f]+/gu, ' ')
+    .replace(/^\p{White_Space}+|\p{White_Space}+$/gu, '');
+  const title = [...joined].slice(0, 200).join('').replace(/\p{White_Space}+$/u, '') || '外部项目委托';
+  // A single-line search input needs an actual substring of the stored title.
+  const line = title.split(/[\u0085\u2028\u2029]/u).map(part => part.trim()).find(Boolean);
+  return line ? [...line].slice(0, 60).join('').trimEnd() : '';
+}
 
 export function replyText(kind, job, config) {
   if (kind === 'denial') return denialText(job, config);
@@ -77,13 +87,10 @@ function needText(reason, detail) {
 
 function acceptedText(job, config) {
   const id = job?.pairfob?.taskId ? `\n任务号：${job.pairfob.taskId}` : '';
-  // RoveTap starts the task title with the instruction, with control breaks
-  // folded to spaces. Keep a short prefix as a locator in the project list.
-  const title = [...(job?.instruction ?? '').replace(/[\x00-\x1f\x7f\u0085\u2028\u2029]+/gu, ' ').trim()]
-    .slice(0, TITLE_PREFIX_LENGTH).join('').trimEnd();
-  const titleLine = title ? `\n标题开头：${title}` : '';
-  const locate = title ? '按标题开头找到这条任务' : '查看项目任务';
-  return `✅ ${PROJECT_LABEL} 项目已接单。${id}${titleLine}\n请在已连接总机的 RoveTap 项目任务列表中${locate}。进展会回到本话题。${taskEntryText(job, config)}`;
+  const fragment = taskTitleFragment(job?.instruction);
+  const titleLine = fragment ? `\n标题片段：${fragment}` : '';
+  const locate = fragment ? '其他客户端可按标题片段查找。' : '';
+  return `✅ ${PROJECT_LABEL} 项目已接单。${id}${titleLine}\n请在已连接总机的 RoveTap 中查看。新版桌面看板优先用完整任务号。${locate}进展会回到本话题。${taskEntryText(job, config)}`;
 }
 
 function phaseText(phase, job, config) {

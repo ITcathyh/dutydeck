@@ -1441,8 +1441,9 @@ pairfob project status --project rovetap --key &lt;来源键&gt;</pre
               另按稳定来源键唯一建单，重复且内容一致时取回原任务，键相同但输入不同则报冲突。
             </li>
             <li>
-              建单成功后，飞书回执显示任务号和标题开头。在已连接总机的 RoveTap 桌面端，从「项目」进入对应项目下的「项目 leader」，
-              在「搜索任务」输入回执中的标题开头，再点开匹配的任务。
+              建单成功后，飞书回执显示任务号和标题片段。在已连接总机的 RoveTap 桌面端，从「项目」进入对应项目下的「项目 leader」。
+              支持按编号搜索的新版桌面看板优先在「搜索任务」输入完整任务号，旧版和手机可按标题片段查找。
+              遇到同名任务，可在详情的「派单原文」中对照引用原文和接单时间。
               进展继续回到原话题。总机进入 doing 时回报“项目正在处理”，详情可查看是否正在等待人回复。
             </li>
             <li>
@@ -1631,9 +1632,15 @@ pairfob project status --project rovetap --key &lt;来源键&gt;</pre
       function hubTask() {
         return state.hubTasks.find((t) => t.key === state.order?.key);
       }
-      function taskTitle(instruction, limit = 200) {
-        const line = instruction.replace(/[\x00-\x1f\x7f\u0085\u2028\u2029]+/gu, " ").trim();
-        return [...line].slice(0, limit).join("").trimEnd() || "外部项目委托";
+      function taskTitle(instruction) {
+        const joined = instruction
+          .replace(/[\x00-\x1f\x7f]+/gu, " ")
+          .replace(/^\p{White_Space}+|\p{White_Space}+$/gu, "");
+        return [...joined].slice(0, 200).join("").replace(/\p{White_Space}+$/u, "") || "外部项目委托";
+      }
+      function taskTitleFragment(title) {
+        const line = title.split(/[\u0085\u2028\u2029]/u).map((part) => part.trim()).find(Boolean);
+        return line ? [...line].slice(0, 60).join("").trimEnd() : "";
       }
       function statusLabel() {
         return !state.order
@@ -1770,14 +1777,17 @@ pairfob project status --project rovetap --key &lt;来源键&gt;</pre
             "receipt",
           );
         const task = hubTask();
+        const fragment = taskTitleFragment(taskTitle(task.instruction));
         const link = button("detail", "模拟打开项目任务", "out", "text-btn");
         let messages = msg(
           "Dutydeck",
           '<b>项目已接单</b> · RoveTap<br>任务号：<span class="taskid">' +
             esc(task.id) +
-            "</span><br>标题开头：" +
-            esc(taskTitle(task.instruction, 60)) +
-            "<br>请在已连接总机的 RoveTap 项目任务列表中按标题开头找到这条任务。进展会回到本话题。" +
+            "</span>" +
+            (fragment ? "<br>标题片段：" + esc(fragment) : "") +
+            "<br>请在已连接总机的 RoveTap 中查看。新版桌面看板优先用完整任务号。" +
+            (fragment ? "其他客户端可按标题片段查找。" : "") +
+            "进展会回到本话题。" +
             link,
           "receipt",
         );

@@ -46,8 +46,10 @@ describe('rovetap-jobs  happy path / contract', () => {
     expect(accepted.inThread).toBe(true);
     expect(accepted.uuid).toBeTruthy();
     expect(accepted.text).toContain('任务号：pt_000001');
-    expect(accepted.text).toContain('标题开头：复现并修复草稿丢失，补回归测试。');
-    expect(accepted.text).toContain('已连接总机的 RoveTap 项目任务列表');
+    expect(accepted.text).toContain('标题片段：复现并修复草稿丢失，补回归测试。');
+    expect(accepted.text).toContain('在已连接总机的 RoveTap 中查看');
+    expect(accepted.text).toContain('新版桌面看板优先用完整任务号');
+    expect(accepted.text).toContain('其他客户端可按标题片段查找');
     expect(accepted.text).toContain('进展会回到本话题');
     expect(accepted.text).toContain('项目任务入口（仅在已连接总机的 RoveTap 环境可用）');
     expect(accepted.text).toContain('https://rove.example.com/?task=pt_000001&leader=pl_leader_1');
@@ -61,8 +63,9 @@ describe('rovetap-jobs  happy path / contract', () => {
     expect(h.hub().lastPayload.instruction).toBe('请项目 leader 跟进这条反馈。');
     const accepted = h.lark.replies.find((reply) => reply.text.includes('项目已接单'));
     expect(accepted.text).toContain('任务号：pt_000001');
-    expect(accepted.text).toContain('标题开头：请项目 leader 跟进这条反馈。');
-    expect(accepted.text).toContain('在已连接总机的 RoveTap 项目任务列表中按标题开头找到这条任务');
+    expect(accepted.text).toContain('标题片段：请项目 leader 跟进这条反馈。');
+    expect(accepted.text).toContain('新版桌面看板优先用完整任务号');
+    expect(accepted.text).toContain('其他客户端可按标题片段查找');
     expect(accepted.text).not.toMatch(/https?:\/\//);
   });
 

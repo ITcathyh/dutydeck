@@ -45,7 +45,7 @@ describe('buildTaskUrl trusted boundary', () => {
   });
 });
 
-describe('receipts do not leak pairing-url segments', () => {
+describe('rovetap job receipts', () => {
   const job = { pairfob: { taskId: 'pt_1', leaderId: 'pl_1' } } as any;
 
   it('accepted receipt cleans query and fragment from a fake pairing URL', () => {
@@ -79,15 +79,22 @@ describe('receipts do not leak pairing-url segments', () => {
     expect(text).not.toContain('http');
   });
 
-  it('uses a single 60-code-point title prefix from the instruction, even for a long multiline command', () => {
-    const instruction = `梳理草稿\n\r\t补齐复现步骤\u2028${'🧪'.repeat(100)}后续说明`;
+  it.each([
+    ['排查搜索\u2028修复草稿', '排查搜索\u2028修复草稿', '排查搜索'],
+    ['\u0085\u2029\t 找回草稿\u0085核对发布 ', '找回草稿\u0085核对发布', '找回草稿'],
+    ['核对草稿\n\r\t补测试\u2029再复测', '核对草稿 补测试\u2029再复测', '核对草稿 补测试'],
+    ['\u0085 \u2028\t \u2029', '外部项目委托', '外部项目委托'],
+    ['🧪'.repeat(201), '🧪'.repeat(200), '🧪'.repeat(60)],
+    [`\ufeff${' '.repeat(197)}\u2028甲乙`, `\ufeff${' '.repeat(197)}\u2028甲`, '甲'],
+  ])('keeps the searchable fragment within the actual RoveTap title for %j', (instruction, upstreamTitle, expected) => {
     const text = replyText('accepted', { ...job, instruction }, {});
-    const prefix = '梳理草稿 补齐复现步骤 ';
-    const titleLine = `标题开头：${prefix}${'🧪'.repeat(60 - [...prefix].length)}`;
+    const fragment = text.match(/^标题片段：([^\n]*)/m)?.[1] ?? '';
 
-    expect(text.split('\n')).toContain(titleLine);
+    expect(fragment).toBe(expected);
+    expect(upstreamTitle).toContain(fragment);
+    expect(fragment).not.toMatch(/[\n\r\u0085\u2028\u2029]/u);
+    expect([...fragment].length).toBeLessThanOrEqual(60);
     expect(text).toContain('任务号：pt_1');
-    expect(text).not.toContain('后续说明');
     expect(text).not.toMatch(/https?:\/\//);
   });
 });

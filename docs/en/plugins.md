@@ -270,7 +270,7 @@ Two boundaries come up often. The first is @-mentions and visibility: a bare `/j
 
 When the project connection fails before submission, the plugin waits and retries with the original saved command and material. An unknown submission outcome triggers a status lookup by the original key.
 
-The acceptance reply includes a task number and the beginning of the task title. In the RoveTap desktop client connected to the hub, go to **Projects**, open **Project leader** under the relevant project, and enter the title prefix from the reply in **Search tasks**. Open the matching task. Progress updates continue in the original topic. An optional `webBaseUrl` opens the task only in a RoveTap environment with an existing hub connection. Feishu's in-app browser shows the connection screen when it has no such connection.
+The acceptance reply includes a task number and a title fragment. In the RoveTap desktop client connected to the hub, go to **Projects** and open **Project leader** under the relevant project. On the updated desktop board, enter the full task number in **Search tasks** to distinguish tasks that share the default title from a bare `/job`. On older versions and mobile, look for the title fragment. For tasks with the same title, compare the quoted source and intake time under **Job source** in the task details. Progress updates continue in the original topic. An optional `webBaseUrl` opens the task only in a RoveTap environment with an existing hub connection. Feishu's in-app browser shows the connection screen when it has no such connection.
 
 ## Controlled plugin results
 
