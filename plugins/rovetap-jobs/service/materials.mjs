@@ -18,14 +18,13 @@
 //  - nothing is ever taken from mentioned accounts;
 //  - the final text is clipped to Rove's per-entry 4000 Unicode code points.
 
-import { extractMessageText } from './commands.mjs';
+import { extractMessageText, MAX_MATERIAL_CHOICES } from './commands.mjs';
 
 /** Rove tasksource clips one submitted text entry at 4000 runes/code points. */
 export const ROVE_ENTRY_CODEPOINTS = 4000;
 
 const TRUNC_SUFFIX = '\n…（材料过长，已截断）';
 const MATERIAL_TEXT_TYPES = new Set(['text', 'post']);
-const MAX_CHOICES = 5;
 const PREVIEW_CODEPOINTS = 80;
 
 /** Effective cap in Unicode code points; callers can only ask for less. */
@@ -305,7 +304,7 @@ function isChoice(message, commandTime) {
 async function withChoices(result, { client, event, root, messages, commandTime, topic }) {
   const possible = messages.filter((m) => couldBeChoice(m, commandTime)
     && (!m.sender?.sender_type || m.sender.sender_type === 'user'));
-  if (possible.length > MAX_CHOICES) return result;
+  if (possible.length > MAX_MATERIAL_CHOICES) return result;
 
   const choices = [];
   for (const message of possible) {
