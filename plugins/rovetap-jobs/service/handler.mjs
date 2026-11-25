@@ -11,7 +11,7 @@
 // human in the bound group who lacks permission gets an explanatory reply.
 
 import { timingSafeEqual } from 'node:crypto';
-import { parseJobCommand, renderMentionText, extractMessageText, isForwardedMessage } from './commands.mjs';
+import { parseJobCommand, renderMentionText, extractMessageText, isForwardedMessage, materialChoiceCode, MAX_MATERIAL_CHOICES } from './commands.mjs';
 import { sourceKeyFor, newJobRecord } from './store.mjs';
 
 export function bearerMatches(headerValue, expectedToken) {
@@ -85,6 +85,30 @@ export function checkTransportAuth({ authorization, body }, config) {
   return null;
 }
 
+function sameTopic(job, env) {
+  // Older records use the root ID as threadId when the native ID was absent.
+  const threadId = job.threadId === job.rootId ? null : job.threadId;
+  if (threadId && env.threadId && threadId !== env.threadId) return false;
+  if (job.rootId && env.rootId && job.rootId !== env.rootId) return false;
+  return Boolean((threadId && threadId === env.threadId) || (job.rootId && job.rootId === env.rootId));
+}
+
+function findMaterialSelection(state, env, appId, code) {
+  const now = Date.now();
+  let match;
+  for (const job of Object.values(state.jobs)) {
+    if (job.stage !== 'needs_input' || job.selectedMaterialId || job.pairfob || job.submit?.state !== 'idle'
+      || job.appId !== appId || job.chatId !== env.chatId || job.commanderOpenId !== env.senderOpenId
+      || !sameTopic(job, env) || !(job.materialChoicesExpireAt > now) || !Array.isArray(job.materialChoices)) continue;
+    for (const choice of job.materialChoices.slice(0, MAX_MATERIAL_CHOICES)) {
+      if (materialChoiceCode(job.sourceKey, choice.messageId) !== code) continue;
+      if (match) return undefined; // A short-code collision cannot resolve a job.
+      match = { job, messageId: choice.messageId };
+    }
+  }
+  return match;
+}
+
 /**
  * Persist a recognized `/job` exactly once and decide propagation.
  *
@@ -141,6 +165,26 @@ export async function receiveEnvelope({ body, authorization }, { config, store, 
       return { mode: 'message-duplicate', decision: 'stop', sourceKey: existingSourceKey };
     }
 
+    if (parsed.kind === 'select-material' && stage === 'queued') {
+      const selected = parsed.code ? findMaterialSelection(state, env, config.appId, parsed.code) : undefined;
+      if (selected) {
+        const { job, messageId } = selected;
+        job.selectedMaterialId = messageId;
+        job.stage = 'queued';
+        job.reasonCode = null;
+        job.reasonDetail = null;
+        job.nextRunAt = 0;
+        job.updatedAt = nowIso;
+        if (job.replies.need) job.replies.need.supersededAt = nowIso;
+        state.messageIndex[env.messageId] = job.sourceKey;
+        state.events[env.eventId] = { eventId: env.eventId, decision: 'stop', sourceKey: job.sourceKey, at: nowIso };
+        return { mode: 'material-selected', decision: 'stop', sourceKey: job.sourceKey };
+      }
+      stage = 'denied';
+      reasonCode = parsed.code ? 'selection_unavailable' : 'selection_usage';
+      wantsReply = true;
+    }
+
     const job = newJobRecord({ sourceKey, appId: config.appId, eventId: env.eventId, messageId: env.messageId });
     Object.assign(job, {
       chatId: env.chatId,
@@ -149,7 +193,7 @@ export async function receiveEnvelope({ body, authorization }, { config, store, 
       rootId: env.rootId || null,
       parentId: env.parentId || null,
       commandCreateTime: env.createTime === null || env.createTime === undefined ? null : String(env.createTime),
-      replyAnchor: env.rootId || env.messageId,
+      replyAnchor: parsed.kind === 'select-material' ? env.messageId : env.rootId || env.messageId,
       commanderOpenId: env.senderOpenId || null,
       rawText: env.rawText,
       instruction: parsed.kind === 'job' ? parsed.instruction : '',
