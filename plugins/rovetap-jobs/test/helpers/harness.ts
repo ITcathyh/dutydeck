@@ -35,13 +35,16 @@ export interface FakeLark {
   replies: any[];
   requests: any[];
   failReplies: number;
+  /** Keyed by reply anchor message id: forced business/HTTP error for that target. */
+  replyErrorTargets: Map<string, { status?: number; code: number; msg?: string }>;
   server: Server;
   close: () => Promise<void>;
 }
 
 export async function startFakeLark(): Promise<FakeLark> {
   const state: FakeLark = {
-    baseUrl: '', messages: new Map(), replies: [], requests: [], failReplies: 0, server: null as unknown as Server,
+    baseUrl: '', messages: new Map(), replies: [], requests: [], failReplies: 0,
+    replyErrorTargets: new Map(), server: null as unknown as Server,
     close: async () => {},
   };
   const server = createServer((req, res) => {
@@ -60,6 +63,11 @@ export async function startFakeLark(): Promise<FakeLark> {
 
       const msgMatch = url.pathname.match(/\/open-apis\/im\/v1\/messages\/([^/]+)\/reply$/);
       if (req.method === 'POST' && msgMatch) {
+        const anchor = decodeURIComponent(msgMatch[1]);
+        const forced = state.replyErrorTargets.get(anchor);
+        if (forced) {
+          return json(forced.status ?? 400, { code: forced.code, msg: forced.msg ?? `forced ${forced.code}` });
+        }
         if (state.failReplies > 0) { state.failReplies -= 1; return json(500, { code: 500, msg: 'synthetic 500' }); }
         let parsed: any = {};
         try { parsed = JSON.parse(body.content ?? '{}'); } catch { parsed = { text: body.content }; }

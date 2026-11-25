@@ -453,7 +453,9 @@ export class JobWorker {
 
       const text = replyText(kind, job, this.config);
       if (!text) continue;
-      const replyTo = job.replyAnchor || job.rootId || job.messageId;
+      // A prior definitive 230072-style rejection may have persisted a one-time
+      // redirect to the original /job command message; honour it on every retry.
+      const replyTo = reply.targetMessageId || job.replyAnchor || job.rootId || job.messageId;
 
       await this.mutateJob(sourceKey, (j) => {
         const r = j.replies[kind];
@@ -466,6 +468,7 @@ export class JobWorker {
 
       const result = await this.sender.send({ uuid: reply.uuid, replyTo, text });
 
+      let redirected = null;
       await this.mutateJob(sourceKey, (j) => {
         const r = j.replies[kind];
         if (result.outcome === 'sent') {
@@ -473,15 +476,35 @@ export class JobWorker {
           r.providerMessageId = result.messageId ?? null;
           r.sentAt = new Date().toISOString();
         } else if (result.outcome === 'unknown') {
-          // Protected: durable status; idempotent senders may retry same uuid later.
+          // Timeout/network/5xx/429/230049: the reply may already exist, so keep
+          // BOTH the target and the durable uuid and retry later — never switch.
           r.status = 'unknown';
           r.error = result.reason ?? 'unknown';
           r.retryAt = Date.now() + this.backoff(r.attempts);
+        } else if (result.replyTargetUnavailable === true && replyTo !== j.messageId) {
+          // Definitive “anchor cannot be replied to” (e.g. 230072 on a
+          // merge_forward topic root). Redirect exactly once to the original
+          // /job text message in the same topic/chat; reusing the durable uuid
+          // keeps dedup. A second rejection against /job ends as 'failed'.
+          redirected = { from: replyTo, to: j.messageId, code: result.code ?? null };
+          r.targetMessageId = j.messageId;
+          r.targetFallbackFrom = replyTo;
+          r.status = 'pending';
+          r.error = result.reason ?? 'reply target unavailable';
+          r.code = result.code ?? null;
+          r.retryAt = 0;
         } else {
           r.status = 'failed';
           r.error = result.reason ?? 'failed';
+          r.code = result.code ?? null;
         }
       });
+      if (redirected) {
+        this.log.warn?.(
+          { sourceKey, kind, ...redirected },
+          'reply anchor unavailable; redirecting receipt to the original /job message',
+        );
+      }
     }
   }
 }

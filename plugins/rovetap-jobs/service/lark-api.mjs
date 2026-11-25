@@ -13,9 +13,44 @@ export class LarkApiError extends Error {
   constructor(kind, message, details = {}) {
     super(message);
     this.name = 'LarkApiError';
-    this.kind = kind; // auth | not_found | forbidden | bad_request | server | network
+    this.kind = kind; // auth | not_found | forbidden | bad_request | server | network | rate_limited | sending
     Object.assign(this, details);
   }
+}
+
+// Authoritative Feishu classifications, kept in sync with
+// apps/server/src/lark/api-gate.ts (the plugin cannot import the TS gate).
+// 230020 消息频控、99991400 网关频控/后端抖动：按瞬时频控退避重试。
+const RATE_LIMIT_CODES = new Set([230020, 99991400]);
+// 230049：同一 UUID 的消息正在发送；原请求可能已成功，只能按未知结果原样重发。
+const MESSAGE_SENDING_CODE = 230049;
+const TOKEN_INVALID_CODES = new Set([99991663, 99991661, 99991668]);
+const NOT_FOUND_CODES = new Set([230002, 230001]);
+// 回复接口明确表示锚点不可再回复（已撤回/话题不存在/不可见/类型不支持/
+// 230071-230072 群或合并消息不支持话题回复/即将自毁）。只有这类确定性拒绝
+// 才允许把回执改向到原 /job 消息。
+export const REPLY_TARGET_UNAVAILABLE_CODES = new Set([230011, 230019, 230050, 230054, 230071, 230072, 230111]);
+
+function sleepMs(ms, signal) {
+  return new Promise((resolve) => {
+    if (signal?.aborted) return resolve();
+    const timer = setTimeout(() => {
+      signal?.removeEventListener?.('abort', onAbort);
+      resolve();
+    }, ms);
+    timer.unref?.();
+    const onAbort = () => { clearTimeout(timer); resolve(); };
+    signal?.addEventListener?.('abort', onAbort, { once: true });
+  });
+}
+
+/** Integer `Retry-After` seconds -> ms; other shapes are left to callers. */
+function retryAfterHintMs(headers) {
+  const value = headers?.get ? headers.get('retry-after') : headers?.['retry-after'];
+  if (value !== null && value !== undefined && /^\s*\d+\s*$/.test(String(value))) {
+    return Math.min(30_000, Math.max(0, Number(value) * 1000));
+  }
+  return undefined;
 }
 
 export class LarkApiClient {
@@ -24,6 +59,10 @@ export class LarkApiClient {
     this.appSecret = config.appSecret;
     this.baseUrl = config.baseUrl.replace(/\/+$/, '');
     this.timeoutMs = config.timeoutMs ?? 8000;
+    // Bounded in-client backoff for 429 / frequency business codes. Upper layers
+    // still durably retry when these attempts are exhausted.
+    this.rateLimitRetries = config.rateLimitRetries ?? 2;
+    this.retryBaseMs = config.retryBaseMs ?? 300;
     this.fetch = fetcher;
     this.token = null;
     this.tokenExpiresAt = 0;
@@ -51,52 +90,121 @@ export class LarkApiClient {
     return token;
   }
 
-  /** Core JSON request. `token:false` skips the bearer dance. */
+  /**
+   * Core JSON request. One shared path for tenant token, material reads and
+   * receipts. Rate-limit responses back off and retry in-client; an invalid
+   * token forces one refresh. Transport/5xx/230049 outcomes are thrown for the
+   * durable upper-layer retry/unknown machinery instead.
+   */
   async request(path, options = {}) {
+    let tokenRetried = false;
+    let rateAttempts = 0;
+    for (;;) {
+      try {
+        return await this.#attempt(path, options);
+      } catch (error) {
+        if (error?.tokenInvalid === true && options.token !== false && !tokenRetried) {
+          tokenRetried = true;
+          this.token = null;
+          this.tokenExpiresAt = 0;
+          continue;
+        }
+        if (error?.kind === 'rate_limited' && rateAttempts < this.rateLimitRetries) {
+          rateAttempts += 1;
+          const backoff = error.retryAfterMs
+            ?? Math.min(8_000, this.retryBaseMs * 2 ** (rateAttempts - 1));
+          await sleepMs(backoff, options.externalSignal);
+          continue;
+        }
+        throw error;
+      }
+    }
+  }
+
+  /** One full attempt: the timeout covers fetch AND reading the whole body. */
+  async #attempt(path, options) {
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), this.timeoutMs);
-    const onAbort = () => controller.abort(options.externalSignal?.reason);
-    options.externalSignal?.addEventListener?.('abort', onAbort, { once: true });
-    let response;
+    let timedOut = false;
+    // Armed until the body is fully consumed: response.text() can stall or fail
+    // mid-stream after headers have already arrived.
+    const timer = setTimeout(() => { timedOut = true; controller.abort(new Error('timeout')); }, this.timeoutMs);
+    const onExternalAbort = () => controller.abort(options.externalSignal?.reason);
+    options.externalSignal?.addEventListener?.('abort', onExternalAbort, { once: true });
     try {
       const headers = { 'Content-Type': 'application/json; charset=utf-8' };
       if (options.token !== false) headers.Authorization = `Bearer ${await this.tenantToken(options.externalSignal)}`;
-      response = await this.fetch(`${this.baseUrl}${path}`, {
-        method: options.method ?? 'GET',
-        headers,
-        body: options.body !== undefined ? JSON.stringify(options.body) : undefined,
-        signal: controller.signal,
-      });
-    } catch (error) {
-      clearTimeout(timer);
-      options.externalSignal?.removeEventListener?.('abort', onAbort);
-      throw new LarkApiError('network', `飞书请求失败：${error?.name === 'AbortError' ? 'timeout' : 'network'}`);
-    }
-    clearTimeout(timer);
-    options.externalSignal?.removeEventListener?.('abort', onAbort);
-
-    let payload = null;
-    const raw = await response.text();
-    if (raw) {
-      try { payload = JSON.parse(raw); } catch { payload = null; }
-    }
-    if (!response.ok) {
-      const kind = response.status === 401 || response.status === 403 ? 'forbidden'
-        : response.status === 404 ? 'not_found'
-        : response.status >= 500 ? 'server' : 'bad_request';
-      throw new LarkApiError(kind, `飞书 HTTP ${response.status}`, { httpStatus: response.status, payload });
-    }
-    // Lark business code: 0 success; token errors imply a refresh is needed once.
-    if (payload && typeof payload.code === 'number' && payload.code !== 0) {
-      if (payload.code === 99991663 || payload.code === 99991661 || payload.code === 99991668) {
-        this.token = null;
-        throw new LarkApiError('auth', `飞书 token 失效 (${payload.code})`, { larkCode: payload.code });
+      let response;
+      try {
+        response = await this.fetch(`${this.baseUrl}${path}`, {
+          method: options.method ?? 'GET',
+          headers,
+          body: options.body !== undefined ? JSON.stringify(options.body) : undefined,
+          signal: controller.signal,
+        });
+      } catch (error) {
+        throw new LarkApiError('network', `飞书请求失败：${timedOut || error?.name === 'AbortError' ? 'timeout' : 'network'}`);
       }
-      const kind = [230002, 230020, 230001].includes(payload.code) ? 'not_found'
-        : payload.code === 99991672 ? 'forbidden' : 'bad_request';
-      throw new LarkApiError(kind, `飞书业务错误 ${payload.code}: ${payload.msg ?? ''}`, { larkCode: payload.code });
+
+      let raw;
+      try {
+        raw = await response.text();
+      } catch (error) {
+        // Headers arrived but the body never completed (stall / mid-stream reset):
+        // the outcome is uncertain for writes, retryable for reads.
+        throw new LarkApiError('network', `飞书响应正文读取失败：${timedOut || error?.name === 'AbortError' ? 'timeout' : 'network'}`);
+      }
+
+      let payload = null;
+      if (raw) {
+        try { payload = JSON.parse(raw); } catch { payload = null; }
+      }
+      const businessCode = typeof payload?.code === 'number' ? payload.code : undefined;
+      if (businessCode !== undefined && businessCode !== 0) {
+        throw this.#businessError(response.status, payload, businessCode, retryAfterHintMs(response.headers));
+      }
+      if (!response.ok) {
+        throw this.#httpError(response.status, payload, retryAfterHintMs(response.headers));
+      }
+      return payload ?? {};
+    } finally {
+      clearTimeout(timer);
+      options.externalSignal?.removeEventListener?.('abort', onExternalAbort);
     }
-    return payload ?? {};
+  }
+
+  #businessError(httpStatus, payload, code, retryAfterMs) {
+    const details = { httpStatus, payload, larkCode: code, ...(retryAfterMs !== undefined ? { retryAfterMs } : {}) };
+    if (TOKEN_INVALID_CODES.has(code)) {
+      // Caller retries once after forcing a fresh tenant token.
+      return new LarkApiError('auth', `飞书 token 失效 (${code})`, { ...details, tokenInvalid: true });
+    }
+    if (RATE_LIMIT_CODES.has(code)) {
+      return new LarkApiError('rate_limited', `飞书频控 ${code}: ${payload.msg ?? ''}`, details);
+    }
+    if (code === MESSAGE_SENDING_CODE) {
+      return new LarkApiError('sending', `飞书同 UUID 消息正在发送 (${code})`, details);
+    }
+    if (NOT_FOUND_CODES.has(code)) {
+      return new LarkApiError('not_found', `飞书业务错误 ${code}: ${payload.msg ?? ''}`, details);
+    }
+    if (code === 99991672) {
+      return new LarkApiError('forbidden', `飞书业务错误 ${code}: ${payload.msg ?? ''}`, details);
+    }
+    if (REPLY_TARGET_UNAVAILABLE_CODES.has(code)) {
+      return new LarkApiError('bad_request', `飞书回复目标不可回复 (${code})`, { ...details, replyTargetUnavailable: true });
+    }
+    // Unrecognised business code behind a transport-y HTTP status keeps the
+    // retryable/unknown classification instead of becoming a hard rejection.
+    return this.#httpError(httpStatus, payload, retryAfterMs, code);
+  }
+
+  #httpError(status, payload, retryAfterMs, businessCode) {
+    const details = { httpStatus: status, payload, ...(businessCode !== undefined ? { larkCode: businessCode } : {}), ...(retryAfterMs !== undefined ? { retryAfterMs } : {}) };
+    if (status === 429) return new LarkApiError('rate_limited', `飞书 HTTP 429`, details);
+    if (status === 401 || status === 403) return new LarkApiError('forbidden', `飞书 HTTP ${status}`, details);
+    if (status === 404) return new LarkApiError('not_found', `飞书 HTTP ${status}`, details);
+    if (status >= 500) return new LarkApiError('server', `飞书 HTTP ${status}`, details);
+    return new LarkApiError('bad_request', `飞书 HTTP ${status}`, details);
   }
 
   /** GET one message detail; for merge_forward the items include children. */
@@ -152,10 +260,25 @@ export class LarkApiClient {
       if (!messageId) return { outcome: 'unknown', reason: 'missing_message_id' };
       return { outcome: 'sent', messageId };
     } catch (error) {
-      if (error instanceof LarkApiError && (error.kind === 'network' || error.kind === 'server' || error.kind === 'auth')) {
-        return { outcome: 'unknown', reason: `${error.kind}:${error.message}` };
+      // These may have reached Feishu (or were rejected only by the rate gate):
+      // the worker protects the outbound record and retries the SAME uuid.
+      const unknownKinds = new Set(['network', 'server', 'auth', 'rate_limited', 'sending']);
+      if (error instanceof LarkApiError && unknownKinds.has(error.kind)) {
+        return {
+          outcome: 'unknown',
+          reason: `${error.kind}:${error.message}`,
+          code: error.larkCode ?? null,
+          inFlight: error.kind === 'sending',
+        };
       }
-      return { outcome: 'failed', reason: error instanceof Error ? error.message : String(error) };
+      return {
+        outcome: 'failed',
+        reason: error instanceof Error ? error.message : String(error),
+        code: error?.larkCode ?? null,
+        // Only a definitive platform “this anchor cannot be replied to” allows
+        // the worker to redirect the receipt to the original /job message.
+        replyTargetUnavailable: error?.replyTargetUnavailable === true,
+      };
     }
   }
 }
@@ -173,6 +296,7 @@ export function normalizeMessage(m) {
     upperMessageId: m.upper_message_id ?? m.upperMessageId ?? null,
     messageType: m.msg_type ?? m.message_type ?? m.messageType ?? 'text',
     createTime: m.create_time ?? m.createTime ?? null,
+    deleted: m.deleted === true,
     sender: m.sender ?? null,
     content: typeof bodyContent === 'string' ? bodyContent
       : typeof m.content === 'string' ? m.content
