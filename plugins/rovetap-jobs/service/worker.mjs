@@ -21,6 +21,7 @@ const MAX_IDEMPOTENT_RETRIES = 6;
 // 飞书同一个 uuid 只在首次尝试后的 1 小时内去重（与 server reconciler 的投递窗口一致）：
 // 超窗再发，前一次若已送达就会在群里出现两条回执。
 const UUID_DEDUP_WINDOW_MS = 60 * 60_000;
+const MATERIAL_CHOICES_TTL_MS = 24 * 60 * 60_000;
 
 function replyDeadlineAt(firstAttemptAt) {
   const time = typeof firstAttemptAt === 'number' ? firstAttemptAt : Date.parse(firstAttemptAt);
@@ -195,12 +196,11 @@ export class JobWorker {
     await this.mutateJob(sourceKey, (j) => { j.stage = 'resolving'; });
 
     const event = {
-      chatId: job.chatId, threadId: job.threadId?.startsWith?.('omt_') ? job.threadId : (job.threadId ?? null),
+      chatId: job.chatId, threadId: job.threadId,
       rootId: job.rootId, parentId: job.parentId, messageId: job.messageId,
+      selectedMaterialId: job.selectedMaterialId,
       commandCreateTime: job.commandCreateTime ?? null,
     };
-    // threadId stored may be root om_ when no omt_; materials falls back to chat scan + root filter.
-    if (job.threadId && !job.threadId.startsWith('omt_')) event.threadId = null;
 
     const result = await resolveMaterial({
       client: this.lark,
@@ -210,16 +210,29 @@ export class JobWorker {
     });
 
     if (result.status === 'ok') {
-      await this.mutateJob(sourceKey, (j) => { j.material = result.material; j.stage = 'ready'; j.reasonCode = null; });
+      await this.mutateJob(sourceKey, (j) => {
+        j.material = result.material;
+        j.threadId = result.threadId ?? j.threadId;
+        j.rootId = result.rootId ?? j.rootId;
+        j.stage = 'ready';
+        j.reasonCode = null;
+        j.materialChoices = [];
+        j.materialChoicesExpireAt = null;
+      });
       return this.submitStep(sourceKey);
     }
 
     if (result.status === 'need') {
       await this.mutateJob(sourceKey, (j, state) => {
         j.stage = 'needs_input';
-        j.reasonCode = result.reason;
+        j.reasonCode = j.selectedMaterialId ? 'selected_material_unavailable' : result.reason;
         j.reasonDetail = result.detail ?? null;
-        this.store.outbound(state, sourceKey, 'need').status = 'pending';
+        j.threadId = result.threadId ?? j.threadId;
+        j.rootId = result.rootId ?? j.rootId;
+        j.commandCreateTime = result.commandCreateTime ?? j.commandCreateTime;
+        j.materialChoices = result.choices ?? [];
+        j.materialChoicesExpireAt = j.materialChoices.length ? Date.now() + MATERIAL_CHOICES_TTL_MS : null;
+        this.store.outbound(state, sourceKey, j.selectedMaterialId ? 'need:selected' : 'need').status = 'pending';
       });
       await this.flushDueReplies(sourceKey);
       return;
@@ -435,6 +448,7 @@ export class JobWorker {
   // ---- outbound -----------------------------------------------------------
 
   dueReply(job, reply) {
+    if (reply.supersededAt) return false;
     // 没有任何发送痕迹的 pending 确定未发出，可以首发（firstAttemptAt 与后端归属在发送前持久化）。
     const untouchedPending = reply.status === 'pending'
       && (reply.attempts ?? 0) === 0 && reply.firstAttemptAt == null;
@@ -452,7 +466,7 @@ export class JobWorker {
     for (const kind of Object.keys(job.replies)) {
       job = this.store.getJob(sourceKey);
       const reply = job.replies[kind];
-      if (!reply) continue;
+      if (!reply || reply.supersededAt) continue;
       if (!this.dueReply(job, reply)) {
         // 没经过启动恢复就调度到时，被 CLI/窗口挡住的在途记录也要落为 unknown，不能一直停在 sending。
         const inFlight = reply.status === 'sending'
@@ -473,6 +487,7 @@ export class JobWorker {
 
       const firstAttemptAt = await this.mutateJob(sourceKey, (j) => {
         const r = j.replies[kind];
+        if (r.supersededAt) return null;
         r.status = 'sending';
         r.attempts = (r.attempts ?? 0) + 1;
         r.lastAttemptAt = new Date().toISOString();
@@ -486,6 +501,7 @@ export class JobWorker {
         }
         return r.firstAttemptAt;
       });
+      if (!firstAttemptAt || this.store.getJob(sourceKey)?.replies[kind]?.supersededAt) continue;
       const deadlineAt = replyDeadlineAt(firstAttemptAt);
       const result = await this.sender.send({ uuid: reply.uuid, replyTo, text, deadlineAt });
 

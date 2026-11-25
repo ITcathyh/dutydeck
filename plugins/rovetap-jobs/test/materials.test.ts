@@ -57,6 +57,7 @@ function fakeClient(opts: FakeOptions = {}) {
       if (opts.errors?.[id]) throw opts.errors[id];
       if (opts.items?.has(id)) return opts.items.get(id);
       const record = opts.records?.get(id);
+      if (!record && id === 'om_root') return [msg({ messageId: id, messageType: 'image', createTime: '1' })];
       if (!record) throw notFound(id);
       return [record, ...(opts.children?.get(id) ?? [])];
     },
@@ -104,7 +105,7 @@ describe('materials / explicit reference scope', () => {
     expect(r.status).toBe('ok');
   });
 
-  it('accepts the trusted topic root itself even without thread/root attribution on the item', async () => {
+  it('accepts the sole earlier topic root even without thread/root attribution on the item', async () => {
     const root = textMsg('om_root', '话题根原文', { threadId: null, rootId: null });
     const client = fakeClient({ records: new Map([['om_root', root]]) });
     const r = await resolveMaterial({ client, event: event({ parentId: 'om_root' }) });
@@ -323,10 +324,10 @@ describe('materials / unique-forward discovery inside the topic only', () => {
     expect(client.calls.list.every((q) => q.containerIdType === 'thread')).toBe(true);
   });
 
-  it('zero candidates -> none; several candidates -> multiple', async () => {
+  it('an unreadable sole root needs text; several earlier forwards need a choice', async () => {
     const empty = fakeClient({ pages: [{ items: [], hasMore: false }] });
     await expect(resolveMaterial({ client: empty, event: event() }))
-      .resolves.toMatchObject({ status: 'need', reason: 'none' });
+      .resolves.toMatchObject({ status: 'need', reason: 'no_text' });
 
     const many = [mfMsg('om_mf1'), mfMsg('om_mf2')];
     const multi = fakeClient({ pages: [{ items: many, hasMore: false }] });
@@ -347,6 +348,16 @@ describe('materials / unique-forward discovery inside the topic only', () => {
     const client = fakeClient({ pages: [{ items: [mfMsg('om_mf1')], hasMore: true, pageToken: null }] });
     const r = await resolveMaterial({ client, event: event() });
     expect(r).toMatchObject({ status: 'need', reason: 'incomplete', detail: 'bad_page_token' });
+  });
+
+  it('never uses a text root from an incomplete or malformed topic page', async () => {
+    const root = textMsg('om_root', '产品反馈');
+    const client = fakeClient({
+      records: new Map([['om_root', root]]),
+      pages: [{ items: [] }], // The API did not prove this was the last page.
+    });
+    const result = await resolveMaterial({ client, event: event({ parentId: 'om_root' }) });
+    expect(result).toEqual({ status: 'need', reason: 'incomplete', detail: 'malformed_page' });
   });
 
   it('drains continuation pages and accepts a unique candidate on a later page', async () => {
@@ -422,7 +433,7 @@ describe('materials / candidates must predate the command', () => {
   it('keeps only the older forward when one older and one newer compete', async () => {
     const older = mfMsg('om_old', { createTime: '1000' });
     const newer = mfMsg('om_new', { createTime: '3000' });
-    const chosen = mfMsg('om_old', { threadId: 'omt_topic' });
+    const chosen = mfMsg('om_old', { threadId: 'omt_topic', createTime: '1000' });
     const child = textMsg('om_old_c', '旧转发正文', { upperMessageId: 'om_old' });
     const client = fakeClient({
       records: new Map([['om_old', chosen]]),
@@ -437,7 +448,7 @@ describe('materials / candidates must predate the command', () => {
   it('uses the command anchor found in the listed page for its time', async () => {
     const command = msg({ messageId: 'om_command', messageType: 'text', createTime: '2000' });
     const older = mfMsg('om_old', { createTime: '1000' });
-    const chosen = mfMsg('om_old', { threadId: 'omt_topic' });
+    const chosen = mfMsg('om_old', { threadId: 'omt_topic', createTime: '1000' });
     const child = textMsg('om_old_c2', '旧转发正文二', { upperMessageId: 'om_old' });
     const client = fakeClient({
       records: new Map([['om_old', chosen]]),
@@ -453,7 +464,7 @@ describe('materials / candidates must predate the command', () => {
 
   it('reads the command anchor by id when absent from the list', async () => {
     const older = mfMsg('om_old', { createTime: '1000' });
-    const chosen = mfMsg('om_old', { threadId: 'omt_topic' });
+    const chosen = mfMsg('om_old', { threadId: 'omt_topic', createTime: '1000' });
     const child = textMsg('om_old_c3', '旧转发正文三', { upperMessageId: 'om_old' });
     const command = msg({ messageId: 'om_command', createTime: '2000' });
     const client = fakeClient({
@@ -522,6 +533,10 @@ describe('materials / Rove 4000 code point submission limit', () => {
     expect(out.endsWith('已截断）')).toBe(true);
     const suffixLength = Array.from('\n…（材料过长，已截断）').length;
     expect(Array.from(out).filter((c) => c === '😀').length).toBe(4000 - suffixLength);
+  });
+
+  it('keeps the truncation marker within a small configured limit', () => {
+    expect(Array.from(clipToCodePoints('😀'.repeat(10), 2))).toHaveLength(2);
   });
 
   it('never exceeds 4000 code points even when caller asks for more', async () => {

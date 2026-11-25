@@ -12,6 +12,11 @@ const seedQuotedText = (id = 'om_fwd1', text = '切回前台后草稿消失，�
   h!.lark.messages.set(id, apiMessage({ messageId: id, text, threadId: 'omt_1', rootId: 'om_root' }));
 };
 
+const seedTopic = (threadId: string) => {
+  h!.lark.messages.set('om_root', apiMessage({ messageId: 'om_root', text: '产品反馈', threadId }));
+  return { threadId, rootId: 'om_root', parentId: 'om_root' };
+};
+
 describe('rovetap-jobs  happy path / contract', () => {
   it('persists inbox, calls the real-arg-array CLI with the contract payload, replies in thread with link', async () => {
     h = await setupHarness();
@@ -228,7 +233,7 @@ describe('rovetap-jobs  material selection', () => {
     h = await setupHarness();
     h.lark.messages.set('om_mf1', apiMessage({ messageId: 'om_mf1', messageType: 'merge_forward', threadId: 'omt_multi' }));
     h.lark.messages.set('om_mf2', apiMessage({ messageId: 'om_mf2', messageType: 'merge_forward', threadId: 'omt_multi' }));
-    await h.post(makeEnvelope({ messageId: 'om_multi', threadId: 'omt_multi', text: '/job 调查' }));
+    await h.post(makeEnvelope({ messageId: 'om_multi', ...seedTopic('omt_multi'), text: '/job 调查' }));
     await waitFor(() => h!.lark.replies.some((r) => r.text.includes('多条')));
     expect(h.hub()).toBeNull();
   });
@@ -239,7 +244,7 @@ describe('rovetap-jobs  material selection', () => {
     h.lark.messages.set('om_child_u', apiMessage({
       messageId: 'om_child_u', upperMessageId: 'om_mf_u', threadId: 'omt_u', text: '唯一转发：搜索页打不开文件',
     }));
-    await h.post(makeEnvelope({ messageId: 'om_unique', threadId: 'omt_u', text: '/job 跟进这条' }));
+    await h.post(makeEnvelope({ messageId: 'om_unique', ...seedTopic('omt_u'), text: '/job 跟进这条' }));
     await waitFor(() => h!.hub()?.submitCount === 1);
     const material = h.hub().lastPayload.materials[0];
     expect(material.message_id).toBe('om_mf_u');
@@ -253,7 +258,7 @@ describe('rovetap-jobs  material selection', () => {
       messageId: 'om_child_t', upperMessageId: 'om_mf_t', threadId: 'omt_tanchor', text: '时间锚点材料正文',
     }));
     await h.post(makeEnvelope({
-      eventId: 'ev_ctime', messageId: 'om_ctime', threadId: 'omt_tanchor',
+      eventId: 'ev_ctime', messageId: 'om_ctime', ...seedTopic('omt_tanchor'),
       createTime: '1764000060000',
     }));
     await waitFor(() => h!.svc.store.getJobByMessage('om_ctime')?.commandCreateTime === '1764000060000');
@@ -271,7 +276,7 @@ describe('rovetap-jobs  material selection', () => {
       messageId: 'om_child_late', upperMessageId: 'om_mf_late', threadId: 'omt_late', text: '命令之后才转发的内容',
     }));
     await h.post(makeEnvelope({
-      eventId: 'ev_late', messageId: 'om_late', threadId: 'omt_late', createTime: '1764000000000', text: '/job 跟进',
+      eventId: 'ev_late', messageId: 'om_late', ...seedTopic('omt_late'), createTime: '1764000000000', text: '/job 跟进',
     }));
     await waitFor(() => h!.lark.replies.some((r) => r.text.includes('晚于')), { label: 'late-forward guidance' });
     expect(h.hub()).toBeNull();
@@ -285,7 +290,7 @@ describe('rovetap-jobs  material selection', () => {
     h.lark.messages.set('om_mf_undated_cmd', apiMessage({ messageId: 'om_mf_undated_cmd', messageType: 'merge_forward', threadId: 'omt_uc' }));
     // No create_time on the inbound event; the fake Lark has no om_uc_cmd
     // record to read back, so the anchor is definitively undatable.
-    const envelope = makeEnvelope({ messageId: 'om_uc_cmd', threadId: 'omt_uc' });
+    const envelope = makeEnvelope({ messageId: 'om_uc_cmd', ...seedTopic('omt_uc') });
     delete (envelope.event.message as any).create_time;
     await h.post(envelope);
     await waitFor(() => h!.lark.replies.some((r) => r.text.includes('无法证明')), { label: 'undatable guidance' });
