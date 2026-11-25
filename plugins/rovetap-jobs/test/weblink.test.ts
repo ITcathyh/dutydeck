@@ -86,12 +86,18 @@ describe('rovetap job receipts', () => {
     ['\u0085 \u2028\t \u2029', '外部项目委托', '外部项目委托'],
     ['🧪'.repeat(201), '🧪'.repeat(200), '🧪'.repeat(60)],
     [`\ufeff${' '.repeat(197)}\u2028甲乙`, `\ufeff${' '.repeat(197)}\u2028甲`, '甲'],
+    [`${'甲'.repeat(58)}ΟΣΑ`, `${'甲'.repeat(58)}ΟΣΑ`, `${'甲'.repeat(58)}Ο`],
+    [`${'甲'.repeat(58)}ΟΣ\u2028Α`, `${'甲'.repeat(58)}ΟΣ\u2028Α`, `${'甲'.repeat(58)}ΟΣ`],
+    ['ΟΣ', 'ΟΣ', 'Ο'],
   ])('keeps the searchable fragment within the actual RoveTap title for %j', (instruction, upstreamTitle, expected) => {
     const text = replyText('accepted', { ...job, instruction }, {});
     const fragment = text.match(/^标题片段：([^\n]*)/m)?.[1] ?? '';
 
     expect(fragment).toBe(expected);
     expect(upstreamTitle).toContain(fragment);
+    for (const cardText of [upstreamTitle, `A${upstreamTitle}`, `${upstreamTitle}A`, `A${upstreamTitle}A`]) {
+      expect(cardText.toLocaleLowerCase()).toContain(fragment.toLocaleLowerCase());
+    }
     expect(fragment).not.toMatch(/[\n\r\u0085\u2028\u2029]/u);
     expect([...fragment].length).toBeLessThanOrEqual(60);
     expect(text).toContain('任务号：pt_1');

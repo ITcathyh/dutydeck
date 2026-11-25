@@ -13,9 +13,20 @@ function taskTitleFragment(instruction) {
   const joined = instruction.replace(/[\x00-\x1f\x7f]+/gu, ' ')
     .replace(/^\p{White_Space}+|\p{White_Space}+$/gu, '');
   const title = [...joined].slice(0, 200).join('').replace(/\p{White_Space}+$/u, '') || '外部项目委托';
-  // A single-line search input needs an actual substring of the stored title.
-  const line = title.split(/[\u0085\u2028\u2029]/u).map(part => part.trim()).find(Boolean);
-  return line ? [...line].slice(0, 60).join('').trimEnd() : '';
+  // The board lowercases the whole card's text, with status and summary
+  // adjacent to the title. Check both cased and uncased boundaries so
+  // cutting a fragment short cannot change the casing of a letter like Σ.
+  const searchable = [title, `A${title}`, `${title}A`, `A${title}A`].map(text => text.toLocaleLowerCase());
+  for (const line of title.split(/[\u0085\u2028\u2029]/u)) {
+    const chars = [...line.trim()].slice(0, 60);
+    while (chars.length) {
+      const fragment = chars.join('').trimEnd();
+      const query = fragment.toLocaleLowerCase();
+      if (searchable.every(text => text.includes(query))) return fragment;
+      chars.pop();
+    }
+  }
+  return '';
 }
 
 export function replyText(kind, job, config) {

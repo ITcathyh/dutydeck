@@ -1639,8 +1639,17 @@ pairfob project status --project rovetap --key &lt;来源键&gt;</pre
         return [...joined].slice(0, 200).join("").replace(/\p{White_Space}+$/u, "") || "外部项目委托";
       }
       function taskTitleFragment(title) {
-        const line = title.split(/[\u0085\u2028\u2029]/u).map((part) => part.trim()).find(Boolean);
-        return line ? [...line].slice(0, 60).join("").trimEnd() : "";
+        const searchable = [title, `A${title}`, `${title}A`, `A${title}A`].map((text) => text.toLocaleLowerCase());
+        for (const line of title.split(/[\u0085\u2028\u2029]/u)) {
+          const chars = [...line.trim()].slice(0, 60);
+          while (chars.length) {
+            const fragment = chars.join("").trimEnd();
+            const query = fragment.toLocaleLowerCase();
+            if (searchable.every((text) => text.includes(query))) return fragment;
+            chars.pop();
+          }
+        }
+        return "";
       }
       function statusLabel() {
         return !state.order
