@@ -17,41 +17,19 @@
  * on recency: several dutydeck sessions can share a cwd, and picking the
  * newest jsonl among them would resume a sibling's conversation.
  */
-import { existsSync } from 'node:fs';
-import { join } from 'node:path';
 import { getCliProfile, pinnedSessionUuid } from '@dutydeck/cli-adapters';
 import { claudeFamilyCliAdapterIds } from '@dutydeck/shared';
 import { claudeProjectDirCandidates } from '../cli-paths.js';
-import { byMtimeDesc, parseJsonlObjects, readHead, nativeTranscriptObjects, walkFiles } from './fs-scan.js';
+import { claudeMarkerCandidates, claudePinnedTranscriptPaths, findClaudeMarkerEntry } from '../claude-transcript-files.js';
 import { buildSessionMarker, isUsableMarker } from './marker.js';
-import { userEntryMentionsMarker } from '../transcript/claude-content.js';
 import type { SessionIdLookup, SessionIdLookupContext } from './types.js';
 
-/** Head window per candidate transcript. The marker rides the FIRST user
- *  prompt, so a small head window is enough and keeps a long conversation
- *  from being read in full. */
-const HEAD_BYTES = 256 * 1024;
-/** Newest-first cap on candidates scanned across a cwd's project dirs. */
-const MAX_CANDIDATES = 40;
-
-/** The UUID dutydeck pinned via --session-id; Claude's own ids are bare UUIDs. */
-function bareId(sessionId: string): string {
-  return pinnedSessionUuid(sessionId);
-}
-
-/** The CLI session id recorded inside a transcript entry, if any. */
-function entrySessionId(entry: any): string | undefined {
-  const id = entry?.sessionId;
-  return typeof id === 'string' && id.length > 0 ? id : undefined;
-}
-
-function markedSession(path: string, sessionId: string, exactPinned = false): string | undefined {
-  const records = exactPinned ? nativeTranscriptObjects(path) : parseJsonlObjects(readHead(path, HEAD_BYTES));
-  for (const entry of records) {
-    if (!userEntryMentionsMarker(entry, buildSessionMarker(sessionId))) continue;
-    return entrySessionId(entry) ?? (path.replace(/^.*\//, '').replace(/\.jsonl$/, '') || undefined);
-  }
-  return undefined;
+function markedSession(path: string, marker: string, scan: 'head' | 'whole'): string | undefined {
+  const entry = findClaudeMarkerEntry(path, marker, scan);
+  if (!entry) return undefined;
+  const id = entry.sessionId;
+  if (typeof id === 'string' && id.length > 0) return id;
+  return (path.replace(/^.*\//, '').replace(/\.jsonl$/, '') || undefined);
 }
 
 export function hasPinnedClaudeSession(adapterId: string, context: SessionIdLookupContext): boolean {
@@ -71,15 +49,16 @@ export const claudeSessionIdLookup: SessionIdLookup = {
     const projectDirs = claudeProjectDirCandidates(cwd, env);
 
     // Fast path: dutydeck pinned the id via --session-id and Claude accepted it.
-    const pinned = bareId(sessionId);
-    const pinnedPaths = pinned ? projectDirs.map(dir => join(dir, `${pinned}.jsonl`)).filter(path => existsSync(path)) : [];
+    const pinned = pinnedSessionUuid(sessionId);
+    const pinnedPaths = claudePinnedTranscriptPaths(projectDirs, pinned);
     if (pinnedPaths.length > 0) {
       if (!requireMarker) return pinned;
       // Do not let unrelated newer files push the exact pinned transcript out
       // of the bounded scan. A conflicting pinned file must not be adopted,
       // and two proven copies cannot be told apart here.
       if (!isUsableMarker(sessionId)) return undefined;
-      const proven = pinnedPaths.flatMap(path => markedSession(path, sessionId, true) ?? []);
+      const marker = buildSessionMarker(sessionId);
+      const proven = pinnedPaths.flatMap(path => markedSession(path, marker, 'whole') ?? []);
       return proven.length === 1 ? proven[0] : undefined;
     }
 
@@ -87,13 +66,9 @@ export const claudeSessionIdLookup: SessionIdLookup = {
 
     // Scan path: find the transcript whose first user prompt carries our
     // marker. Newest first only bounds the work — the marker decides.
-    const candidates = projectDirs.flatMap(dir => walkFiles(dir, {
-      maxDepth: 0,
-      accept: name => name.endsWith('.jsonl'),
-    })).sort(byMtimeDesc).slice(0, MAX_CANDIDATES);
-
-    for (const candidate of candidates) {
-      const found = markedSession(candidate.path, sessionId);
+    const marker = buildSessionMarker(sessionId);
+    for (const { path } of claudeMarkerCandidates(projectDirs)) {
+      const found = markedSession(path, marker, 'head');
       if (found) return found;
     }
     return undefined;

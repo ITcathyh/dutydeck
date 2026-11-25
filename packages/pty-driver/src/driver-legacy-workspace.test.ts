@@ -1,4 +1,5 @@
 import { defaultDriverProviders } from '../../../apps/server/src/driver-providers.js';
+import { initGitWorkspace } from '../../../tests/support/git-workspace.js';
 import { describe, expect, it, vi } from 'vitest';
 import { appendFileSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
@@ -36,6 +37,8 @@ describe.skipIf(process.platform !== 'linux')('legacy Claude workspace admission
       },
     });
     try {
+      // Exercise admission across two sessions in one Git repository.
+      initGitWorkspace(cwd);
       await runtime.initialize(agents);
       const first = await runtime.start({ agentId: 'claude-code', cwd });
       expect((await runtime.send(first.id, 'first')).status).toBe('completed');

@@ -81,9 +81,6 @@ const ACTIVE_TASK_STATUSES = new Set(['running', 'queued', 'reconcile_required']
 function compareAsc(a: string, b: string): number {
   return a < b ? -1 : a > b ? 1 : 0;
 }
-function compareDesc(a: string, b: string): number {
-  return a < b ? 1 : a > b ? -1 : 0;
-}
 
 function configuredModelOf(accepted: AcceptedTask): string | undefined {
   if (accepted.input?.version === 2) return accepted.input.executionOptions.model;
@@ -98,10 +95,8 @@ function projectGoals(
   for (const projection of executions) {
     if (!byTask.has(projection.task.id)) byTask.set(projection.task.id, projection);
   }
-  const projections = [...byTask.values()];
-
   // 规范（发布/digest）顺序：createdAt、id 升序。
-  const canonicalOrder = [...projections]
+  const canonicalOrder = [...byTask.values()]
     .sort((x, y) => {
       const byCreated = compareAsc(x.task.createdAt, y.task.createdAt);
       return byCreated !== 0 ? byCreated : compareAsc(x.task.id, y.task.id);
@@ -121,22 +116,15 @@ function projectGoals(
     } satisfies GoalItem;
   });
 
-  // 限量挑选顺序：当前活跃目标优先，其次最新创建，再按 id 降序，确定性。
-  const priority = canonicalOrder
-    .map((entry, canonicalIndex) => ({
-      canonicalIndex,
-      active: ACTIVE_TASK_STATUSES.has(entry.task.status) ? 0 : 1,
-      createdAt: entry.task.createdAt,
-      id: entry.task.id
-    }))
-    .sort((x, y) => {
-      if (x.active !== y.active) return x.active - y.active;
-      const byCreated = compareDesc(x.createdAt, y.createdAt);
-      return byCreated !== 0 ? byCreated : compareDesc(x.id, y.id);
-    })
-    .map(entry => entry.canonicalIndex);
+  // 限量时先挑选活跃目标，每组都从规范顺序的末尾开始。
+  const active: number[] = [];
+  const other: number[] = [];
+  for (let index = items.length - 1; index >= 0; index--) {
+    const group = ACTIVE_TASK_STATUSES.has(items[index]!.status) ? active : other;
+    group.push(index);
+  }
 
-  return { items, priority };
+  return { items, priority: active.concat(other) };
 }
 
 function projectSteering(
@@ -150,8 +138,7 @@ function projectSteering(
       byOperation.set(steering.operationId, steering);
     }
   }
-  const operations = [...byOperation.values()];
-  const canonicalOrder = [...operations]
+  const canonicalOrder = [...byOperation.values()]
     .sort((x, y) => {
       const byUpdated = compareAsc(x.updatedAt, y.updatedAt);
       return byUpdated !== 0
@@ -172,18 +159,8 @@ function projectSteering(
     } satisfies SteeringItem;
   });
 
-  const priority = canonicalOrder
-    .map((entry, canonicalIndex) => ({
-      canonicalIndex,
-      updatedAt: entry.updatedAt,
-      id: entry.operationId
-    }))
-    .sort((x, y) => {
-      const byUpdated = compareDesc(x.updatedAt, y.updatedAt);
-      return byUpdated !== 0 ? byUpdated : compareDesc(x.id, y.id);
-    })
-    .map(entry => entry.canonicalIndex);
-
+  // 限量时按更新顺序从新到旧挑选，发布仍使用规范升序。
+  const priority = items.map((_, index) => index).reverse();
   return { items, priority };
 }
 
@@ -251,19 +228,17 @@ function projectModelConfigs(
   for (const value of accepted) {
     if (!byTask.has(value.task.id)) byTask.set(value.task.id, value);
   }
-  const values = [...byTask.values()];
-  const canonicalOrder = [...values]
+  const canonicalOrder = [...byTask.values()]
     .sort((x, y) => {
       const byUpdated = compareAsc(x.task.updatedAt, y.task.updatedAt);
       return byUpdated !== 0 ? byUpdated : compareAsc(x.task.id, y.task.id);
     });
 
   const items: ModelConfigItem[] = [];
-  // 仅保留有冻结模型的条目，同时记录其在 items 内的规范序与挑选序。
-  const keptCanonical: Array<{ canonicalIndex: number; updatedAt: string; id: string }> = [];
-  canonicalOrder.forEach(value => {
+  // 仅保留有冻结模型的条目，沿用任务的规范升序。
+  for (const value of canonicalOrder) {
     const model = configuredModelOf(value);
-    if (!model) return;
+    if (!model) continue;
     assertSafeIdentity('modelConfigs.taskId', value.task.id, context);
     items.push({
       taskId: value.task.id,
@@ -271,21 +246,9 @@ function projectModelConfigs(
       attemptId: null,
       configuredModel: truncateUtf8Bytes(redactText(model, context), EXCERPT_BYTES)
     });
-    keptCanonical.push({
-      canonicalIndex: items.length - 1,
-      updatedAt: value.task.updatedAt,
-      id: value.task.id
-    });
-  });
+  }
 
-  // 最新更新任务的模型配置优先。
-  const priority = keptCanonical
-    .slice()
-    .sort((x, y) => {
-      const byUpdated = compareDesc(x.updatedAt, y.updatedAt);
-      return byUpdated !== 0 ? byUpdated : compareDesc(x.id, y.id);
-    })
-    .map(entry => entry.canonicalIndex);
+  const priority = items.map((_, index) => index).reverse();
 
   return { items, priority };
 }

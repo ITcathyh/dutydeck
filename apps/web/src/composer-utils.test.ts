@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { buildPrompt, commandsFromEvents, contextStatsFromEvents, currentContextStats, getModelReadiness, replaceSlashQuery, slashQuery } from './composer-utils';
+import { buildPrompt, commandsFromEvent, contextStatsFromEvents, currentContextStats, findLatestCommandsEvent, getModelReadiness, replaceSlashQuery, slashQuery } from './composer-utils';
 
 describe('composer slash references', () => {
   it('can invoke a selected skill without additional text', () => {
@@ -26,7 +26,7 @@ describe('composer slash references', () => {
       { type: 'status', data: { state: 'commands', availableCommands: [{ name: '/compact', description: 'Compact context' }] } }
     ];
     expect(contextStatsFromEvents(events)).toEqual({ used: 11_000, size: 200_000, compacted: 10_000, percentage: 5.5 });
-    expect(commandsFromEvents(events)).toEqual([{ name: 'compact', description: 'Compact context' }]);
+    expect(commandsFromEvent(findLatestCommandsEvent(events))).toEqual([{ name: 'compact', description: 'Compact context' }]);
   });
 
   it('blocks sending until models have loaded', () => {

@@ -1,5 +1,5 @@
 import { foundationCapabilitiesQuery, groupMatrixQuery, queryKeys, scheduleCapabilitiesQuery, schedulesQuery, secretRefsQuery, terminalSettingsQuery } from '../queries';
-import { globalSettingFields, focusSettingField } from '../settings-search';
+import { globalSettingFields, focusSettingFieldWhenAvailable } from '../settings-search';
 import { PluginBindingsPanel } from './PluginBindingsPanel';
 import { ConfirmDialog } from './ConfirmDialog';
 import { AgentModelSettings } from './AgentModelSettings';
@@ -158,11 +158,7 @@ export function ControlCenterModal({
     if (!open || !field || (field !== 'terminalBackend' && !field.startsWith('model-'))) return;
     const root = document.querySelector<HTMLElement>('[role="dialog"][aria-modal="true"][aria-label="Dutydeck 设置与接入"]');
     if (!root) return;
-    const focus = () => focusSettingField(root, field === 'terminalBackend' ? globalSettingFields.terminalBackend.anchor : field);
-    if (focus()) return;
-    const observer = new MutationObserver(() => { if (focus()) observer.disconnect(); });
-    observer.observe(root, { subtree: true, childList: true });
-    return () => observer.disconnect();
+    return focusSettingFieldWhenAvailable(root, field === 'terminalBackend' ? globalSettingFields.terminalBackend.anchor : field);
   }, [open, field, section]);
   const requestLeave = useCallback<SettingsLeaveGuard>(action => {
     if (createBot.isPending || modelSaving) return false;

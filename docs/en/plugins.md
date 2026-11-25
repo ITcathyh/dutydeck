@@ -240,6 +240,38 @@ Reference files you want the Leader to receive on every run go into the manifest
 
 Start, stop, restart and automatic restart requests for the same plugin service run in order; a restart ends the old instance before starting its replacement. On POSIX systems, stopping waits for workers in the owned process group too, forcibly ending survivors after the grace period. A parent exiting first does not report the service as stopped. Failed cleanup returns an error; another instance can start only after the old one has been cleaned up. Descendants that leave the process group are outside this cleanup scope; Windows still manages only the direct child.
 
+### Optional service plugin: Lark `/job` intake for RoveTap projects (rovetap-jobs) <a id="rovetap-jobs"></a>
+
+`plugins/rovetap-jobs` is a repository-shipped plugin you install explicitly. Its auto service intercepts `/job [project] [instruction]` messages from dispatch groups through `eventHandlers` (it replies `stop` for recognized commands and `continue` for ordinary traffic), reads verifiable material in the topic with the bot's own credentials, creates a job for a fixed project leader through local `pairfob project submit/status`, and posts acceptance and phase updates back into the original topic. It starts no extra Agent and has no third-party runtime dependencies. The full operator guide, including the config key reference and troubleshooting, is [`plugins/rovetap-jobs/README.md`](../../plugins/rovetap-jobs/README.md) (Chinese).
+
+Enable the plugin in chats that support topic replies. If Feishu reports that the chat lacks topic support (230071), the receipt is marked as failed.
+
+Shortest working sequence; see the plugin README for details:
+
+```bash
+# 1) Enable the dedicated pairfob project entry, bind one leader, then restart the pairfob hub
+pairfob hub project-job enable --project rovetap --leader pl_<24 hex chars>
+# 2) Install and trust the service capability
+dutydeck plugin install ./plugins/rovetap-jobs --yes
+# 3) Write a 0600 config at <database-dir>/plugins/.data/rovetap-jobs/config.json:
+#    appId, handlerToken(File), appSecret(File), allowedChatIds, commanderOpenIds,
+#    selfOpenId (bot.open_id) if you want `@bot /job`,
+#    a fixed listen.port (the default 0 picks a random port and cannot back a stable
+#    eventHandlers URL), pairfob.bin (absolute path), and the hub-printed
+#    pairfob.socket/tokenFile
+# 4) Restart the host so the auto service starts, then check health
+dutydeck restart            # systemd units: dutydeck restart --unit <unit>
+curl http://127.0.0.1:<fixed-port>/healthz
+# 5) Bind the message event handler last (the array replaces wholesale; append to existing handlers)
+dutydeck settings bot set cli_xxx 'eventHandlers=[{"id":"rovetap-jobs","eventTypes":["im.message.receive_v1"],"url":"http://127.0.0.1:<fixed-port>/lark/events","token":"<same value as handlerToken>"}]'
+```
+
+Two boundaries come up often. The first is @-mentions and visibility: a bare `/job` is accepted whenever Feishu delivers the event and does not need `selfOpenId`; an `@bot /job` form is accepted only when the configured trusted `selfOpenId` exactly matches the mention `open_id` in the event — without it (or on a mismatch) the message continues through Dutydeck. So when the Feishu app only receives @-addressed group messages, set `selfOpenId` first (`bot.open_id` from `GET /open-apis/bot/v3/info` with the same app credentials); otherwise use a bare `/job` after the `im:message.group_msg` scope is approved and published. The second is material: forward the feedback to the group, open its topic, and send `/job` or `@bot /job`. The forwarded message can be the topic root, or a merged forward can appear beneath an ordinary title. A single forwarded message does not always carry a platform forwarding marker. When several sources are available, the original commander selects one in the same topic using `/job 选 #<short code>` from the receipt; the plugin verifies the choice and sends the original instruction and selected material to the leader. The selection prompt lasts 24 hours; after it expires, quote the material again and send `/job`. Follow the receipt if attribution, ordering, or completeness cannot be established. Duplicate deliveries and restarts reuse durable state; an unknown submission outcome is reconciled before any retry. Instructions and material are each capped at 4000 Unicode code points; both `limits.maxInstructionChars` and `limits.maxMaterialChars` can only lower that. On configuration, `listen.host` may only be a local loopback address; if required values such as the material-reading `appSecret`, `pairfob.bin`, or the pairfob project token file are missing, the service fails at startup and names the config key or path on stderr instead of accepting `/job` commands that never receive a reply.
+
+When the project connection fails before submission, the plugin waits and retries with the original saved command and material. An unknown submission outcome triggers a status lookup by the original key.
+
+The acceptance reply includes a task number and a title fragment. In the RoveTap desktop client connected to the hub, go to **Projects** and open **Project leader** under the relevant project. On the updated desktop board, enter the full task number in **Search tasks** to distinguish tasks that share the default title from a bare `/job`. On older versions and mobile, look for the title fragment. For tasks with the same title, compare the quoted source and intake time under **Job source** in the task details. Progress updates continue in the original topic. An optional `webBaseUrl` opens the task only in a RoveTap environment with an existing hub connection. Feishu's in-app browser shows the connection screen when it has no such connection.
+
 ## Controlled plugin results
 
 A trusted `providers` plugin registers exports through `api.registerResultTool({ name, description, inputSchema, execute })`. `inputSchema.parse(input)` validates arguments; `execute(input, { invocationId, requester, signal })` returns `Promise<{ files: Array<{ name: string, data: Uint8Array }> }>`. Tools return names and bytes without filesystem paths, recipients or a model-visible body. The host stores bytes and sends a fixed viewing notice. The model receives only `deliveryId`, `status` and `fileCount`; `delivered` confirms the notice, not a download or overall task completion.

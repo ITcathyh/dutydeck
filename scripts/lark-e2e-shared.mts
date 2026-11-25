@@ -20,6 +20,23 @@ export async function withTimeout<T>(promise: Promise<T>, ms: number, label: str
   }
 }
 
+type CleanupStep = (label: string, work: () => unknown, timeoutMs?: number) => Promise<void>;
+
+/** Run cleanup once, including when normal completion races with termination. */
+export function createCleanup(cleanup: (isFailure: boolean, step: CleanupStep) => Promise<void>, logger: Pick<ArtifactLogger, 'flush'>) {
+  let pending: Promise<Error | undefined> | undefined;
+  return (isFailure: boolean) => pending ??= Promise.resolve().then(async () => {
+    let failure: Error | undefined;
+    const step: CleanupStep = async (label, work, timeoutMs = 10_000) => {
+      try { await withTimeout(Promise.resolve().then(work), timeoutMs, label); }
+      catch (error) { if (!failure) failure = error as Error; }
+    };
+    await cleanup(isFailure, step);
+    await logger.flush().catch(() => {});
+    return failure;
+  });
+}
+
 /** Toasts sit on top of the save bar; a click would otherwise wait until each one expires. */
 export async function closeToasts(page: Page): Promise<void> {
   const close = page.getByRole('button', { name: /^关闭通知：/ });

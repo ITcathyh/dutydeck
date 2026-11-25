@@ -547,30 +547,45 @@ describe('512 KiB 宿主证据限额与 omittedCounts', () => {
     expect(again.verificationSnapshot.length).toBe(snapshot.verificationSnapshot.length);
   });
 
-  it('当前活跃的旧目标即使不最新也被优先保留', () => {
+  it('活跃目标优先，同时间的已完成目标按编号挑选，发布仍按创建时间和编号升序', () => {
+    const recentIds = Array.from({ length: goalCount - 1 }, (_, index) => `task_${String(index).padStart(4, '0')}`);
+    const queuedId = recentIds[0]!;
     const executions = [
-      // 旧但仍 running。
+      ...recentIds.toReversed().map(id => execution(task(id, {
+        status: id === queuedId ? 'queued' : 'completed',
+        createdAt: new Date(baseMs + 1000).toISOString(),
+        prompt: 'x'.repeat(1500)
+      }))),
       execution(
         task('task_old_active', {
           status: 'running',
           createdAt: new Date(baseMs).toISOString(),
           prompt: 'x'.repeat(1500)
         })
-      ),
-      // 大量更新的已完成目标。
-      ...Array.from({ length: goalCount - 1 }, (_, i) =>
-        execution(
-          task(`task_${String(i).padStart(4, '0')}`, {
-            status: 'completed',
-            createdAt: new Date(baseMs + (i + 1) * 1000).toISOString(),
-            prompt: 'x'.repeat(1500)
-          })
-        )
       )
     ];
     const snapshot = buildHostEvidenceSnapshot(input({ executions }), context);
     expect(snapshot.omittedGoalsCount).toBeGreaterThan(0);
-    expect(snapshot.taskGoals.map(g => g.taskId)).toContain('task_old_active');
+    expect(snapshot.taskGoals.map(g => g.taskId)).toEqual([
+      'task_old_active', queuedId, ...recentIds.slice(1 + snapshot.omittedGoalsCount)
+    ]);
+  });
+
+  it('更新时间相同且超预算时按编号选取 steering 和模型配置，发布仍按编号升序', () => {
+    const ids = Array.from({ length: 700 }, (_, index) => `task_${String(index).padStart(4, '0')}`);
+    const newestFirst = [...ids].reverse();
+    const executions = newestFirst.map(id => execution(task(id), {
+      steering: steering(id, 'task_target', 'att_target', 'delivered')
+    }));
+    const missingModelId = ids.at(-2);
+    const accepted = newestFirst.map(id => acceptedV2(id, id === missingModelId ? undefined : 'm'.repeat(100)));
+    const modelIds = ids.filter(id => id !== missingModelId);
+    const snapshot = buildHostEvidenceSnapshot(input({ executions, accepted }), context);
+
+    expect(snapshot.omittedSteeringCount).toBeGreaterThan(0);
+    expect(snapshot.steeringRelations.map(relation => relation.steeringTaskId)).toEqual(ids.slice(snapshot.omittedSteeringCount));
+    expect(snapshot.omittedModelConfigsCount).toBeGreaterThan(0);
+    expect(snapshot.modelConfigs.map(model => model.taskId)).toEqual(modelIds.slice(snapshot.omittedModelConfigsCount));
   });
 
   it('小数据集零省略', () => {

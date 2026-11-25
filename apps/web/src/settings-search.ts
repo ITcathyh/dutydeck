@@ -121,7 +121,7 @@ export function settingsSearchActions(bots: Array<{ appId: string; name: string 
 }
 
 /** Open existing disclosure panels; focusing never changes a saved setting. */
-export function focusSettingField(root: HTMLElement, anchor: string): boolean {
+function focusSettingField(root: HTMLElement, anchor: string): boolean {
   const target = Array.from(root.querySelectorAll<HTMLElement>('[id]')).find(node => node.id === anchor);
   if (!target) return false;
   for (let parent = target.parentElement; parent && root.contains(parent); parent = parent.parentElement) {
@@ -130,4 +130,14 @@ export function focusSettingField(root: HTMLElement, anchor: string): boolean {
   target.scrollIntoView?.({ block: 'center' });
   target.focus({ preventScroll: true });
   return true;
+}
+
+export function focusSettingFieldWhenAvailable(root: HTMLElement, anchor: string, fallbackAnchor?: string) {
+  if (focusSettingField(root, anchor)) return;
+  if (fallbackAnchor) focusSettingField(root, fallbackAnchor);
+  const observer = new MutationObserver(() => {
+    if (focusSettingField(root, anchor)) observer.disconnect();
+  });
+  observer.observe(root, { childList: true, subtree: true });
+  return () => observer.disconnect();
 }

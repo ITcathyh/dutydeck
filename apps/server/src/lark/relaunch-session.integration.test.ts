@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { initGitWorkspace } from '../../../../tests/support/git-workspace.js';
 import { createRepositories } from '@dutydeck/storage';
 import { DutydeckRuntime } from '@dutydeck/runtime';
 import { PtyCliDriver } from '@dutydeck/pty-driver';
@@ -76,9 +77,13 @@ const callbackValueOf = (card: any, elementId: string) => {
 const callbackButtonCount = (card: any) => (JSON.stringify(buildLarkCard(card)).match(/"type":"callback"/g) ?? []).length;
 
 /** web: 配置 Web 地址并要求登录，页脚「查看详情」渲染成登录回调按钮。 */
-async function blockedTopic({ thread = true, web = false } = {}) {
-  const cwd = await mkdtemp(join(tmpdir(), 'dutydeck-lark-relaunch-'));
-  const path = join(cwd, 'state.db');
+async function blockedTopic({ thread = true, web = false, gitWorkspace = false } = {}) {
+  const directory = await mkdtemp(join(tmpdir(), 'dutydeck-lark-relaunch-'));
+  cleanups.push(async () => { await rm(directory, { recursive: true, force: true }); });
+  const cwd = gitWorkspace ? join(directory, 'repo') : directory;
+  if (gitWorkspace) initGitWorkspace(cwd);
+  const path = join(directory, 'state.db');
+  const workspaceRoot = join(directory, 'worktrees');
   const agent: AgentConfig = { id: 'relaunch-fixture', name: 'Fixture', command: 'unused', args: [], protocol: 'pty-cli', cwd, env: {},
     permissionMode: 'full-trust', timeout: 60, capabilities: { pause: false, resume: true }, builtin: false };
   const config: StoredLarkConfig = { appId: 'app', appSecret: 'fixture', workspace: cwd, defaultAgentId: agent.id,
@@ -110,7 +115,7 @@ async function blockedTopic({ thread = true, web = false } = {}) {
   // 第一个进程：两条请求进同一个话题会话，第一条执行中、第二条排队。
   let repos = createRepositories(path, { newDatabaseAuthority: 'ledger_v1' });
   await repos.config.set(larkBotsConfigKey, JSON.stringify([config]));
-  let runtime = new DutydeckRuntime(repos, { providers: defaultDriverProviders(), driverIdleTimeoutMs: 0, probe, driverFactory: factory(false) as any });
+  let runtime = new DutydeckRuntime(repos, { providers: defaultDriverProviders(), driverIdleTimeoutMs: 0, workspaceRoot, probe, driverFactory: factory(false) as any });
   await runtime.initialize([agent]);
   const first = new LarkMessageCoordinator(runtime as any, cardService('p1') as any, silentLog(), Math.random, 'ou_bot',
     undefined, repos.channelMappings, undefined, undefined, undefined, { store: repos.config });
@@ -127,13 +132,13 @@ async function blockedTopic({ thread = true, web = false } = {}) {
 
   // 守护进程重启：旧执行无法确认安全停止，重启后的 driverFactory 对旧会话一律拒绝。
   repos = createRepositories(path, { newDatabaseAuthority: 'ledger_v1' });
-  runtime = new DutydeckRuntime(repos, { providers: defaultDriverProviders(), driverIdleTimeoutMs: 0, probe, driverFactory: factory(true) as any });
+  runtime = new DutydeckRuntime(repos, { providers: defaultDriverProviders(), driverIdleTimeoutMs: 0, workspaceRoot, probe, driverFactory: factory(true) as any });
   await runtime.initialize([agent]);
   const coordinators: LarkMessageCoordinator[] = [];
   const liveRepos = repos, liveRuntime = runtime;
   cleanups.push(async () => {
     for (const coordinator of coordinators) coordinator.stop();
-    await liveRuntime.shutdown(); liveRepos.close(); await rm(cwd, { recursive: true, force: true });
+    await liveRuntime.shutdown(); liveRepos.close();
   });
   const start = async (prefix: string) => {
     const service = cardService(prefix);
@@ -166,7 +171,7 @@ async function blockedTopic({ thread = true, web = false } = {}) {
 
 describe('卡住的任务在飞书里转到新会话（真实 Runtime + SQLite）', () => {
   it('排队受阻的请求：取消原排队、将原文转入新会话队列，旧会话原样保留，重复点击与重启后都只受理一次', async () => {
-    const h = await blockedTopic();
+    const h = await blockedTopic({ gitWorkspace: true });
     const [firstTask, queuedTask] = await h.tasks(h.oldSessionId);
     expect([firstTask!.status, queuedTask!.status]).toEqual(['reconcile_required', 'queued']);
     const blockersBefore = h.blockers();
@@ -245,7 +250,7 @@ describe('卡住的任务在飞书里转到新会话（真实 Runtime + SQLite�
   });
 
   it('需要核对的任务：将原请求转入新会话队列，旧任务状态与阻塞不变，续聊进入新会话', async () => {
-    const h = await blockedTopic();
+    const h = await blockedTopic({ gitWorkspace: true });
     const blockersBefore = h.blockers();
     const { coordinator, service } = await h.start('p2');
     const firstCardId = (await h.mapping('om_first')).saved.card_message_id!;
@@ -283,7 +288,7 @@ describe('卡住的任务在飞书里转到新会话（真实 Runtime + SQLite�
   });
 
   it('同一话题第二次转交：复用上一次转交建出的正常会话，排在它已有的任务后面，不再新建会话', async () => {
-    const h = await blockedTopic();
+    const h = await blockedTopic({ gitWorkspace: true });
     const first = await h.start('p2');
     const rerun = await h.relaunchButton(first.service, 'om_first', 'rerun_in_new_session');
     expect(await first.coordinator.handleAction(rerun.value, 'ou_alice', rerun.context)).toMatchObject({ type: 'success' });
@@ -463,7 +468,7 @@ describe('卡住的任务在飞书里转到新会话（真实 Runtime + SQLite�
   });
 
   it('原排队请求已取消、但交给新会话失败：失败卡说明可再点一次，旧卡按钮保留，再点一次接着受理且只排队一次', async () => {
-    const h = await blockedTopic();
+    const h = await blockedTopic({ gitWorkspace: true });
     const { coordinator, service } = await h.start('p2');
     const run = await h.relaunchButton(service, 'om_queued', 'run_in_new_session');
     // 取消之后的实际存储异常；仅返回 false 的 CAS 竞争会按执行快照重试。

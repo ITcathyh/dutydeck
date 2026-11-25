@@ -8,6 +8,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import '../../../../tests/support/fast-wait-for.js';
+import { initGitWorkspace } from '../../../../tests/support/git-workspace.js';
 import { RelayAskBroker } from '@dutydeck/relay';
 import { createRepositories } from '@dutydeck/storage';
 import { DutydeckRuntime, type AgentDriver } from '@dutydeck/runtime';
@@ -36,15 +37,19 @@ const event = (id: string, text: string): LarkMessageEvent => ({
   mentions: [{ key: '@_user_1', name: 'Dock', openId: 'ou_bot' }]
 });
 
-async function harness() {
-  const cwd = await mkdtemp(join(tmpdir(), 'dutydeck-lark-turn-stall-'));
-  const repos = createRepositories(join(cwd, 'state.db'), { newDatabaseAuthority: 'ledger_v1' });
+async function harness({ gitWorkspace = false } = {}) {
+  const directory = await mkdtemp(join(tmpdir(), 'dutydeck-lark-turn-stall-'));
+  cleanups.push(async () => { await rm(directory, { recursive: true, force: true }); });
+  const cwd = gitWorkspace ? join(directory, 'repo') : directory;
+  if (gitWorkspace) initGitWorkspace(cwd);
+  const repos = createRepositories(join(directory, 'state.db'), { newDatabaseAuthority: 'ledger_v1' });
   const idle = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
   const prompts: string[] = [];
   const interrupt = vi.fn();
   let emit!: (event: NormalizedDriverEvent) => void;
   const runtime = new DutydeckRuntime(repos, {
     providers: defaultDriverProviders(),
+    workspaceRoot: join(directory, 'worktrees'),
     probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }),
     awaitingAnswer: id => broker.listPending(id).length > 0,
     driverFactory: (_config, _protocol, onEvent) => {
@@ -92,7 +97,7 @@ async function harness() {
   const coordinator = new LarkMessageCoordinator(runtime, service as any, { info: vi.fn(), warn: vi.fn(), error: vi.fn() }, Math.random, 'ou_bot', undefined, repos.channelMappings,
     async () => 'group', undefined, undefined, { store: repos.config, broker });
   await coordinator.initializeWorkflows(config);
-  cleanups.push(async () => { coordinator.stop(); broker.close(); await broker.flush(); await runtime.shutdown(); repos.close(); idle.kill('SIGKILL'); await rm(cwd, { recursive: true, force: true }); });
+  cleanups.push(async () => { coordinator.stop(); broker.close(); await broker.flush(); await runtime.shutdown(); repos.close(); idle.kill('SIGKILL'); });
   // 墙钟整体前移，其余照常流逝：静默时长与 CPU 采样窗口都按它算。
   const realNow = Date.now.bind(Date);
   let offset = 0;
@@ -169,7 +174,7 @@ describe.runIf(existsSync('/proc/self/stat'))('飞书卡上的「可能卡住」
   }, 30_000);
 
   it('卡住时点排队卡的「在新会话中执行」被受理，原来那一轮不被中断', async () => {
-    const h = await harness();
+    const h = await harness({ gitWorkspace: true });
     await h.dispatch('om_1', '第一件事');
     await vi.waitFor(() => expect(h.prompts).toHaveLength(1));
     await h.dispatch('om_2', '第二件事');
