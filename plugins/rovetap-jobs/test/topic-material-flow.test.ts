@@ -63,10 +63,41 @@ describe('RoveTap material from real-shaped topic replies', () => {
     h = await setupHarness();
     seedRoot('产品反馈'); // By ID only: the thread history does not contain the root.
     seedMerged('om_forward', '私聊反馈原话');
+    seedReply('om_old_job', '@_user_1 /job 旧派单');
+    seedReply('om_bot', '项目已接单', { rawExtra: { sender: { sender_type: 'app' } } });
+    seedReply('om_recalled', '已撤回正文', { rawExtra: { ...user, deleted: true } });
+    seedReply('om_later', '命令以后才发的反馈', { createTime: '1764000070000' });
     await deliver();
     expect(await submittedMaterial()).toEqual([{ message_id: 'om_forward', text: '私聊反馈原话' }]);
     expect(h.lark.requests.filter((r) => r.method === 'GET' && r.path.endsWith('/messages')).map((r) => r.query))
       .toEqual([expect.objectContaining({ container_id_type: 'thread', container_id: threadId })]);
+  });
+
+  it.each(['text', 'post'])('asks for a choice between an earlier merge forward and a plain %s reply', async (messageType) => {
+    h = await setupHarness();
+    seedRoot('产品反馈');
+    seedMerged('om_earlier', '早先的合并转发');
+    const text = '后来逐条转发的私聊反馈';
+    seedReply('om_later_forward', text, {
+      messageType,
+      createTime: '1764000030000',
+      ...(messageType === 'post' ? { content: { content: [[{ tag: 'text', text }]] } } : {}),
+    });
+    await deliver();
+    await waitFor(() => h!.svc.store.getJobByMessage(messageId)?.stage === 'needs_input' || h!.hub()?.submitCount);
+    expect(h.hub()).toBeNull();
+    const job = h.svc.store.getJobByMessage(messageId);
+    expect(job).toMatchObject({
+      reasonCode: 'multiple',
+      materialChoices: [
+        { messageId: 'om_earlier', preview: '早先的合并转发' },
+        { messageId: 'om_later_forward', preview: text },
+      ],
+    });
+    await h.svc.store.mutate((state) => {
+      Object.assign(state.jobs[job.sourceKey], { stage: 'queued', selectedMaterialId: 'om_later_forward' });
+    });
+    expect(await submittedMaterial()).toEqual([{ message_id: 'om_later_forward', text }]);
   });
 
   it('counts a merged-forward root missing from the list, and previews only verified older forwards', async () => {
@@ -90,12 +121,34 @@ describe('RoveTap material from real-shaped topic replies', () => {
     const original = '😀'.repeat(4_100);
     seedRoot(original, { threadId });
     seedReply('om_later', '命令后发来的评论', { createTime: '1764000070000' });
+    seedReply(messageId, '/job', { createTime: COMMAND_CREATE_TIME });
     await deliver({ threadId: undefined });
     const [material] = await submittedMaterial();
     expect(material.message_id).toBe(rootId);
     expect(Array.from(material.text)).toHaveLength(4_000);
     expect(material.text.endsWith('…（材料过长，已截断）')).toBe(true);
     expect(h.hub().lastPayload.thread_id).toBe(threadId);
+  });
+
+  it.each([undefined, threadId])('keeps a flat explicit quote when the quoted root thread is %s', async (rootThreadId) => {
+    h = await setupHarness();
+    seedRoot('用户明确引用的反馈', { threadId: rootThreadId });
+    seedMerged('om_other_forward', '同一根可能有另一个话题的反馈');
+    seedReply(messageId, '/job', { threadId: undefined, createTime: COMMAND_CREATE_TIME });
+    await deliver({ threadId: undefined });
+    await waitFor(() => h!.svc.store.getJobByMessage(messageId)?.stage === 'needs_input' || h!.hub()?.submitCount);
+    expect(h.hub()?.lastPayload.materials).toEqual([{ message_id: rootId, text: '用户明确引用的反馈' }]);
+    expect(h.lark.requests.some((r) => r.method === 'GET' && r.path.endsWith('/messages'))).toBe(false);
+  });
+
+  it('does not use the root thread when the command detail cannot establish its own scope', async () => {
+    h = await setupHarness();
+    seedRoot('产品反馈', { threadId });
+    seedMerged('om_other_forward', '同一根下另一话题的内容');
+    await deliver({ threadId: undefined });
+    await waitFor(() => h!.svc.store.getJobByMessage(messageId)?.stage === 'needs_input' || h!.hub()?.submitCount);
+    expect(h.hub()).toBeNull();
+    expect(h.lark.requests.some((r) => r.method === 'GET' && r.path.endsWith('/messages'))).toBe(false);
   });
 
   it('uses an explicitly quoted non-root reply before any topic discovery', async () => {

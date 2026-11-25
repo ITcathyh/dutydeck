@@ -329,10 +329,50 @@ describe('materials / unique-forward discovery inside the topic only', () => {
     await expect(resolveMaterial({ client: empty, event: event() }))
       .resolves.toMatchObject({ status: 'need', reason: 'no_text' });
 
-    const many = [mfMsg('om_mf1'), mfMsg('om_mf2')];
-    const multi = fakeClient({ pages: [{ items: many, hasMore: false }] });
+    const many = ['om_mf1', 'om_mf2'].map((id) => mfMsg(id, { threadId: 'omt_topic', sender: { sender_type: 'user' } }));
+    const items = new Map(many.map((m) => [
+      m.messageId, [m, textMsg(`${m.messageId}_child`, '转发正文', { upperMessageId: m.messageId })],
+    ]));
+    const multi = fakeClient({ items, pages: [{ items: many, hasMore: false }] });
     await expect(resolveMaterial({ client: multi, event: event() }))
-      .resolves.toMatchObject({ status: 'need', reason: 'multiple', candidateCount: 2 });
+      .resolves.toMatchObject({
+        status: 'need', reason: 'multiple', candidateCount: 2,
+        choices: many.map((m) => ({ messageId: m.messageId, preview: '转发正文' })),
+      });
+  });
+
+  it('retries a failed detail read instead of losing the material choices', async () => {
+    const sender = { sender_type: 'user' };
+    const first = mfMsg('om_first', { threadId: 'omt_topic', sender });
+    const second = mfMsg('om_second', { threadId: 'omt_topic', sender });
+    const pages = () => ({ items: [first, second], hasMore: false });
+    const items = new Map([
+      [first.messageId, [first, textMsg('om_first_child', '先转发的原文', { upperMessageId: first.messageId })]],
+      [second.messageId, [second, textMsg('om_second_child', '后转发的原文', { upperMessageId: second.messageId })]],
+    ]);
+    const errors = { om_second: networkError as Error | undefined };
+    const client = fakeClient({ items, errors, listImpl: pages });
+    await expect(resolveMaterial({ client, event: event() })).resolves.toMatchObject({ status: 'error' });
+    errors.om_second = undefined;
+    await expect(resolveMaterial({ client, event: event() })).resolves.toMatchObject({
+      status: 'need', reason: 'multiple',
+      choices: [
+        { messageId: first.messageId, preview: '先转发的原文' },
+        { messageId: second.messageId, preview: '后转发的原文' },
+      ],
+    });
+  });
+
+  it('does not dispatch an earlier merge forward when a plausible reply cannot be verified', async () => {
+    const forward = mfMsg('om_forward', { threadId: 'omt_topic' });
+    const reply = textMsg('om_feedback', '列表里的另一条反馈', { threadId: 'omt_topic' });
+    const client = fakeClient({
+      items: new Map([[forward.messageId, [forward, textMsg('om_child', '合并转发', { upperMessageId: forward.messageId })]]]),
+      pages: [{ items: [forward, reply], hasMore: false }],
+    });
+    const result = await resolveMaterial({ client, event: event() });
+    expect(result).toMatchObject({ status: 'need', reason: 'inaccessible' });
+    expect(result).not.toHaveProperty('choices');
   });
 
   it('only merge_forward is a confirmable forward candidate', () => {
@@ -367,7 +407,7 @@ describe('materials / unique-forward discovery inside the topic only', () => {
       records: new Map([['om_mf_late', candidate]]),
       children: new Map([['om_mf_late', [child]]]),
       pages: [
-        { items: [textMsg('om_a', '闲聊一'), textMsg('om_b', '闲聊二')], hasMore: true, pageToken: 'pt1' },
+        { items: [textMsg('om_receipt', '接单回执', { sender: { sender_type: 'app' } })], hasMore: true, pageToken: 'pt1' },
         { items: [candidate], hasMore: false, pageToken: null },
       ],
     });

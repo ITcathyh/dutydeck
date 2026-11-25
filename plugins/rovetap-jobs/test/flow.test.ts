@@ -231,8 +231,10 @@ describe('rovetap-jobs  authorization and rejection', () => {
 describe('rovetap-jobs  material selection', () => {
   it('multiple forwards without a quote asks for an explicit quote', async () => {
     h = await setupHarness();
-    h.lark.messages.set('om_mf1', apiMessage({ messageId: 'om_mf1', messageType: 'merge_forward', threadId: 'omt_multi' }));
-    h.lark.messages.set('om_mf2', apiMessage({ messageId: 'om_mf2', messageType: 'merge_forward', threadId: 'omt_multi' }));
+    for (const id of ['om_mf1', 'om_mf2']) {
+      h.lark.messages.set(id, apiMessage({ messageId: id, messageType: 'merge_forward', threadId: 'omt_multi' }));
+      h.lark.messages.set(`${id}_child`, apiMessage({ messageId: `${id}_child`, upperMessageId: id, text: '转发正文' }));
+    }
     await h.post(makeEnvelope({ messageId: 'om_multi', ...seedTopic('omt_multi'), text: '/job 调查' }));
     await waitFor(() => h!.lark.replies.some((r) => r.text.includes('多条')));
     expect(h.hub()).toBeNull();
