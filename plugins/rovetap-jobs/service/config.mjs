@@ -1,6 +1,6 @@
 // Configuration loading + validation for rovetap-jobs.
 //
-// Discovery order (see dd.notes):
+// Discovery order:
 //   1. --config <path>
 //   2. $ROVETAP_JOBS_CONFIG
 //   3. $DUTYDECK_PLUGIN_DATA/config.json   (real host-supervised location)

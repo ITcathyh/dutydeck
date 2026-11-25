@@ -240,6 +240,32 @@ Reference files you want the Leader to receive on every run go into the manifest
 
 Start, stop, restart and automatic restart requests for the same plugin service run in order; a restart ends the old instance before starting its replacement. On POSIX systems, stopping waits for workers in the owned process group too, forcibly ending survivors after the grace period. A parent exiting first does not report the service as stopped. Failed cleanup returns an error; another instance can start only after the old one has been cleaned up. Descendants that leave the process group are outside this cleanup scope; Windows still manages only the direct child.
 
+### Optional service plugin: Lark `/job` intake for RoveTap projects (rovetap-jobs) <a id="rovetap-jobs"></a>
+
+`plugins/rovetap-jobs` is a repository-shipped plugin you install explicitly. Its auto service intercepts `/job [project] [instruction]` messages from dispatch groups through `eventHandlers` (it replies `stop` for recognized commands and `continue` for ordinary traffic), reads the quoted message or the single verifiable forward/merge-forward in the topic with the bot's own credentials, creates a job for a fixed project leader through local `pairfob project submit/status`, and posts acceptance and phase updates back into the original topic. It starts no extra Agent and has no third-party runtime dependencies. The full operator guide, including the config key reference and troubleshooting, is [`plugins/rovetap-jobs/README.md`](../../plugins/rovetap-jobs/README.md) (Chinese).
+
+Shortest working sequence; see the plugin README for details:
+
+```bash
+# 1) Enable the dedicated pairfob project entry, bind one leader, then restart the pairfob hub
+pairfob hub project-job enable --project rovetap --leader pl_<24 hex chars>
+# 2) Install and trust the service capability
+dutydeck plugin install ./plugins/rovetap-jobs --yes
+# 3) Write a 0600 config at <database-dir>/plugins/.data/rovetap-jobs/config.json:
+#    appId, handlerToken(File), appSecret(File), allowedChatIds, commanderOpenIds,
+#    selfOpenId (bot.open_id) if you want `@bot /job`,
+#    a fixed listen.port (the default 0 picks a random port and cannot back a stable
+#    eventHandlers URL), pairfob.bin (absolute path), and the hub-printed
+#    pairfob.socket/tokenFile
+# 4) Restart the host so the auto service starts, then check health
+dutydeck restart            # systemd units: dutydeck restart --unit <unit>
+curl http://127.0.0.1:<fixed-port>/healthz
+# 5) Bind the message event handler last (the array replaces wholesale; append to existing handlers)
+dutydeck settings bot set cli_xxx 'eventHandlers=[{"id":"rovetap-jobs","eventTypes":["im.message.receive_v1"],"url":"http://127.0.0.1:<fixed-port>/lark/events","token":"<same value as handlerToken>"}]'
+```
+
+Two boundaries come up often. The first is @-mentions and visibility: a bare `/job` is accepted whenever Feishu delivers the event and does not need `selfOpenId`; an `@bot /job` form is accepted only when the configured trusted `selfOpenId` exactly matches the mention `open_id` in the event — without it (or on a mismatch) the message continues through Dutydeck. So when the Feishu app only receives @-addressed group messages, set `selfOpenId` first (`bot.open_id` from `GET /open-apis/bot/v3/info` with the same app credentials); otherwise use a bare `/job` after the `im:message.group_msg` scope is approved and published. The second is material: exactly one source provably in the same chat/topic is accepted. A re-fetched explicit quote wins; without one, a forward is used only inside a native `omt_` topic that can be enumerated completely with exactly one older `merge_forward`. Several candidates, incomplete pagination, missing attribution, or a cross-chat/cross-topic item all turn into an explicit quote request. Material is capped at 4000 Unicode code points; `limits.maxMaterialChars` can only lower that.
+
 ## Controlled plugin results
 
 A trusted `providers` plugin registers exports through `api.registerResultTool({ name, description, inputSchema, execute })`. `inputSchema.parse(input)` validates arguments; `execute(input, { invocationId, requester, signal })` returns `Promise<{ files: Array<{ name: string, data: Uint8Array }> }>`. Tools return names and bytes without filesystem paths, recipients or a model-visible body. The host stores bytes and sends a fixed viewing notice. The model receives only `deliveryId`, `status` and `fileCount`; `delivered` confirms the notice, not a download or overall task completion.
