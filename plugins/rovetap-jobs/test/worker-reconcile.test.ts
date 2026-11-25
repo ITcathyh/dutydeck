@@ -223,8 +223,47 @@ describe('rovetap pending reminder is armed once and delivery state is protected
     expect(pf.getProjectStatus).toHaveBeenCalledTimes(4); // initial + 3 due re-checks
   });
 
-  it('幂等通道送达结果 unknown 时，核对不会把它打回 pending；重试仍走同一 uuid', async () => {
-    const c = await setup({ sendResult: { outcome: 'unknown', reason: 'server:500' }, idempotent: true });
+  it('NOT_FOUND 核对不把已 failed 的提醒记录重置为 pending，也不重发', async () => {
+    const c = await setup();
+    await seedJob(c.store, 'unknown');
+    await c.store.mutate((state) => {
+      const reply = c.store.outbound(state, KEY, 'pending');
+      reply.status = 'failed';
+      reply.attempts = 4;
+      reply.error = 'definitive 400';
+    });
+
+    await c.worker.kick(KEY);
+
+    const reply: any = c.store.getJob(KEY).replies.pending;
+    expect(reply.status).toBe('failed');
+    expect(reply.attempts).toBe(4);
+    expect(c.sender.calls).toHaveLength(0);
+  });
+
+  it('NOT_FOUND 核对不把窗口内等待 retryAt 的 sending 记录重置为 pending', async () => {
+    const c = await setup({ idempotent: true });
+    await seedJob(c.store, 'unknown');
+    const uuid = 'fixed-sending-uuid';
+    await c.store.mutate((state) => {
+      const reply = c.store.outbound(state, KEY, 'pending');
+      reply.uuid = uuid;
+      reply.status = 'sending';
+      reply.attempts = 1;
+      reply.firstAttemptAt = new Date().toISOString();
+      reply.retryAt = Date.now() + 60_000; // backoff not due: flush must not touch it
+    });
+
+    await c.worker.kick(KEY);
+
+    const reply: any = c.store.getJob(KEY).replies.pending;
+    expect(reply.status).toBe('sending'); // not downgraded to 'pending' by reconcile
+    expect(reply.uuid).toBe(uuid);
+    expect(reply.attempts).toBe(1);
+    expect(c.sender.calls).toHaveLength(0);
+  });
+
+  it('幂等通道送达结果 unknown 时，核对不会把它打回 pending；重试仍走同一 uuid', async () => {    const c = await setup({ sendResult: { outcome: 'unknown', reason: 'server:500' }, idempotent: true });
     await seedJob(c.store, 'ready');
     await c.worker.kick(KEY);
 

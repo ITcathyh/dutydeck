@@ -90,11 +90,15 @@ describe('rovetap-jobs fixed-port bind conflict (real main.mjs process)', () => 
       listen: { host: '127.0.0.1', port, path: '/lark/events' },
       lark: { appId: APP, appSecret: 'test-secret', baseUrl: lark.baseUrl },
       reply: { mode: 'lark-api' },
+      // Complete required startup config so the loser reaches bind and fails
+      // with EADDRINUSE rather than config validation.
+      pairfob: { bin: process.execPath, project: 'rovetap', tokenFile: join(dir, 'project.token') },
       // No tick should run before the bind failure tears the process down.
       pollMs: 60_000,
     };
     const configPath = join(dir, 'config.json');
     await writeFile(configPath, JSON.stringify(config));
+    await writeFile(config.pairfob.tokenFile, 'test-project-token');
 
     let stderr = '';
     child = spawn(process.execPath, [MAIN, '--config', configPath], {

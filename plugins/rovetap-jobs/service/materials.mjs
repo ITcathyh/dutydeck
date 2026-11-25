@@ -229,17 +229,18 @@ export async function resolveMaterial({ client, event, maxChars = ROVE_ENTRY_COD
     return verifyCandidate(client, earlier[0], event, limit);
   }
 
-  // Anchor time is definitively unavailable (e.g. read-back not found): keep the
-  // complete-page uniqueness verdict without the temporal restriction.
-  if (candidates.length > 1) return need('multiple', { candidateCount: candidates.length });
-  return verifyCandidate(client, candidates[0], event, limit);
+  // Anchor time is definitively unavailable (e.g. missing on the event and
+  // read-back not found): we cannot prove the candidate predates the command,
+  // so even a single candidate is not green-lit. Ask for an explicit quote.
+  return need('incomplete', { detail: 'command_time_unknown' });
 }
 
 /**
  * @returns {Promise<{time:number|null, abort?:undefined} | {time?:undefined, abort:object}>}
  *   `abort` is a retryable resolveMaterial result when an anchor read fails
  *   transiently; otherwise `time:null` means the anchor cannot be dated for
- *   definitive reasons (caller proceeds best-effort).
+ *   definitive reasons. The caller treats that as fail-closed: without a
+ *   provable command time no unquoted candidate is trusted.
  */
 async function resolveCommandTime(client, event, listed) {
   const fromEvent = parseMessageTime(event.commandCreateTime ?? event.createTime);
@@ -260,7 +261,8 @@ async function resolveCommandTime(client, event, listed) {
     const classified = classifyReadError(error);
     // Transient network/server/auth failures must be retried, not decided on.
     if (classified.status === 'error') return { abort: classified };
-    // not_found/forbidden/bad_request for the anchor: proceed best-effort.
+    // Definitive anchor read rejection: date unknown; the caller fails closed
+    // and asks for a quote rather than trusting an undated candidate.
     return { time: null };
   }
 }

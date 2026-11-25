@@ -235,6 +235,53 @@ describe('rovetap-jobs  material selection', () => {
     expect(material.text).toContain('搜索页打不开文件');
   });
 
+  it('persists the real event message.create_time as the command time anchor', async () => {
+    h = await setupHarness();
+    h.lark.messages.set('om_mf_t', apiMessage({ messageId: 'om_mf_t', messageType: 'merge_forward', threadId: 'omt_tanchor' }));
+    h.lark.messages.set('om_child_t', apiMessage({
+      messageId: 'om_child_t', upperMessageId: 'om_mf_t', threadId: 'omt_tanchor', text: '时间锚点材料正文',
+    }));
+    await h.post(makeEnvelope({
+      eventId: 'ev_ctime', messageId: 'om_ctime', threadId: 'omt_tanchor',
+      createTime: '1764000060000',
+    }));
+    await waitFor(() => h!.svc.store.getJobByMessage('om_ctime')?.commandCreateTime === '1764000060000');
+    // The persisted anchor is what lets the older candidate pass the time gate.
+    await waitFor(() => h!.hub()?.submitCount === 1);
+  });
+
+  it('does not green-light a forward posted AFTER the command: asks for a quote and never submits', async () => {
+    h = await setupHarness();
+    // Command at T0, candidate one minute later (the "late-arriving material").
+    h.lark.messages.set('om_mf_late', apiMessage({
+      messageId: 'om_mf_late', messageType: 'merge_forward', threadId: 'omt_late', createTime: '1764000060000',
+    }));
+    h.lark.messages.set('om_child_late', apiMessage({
+      messageId: 'om_child_late', upperMessageId: 'om_mf_late', threadId: 'omt_late', text: '命令之后才转发的内容',
+    }));
+    await h.post(makeEnvelope({
+      eventId: 'ev_late', messageId: 'om_late', threadId: 'omt_late', createTime: '1764000000000', text: '/job 跟进',
+    }));
+    await waitFor(() => h!.lark.replies.some((r) => r.text.includes('晚于')), { label: 'late-forward guidance' });
+    expect(h.hub()).toBeNull();
+    const job = h.svc.store.getJobByMessage('om_late');
+    expect(job.stage).toBe('needs_input');
+    expect(job.reasonDetail).toBe('no_forward_before_command');
+  });
+
+  it('asks for a quote when the command time cannot be proven end to end', async () => {
+    h = await setupHarness();
+    h.lark.messages.set('om_mf_undated_cmd', apiMessage({ messageId: 'om_mf_undated_cmd', messageType: 'merge_forward', threadId: 'omt_uc' }));
+    // No create_time on the inbound event; the fake Lark has no om_uc_cmd
+    // record to read back, so the anchor is definitively undatable.
+    const envelope = makeEnvelope({ messageId: 'om_uc_cmd', threadId: 'omt_uc' });
+    delete (envelope.event.message as any).create_time;
+    await h.post(envelope);
+    await waitFor(() => h!.lark.replies.some((r) => r.text.includes('无法证明')), { label: 'undatable guidance' });
+    expect(h.hub()).toBeNull();
+    expect(h.svc.store.getJobByMessage('om_uc_cmd')?.reasonDetail).toBe('command_time_unknown');
+  });
+
   it('no forward at all asks the user to forward or quote', async () => {
     h = await setupHarness();
     await h.post(makeEnvelope({ messageId: 'om_none', threadId: 'omt_empty', text: '/job' }));
@@ -306,5 +353,34 @@ describe('rovetap-jobs  command addressing: only bare /job or a real self @menti
     }
     expect(h.svc.store.listJobs()).toHaveLength(0);
     expect(h.hub()).toBeNull();
+  });
+});
+
+describe('rovetap-jobs  instruction length is counted in Unicode code points', () => {
+  it('rejects 4001 code points with an explicit limit hint and creates no order', async () => {
+    h = await setupHarness();
+    seedQuotedText('om_fwd_len', '材料');
+    const longInstruction = '指'.repeat(4001);
+    await h.post(makeEnvelope({
+      eventId: 'ev_len_too_long', messageId: 'om_len_long', parentId: 'om_fwd_len', threadId: 'omt_1', rootId: 'om_root',
+      text: `/job rovetap ${longInstruction}`,
+    }));
+    await waitFor(() => h!.lark.replies.some((r) => r.text.includes('指令过长') && r.text.includes('4000')), {
+      label: 'explicit length hint',
+    });
+    expect(h.hub()).toBeNull();
+    expect(h.svc.store.getJobByMessage('om_len_long')?.reasonCode).toBe('instruction_too_long');
+  });
+
+  it('counts astral characters as one code point each: 2500 emoji (5000 UTF-16 units) is accepted', async () => {
+    h = await setupHarness();
+    seedQuotedText('om_fwd_astral', '材料');
+    const emojiInstruction = '😀'.repeat(2500);
+    await h.post(makeEnvelope({
+      eventId: 'ev_len_astral', messageId: 'om_len_astral', parentId: 'om_fwd_astral', threadId: 'omt_1', rootId: 'om_root',
+      text: `/job rovetap ${emojiInstruction}`,
+    }));
+    await waitFor(() => h!.hub()?.submitCount === 1, { label: 'one submit by code-point rule' });
+    expect(Array.from(h.hub().lastPayload.instruction).length).toBe(2500);
   });
 });

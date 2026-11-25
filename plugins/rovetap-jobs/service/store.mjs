@@ -38,6 +38,9 @@ export function newJobRecord({ sourceKey, appId, eventId, messageId }) {
     threadId: null,
     rootId: null,
     parentId: null,
+    // Trusted command message create_time (ms string) from the inbound event;
+    // temporal anchor for no-quote material discovery.
+    commandCreateTime: null,
     commanderOpenId: null,
     rawText: '',
     instruction: '',

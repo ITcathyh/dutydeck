@@ -180,6 +180,7 @@ export class JobWorker {
     const event = {
       chatId: job.chatId, threadId: job.threadId?.startsWith?.('omt_') ? job.threadId : (job.threadId ?? null),
       rootId: job.rootId, parentId: job.parentId, messageId: job.messageId,
+      commandCreateTime: job.commandCreateTime ?? null,
     };
     // threadId stored may be root om_ when no omt_; materials falls back to chat scan + root filter.
     if (job.threadId && !job.threadId.startsWith('omt_')) event.threadId = null;
@@ -341,13 +342,13 @@ export class JobWorker {
       await this.mutateJob(sourceKey, (j, state) => {
         j.stage = 'unknown';
         j.reconcileAttempts = (j.reconcileAttempts ?? 0) + 1;
-        // The "still checking" reminder is one durable outbound record, created
-        // as 'pending' by outbound(). Never reset 'sent' (would re-notify) or
-        // 'unknown' (bypasses the same-uuid retry backoff) back to pending.
-        const pendingReply = this.store.outbound(state, sourceKey, 'pending');
-        if (pendingReply.status !== 'sent' && pendingReply.status !== 'unknown') {
-          pendingReply.status = 'pending';
-        }
+        // The "still checking" reminder is one durable outbound record. Only
+        // outbound()'s first creation arms it (as 'pending'); an existing
+        // record is NEVER reset to pending here — not 'sent' (would
+        // re-notify), 'unknown' (would bypass same-uuid backoff), 'failed'
+        // (definitive send rejection) nor 'sending' (its retry is governed by
+        // the durable firstAttemptAt/UUID window in flushDueReplies).
+        this.store.outbound(state, sourceKey, 'pending');
         j.nextRunAt = Date.now() + this.backoff(j.reconcileAttempts);
       });
       await this.flushDueReplies(sourceKey);

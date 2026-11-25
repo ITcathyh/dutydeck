@@ -60,6 +60,10 @@ export function normalizeEnvelope(body, selfOpenId = '') {
     chatId: typeof message.chat_id === 'string' ? message.chat_id : '',
     chatType: typeof message.chat_type === 'string' ? message.chat_type : '',
     messageType,
+    // Real im.message.receive_v1 events carry message.create_time as a
+    // millisecond string. It is the trusted command anchor used to prove a
+    // no-quote forward predates the command.
+    createTime: message.create_time ?? message.createTime ?? null,
     parentId: typeof message.parent_id === 'string' ? message.parent_id : '',
     rootId: typeof message.root_id === 'string' ? message.root_id : '',
     threadId: typeof message.thread_id === 'string' ? message.thread_id : '',
@@ -116,8 +120,10 @@ export async function receiveEnvelope({ body, authorization }, { config, store, 
     stage = 'needs_input'; reasonCode = 'unknown_project'; wantsReply = true;
   }
 
-  // Validate instruction length for authorized dispatches.
-  if (stage === 'queued' && parsed.kind === 'job' && parsed.instruction.length > config.limits.maxInstructionChars) {
+  // Validate instruction length for authorized dispatches. The upstream contract
+  // counts Unicode code points, not UTF-16 units.
+  const instructionCodePoints = parsed.kind === 'job' ? Array.from(parsed.instruction).length : 0;
+  if (stage === 'queued' && parsed.kind === 'job' && instructionCodePoints > config.limits.maxInstructionChars) {
     stage = 'needs_input'; reasonCode = 'instruction_too_long'; wantsReply = true;
   }
 
@@ -142,6 +148,7 @@ export async function receiveEnvelope({ body, authorization }, { config, store, 
       threadId: env.threadId || env.rootId || null,
       rootId: env.rootId || null,
       parentId: env.parentId || null,
+      commandCreateTime: env.createTime === null || env.createTime === undefined ? null : String(env.createTime),
       replyAnchor: env.rootId || env.messageId,
       commanderOpenId: env.senderOpenId || null,
       rawText: env.rawText,

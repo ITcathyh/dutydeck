@@ -3,12 +3,13 @@
 // pairfob as data, never evaluated here.
 
 import { buildTaskUrl } from './weblink.mjs';
+import { ROVE_ENTRY_CODEPOINTS } from './materials.mjs';
 
 const PROJECT_LABEL = 'RoveTap';
 
 export function replyText(kind, job, config) {
-  if (kind === 'denial') return denialText(job);
-  if (kind === 'need') return needText(job?.reasonCode);
+  if (kind === 'denial') return denialText(job, config);
+  if (kind === 'need') return needText(job?.reasonCode, job?.reasonDetail);
   if (kind === 'pending') {
     return '委托已记录。' + PROJECT_LABEL + ' 接单结果暂时未知，我会按原来源键只读核对，不会重复建单。';
   }
@@ -21,14 +22,16 @@ export function replyText(kind, job, config) {
   return '';
 }
 
-function denialText(job) {
+function denialText(job, config) {
   switch (job?.reasonCode) {
     case 'forbidden':
       return '你没有在这个派单群使用 /job 的权限，本次命令已停止且不会创建任务。';
     case 'unknown_project':
       return '不明确的项目：当前只支持 rovetap。可使用 `/job rovetap <给 leader 的指令>`，或直接发 `/job <指令>`。';
-    case 'instruction_too_long':
-      return `指令过长（上限见插件配置）。请精简后重新发送 /job。`;
+    case 'instruction_too_long': {
+      const limit = config?.limits?.maxInstructionChars ?? ROVE_ENTRY_CODEPOINTS;
+      return `指令过长：指令上限为 ${limit} 个 Unicode 码点（汉字、字母、emoji 均按码点计；上游固定上限 ${ROVE_ENTRY_CODEPOINTS}，本实例只能调小）。请精简后重新发送 /job。`;
+    }
     default:
       return '该 /job 命令未被接受。';
   }
@@ -49,7 +52,13 @@ function rejectedText(job) {
   }
 }
 
-function needText(reason) {
+function needText(reason, detail) {
+  if (reason === 'incomplete' && (detail === 'command_time_unknown' || detail === 'candidate_time_unknown')) {
+    return '无法证明话题里的转发材料发在你的 /job 命令之前（缺少可核对的消息时间）。为避免把命令之后才到的内容当成材料，请直接引用那条反馈，再发送 /job。';
+  }
+  if (reason === 'none' && detail === 'no_forward_before_command') {
+    return '话题里能识别到的转发晚于你的 /job 命令，不能自动当作本次材料。请直接引用那条反馈（或更早的材料），再发送 /job。';
+  }
   switch (reason) {
     case 'multiple':
       return '当前话题里有多条可识别的转发，请**引用**你要交给项目 leader 的那一条，再发送 /job。';
@@ -77,7 +86,10 @@ function phaseText(phase, job, config) {
   const link = url ? `\n${url}` : '';
   switch (String(phase).toLowerCase()) {
     case 'doing':
-      return `🛠 ${PROJECT_LABEL}：leader 已派工，任务正在处理（doing）。`;
+      // The upstream `doing` projection can also cover waiting for a human.
+      // Say only that the project is processing; never claim a worker/leader
+      // dispatch that the phase does not prove.
+      return `🛠 ${PROJECT_LABEL}：项目正在处理（doing）。`;
     case 'done':
     case 'succeeded':
     case 'completed':

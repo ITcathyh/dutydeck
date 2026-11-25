@@ -12,6 +12,16 @@ export const BOSS = 'ou_boss';
 export const OTHER = 'ou_intruder';
 export const TOKEN = 'handler-bearer-secret';
 
+/**
+ * Fixed millisecond timeline for fake Lark payloads. Seeded API messages
+ * default to MESSAGE_CREATE_TIME and command envelopes to COMMAND_CREATE_TIME
+ * one minute later, so the no-quote "forward must predate /job" proof has the
+ * same shape as real events. Tests for late/undated messages override either
+ * side explicitly.
+ */
+export const MESSAGE_CREATE_TIME = '1764000000000';
+export const COMMAND_CREATE_TIME = '1764000060000';
+
 const FIXTURE = resolve(fileURLToPath(new URL('.', import.meta.url)), '../fixtures/fake-pairfob.mjs');
 
 export function apiMessage(m: Record<string, any>) {
@@ -23,7 +33,7 @@ export function apiMessage(m: Record<string, any>) {
     parent_id: m.parentId,
     upper_message_id: m.upperMessageId,
     msg_type: m.messageType ?? 'text',
-    create_time: m.createTime ?? '1764000000000',
+    create_time: m.createTime ?? MESSAGE_CREATE_TIME,
     body: { content: typeof m.content === 'string' ? m.content : JSON.stringify(m.content ?? { text: m.text ?? '' }) },
     ...(m.rawExtra ?? {}),
   };
@@ -125,6 +135,9 @@ export function makeEnvelope(o: Record<string, any> = {}) {
     chat_id: o.chatId ?? CHAT,
     chat_type: o.chatType ?? 'group',
     message_type: o.messageType ?? 'text',
+    // Real events always carry message.create_time (ms string); override with
+    // o.createTime (or messageExtra.create_time) for temporal counter-examples.
+    create_time: o.createTime ?? COMMAND_CREATE_TIME,
     content: o.content ?? JSON.stringify({ text }),
     ...(o.threadId !== undefined ? { thread_id: o.threadId } : {}),
     ...(o.rootId !== undefined ? { root_id: o.rootId } : {}),

@@ -76,6 +76,9 @@ const event = (over: Record<string, any> = {}) => ({
   rootId: 'om_root',
   parentId: null,
   messageId: 'om_command',
+  // Mirrors the command message.create_time the handler now persists; the msg()
+  // fixture's default createTime is one minute earlier.
+  createTime: '1764000060000',
   ...over,
 });
 
@@ -441,7 +444,7 @@ describe('materials / candidates must predate the command', () => {
       children: new Map([['om_old', [child]]]),
       pages: [{ items: [command, older], hasMore: false }],
     });
-    const r = await resolveMaterial({ client, event: event() });
+    const r = await resolveMaterial({ client, event: event({ createTime: null }) });
     expect(r.status).toBe('ok');
     expect(r.material.messageId).toBe('om_old');
     // Anchor came from the list: no direct command read-back needed.
@@ -458,7 +461,7 @@ describe('materials / candidates must predate the command', () => {
       children: new Map([['om_old', [child]]]),
       pages: [{ items: [older], hasMore: false }],
     });
-    const r = await resolveMaterial({ client, event: event() });
+    const r = await resolveMaterial({ client, event: event({ createTime: null }) });
     expect(r.status).toBe('ok');
     expect(client.calls.get).toContain('om_command');
   });
@@ -469,11 +472,11 @@ describe('materials / candidates must predate the command', () => {
       errors: { om_command: networkError },
       pages: [{ items: [older], hasMore: false }],
     });
-    const r = await resolveMaterial({ client, event: event() });
+    const r = await resolveMaterial({ client, event: event({ createTime: null }) });
     expect(r).toMatchObject({ status: 'error' });
   });
 
-  it('proceeds without the time gate when the anchor is definitively unreadable', async () => {
+  it('asks for a quote when the command anchor is definitively undatable, even with one candidate', async () => {
     const only = mfMsg('om_only', { threadId: 'omt_topic' });
     const child = textMsg('om_only_c', '唯一转发正文', { upperMessageId: 'om_only' });
     const client = fakeClient({
@@ -482,9 +485,17 @@ describe('materials / candidates must predate the command', () => {
       errors: { om_command: notFoundError },
       pages: [{ items: [only], hasMore: false }],
     });
-    const r = await resolveMaterial({ client, event: event() });
-    expect(r.status).toBe('ok');
-    expect(r.material.messageId).toBe('om_only');
+    const r = await resolveMaterial({ client, event: event({ createTime: null }) });
+    expect(r).toMatchObject({ status: 'need', reason: 'incomplete', detail: 'command_time_unknown' });
+    // Fail closed before re-fetching/trusting the candidate.
+    expect(client.calls.get).not.toContain('om_only');
+  });
+
+  it('asks for a quote when the event carries no command time and no anchor id exists', async () => {
+    const only = mfMsg('om_only2', { threadId: 'omt_topic' });
+    const client = fakeClient({ pages: [{ items: [only], hasMore: false }] });
+    const r = await resolveMaterial({ client, event: event({ createTime: null, messageId: null }) });
+    expect(r).toMatchObject({ status: 'need', reason: 'incomplete', detail: 'command_time_unknown' });
   });
 
   it('asks for a quote when a candidate time cannot be ordered against a known command time', async () => {

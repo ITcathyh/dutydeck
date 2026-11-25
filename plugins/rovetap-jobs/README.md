@@ -89,8 +89,9 @@ console.log(i.bot.open_id);'
 - `handlerToken(File)`：与第 3 步 eventHandlers token 相同的 bearer。
 - `appSecret(File)`：回读材料和默认 `lark-api` 回执都要用。
 - **限群与授权只说一次**：`allowedChatIds`（`oc_...`）和 `commanderOpenIds`（`ou_...`）都要显式填，空数组等于全部拒绝。非允许群的命令静默停止；白名单外真人会在话题收到无权限说明；非真人发送者拒绝且不回复。群 ID/成员可用 `dutydeck settings group sync/list/members`（必要时加 `--database`）查询。
-- `listen.port` 默认 `0` 是随机端口，eventHandlers 需要稳定 URL，所以**固定一个空闲 loopback 端口**；host 保持 `127.0.0.1`。
-- `pairfob.bin` 必须绝对路径；`pairfob.project` 与 `hub project-job enable --project` 一致；socket/tokenFile 建议显式写配置（宿主会清洗 service 环境，shell 变量不一定传入）。
+- `listen.port` 默认 `0` 是随机端口，eventHandlers 需要稳定 URL，所以**固定一个空闲 loopback 端口**；host 保持 `127.0.0.1`。`listen.host` 只接受本机回环（`127.x.x.x`、`::1`、`localhost`），填 `0.0.0.0` 或局域网地址会在启动时直接报错退出。
+- `pairfob.bin` 必须绝对路径且当前用户可执行；`pairfob.project` 与 `hub project-job enable --project` 一致；`pairfob.tokenFile` 是必需的项目令牌文件（也可用环境变量 `ROVETAP_PROJECT_TOKEN_FILE`，但宿主会清洗 service 环境，建议显式写配置），socket 建议一并显式填写。
+- **启动即校验必需项**：缺少 `appSecret(File)`、`pairfob.bin`、`pairfob.tokenFile`（或文件不可读/为空、bin 不可执行）时，service 不会带病运行，而是在 stderr 打印 `[rovetap-jobs] failed to start: <含配置键名与路径的原因>` 并以状态码 1 退出；按提示补配置后重启即可，不会出现 `/job` 被 stop 却永远没有回执。
 - `webBaseUrl` 填工作台**普通地址**（origin+路径）。误粘带 token 的配对/登录链接时，原 query/fragment 会被清除；含 `user:pass@` userinfo 时不生成链接——敏感段不会进飞书。最终链接固定为 `<origin/路径>?task=<taskId>&leader=<leaderId>`。
 - 其他可选项（`projectAliases`、`reply.mode=dutydeck-cli`、`lark.baseUrl`、`limits` 等）以 `service/config.mjs` 的默认值为准。
 
@@ -142,9 +143,9 @@ unset HANDLER_TOKEN
 每条 `/job` 只附**一个**经回读证明的文字材料：
 
 1. **显式引用优先**：带 `parent_id` 时重新调消息接口读取，并证明其 `chat_id` 与当前群一致、话题（`thread_id`/`root_id`，或引用消息本身就是话题根）一致。引用已删除/撤回、归属字段缺失、跨群跨话题、正文只剩 `@_user_n` 占位或合并转发英文壳文案，都会被拒绝并提示重新引用。
-2. **无引用时只在原生话题 `omt_...` 内找唯一合并转发**：会翻页枚举完整话题（预算 `limits.threadScan`，默认 30 条）。没有 `omt_` 话题（不做群历史扫描）、翻页不完整或窗口截断导致唯一性无法证明、存在多条更早的 `merge_forward`、候选时间无法证明，都转为请指挥官**显式引用**其中一条。普通逐条转发的文本在平台事件里与手打文本无法区分，不是自动候选——直接引用它即可。
+2. **无引用时只在原生话题 `omt_...` 内找唯一合并转发**：会翻页枚举完整话题（预算 `limits.threadScan`，默认 30 条）。没有 `omt_` 话题（不做群历史扫描）、翻页不完整或窗口截断导致唯一性无法证明、存在多条更早的 `merge_forward`、命令或候选时间无法证明先后，都转为请指挥官**显式引用**其中一条。命令时间取自真实事件的 `message.create_time` 并随任务持久化；事件缺时间且命令消息回读不到时同样不放行，因此命令之后才到达的“材料”不会被绿灯信任。普通逐条转发的文本在平台事件里与手打文本无法区分，不是自动候选——直接引用它即可。
 3. 列表内容不被信任，命中的 id 一律重新获取并复核范围；合并转发子项只在 `upperMessageId` 证明父子关系时展开，嵌套合并转发不展开；只读机器人在本群/本话题有权看到的副本，不接触私聊，不读取被提及账号的内容。
-4. **材料上限固定为 4000 Unicode 码点**（Rove 提交契约，按码点截断、不拆代理对，截断后缀计入上限）；`limits.maxMaterialChars` 只能调小，配更大值也会被夹到 4000。首版只取文本与富文本（post）正文中的文字。
+4. **指令与材料各有固定 4000 Unicode 码点上限**（Rove 提交契约，按码点而非 UTF-16 长度计）：材料按码点截断、不拆代理对，截断后缀计入上限；指令超长不截断，会回执写明本实例的实际上限（`limits.maxInstructionChars`，默认 4000）并请指挥官精简重发。`limits.maxMaterialChars` 与 `limits.maxInstructionChars` 都只能调小，配更大值也会被夹到 4000。材料首版只取文本与富文本（post）正文中的文字。
 5. `/job` 命令本身必须是发送者新打的 `text`；带转发来源或非文本（post/图片/文件/merge_forward 等）的命令消息不识别为命令，照常 `continue`。
 
 ## 提交结果三分支：可安全重试、明确终局反馈、未知只核对
@@ -181,6 +182,6 @@ pnpm exec vitest run plugins/rovetap-jobs/test
 | 回执无任务链接 | 未配 `webBaseUrl`，或其含 userinfo 被拒绝；改成普通 HTTPS 工作台地址后重启 service。 |
 | pairfob 一直核对 | `pairfob.bin` 绝对路径可执行、hub 已重启、socket/tokenFile 与 `hub project-job enable` 输出一致；用 `project status --key <source-key>` 只读核对，不要换新键重发。若话题已收到 `configuration_error`/`not_found`/`project_closed` 说明，则属明确终局，按提示修配置或绑定后重新发 `/job`；`unreachable` 会自动退避重提，无需人工重发。 |
 | 重启瞬间 eventHandlers 收到 503 `shutting_down` | 旧代仍在排空并独占固定端口，503 明确可重投，Dutydeck/飞书重投后由持久收件箱去重；排空结束端口释放，新代才能绑定，属正常无损重启。 |
-| service 反复退出 | 看宿主/unit stderr 的 `[rovetap-jobs] failed to start: ...`（不含密钥）；连续崩溃超上限后 supervisor 停止自动重启，修复后 `dutydeck restart` 或 `POST /api/plugins/rovetap-jobs/service/restart`（安装管理员）。 |
+| service 反复退出 | 看宿主/unit stderr 的 `[rovetap-jobs] failed to start: ...`（不含密钥）：配置缺 `appSecret`/`pairfob.bin`/`pairfob.tokenFile`、token 文件或 bin 路径不可用、`listen.host` 非回环都会在启动时这样指出键名/路径。连续崩溃超上限后 supervisor 停止自动重启，修复后 `dutydeck restart` 或 `POST /api/plugins/rovetap-jobs/service/restart`（安装管理员）。 |
 
 安全：仅监听 loopback，bearer + 外层 app_id + 群/指挥官白名单；config 与 token 文件 0600，日志不打印令牌/secret/材料全文；一个实例服务一个飞书应用、一组派单群和一个 pairfob 项目；插件是可信本机代码，不提供沙箱。
