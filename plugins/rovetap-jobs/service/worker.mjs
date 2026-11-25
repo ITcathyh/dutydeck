@@ -31,6 +31,8 @@ export class JobWorker {
     this.log = logger;
     this.locks = new Map();
     this.timer = null;
+    this.stopping = false;
+    this.stopPromise = null;
   }
 
   start() {
@@ -39,13 +41,31 @@ export class JobWorker {
     this.timer.unref?.();
   }
 
+  /**
+   * Stop polling and resolve once every kicked chain has settled, so callers
+   * can close the store without cutting a durable write. Kicks arriving after
+   * stop begins are ignored: their inbox record is already durable and the
+   * next generation recovers it. Idempotent; concurrent calls share one wait.
+   */
   stop() {
+    if (this.stopPromise) return this.stopPromise;
+    this.stopping = true;
     if (this.timer) clearInterval(this.timer);
     this.timer = null;
+    this.stopPromise = (async () => {
+      // A concurrent kick replaces the per-key chain with a chained promise,
+      // so re-check until the map actually drains. The stopping flag prevents
+      // fresh registrations.
+      while (this.locks.size > 0) {
+        await Promise.allSettled([...this.locks.values()]);
+      }
+    })();
+    return this.stopPromise;
   }
 
   /** Serialize all work for one source key; never let one kick reject loudly. */
   kick(sourceKey) {
+    if (this.stopping) return Promise.resolve();
     const previous = this.locks.get(sourceKey) ?? Promise.resolve();
     const run = previous
       .then(() => this.processLocked(sourceKey))
@@ -56,9 +76,11 @@ export class JobWorker {
   }
 
   async tick() {
+    if (this.stopping) return;
     let jobs = [];
     try { jobs = this.store.listJobs(); } catch { return; }
     for (const job of jobs) {
+      if (this.stopping) return;
       if (this.isActionable(job)) await this.kick(job.sourceKey);
     }
   }

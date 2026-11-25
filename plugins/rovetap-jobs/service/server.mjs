@@ -6,9 +6,19 @@
 import { createServer } from 'node:http';
 import { receiveEnvelope } from './handler.mjs';
 
-export function createEventServer({ config, store, worker }) {
-  return createServer((req, res) => {
-    void route(req, res, { config, store, worker }).catch((error) => {
+export function createEventServer(deps) {
+  // Response-completion promises, so shutdown can wait for every accepted
+  // request to finish its durable inbox write and receipt before closing.
+  const inflight = new Set();
+  const server = createServer((req, res) => {
+    const finished = new Promise((resolve) => {
+      res.once('finish', resolve);
+      res.once('close', resolve);
+    });
+    inflight.add(finished);
+    void finished.finally(() => inflight.delete(finished));
+
+    void route(req, res, deps).catch((error) => {
       // Never leak secrets; log id-less message to stderr.
       process.stderr.write(`[rovetap-jobs] http error: ${error?.message ?? error}\n`);
       if (!res.headersSent) {
@@ -19,9 +29,15 @@ export function createEventServer({ config, store, worker }) {
       }
     });
   });
+  server.drainInflight = () => Promise.allSettled(inflight);
+  return server;
 }
 
 async function route(req, res, deps) {
+  // The winner of the exclusive bind initializes the store and recovers
+  // in-flight work after listen(); hold requests until that completes so
+  // business never runs against half-ready dependencies.
+  if (deps.ready) await deps.ready;
   const url = new URL(req.url ?? '/', 'http://127.0.0.1');
   if (req.method === 'GET' && url.pathname === '/healthz') {
     res.writeHead(200, { 'content-type': 'application/json' });
