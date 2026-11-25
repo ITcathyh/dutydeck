@@ -62,15 +62,20 @@ export async function createService(config, deps = {}) {
     let stopPromise = null;
     const stop = () => {
       if (stopPromise) return stopPromise;
+      // Set synchronously before the first await: from here new requests get a
+      // retryable 503, while server.close() is deliberately deferred so this
+      // generation keeps owning the fixed port until every accepted request,
+      // worker chain and durable write has finished. Otherwise an overlapping
+      // restart could bind the same port and recover shared state mid-drain.
+      handlerDeps.stopping = true;
       stopPromise = (async () => {
-        // Stop new connections, finish accepted requests' durable inbox write
-        // and receipt (their detached worker.kick registers before the
-        // response ends), then reap keep-alive sockets.
-        await closeEventServer(server);
+        await drainHttpRequests(server);
         // Stop polling and wait for all in-flight worker chains to persist
         // their final state before the store write chain is closed.
         await worker.stop();
         await store.close();
+        // Only now release the fixed loopback port for the next generation.
+        await closeListeningServer(server);
       })();
       return stopPromise;
     };
@@ -89,15 +94,23 @@ export async function createService(config, deps = {}) {
 }
 
 /**
- * Stop accepting new connections, wait until every request already tracked has
- * fully delivered its response, then reap idle keep-alive sockets and wait for
- * the server handle to close.
+ * Reap idle keep-alive sockets and wait until every request accepted before
+ * shutdown was marked has fully delivered its response. The listening handle
+ * stays open here on purpose; the fixed port is released only after worker and
+ * store drain in closeListeningServer().
  */
-async function closeEventServer(server) {
-  const closed = new Promise((resolve) => { server.close(() => resolve()); });
-  await server.drainInflight?.();
+async function drainHttpRequests(server) {
   server.closeIdleConnections?.();
-  await closed;
+  await server.drainInflight?.();
+}
+
+/** Release the listening socket once all business/worker/store work is done. */
+function closeListeningServer(server) {
+  return new Promise((resolve) => {
+    server.close(() => resolve());
+    // Reap surviving 503/keep-alive sockets so close cannot wait on peers.
+    server.closeAllConnections?.();
+  });
 }
 
 /** Startup-failure cleanup: no request can be served, so release sockets. */

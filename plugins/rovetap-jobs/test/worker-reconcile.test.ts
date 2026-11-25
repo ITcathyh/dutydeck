@@ -5,7 +5,7 @@
 // so "restart" is simulated by reopening the JSON state file with a new worker.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, rm, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -20,7 +20,7 @@ vi.mock('../service/pairfob.mjs', () => ({
 }));
 
 import { JobWorker } from '../service/worker.mjs';
-import { JobStore, newJobRecord } from '../service/store.mjs';
+import { JobStore, newJobRecord, STATE_FILE_NAME } from '../service/store.mjs';
 
 const APP = 'cli_reconcile_unit';
 const MESSAGE = 'om_reconcile_1';
@@ -289,4 +289,127 @@ describe('rovetap pending reminder is armed once and delivery state is protected
     expect(acceptedSends[0].text).toContain('pt_000077');
     expect(job.replies.pending.status).toBe('sent');
   });
+});
+
+describe('阶段/去重/回执与终态同事务提交，重启后原话题收齐回执', () => {
+  it('adoptStatus(done) 一次落库同时包含终态、sentPhases 去重和待发完成回执，随后只发一次', async () => {
+    const c = await setup();
+    await seedJob(c.store, 'live');
+    await c.store.mutate((state) => {
+      const j: any = state.jobs[KEY];
+      j.pairfob = { taskId: 'pt_1', leaderId: 'pl_1', phase: 'doing', checkedAt: '' };
+      j.sentPhases = ['doing'];
+    });
+
+    await c.worker.adoptStatus(KEY, { taskId: 'pt_1', leaderId: 'pl_1', phase: 'done' });
+
+    const job: any = c.store.getJob(KEY);
+    expect(job.stage).toBe('done');
+    expect(job.sentPhases).toContain('done');
+    expect(job.replies['phase:done']).toMatchObject({ status: 'pending' });
+
+    // 已 fsync+rename 的磁盘状态必须同时具备三者：旧实现的完成通知在第二次
+    // mutate 才入队，adoptStatus 返回后的磁盘上没有 phase:done。
+    const onDisk = JSON.parse(await readFile(join(c.dir, STATE_FILE_NAME), 'utf8'));
+    const diskJob = onDisk.jobs[KEY];
+    expect(diskJob.stage).toBe('done');
+    expect(diskJob.sentPhases).toContain('done');
+    expect(diskJob.replies['phase:done'].status).toBe('pending');
+
+    await c.worker.kick(KEY);
+    const doneSends = c.sender.calls.filter((call: any) => call.text.includes('任务已完成'));
+    expect(doneSends).toHaveLength(1);
+    expect(c.store.getJob(KEY).replies['phase:done'].status).toBe('sent');
+  });
+
+  it('终态事务提交后、回执发送前崩溃：重开 store + 新 worker 仍把接单与完成回执各发一次', async () => {
+    const c = await setup();
+    await seedJob(c.store, 'unknown');
+
+    // 同一事务内首次确认身份：accepted 与 phase:done 一起 pending。
+    await c.worker.adoptStatus(KEY, { taskId: 'pt_2', leaderId: 'pl_2', phase: 'done' });
+    await c.store.close(); // 模拟提交后立即崩溃，未执行任何 flush
+
+    const store2 = await JobStore.open(c.dir);
+    const sender2 = {
+      idempotent: true,
+      calls: [] as any[],
+      send: vi.fn(async (arg: any) => { sender2.calls.push(arg); return { outcome: 'sent', messageId: 'om_p3' }; }),
+    };
+    const worker2 = new JobWorker({ config: c.config, store: store2, sender: sender2, lark: {}, logger: { info() {}, warn() {}, error() {}, debug() {} } });
+    await worker2.recoverInFlightReplies();
+    await worker2.kick(KEY);
+
+    const texts = sender2.calls.map((call: any) => call.text);
+    expect(texts.some((t: string) => t.includes('项目已接单') && t.includes('pt_2'))).toBe(true);
+    expect(texts.filter((t: string) => t.includes('任务已完成'))).toHaveLength(1);
+    expect(sender2.calls).toHaveLength(2);
+    const job: any = store2.getJob(KEY);
+    expect(job.stage).toBe('done');
+    expect(job.replies.accepted.status).toBe('sent');
+    expect(job.replies['phase:done'].status).toBe('sent');
+    worker2.stop();
+    await store2.close();
+  });
+
+  it('submit 首次回执已是终态 done：接受与完成通知同事务入队并在本轮都发出', async () => {
+    pf.submitProjectJob.mockResolvedValueOnce({ outcome: 'ok', taskId: 'pt_t', leaderId: 'pl_t', phase: 'done' });
+    const c = await setup();
+    await seedJob(c.store, 'ready');
+
+    await c.worker.kick(KEY);
+
+    const job: any = c.store.getJob(KEY);
+    expect(job.stage).toBe('done');
+    expect(job.replies.accepted.status).toBe('sent');
+    expect(job.replies['phase:done'].status).toBe('sent');
+    const texts = c.sender.calls.map((call: any) => call.text);
+    expect(texts.some((t: string) => t.includes('已接单') && t.includes('pt_t'))).toBe(true);
+    expect(texts.filter((t: string) => t.includes('任务已完成'))).toHaveLength(1);
+  });
+});
+
+describe('submit 明确错误的退避重试与终局反馈', () => {
+  it('unreachable（拨号失败、未写字节）：材料保留、退回 queued 退避，到期可用同一 payload 再提交', async () => {
+    pf.submitProjectJob.mockResolvedValueOnce({ outcome: 'unreachable', code: 'unreachable', message: 'no socket' });
+    const c = await setup();
+    await seedJob(c.store, 'ready');
+
+    await c.worker.kick(KEY);
+    let job: any = c.store.getJob(KEY);
+    expect(job.stage).toBe('queued');
+    expect(job.submit.state).toBe('unreachable');
+    expect(job.nextRunAt).toBeGreaterThan(Date.now());
+    expect(job.material).toMatchObject({ messageId: 'om_material' });
+    expect(pf.submitProjectJob).toHaveBeenCalledTimes(1);
+    const firstPayload = pf.submitProjectJob.mock.calls[0][0].payload;
+
+    // 不经过会重新读 Lark 材料的 queued 步骤，直接在材料已就绪的 ready 态安全重提。
+    await c.store.mutate((state) => { state.jobs[KEY].stage = 'ready'; state.jobs[KEY].nextRunAt = 0; });
+    pf.submitProjectJob.mockResolvedValueOnce({ outcome: 'ok', taskId: 'pt_u', leaderId: 'pl_u', phase: 'todo' });
+    await c.worker.submitStep(KEY);
+
+    expect(pf.submitProjectJob).toHaveBeenCalledTimes(2);
+    const secondOptions = pf.submitProjectJob.mock.calls[1][0];
+    expect(secondOptions.payload).toEqual(firstPayload); // 原消息与已解析材料不变
+    expect(c.store.getJob(KEY).pairfob.taskId).toBe('pt_u');
+  });
+
+  it.each(['configuration_error', 'not_found', 'project_closed'])(
+    '%s 是明确终局：stage=failed、原话题收到带码反馈，且不做 status 核对',
+    async (code) => {
+      pf.submitProjectJob.mockResolvedValueOnce({ outcome: 'rejected', code, message: 'hub verdict' });
+      const c = await setup();
+      await seedJob(c.store, 'ready');
+
+      await c.worker.kick(KEY);
+
+      const job: any = c.store.getJob(KEY);
+      expect(job.stage).toBe('failed');
+      expect(job.submit.code).toBe(code);
+      expect(job.replies.rejected.status).toBe('sent');
+      expect(c.sender.calls[0].text).toContain(code);
+      expect(pf.getProjectStatus).not.toHaveBeenCalled();
+    },
+  );
 });

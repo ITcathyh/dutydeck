@@ -263,20 +263,15 @@ export class JobWorker {
 
     if (result.outcome === 'ok') {
       await this.mutateJob(sourceKey, (j, state) => {
-        j.pairfob = {
-          project: job.alias || this.config.pairfob.project,
-          taskId: result.taskId, leaderId: result.leaderId, phase: result.phase ?? 'todo',
-          checkedAt: new Date().toISOString(),
-        };
-        j.stage = 'live';
         j.submit.state = 'ok';
         j.submit.code = null; j.submit.message = null;
-        const reply = this.store.outbound(state, sourceKey, 'accepted');
-        if (!reply.status || reply.status === 'pending') reply.status = 'pending';
-        if (QUIET_PHASES.has(String(j.pairfob.phase).toLowerCase())) {
-          if (!j.sentPhases.includes(j.pairfob.phase)) j.sentPhases.push(j.pairfob.phase);
-        }
-        j.nextPollAt = Date.now() + (this.config.phasePollMs ?? 5000);
+        // Same atomic adoption as poll/reconcile: a submit receipt can already
+        // carry a terminal phase, and its completion notice must commit with it.
+        this.commitStatusAdoption(sourceKey, j, state, {
+          taskId: result.taskId,
+          leaderId: result.leaderId,
+          phase: result.phase ?? 'todo',
+        });
       });
       await this.flushDueReplies(sourceKey);
       return;
@@ -294,12 +289,15 @@ export class JobWorker {
       return;
     }
 
-    if (result.outcome === 'not_spawned') {
-      // Definitely never wrote: safe to retry after backoff.
+    if (result.outcome === 'not_spawned' || result.outcome === 'unreachable') {
+      // Both are proven never written: a spawn-level ENOENT/EACCES, or the real
+      // pairfob CLI's 'unreachable' envelope, which cmd/pairfob/project.go
+      // emits only when dialing the socket failed before any byte was sent.
+      // Keep the resolved material and back off to a safe resubmission.
       await this.mutateJob(sourceKey, (j) => {
         j.stage = 'queued';
-        j.submit.state = 'not_spawned';
-        j.submit.message = result.error;
+        j.submit.state = result.outcome;
+        j.submit.message = result.message ?? result.error ?? result.code ?? result.outcome;
         j.nextRunAt = Date.now() + this.backoff(j.submit.attempts);
       });
       return;
@@ -335,7 +333,6 @@ export class JobWorker {
 
     if (status.outcome === 'ok') {
       await this.adoptStatus(sourceKey, status);
-      await this.maybeQueuePhaseReply(sourceKey, status.phase);
       await this.flushDueReplies(sourceKey);
       return;
     }
@@ -381,41 +378,56 @@ export class JobWorker {
       return;
     }
     await this.adoptStatus(sourceKey, status);
-    await this.maybeQueuePhaseReply(sourceKey, status.phase);
     await this.flushDueReplies(sourceKey);
+  }
+
+  /**
+   * Atomically adopt one verified project status inside the caller's
+   * store.mutate transaction: identity, terminal/live stage, next poll time,
+   * the accepted receipt and the deduped visible-phase receipt are all part of
+   * the same durable commit. A crash right after commit therefore always leaves
+   * a terminal job with its completion notice already queued. Must be invoked
+   * inside a mutate callback with its live `state`; do not await or do I/O here.
+   */
+  commitStatusAdoption(sourceKey, j, state, status) {
+    const firstConfirmed = !j.pairfob?.taskId;
+    const rawPhase = status.phase ?? '';
+    j.pairfob = {
+      project: j.alias || this.config.pairfob.project,
+      taskId: status.taskId,
+      leaderId: status.leaderId || j.pairfob?.leaderId || '',
+      phase: rawPhase,
+      checkedAt: new Date().toISOString(),
+    };
+    const lowerPhase = String(rawPhase).toLowerCase();
+    if (DONE_PHASES.has(lowerPhase)) j.stage = 'done';
+    else if (BAD_PHASES.has(lowerPhase)) j.stage = lowerPhase.includes('cancel') ? 'cancelled' : 'failed';
+    else j.stage = 'live';
+    j.nextPollAt = Date.now() + (this.config.phasePollMs ?? 5000);
+
+    if (firstConfirmed) {
+      this.store.outbound(state, sourceKey, 'accepted').status = 'pending';
+      if (QUIET_PHASES.has(lowerPhase) && !j.sentPhases.includes(rawPhase)) j.sentPhases.push(rawPhase);
+    }
+    this.queuePhaseReceipt(sourceKey, j, state, rawPhase);
+  }
+
+  /**
+   * Dedup and enqueue a visible phase receipt inside the adoption transaction.
+   * Quiet phases (todo/open/…) make no thread noise. Must run in store.mutate.
+   */
+  queuePhaseReceipt(sourceKey, j, state, rawPhase) {
+    if (!rawPhase) return;
+    const phase = String(rawPhase);
+    if (QUIET_PHASES.has(phase.toLowerCase())) return;
+    if (j.sentPhases.includes(phase)) return;
+    j.sentPhases.push(phase);
+    this.store.outbound(state, sourceKey, `phase:${phase}`).status = 'pending';
   }
 
   async adoptStatus(sourceKey, status) {
     await this.mutateJob(sourceKey, (j, state) => {
-      const firstConfirmed = !j.pairfob?.taskId;
-      j.pairfob = {
-        project: j.alias || this.config.pairfob.project,
-        taskId: status.taskId,
-        leaderId: status.leaderId || j.pairfob?.leaderId || '',
-        phase: status.phase,
-        checkedAt: new Date().toISOString(),
-      };
-      const phase = String(status.phase ?? '').toLowerCase();
-      if (DONE_PHASES.has(phase)) j.stage = 'done';
-      else if (BAD_PHASES.has(phase)) j.stage = phase.includes('cancel') ? 'cancelled' : 'failed';
-      else j.stage = 'live';
-      j.nextPollAt = Date.now() + (this.config.phasePollMs ?? 5000);
-      if (firstConfirmed) {
-        this.store.outbound(state, sourceKey, 'accepted').status = 'pending';
-        if (QUIET_PHASES.has(phase) && !j.sentPhases.includes(status.phase)) j.sentPhases.push(status.phase);
-      }
-    });
-  }
-
-  async maybeQueuePhaseReply(sourceKey, rawPhase) {
-    if (!rawPhase) return;
-    const phase = String(rawPhase);
-    const lower = phase.toLowerCase();
-    if (QUIET_PHASES.has(lower)) return;
-    await this.mutateJob(sourceKey, (j, state) => {
-      if (j.sentPhases.includes(phase)) return;
-      j.sentPhases.push(phase);
-      this.store.outbound(state, sourceKey, `phase:${phase}`).status = 'pending';
+      this.commitStatusAdoption(sourceKey, j, state, status);
     });
   }
 

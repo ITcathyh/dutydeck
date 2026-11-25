@@ -13,10 +13,7 @@ export function replyText(kind, job, config) {
     return '委托已记录。' + PROJECT_LABEL + ' 接单结果暂时未知，我会按原来源键只读核对，不会重复建单。';
   }
   if (kind === 'accepted') return acceptedText(job, config);
-  if (kind === 'rejected') {
-    const code = job?.submit?.code ? `（${job.submit.code}）` : '';
-    return `${PROJECT_LABEL} 建单未被接受${code}。请联系管理员核对；系统不会自行重复提交。`;
-  }
+  if (kind === 'rejected') return rejectedText(job);
   if (kind.startsWith('phase:')) {
     const phase = kind.slice('phase:'.length);
     return phaseText(phase, job, config);
@@ -34,6 +31,21 @@ function denialText(job) {
       return `指令过长（上限见插件配置）。请精简后重新发送 /job。`;
     default:
       return '该 /job 命令未被接受。';
+  }
+}
+
+function rejectedText(job) {
+  const code = job?.submit?.code ? String(job.submit.code) : '';
+  const suffix = code ? `（${code}）` : '';
+  switch (code) {
+    case 'configuration_error':
+      return `⚠️ ${PROJECT_LABEL} 派单服务配置有误${suffix}，本次委托没有发出。请联系管理员核对 pairfob socket 与令牌文件配置；系统不会自行重复提交。`;
+    case 'not_found':
+      return `⚠️ ${PROJECT_LABEL} 项目 leader 绑定不存在${suffix}，本次委托未能建单。请联系管理员核对项目与 leader 绑定后重新发送 /job。`;
+    case 'project_closed':
+      return `⚠️ ${PROJECT_LABEL} 项目已关闭${suffix}，不再接受新委托；如需继续请联系管理员。系统不会自行重复提交。`;
+    default:
+      return `${PROJECT_LABEL} 建单未被接受${suffix}。请联系管理员核对；系统不会自行重复提交。`;
   }
 }
 

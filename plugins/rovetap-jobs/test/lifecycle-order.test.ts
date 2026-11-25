@@ -182,4 +182,60 @@ describe('graceful shutdown drains in-flight work', () => {
     // The detached kick ran and reached the fake pairfob exactly once.
     await waitFor(() => h!.hub()?.submitCount === 1, { timeout: 8_000, label: 'one submit after drain' });
   }, 20_000);
+
+  it('drain 期间继续独占固定端口：新业务得可重投 503、第二实例 EADDRINUSE；stop 完成后端口才释放', async () => {
+    h = await setupHarness();
+    const port = h.svc.address.port;
+    const fixedConfig = { ...h.config, listen: { ...h.config.listen, port } };
+    const sourceKey = `lark/${APP}/om_port_hold`;
+
+    // Keep one worker chain blocked inside outbound delivery so stop() stays in
+    // the worker-drain phase while the listening handle must remain bound.
+    let releaseSend: () => void = () => {};
+    const sendGate = new Promise<void>((resolve) => { releaseSend = resolve; });
+    releaseBlockers.push(releaseSend);
+    const sender = h.svc.sender;
+    const originalSend = sender.send.bind(sender);
+    h.svc.sender.send = async (args: unknown) => {
+      await sendGate;
+      return originalSend(args);
+    };
+
+    await h.post(makeEnvelope({ eventId: 'ev_port_hold', messageId: 'om_port_hold', openId: OTHER }));
+    await waitFor(
+      () => h!.svc.store.getJob(sourceKey)?.replies?.denial?.status === 'sending',
+      { timeout: 6_000, label: 'denial in sending state' },
+    );
+
+    const stopped: string[] = [];
+    const stopPromise = h.svc.stop().then(() => stopped.push('stopped'));
+
+    // The still-bound listener explicitly refuses new business as retryable.
+    const retryRes = await fetch(`http://127.0.0.1:${port}/lark/events`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: '{}',
+    });
+    expect(retryRes.status).toBe(503);
+    const retryBody = await retryRes.json();
+    expect(retryBody.error).toMatchObject({ code: 'shutting_down', retryable: true });
+
+    // A second generation cannot take the fixed port during the overlap window.
+    await expect(createService(fixedConfig as any, { logger: silent }))
+      .rejects.toMatchObject({ code: 'EADDRINUSE' });
+    expect(stopped).toHaveLength(0);
+
+    releaseSend();
+    await stopPromise;
+
+    // Only after full drain is the port released and a new generation allowed.
+    const svc2 = await createService(fixedConfig as any, { logger: silent });
+    try {
+      expect(svc2.address.port).toBe(port);
+      const health = await fetch(`http://127.0.0.1:${port}/healthz`);
+      expect(health.status).toBe(200);
+    } finally {
+      await svc2.stop();
+    }
+  }, 25_000);
 });

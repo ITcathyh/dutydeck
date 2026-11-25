@@ -56,6 +56,12 @@ function submit(input) {
       return emit({ ok: false, error: { code: 'usage', message: 'bad flags' } }, 2);
     case 'unreachable1':
       return emit({ ok: false, error: { code: 'unreachable', message: 'no socket' } }, 1);
+    case 'config2':
+      return emit({ ok: false, error: { code: 'configuration_error', message: 'ROVETAP_PROJECT_SOCKET must be an absolute path' } }, 2);
+    case 'submit-notfound4':
+      return emit({ ok: false, error: { code: 'not_found', message: 'configured project leader does not exist' } }, 4);
+    case 'project-closed4':
+      return emit({ ok: false, error: { code: 'project_closed', message: 'project alias is closed' } }, 4);
     case 'weird4':
       return emit({ ok: false, error: { code: 'future_code', message: 'unknown to this adapter' } }, 4);
     case 'forbidden4':
@@ -250,9 +256,15 @@ describe('submitProjectJob rejection vs reconcile-only', () => {
     if (r.outcome === 'unknown') expect(r.reason).toContain('internal');
   });
 
+  it('maps exit 1 unreachable envelope to the safe-retry unreachable outcome (dial failed before bytes)', async () => {
+    // Mirrors cmd/pairfob/project.go: 'unreachable' is emitted only for the
+    // unix dial error with uncertain=false, so the worker may resubmit as-is.
+    const r = await submit('unreachable1');
+    expect(r).toMatchObject({ outcome: 'unreachable', code: 'unreachable' });
+  });
+
   it.each([
     ['usage2', 'usage'],
-    ['unreachable1', 'unreachable'],
     ['weird4', 'future_code'],
   ])('keeps non-refusal code %s reconcile-only', async (caseName, code) => {
     const r = await submit(caseName);
@@ -264,7 +276,10 @@ describe('submitProjectJob rejection vs reconcile-only', () => {
     ['forbidden4', 'forbidden'],
     ['conflict4', 'conflict'],
     ['invalid0', 'invalid_argument'],
-  ])('reports explicit refusal %s as rejected with code and message', async (caseName, code) => {
+    ['config2', 'configuration_error'],
+    ['submit-notfound4', 'not_found'],
+    ['project-closed4', 'project_closed'],
+  ])('reports explicit terminal verdict %s as rejected with code and message', async (caseName, code) => {
     const r = await submit(caseName);
     expect(r.outcome).toBe('rejected');
     if (r.outcome === 'rejected') {

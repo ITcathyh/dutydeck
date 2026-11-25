@@ -13,11 +13,15 @@
 //
 // Adjudication mirrors cmd/pairfob/project.go: a non-zero exit still carries
 // the one JSON envelope on stdout, so the envelope — not the exit code — decides.
-// Only an envelope whose error code is an explicit business refusal of this job
-// is 'rejected'. unknown_outcome, internal, usage/transport/config errors and
-// anything else that does not prove the hub refused (including success-shaped
-// data missing a non-empty task id / leader id / phase) are 'unknown': reconcile
-// by source key, never report rejection.
+// Three classes are safe to act on without a source-key reconcile:
+//  - 'unreachable' is emitted ONLY for the unix dial failure (projectRoundTrip
+//    returns uncertain=false before any byte is written): safe to back off and
+//    resubmit the same payload with its already resolved material;
+//  - the explicit refusal/config family below positively says the job was not
+//    created and warrants one correct notice in the original topic;
+//  - unknown_outcome, internal, usage and anything else that does not prove the
+//    hub refused (including success-shaped data missing identity fields) stay
+//    'unknown': reconcile by source key, never report a rejection or resubmit.
 
 import { execFile } from 'node:child_process';
 
@@ -109,9 +113,10 @@ function classifySpawnError(error) {
   return error && (error.code === 'ENOENT' || error.code === 'EACCES');
 }
 
-// Error codes that positively say the project side considered this submission
-// and refused to create the task (hub internal/hub_project_job_intake*.go and
-// the exit-4 family in cmd/pairfob/project.go). Deliberately an allowlist:
+// Error codes that positively mean this submission created no task and the
+// original topic should receive one terminal explanation. This is the exit-4
+// family plus the exit-2 local configuration failure in cmd/pairfob/project.go
+// and the hub_project_job_intake*.go verdicts. Deliberately an allowlist:
 // unknown/future codes stay reconcile-only instead of producing a false refusal.
 const EXPLICIT_REJECTION_CODES = new Set([
   'rejected', // generic business refusal
@@ -119,6 +124,9 @@ const EXPLICIT_REJECTION_CODES = new Set([
   'conflict', // same source_key already stored with different content
   'invalid_argument', // payload failed intake validation before any write
   'too_large', // payload exceeded the intake limit before any write
+  'not_found', // submit-time binding miss, e.g. configured project leader does not exist
+  'project_closed', // project alias is closed and accepts no new jobs
+  'configuration_error', // local socket/token configuration invalid (exit 2)
 ]);
 
 function nonEmptyField(value) {
@@ -151,6 +159,7 @@ function transportReason(result) {
  * @returns {Promise<
  *  {outcome:'ok', taskId:string, leaderId:string, phase:string, data:object} |
  *  {outcome:'rejected', code:string, message:string} |
+ *  {outcome:'unreachable', code:string, message:string} |
  *  {outcome:'not_spawned', error:string} |
  *  {outcome:'unknown', reason:string, stdout?:string}>}
  */
@@ -183,11 +192,16 @@ export async function submitProjectJob(options) {
   if (envelope && envelope.ok === false && envelope.error && typeof envelope.error === 'object') {
     const code = String(envelope.error.code ?? 'unknown');
     const message = String(envelope.error.message ?? 'project submit rejected');
+    if (code === 'unreachable') {
+      // The real CLI guarantees this is dial-before-write (exit 1); safe to
+      // retry the identical payload rather than reconcile a nonexistent task.
+      return { outcome: 'unreachable', code, message };
+    }
     if (EXPLICIT_REJECTION_CODES.has(code)) {
       return { outcome: 'rejected', code, message };
     }
-    // unknown_outcome / internal / usage / config / transport / unknown future
-    // codes: none proves an explicit refusal, so the caller only reconciles.
+    // unknown_outcome / internal / usage / unknown future codes: none proves an
+    // explicit refusal, so the caller only reconciles.
     return { outcome: 'unknown', reason: `${code}: ${message}`, stdout: result.stdout };
   }
 

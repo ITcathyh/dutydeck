@@ -11,6 +11,23 @@ export function createEventServer(deps) {
   // request to finish its durable inbox write and receipt before closing.
   const inflight = new Set();
   const server = createServer((req, res) => {
+    // During shutdown the listening socket stays bound to keep exclusive ownership
+    // of the fixed port, but new business is refused with an explicit retryable
+    // verdict: Dutydeck/Feishu redelivers and the durable inbox collapses repeats.
+    if (deps.stopping) {
+      if (!res.headersSent) {
+        res.writeHead(503, {
+          'content-type': 'application/json',
+          'retry-after': '1',
+          connection: 'close',
+        });
+        res.end(JSON.stringify({ error: { code: 'shutting_down', retryable: true } }));
+      } else {
+        res.destroy();
+      }
+      return;
+    }
+
     const finished = new Promise((resolve) => {
       res.once('finish', resolve);
       res.once('close', resolve);
