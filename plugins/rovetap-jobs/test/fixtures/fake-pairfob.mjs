@@ -9,7 +9,8 @@
 //   drop          - persist the task, then exit non-zero with no envelope
 //   malformed     - print a partial non-JSON success-looking body
 
-import { readFileSync, writeFileSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
+import { writeHubState } from '../helpers/hub-state.mjs';
 
 const args = process.argv.slice(2);
 const hubPath = process.env.FAKE_PAIRFOB_HUB;
@@ -19,7 +20,7 @@ function loadHub() {
   try { return JSON.parse(readFileSync(hubPath, 'utf8')); }
   catch { return { keys: {}, seq: 0, submitCount: 0, statusCalls: 0 }; }
 }
-function saveHub(h) { writeFileSync(hubPath, JSON.stringify(h, null, 2)); }
+function saveHub(h) { writeHubState(hubPath, h); }
 function emit(o) { process.stdout.write(JSON.stringify(o)); }
 function opt(name) { const i = args.indexOf(name); return i >= 0 ? args[i + 1] : undefined; }
 function fingerprint(p) { return JSON.stringify(p); }

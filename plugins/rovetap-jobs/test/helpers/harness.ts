@@ -1,10 +1,11 @@
 import { createServer, type Server } from 'node:http';
 import { mkdtemp, rm, writeFile, chmod } from 'node:fs/promises';
-import { readFileSync, writeFileSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createService } from '../../service/main.mjs';
+import { writeHubState } from './hub-state.mjs';
 
 export const APP = 'cli_testapp';
 export const CHAT = 'oc_dispatch';
@@ -226,7 +227,7 @@ export async function setupHarness(opts: { mode?: string; config?: Record<string
     updateHub: (fn) => {
       const hub = JSON.parse(readFileSync(hubPath, 'utf8'));
       fn(hub);
-      writeFileSync(hubPath, JSON.stringify(hub, null, 2));
+      writeHubState(hubPath, hub);
     },
     async cleanup() {
       await svc.stop().catch(() => {});
