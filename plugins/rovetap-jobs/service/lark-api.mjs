@@ -282,8 +282,8 @@ export class LarkApiClient {
     });
     if (pageToken) params.set('page_token', pageToken);
     const payload = await this.request(`/open-apis/im/v1/messages?${params.toString()}`);
-    const items = Array.isArray(payload.data?.items) ? payload.data.items.map(normalizeMessage) : [];
-    return { items, pageToken: payload.data?.page_token ?? null, hasMore: Boolean(payload.data?.has_more) };
+    const items = Array.isArray(payload.data?.items) ? payload.data.items.map(normalizeMessage) : null;
+    return { items, pageToken: payload.data?.page_token ?? null, hasMore: payload.data?.has_more };
   }
 
   /**
