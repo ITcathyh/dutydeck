@@ -10,10 +10,10 @@
 //  - merge_forward children are read only when upperMessageId proves the
 //    parent-child relation;
 //  - without a quote, enumerate the current topic completely, including its
-//    root. Use its only earlier merge_forward, or the root when it is the
-//    sole earlier message. With no topic id we never scan the chat history;
-//  - an incomplete list/pagination, several candidates or an unreadable
-//    candidate all end in “please quote it”;
+//    root. An earlier merge_forward can be used automatically only if there
+//    is no other possible material. A text root may stand alone as material;
+//  - for several possible sources offer verified choices, and ask the
+//    commander to quote when history or message details cannot be verified;
 //  - list payloads are never trusted as material: the chosen id is re-fetched;
 //  - nothing is ever taken from mentioned accounts;
 //  - the final text is clipped to Rove's per-entry 4000 Unicode code points.
@@ -64,8 +64,8 @@ export function textBodyProblem(text) {
 
 /**
  * Only a native merged-forward message is a provable forward through the Open
- * API. Plain typed text is deliberately not a candidate, and speculative raw
- * `forward`/`origin` flags are not proof either.
+ * API. Forwarded single messages can appear as the same text types as typed
+ * messages, so a plausible text reply always needs human confirmation.
  */
 export function isForwardCandidate(message) {
   return Boolean(message && message.messageType === 'merge_forward');
@@ -184,9 +184,29 @@ export async function resolveMaterial({ client, event, maxChars = ROVE_ENTRY_COD
   if (!selectedMaterialId || !topicId || selectedMaterialId === rootId) {
     root = await readVerifiedMessage(client, rootId, event, 'root_detail_missing');
     if (root.status !== 'ok') return root;
-    topicId ??= nativeTopicId(root.target.threadId);
   }
-  if (!topicId) return need('none', { detail: 'no_topic' });
+  if (!topicId) {
+    if (!commandMessageId) return need('none', { detail: 'no_topic' });
+    const command = await readVerifiedMessage(client, commandMessageId, { chatId }, 'command_detail_missing');
+    if (command.status === 'error') return command;
+    if (command.status !== 'ok') return need('none', { detail: 'no_topic' });
+    if (topicConflicts(command.target, event)) return need('cross_scope', { detail: 'topic_mismatch' });
+
+    // An OpenAPI detail without thread_id can be a flat quote even when
+    // there is a separately opened topic on the same quoted message.
+    topicId = nativeTopicId(command.target.threadId);
+    if (!topicId) {
+      if (!selectedMaterialId && parentId === rootId
+        && command.target.parentId === rootId && command.target.rootId === rootId) {
+        return materialFromRead(root, limit);
+      }
+      return need('none', { detail: 'no_topic' });
+    }
+    if (topicConflicts(root.target, { rootId, threadId: topicId })) {
+      return need('cross_scope', { detail: 'topic_mismatch' });
+    }
+    event = { ...event, createTime: event.createTime ?? command.target.createTime };
+  }
   event = { ...event, threadId: topicId };
   const topic = { threadId: topicId, rootId };
 
@@ -239,45 +259,56 @@ export async function resolveMaterial({ client, event, maxChars = ROVE_ENTRY_COD
     m.messageId !== commandMessageId && m.messageId !== rootId && !m.upperMessageId
     && (!m.chatId || m.chatId === chatId) && !topicConflicts(m, event),
   ).map((m) => [m.messageId, m])).values()];
-  const candidates = [root.target, ...replies].filter(isForwardCandidate);
+  const candidates = (isForwardCandidate(root.target) ? [root.target, ...replies] : replies)
+    .filter((m) => supportsMaterial(m) && !m.deleted && !isNonHuman(m));
   const anchor = await resolveCommandTime(client, event, listed);
   if (anchor.abort) return anchor.abort;
   if (anchor.time == null) return need('incomplete', { detail: 'command_time_unknown' });
+  if (candidates.some((m) => parseMessageTime(m.createTime) == null)) return need('incomplete', { detail: 'candidate_time_unknown' });
+  const earlier = candidates.filter((m) => predates(m, anchor.time));
+  if (earlier.length > MAX_CHOICES) return need('multiple', { candidateCount: earlier.length });
 
-  if (candidates.length) {
-    if (candidates.some((m) => parseMessageTime(m.createTime) == null)) return need('incomplete', { detail: 'candidate_time_unknown' });
-    const earlier = candidates.filter((c) => parseMessageTime(c.createTime) < anchor.time);
-    if (earlier.length === 0) return need('none', { detail: 'no_forward_before_command' });
-    if (earlier.length > 1) {
-      return withChoices(need('multiple', { candidateCount: earlier.length }), {
-        client, event, root, messages: earlier, commandTime: anchor.time, topic,
-      });
-    }
-    const chosenId = earlier[0].messageId;
-    const chosen = chosenId === rootId ? root : await readVerifiedMessage(client, chosenId, event, 'candidate_detail_missing');
-    if (chosen.status === 'ok' && (!isForwardCandidate(chosen.target) || chosen.target.upperMessageId)) {
+  const reads = [];
+  for (const candidate of earlier) {
+    const read = candidate.messageId === rootId ? root
+      : await readVerifiedMessage(client, candidate.messageId, event, 'candidate_detail_missing');
+    if (read.status === 'need' && read.detail === 'deleted') continue;
+    if (read.status !== 'ok') return read;
+    if (read.target.messageType !== candidate.messageType || read.target.upperMessageId) {
       return need('incomplete', { detail: 'candidate_type_changed' });
     }
-    if (chosen.status === 'ok' && !predates(chosen.target, anchor.time)) {
-      return need('incomplete', { detail: 'candidate_time_unknown' });
+    if (!predates(read.target, anchor.time)) return need('incomplete', { detail: 'candidate_time_unknown' });
+    if (isNonHuman(read.target) || isJobMessage(read.target)) continue;
+    if (!isForwardCandidate(read.target) && read.target.sender?.sender_type !== 'user') {
+      return need('incomplete', { detail: 'candidate_sender_unknown' });
     }
-    return materialFromRead(chosen, limit, topic);
+    const problem = textBodyProblem(verifiedText(read.target, read.items));
+    if (problem) return need('no_text', { detail: problem });
+    reads.push(read);
   }
 
-  // A single forwarded message can become the root as ordinary text. Only
-  // use it when the root is the sole message that could precede this command.
-  const earlierReplies = replies.filter((m) => (parseMessageTime(m.createTime) ?? 0) <= anchor.time);
-  if (earlierReplies.length) {
-    return withChoices(need('none', { detail: 'topic_root_not_only_source' }), {
-      client, event, root, messages: [root.target, ...earlierReplies], commandTime: anchor.time, topic,
-    });
+  if (reads.some((read) => isForwardCandidate(read.target))) {
+    if (reads.length === 1) return materialFromRead(reads[0], limit, topic);
+    return withChoices(need('multiple', { candidateCount: reads.length }), reads, anchor.time, topic);
   }
+  if (reads.length) {
+    return withChoices(need('none', { detail: 'topic_root_not_only_source' }), [root, ...reads], anchor.time, topic);
+  }
+  if (candidates.some(isForwardCandidate) && !earlier.some(isForwardCandidate)) {
+    return need('none', { detail: 'no_forward_before_command' });
+  }
+  if (replies.some((m) => !supportsMaterial(m) && !m.deleted && !isNonHuman(m)
+    && (parseMessageTime(m.createTime) ?? 0) <= anchor.time)) {
+    return need('none', { detail: 'topic_root_not_only_source' });
+  }
+  // A single forwarded message can become the root as ordinary text. Only
+  // use it when no other earlier message could be material for this command.
   const rootTime = parseMessageTime(root.target.createTime);
   if (rootTime == null) return need('incomplete', { detail: 'candidate_time_unknown' });
   if (rootTime >= anchor.time) return need('none', { detail: 'no_forward_before_command' });
   const result = materialFromRead(root, limit, topic);
   if (result.status === 'ok' && (root.target.upperMessageId || isJobMessage(root.target)
-    || (root.target.sender?.sender_type && root.target.sender.sender_type !== 'user'))) {
+    || isNonHuman(root.target))) {
     return need('none', { detail: 'topic_root_not_material' });
   }
   return result;
@@ -288,9 +319,13 @@ function predates(message, commandTime) {
   return time != null && time < commandTime;
 }
 
-function couldBeChoice(message, commandTime) {
-  return predates(message, commandTime) && !message.deleted && !message.upperMessageId
-    && (isForwardCandidate(message) || MATERIAL_TEXT_TYPES.has(message.messageType));
+function supportsMaterial(message) {
+  return isForwardCandidate(message) || MATERIAL_TEXT_TYPES.has(message.messageType);
+}
+
+function isNonHuman(message) {
+  const sender = message.sender?.sender_type;
+  return Boolean(sender && sender !== 'user');
 }
 
 function isJobMessage(message) {
@@ -299,28 +334,24 @@ function isJobMessage(message) {
 }
 
 function isChoice(message, commandTime) {
-  return couldBeChoice(message, commandTime) && message.sender?.sender_type === 'user' && !isJobMessage(message);
+  return supportsMaterial(message) && predates(message, commandTime) && !message.deleted && !message.upperMessageId
+    && message.sender?.sender_type === 'user' && !isJobMessage(message);
 }
 
-async function withChoices(result, { client, event, root, messages, commandTime, topic }) {
-  const possible = messages.filter((m) => couldBeChoice(m, commandTime)
-    && (!m.sender?.sender_type || m.sender.sender_type === 'user'));
-  if (possible.length > MAX_CHOICES) return result;
-
+function withChoices(result, reads, commandTime, topic) {
   const choices = [];
-  for (const message of possible) {
-    const read = message.messageId === topic.rootId ? root
-      : await readVerifiedMessage(client, message.messageId, event, 'candidate_detail_missing');
-    if (read.status !== 'ok') return result;
-    const text = verifiedText(read.target, read.items);
-    if (textBodyProblem(text) || !isChoice(read.target, commandTime)) continue;
+  for (const { target, items } of reads) {
+    if (!isChoice(target, commandTime)) continue;
+    const text = verifiedText(target, items);
+    if (textBodyProblem(text)) continue;
     const chars = Array.from(text.replace(MENTION_PLACEHOLDER, '').replace(/\s+/gu, ' ').trim());
     if (!chars.length) continue;
     const preview = chars.length <= PREVIEW_CODEPOINTS ? chars.join('')
       : `${chars.slice(0, PREVIEW_CODEPOINTS - 1).join('')}…`;
-    choices.push({ messageId: message.messageId, preview });
+    choices.push({ messageId: target.messageId, preview });
   }
-  return choices.length ? { ...result, ...topic, commandCreateTime: String(commandTime), choices } : result;
+  return choices.length && choices.length <= MAX_CHOICES
+    ? { ...result, ...topic, commandCreateTime: String(commandTime), choices } : result;
 }
 
 /**
