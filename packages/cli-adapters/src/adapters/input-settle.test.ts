@@ -459,15 +459,34 @@ describe('Claude composer ownership around the first terminal write', () => {
 
   it('restores the viewport after an unconfirmed write without retrying it', async () => {
     const backend = new ComposerBackend();
-    let restores = 0;
-    Object.assign(backend, { beginExpandedInput: async () => async () => { restores++; } });
+    let begins = 0, restores = 0;
+    Object.assign(backend, { beginExpandedInput: async () => { begins++; return async () => { restores++; }; } });
     backend.onWrite = () => { backend.onWrite = undefined; backend.screen = box('foreign'); };
     const pending = writeClaudeFamilyInput(backend, 'business body');
     const outcome = pending.then(() => undefined, error => error);
     await vi.advanceTimersByTimeAsync(15_000);
     expect(await outcome).toMatchObject({ name: 'DriverRecoveryError', code: 'DRIVER_INPUT_UNCONFIRMED' });
-    expect(restores).toBe(1);
+    // 复核失败后自愈逻辑再申请一次扩展视口；两次申请都对称归还，写入本身不重试。
+    expect({ begins, restores }).toEqual({ begins: 2, restores: 2 });
     expect(backend.writes).toEqual(['business body']);
+  });
+
+  it('re-expands the viewport and accepts the draft when the first ownership check fails', async () => {
+    const backend = new ComposerBackend();
+    let begins = 0, restores = 0;
+    Object.assign(backend, {
+      beginExpandedInput: async () => {
+        begins++;
+        // 外层预留时屏幕保持空白；自愈的第二次申请才模拟 TUI 重排出完整草稿。
+        if (begins === 2) backend.screen = box('business body');
+        return async () => { restores++; };
+      },
+    });
+    // 键入后屏幕不回显，常规复核窗口内始终看不到归属草稿。
+    backend.onWrite = () => { backend.onWrite = undefined; };
+    await finish(writeClaudeFamilyInput(backend, 'business body'));
+    expect({ begins, restores }).toEqual({ begins: 2, restores: 2 });
+    expect(backend.writes).toEqual(['business body', 'Enter']);
   });
 
   it('rejects a bare-PTY viewport containing only the owned long input tail', async () => {

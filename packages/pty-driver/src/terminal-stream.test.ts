@@ -194,8 +194,9 @@ describe('terminal initial screen', () => {
     await driver.start();
     vi.useFakeTimers();
     const target = backend as SessionBackend & { getPaneSize(): Promise<{ cols: number; rows: number }> };
-    target.getPaneSize = async () => ({ cols: 80, rows: 24 });
-    target.resize = vi.fn(async () => {});
+    let paneSize = { cols: 80, rows: 24 };
+    target.getPaneSize = async () => paneSize;
+    target.resize = vi.fn(async (cols: number, rows: number) => { paneSize = { cols, rows }; });
     const snapshot = (driver as any).snapshot;
     const originalResize = vi.spyOn(snapshot, 'resize');
     try {
@@ -220,6 +221,56 @@ describe('terminal initial screen', () => {
       (driver as any).backend = backend;
       (driver as any).snapshot = snapshot;
       originalResize.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
+  it('retries viewport resize until the new geometry is confirmed', async () => {
+    const { driver, backend } = fixture();
+    await driver.start();
+    vi.useFakeTimers();
+    const target = backend as SessionBackend & { getPaneSize(): Promise<{ cols: number; rows: number }> };
+    let paneSize = { cols: 80, rows: 24 };
+    let probes = 0;
+    target.getPaneSize = async () => (++probes <= 2 ? { cols: 80, rows: 24 } : paneSize);
+    target.resize = vi.fn(async (cols: number, rows: number) => { paneSize = { cols, rows }; });
+    const snapshot = (driver as any).snapshot;
+    const snapshotResize = vi.spyOn(snapshot, 'resize');
+    try {
+      const expanding = (driver as any).beginExpandedSubmissionInput(target, 300);
+      await vi.advanceTimersByTimeAsync(2_000);
+      const restore = await expanding;
+      expect(target.resize).toHaveBeenCalledWith(300, 200);
+      expect((target.resize as ReturnType<typeof vi.fn>).mock.calls).toHaveLength(2);
+      expect(snapshotResize).toHaveBeenCalledWith(300, 200);
+      const restoring = restore();
+      await vi.advanceTimersByTimeAsync(200);
+      await restoring;
+      expect(paneSize).toEqual({ cols: 80, rows: 24 });
+    } finally {
+      snapshotResize.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
+  it('returns a no-op restore without touching the snapshot when resize never confirms', async () => {
+    const { driver, backend } = fixture();
+    await driver.start();
+    vi.useFakeTimers();
+    const target = backend as SessionBackend & { getPaneSize(): Promise<{ cols: number; rows: number }> };
+    target.getPaneSize = async () => ({ cols: 80, rows: 24 });
+    target.resize = vi.fn(async () => {});
+    const snapshot = (driver as any).snapshot;
+    const snapshotResize = vi.spyOn(snapshot, 'resize');
+    try {
+      const expanding = (driver as any).beginExpandedSubmissionInput(target, 300);
+      await vi.advanceTimersByTimeAsync(2_000);
+      const restore = await expanding;
+      expect((target.resize as ReturnType<typeof vi.fn>).mock.calls).toHaveLength(3);
+      expect(snapshotResize).not.toHaveBeenCalled();
+      await expect(restore()).resolves.toBeUndefined();
+    } finally {
+      snapshotResize.mockRestore();
       vi.useRealTimers();
     }
   });

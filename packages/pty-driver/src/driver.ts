@@ -2588,23 +2588,48 @@ export class PtyCliDriver implements AgentDriver {
     const snapshot = this.snapshot, generation = this.wiringGeneration;
     const current = () => this.backend === target && this.snapshot === snapshot && this.wiringGeneration === generation;
     const size = await target.getPaneSize?.();
-    if (!size) return async () => {};
+    if (!size) {
+      // 没有几何信息就无法验证扩展结果；交给适配器写入复核的二次扩展兜底，并留一条可排查的告警。
+      warnCaught(this.log, 'PtyCliDriver', 'expandedInput.noPaneGeometry', this.sessionId,
+        new Error('getPaneSize returned no size; viewport expansion skipped'));
+      return async () => {};
+    }
     const cols = Math.max(size.cols, Math.min(requestedColumns, 1024));
     const rows = Math.max(size.rows, 200);
     if (rows === size.rows && cols === size.cols) return async () => {};
-    await target.resize(cols, rows);
-    if (current()) snapshot?.resize(cols, rows);
-    await new Promise<void>(resolve => setTimeout(resolve, 100));
-    let restored = false;
-    return async () => {
-      if (restored) return;
-      restored = true;
-      if (!current()) return;
-      await target.resize(size.cols, size.rows);
-      if (!current()) return;
-      snapshot?.resize(size.cols, size.rows);
-      await new Promise<void>(resolve => setTimeout(resolve, 100));
-    };
+
+    // resize 是 best-effort 的 tmux 调用：启动突发或 tmux 忙时可能静默失败，
+    // 而长草稿在未扩展的小视口里会把输入框起始行滚出屏幕，导致写入复核误判。
+    // 重试并按实际几何验证，确认生效后才同步本地快照。
+    let lastError: unknown;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        await target.resize(cols, rows);
+        await new Promise<void>(resolve => setTimeout(resolve, 100));
+        if (!current()) return async () => {};
+        const actual = await target.getPaneSize?.();
+        if (actual && actual.cols >= cols && actual.rows >= rows) {
+          if (current()) snapshot?.resize(actual.cols, actual.rows);
+          let restored = false;
+          return async () => {
+            if (restored) return;
+            restored = true;
+            if (!current()) return;
+            await target.resize(size.cols, size.rows);
+            if (!current()) return;
+            snapshot?.resize(size.cols, size.rows);
+            await new Promise<void>(resolve => setTimeout(resolve, 100));
+          };
+        }
+        lastError = new Error(`pane still ${actual ? `${actual.cols}x${actual.rows}` : 'unknown'} after resize to ${cols}x${rows}`);
+      } catch (error) {
+        lastError = error;
+        await new Promise<void>(resolve => setTimeout(resolve, 100));
+      }
+    }
+    warnCaught(this.log, 'PtyCliDriver', 'expandedInput.resizeNotConfirmed', this.sessionId, lastError);
+    // 扩展未确认也继续写入：适配器复核失败时会再申请一次扩展，不能因显示准备失败丢整条消息。
+    return async () => {};
   }
 
   /** Wrap the intentionally-small adapter PTY surface per submission. The

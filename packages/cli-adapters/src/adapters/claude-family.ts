@@ -135,6 +135,21 @@ async function writeClaudeFamilyInputBody(backend: PtyLike, prompt: string): Pro
       screen = await read();
       owned = await ownedClaudeComposerWithWrap(screen, expectedDraft, final);
     }
+    if (!owned && backend.beginExpandedInput) {
+      // 长草稿可能把输入框起始行滚出当前视口，而写入前的视口扩展可能未生效：
+      // 重新申请一次扩展让 TUI 重排，再给一轮复核窗口，仍不匹配才按结果未知挂起。
+      const restore = await backend.beginExpandedInput(Buffer.byteLength(expectedDraft, 'utf8') + 6);
+      try {
+        const reflowDeadline = Date.now() + 1000;
+        while (!owned && Date.now() < reflowDeadline) {
+          await delay(50);
+          screen = await read();
+          owned = await ownedClaudeComposerWithWrap(screen, expectedDraft, final);
+        }
+      } finally {
+        await restore?.();
+      }
+    }
     if (!owned) {
       throw new DriverRecoveryError('Claude 输入框在本次写入后发生变化；提交结果未知，原进程已保留，未自动重发', 'DRIVER_INPUT_UNCONFIRMED');
     }
