@@ -74,6 +74,33 @@ describe('topic material choice commands', () => {
     expect(store.listJobs()).toHaveLength(2);
   });
 
+  it('keeps a selection tied to the original bot when all bots can dispatch', async () => {
+    const author = { senderType: 'app', openId: 'ou_unlisted_author' };
+    const enabled = { ...config, allowAllBotCommanders: true };
+    const send = (input: Record<string, unknown>) => receiveEnvelope({
+      body: makeEnvelope({ ...topic, ...author, ...input }), authorization: `Bearer ${TOKEN}`,
+    }, { config: enabled, store });
+    const messageId = 'om_bot_original';
+    const sourceKey = sourceKeyFor(APP, messageId);
+    await send({ messageId, text: '/job 请调查这条反馈' });
+    expect(store.getJob(sourceKey)).toMatchObject({ stage: 'queued', commanderOpenId: author.openId });
+    await store.mutate(state => {
+      Object.assign(state.jobs[sourceKey], {
+        stage: 'needs_input', materialChoices: [first, second], materialChoicesExpireAt: Date.now() + 60_000,
+      });
+    });
+    const text = `/job 选 #${materialChoiceCode(sourceKey, second.messageId)}`;
+
+    await send({ text, messageId: 'om_bot_other_choice', openId: 'ou_unlisted_other' });
+    expect(store.getJobByMessage('om_bot_other_choice')).toMatchObject({ stage: 'denied', reasonCode: 'selection_unavailable' });
+    expect(store.getJob(sourceKey).selectedMaterialId).toBeUndefined();
+
+    await send({ text, messageId: 'om_bot_original_choice' });
+    expect(store.getJobByMessage('om_bot_original_choice')).toMatchObject({
+      sourceKey, stage: 'queued', commanderOpenId: author.openId, selectedMaterialId: second.messageId, instruction: '请调查这条反馈',
+    });
+  });
+
   it('refuses a flat group quote of the same root, so the real topic can still select', async () => {
     const original = await offer('om_original');
     const before = structuredClone(store.getJob(original));

@@ -5,7 +5,7 @@
 //   2. outer app_id exactly equals the configured bot app
 //   3. sender is a user or bot with an open_id from the event
 //   4. chat is an explicitly bound dispatch group
-//   5. commander open_id is explicitly allowed
+//   5. commander is listed by open_id, or the dispatch group allows all bots
 // Failures at 1-2 are transport-level rejects. Failures at 3-5 are recognized
 // `/job` commands that we stop (so Dutydeck never spawns an agent). An
 // unlisted user in the bound group gets an explanatory reply. Unlisted bots
@@ -65,6 +65,7 @@ export function normalizeEnvelope(body, selfOpenId = '') {
     // millisecond string. It is the trusted command anchor used to prove a
     // no-quote forward predates the command.
     createTime: message.create_time ?? message.createTime ?? null,
+    eventMessageCreateTime: message.create_time,
     parentId: typeof message.parent_id === 'string' ? message.parent_id : '',
     rootId: typeof message.root_id === 'string' ? message.root_id : '',
     threadId: typeof message.thread_id === 'string' ? message.thread_id : '',
@@ -103,6 +104,11 @@ function findMaterialSelection(state, env, appId, code) {
   return match;
 }
 
+function messageCreatedSince(value, since) {
+  const time = typeof value === 'string' && /^\d+$/u.test(value) ? Number(value) : value;
+  return Number.isSafeInteger(time) && time > 0 && time >= since;
+}
+
 /**
  * Persist a recognized `/job` exactly once and decide propagation.
  *
@@ -122,19 +128,30 @@ export async function receiveEnvelope({ body, authorization }, { config, store, 
     return { status: 200, body: { event_id: env.eventId, decision: 'continue' } };
   }
 
+  const userSender = env.senderType === 'user';
+  const botSender = env.senderType === 'app' || env.senderType === 'bot';
+  const botAllowed = botSender && config.allowAllBotCommanders === true
+    && (env.chatType === 'group' || env.chatType === 'topic_group');
+  const senderIdentified = Boolean(env.senderOpenId.trim());
+  const dispatchChat = env.chatId && config.allowedChatIds.has(env.chatId);
+  const commanderListed = config.commanderOpenIds.has(env.senderOpenId);
+  const since = config.additionalBotCommandsSince;
+  if (since !== undefined && (!botAllowed || !senderIdentified || !dispatchChat || commanderListed
+    || !messageCreatedSince(env.eventMessageCreateTime, since))) {
+    return { status: 200, body: { event_id: env.eventId, decision: 'continue' } };
+  }
+
   if (!env.messageId) return { status: 400, body: { error: { code: 'bad_event', message: 'missing message_id' } } };
 
   // Authorization disposition (computed before the transaction; sets stage).
   let stage = 'queued';
   let reasonCode = null;
   let wantsReply = false;
-  const userSender = env.senderType === 'user';
-  const botSender = env.senderType === 'app' || env.senderType === 'bot';
-  if ((!userSender && !botSender) || !env.senderOpenId) {
+  if ((!userSender && !botSender) || !senderIdentified) {
     stage = 'denied'; reasonCode = 'invalid_sender';
-  } else if (!env.chatId || !config.allowedChatIds.has(env.chatId)) {
+  } else if (!dispatchChat) {
     stage = 'denied'; reasonCode = 'chat_not_allowed';
-  } else if (!config.commanderOpenIds.has(env.senderOpenId)) {
+  } else if (!botAllowed && !commanderListed) {
     stage = 'denied'; reasonCode = 'forbidden'; wantsReply = userSender;
   } else if (parsed.kind === 'unknown-project') {
     stage = 'needs_input'; reasonCode = 'unknown_project'; wantsReply = true;

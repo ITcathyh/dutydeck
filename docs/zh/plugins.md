@@ -246,6 +246,10 @@ dutydeck settings bot set <appId> leaderSkill=leader-guide/leader
 
 真人和机器人共用 `commanderOpenIds` 派单名单。给发送方机器人授权时，填写接收应用在消息事件 `sender.sender_id.open_id` 中看到的 `ou_...`。已授权的机器人可以在 `allowedChatIds` 指定的群里转发原文，用自己的身份回复该消息并发送 `@接单机器人 /job`，接单和后续进展都会回到原话题。
 
+在插件的 `config.json` 中设置 `"allowAllBotCommanders": true` 并重启插件服务后，`allowedChatIds` 指定的群里所有机器人都可以派单。真人仍需加入 `commanderOpenIds`。只允许机器人派单时，可以把名单设为 `[]`。该开关默认关闭。
+
+若保留原处理器，可另起服务只接收名单外机器人的新派单。新服务启用 `allowAllBotCommanders`，保留原 `commanderOpenIds`，并在 `additionalBotCommandsSince` 中填写带时区的固定启用时间。把新处理器放在原处理器之前。早于该时间的命令和原名单的命令继续交给原处理器。
+
 请在支持话题回复的群启用插件。飞书返回群不支持话题回复（230071）时，回执记为发送失败。
 
 最短接入次序，细节以插件 README 为准：

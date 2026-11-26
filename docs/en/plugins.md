@@ -246,6 +246,10 @@ Start, stop, restart and automatic restart requests for the same plugin service 
 
 People and bots share the `commanderOpenIds` allowlist. To authorize a bot, use the `ou_...` ID that the receiving app sees in `sender.sender_id.open_id` on a message event. The bot can forward a message into a group listed in `allowedChatIds` and reply to the forwarded copy with `@receiving-bot /job` using its own credentials. Acceptance and progress updates appear in that topic.
 
+Set `"allowAllBotCommanders": true` in the plugin's `config.json` and restart the plugin service to let every bot in the groups listed in `allowedChatIds` dispatch jobs. People still need an entry in `commanderOpenIds`. Set that list to `[]` for bot-only dispatch. The option defaults to off.
+
+To add a second service for new orders from unlisted bots, enable `allowAllBotCommanders`, copy the original `commanderOpenIds`, and set `additionalBotCommandsSince` to a fixed ISO 8601 timestamp with a time zone. Register the new handler before the original one. Commands sent before the cutoff and commands from listed senders continue to the original handler.
+
 Enable the plugin in chats that support topic replies. If Feishu reports that the chat lacks topic support (230071), the receipt is marked as failed.
 
 Shortest working sequence; see the plugin README for details:

@@ -2,7 +2,8 @@
 //  - listen.host is loopback-only;
 //  - pairfob.bin + project token file + Lark appSecret are required and their
 //    absence must throw a locatable, key-named error before the service binds;
-//  - the 4000 code point limits can only be lowered.
+//  - the 4000 code point limits can only be lowered;
+//  - the all-bot commander setting uses a JSON boolean.
 //
 // These run through the real loadConfig (the main.mjs entry), not createService
 // with injected object configs, so the operator-facing startup path is covered.
@@ -74,6 +75,49 @@ describe('rovetap-jobs startup config: loopback host', () => {
     }));
     await expect(loadConfig(configPath)).rejects.toThrow(/listen\.host/);
     await expect(loadConfig(configPath)).rejects.toThrow(/回环/);
+  });
+});
+
+describe('rovetap-jobs startup config: all-bot commanders', () => {
+  it.each([undefined, false, true])('loads allowAllBotCommanders=%s as a boolean', async value => {
+    const tokenFile = await setupDir();
+    const config = await loadConfig(await writeConfig(baseRaw(tokenFile, { allowAllBotCommanders: value })));
+    expect(config.allowAllBotCommanders).toBe(value === true);
+  });
+
+  it.each(['true', 1, null])('rejects a non-boolean allowAllBotCommanders=%s', async value => {
+    const tokenFile = await setupDir();
+    const configPath = await writeConfig(baseRaw(tokenFile, { allowAllBotCommanders: value }));
+    await expect(loadConfig(configPath)).rejects.toThrow(/allowAllBotCommanders.*布尔值/u);
+  });
+
+  it('parses a fixed supplemental cutoff and leaves it unset otherwise', async () => {
+    const tokenFile = await setupDir();
+    const raw = baseRaw(tokenFile, { allowAllBotCommanders: true });
+    const configPath = await writeConfig(raw);
+    expect((await loadConfig(configPath)).additionalBotCommandsSince).toBeUndefined();
+
+    const cutoff = '2026-11-26T11:04:00.123+08:00';
+    await writeConfig({ ...raw, additionalBotCommandsSince: cutoff });
+    const expected = Date.UTC(2026, 10, 26, 3, 4, 0, 123);
+    expect((await loadConfig(configPath)).additionalBotCommandsSince).toBe(expected);
+    expect((await loadConfig(configPath)).additionalBotCommandsSince).toBe(expected);
+  });
+
+  it.each([undefined, false])('rejects a cutoff when allowAllBotCommanders=%s', async allowAllBotCommanders => {
+    const tokenFile = await setupDir();
+    const configPath = await writeConfig(baseRaw(tokenFile, {
+      allowAllBotCommanders, additionalBotCommandsSince: '2026-11-26T03:04:00Z',
+    }));
+    await expect(loadConfig(configPath)).rejects.toThrow(/additionalBotCommandsSince.*allowAllBotCommanders/u);
+  });
+
+  it.each([null, 1764000060000, '2026-11-26', '2026-11-26T03:04:00', '2026-02-30T03:04:00Z'])('rejects an invalid cutoff %s', async value => {
+    const tokenFile = await setupDir();
+    const configPath = await writeConfig(baseRaw(tokenFile, {
+      allowAllBotCommanders: true, additionalBotCommandsSince: value,
+    }));
+    await expect(loadConfig(configPath)).rejects.toThrow(/additionalBotCommandsSince.*ISO 8601/u);
   });
 });
 

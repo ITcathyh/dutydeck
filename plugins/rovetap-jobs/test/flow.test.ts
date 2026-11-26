@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
+import { runLarkEventPipeline, type LarkEventHandler } from '../../../apps/server/src/lark/event-pipeline.js';
 import { createService } from '../service/main.mjs';
 import {
   setupHarness, makeEnvelope, waitFor, apiMessage,
@@ -181,8 +182,27 @@ describe('rovetap-jobs  deduplication / concurrency / recovery', () => {
 });
 
 describe('rovetap-jobs  authorization and rejection', () => {
-  it('rejects a non-commander real user in the dispatch group: stop + denial, no order', async () => {
-    h = await setupHarness();
+  it.each([
+    { senderType: 'app', chatType: 'group' },
+    { senderType: 'bot', chatType: 'topic_group' },
+  ])('dispatches from an unlisted $senderType in an enabled $chatType', async ({ senderType, chatType }) => {
+    h = await setupHarness({ config: { allowAllBotCommanders: true, commanderOpenIds: [] } });
+    seedQuotedText();
+    const res = await h.post(makeEnvelope({
+      messageId: 'om_group_bot', senderType, chatType, openId: 'ou_group_bot',
+      text: '@_user_1 /job rovetap 检查反馈材料', mentions: [{ key: '@_user_1', id: { open_id: 'ou_bot' } }],
+      parentId: 'om_fwd1', threadId: 'omt_1', rootId: 'om_root',
+    }));
+    expect(res.body.decision).toBe('stop');
+    await waitFor(() => h!.lark.replies.some(reply => reply.inThread && reply.to === 'om_root' && reply.text.includes('项目已接单')));
+    expect(h.hub()).toMatchObject({ submitCount: 1, lastPayload: {
+      actor: { app_id: APP, open_id: 'ou_group_bot' },
+      materials: [{ message_id: 'om_fwd1', text: '切回前台后草稿消失，连续两次复现。' }],
+    } });
+  });
+
+  it.each([undefined, true])('rejects a non-commander user when allowAllBotCommanders=%s', async allowAllBotCommanders => {
+    h = await setupHarness({ config: { allowAllBotCommanders } });
     const res = await h.post(makeEnvelope({ eventId: 'ev_intr', messageId: 'om_intr', openId: OTHER }));
     expect(res.body.decision).toBe('stop');
     await waitFor(() => h!.lark.replies.some((r) => r.text.includes('没有') && r.text.includes('权限')));
@@ -190,7 +210,7 @@ describe('rovetap-jobs  authorization and rejection', () => {
   });
 
   it.each(['user', 'app', 'bot'])('silently stops an authorized %s in a non-dispatch chat', async (senderType) => {
-    h = await setupHarness();
+    h = await setupHarness({ config: { allowAllBotCommanders: true } });
     const res = await h.post(makeEnvelope({ eventId: 'ev_chat', messageId: 'om_chat', chatId: 'oc_random', senderType }));
     expect(res.body.decision).toBe('stop');
     const denied = h.svc.store.getJobByMessage('om_chat');
@@ -200,8 +220,19 @@ describe('rovetap-jobs  authorization and rejection', () => {
     expect(h.hub()).toBeNull();
   });
 
-  it.each(['app', 'bot'])('silently stops an unlisted %s even if its message mentions an authorized sender', async (senderType) => {
-    h = await setupHarness();
+  it('requires a group event to authorize an unlisted bot', async () => {
+    h = await setupHarness({ config: { allowAllBotCommanders: true } });
+    const res = await h.post(makeEnvelope({ messageId: 'om_private_bot', senderType: 'app', chatType: 'p2p', openId: OTHER }));
+    expect(res.body.decision).toBe('stop');
+    expect(h.svc.store.getJobByMessage('om_private_bot')).toMatchObject({ stage: 'denied', reasonCode: 'forbidden' });
+    expect(h.hub()).toBeNull();
+  });
+
+  it.each([
+    { senderType: 'app', allowAllBotCommanders: undefined },
+    { senderType: 'bot', allowAllBotCommanders: false },
+  ])('silently stops an unlisted $senderType when allowAllBotCommanders=$allowAllBotCommanders', async ({ senderType, allowAllBotCommanders }) => {
+    h = await setupHarness({ config: { allowAllBotCommanders } });
     const res = await h.post(makeEnvelope({
       eventId: 'ev_bot', messageId: 'om_botsender', senderType, openId: 'ou_unlisted_bot',
       text: '/job rovetap 请 @_user_1 看这条反馈。',
@@ -217,9 +248,10 @@ describe('rovetap-jobs  authorization and rejection', () => {
 
   it.each([
     { senderType: 'app', openId: '' },
+    { senderType: 'bot', openId: ' ' },
     { senderType: 'system', openId: BOSS },
   ])('silently rejects $senderType with an invalid sender identity', async (sender) => {
-    h = await setupHarness();
+    h = await setupHarness({ config: { allowAllBotCommanders: true } });
     const res = await h.post(makeEnvelope({ messageId: 'om_invalid_sender', ...sender }));
     expect(res.body.decision).toBe('stop');
     const denied = h.svc.store.getJobByMessage('om_invalid_sender');
@@ -255,6 +287,65 @@ describe('rovetap-jobs  authorization and rejection', () => {
     await waitFor(() => h!.lark.replies.some((r) => r.text.includes('rovetap')));
     expect(h.hub()).toBeNull();
   });
+});
+
+it('routes only new unlisted bot commands through the supplemental HTTP handler', async () => {
+  const cutoff = Date.UTC(2026, 10, 26, 3, 4, 0);
+  const listedBot = 'ou_listed_bot';
+  const additionalBot = 'ou_additional_bot';
+  const commanderOpenIds = [BOSS, listedBot];
+  h = await setupHarness({ config: { commanderOpenIds } });
+  const supplemental = await setupHarness({
+    config: { commanderOpenIds, allowAllBotCommanders: true, additionalBotCommandsSince: cutoff },
+  });
+  try {
+    const eventType = 'im.message.receive_v1';
+    const handler = (id: string, svc: Harness): LarkEventHandler => ({ id, url: svc.svc.url, token: TOKEN, eventTypes: [eventType] });
+    const pipelineConfig = { appId: APP, eventHandlers: [handler('supplemental', supplemental), handler('primary', h)] };
+    const material = apiMessage({ messageId: 'om_material', text: '材料正文', threadId: 'omt_1', rootId: 'om_root' });
+    for (const service of [h, supplemental]) service.lark.messages.set('om_material', material);
+    const command = { senderType: 'app', openId: additionalBot, createTime: String(cutoff), parentId: 'om_material', threadId: 'omt_1', rootId: 'om_root' };
+    const send = async (fields: Record<string, unknown>) => {
+      const audits: unknown[] = [];
+      const { event } = makeEnvelope({ ...command, ...fields });
+      await runLarkEventPipeline(pipelineConfig, eventType, event, fetch, { info: entry => audits.push(entry) });
+      return audits;
+    };
+    const handledBy = (handlerId: string, result: string) => expect.objectContaining({ handlerId, result });
+
+    const fresh = { messageId: 'om_new_bot', eventId: 'ev_new_bot' };
+    expect(await send(fresh)).toEqual([handledBy('supplemental', 'stop')]);
+    expect(await send(fresh)).toEqual([handledBy('supplemental', 'stop')]);
+    expect(await send({ ...fresh, eventId: 'ev_new_bot_retry' })).toEqual([handledBy('supplemental', 'stop')]);
+
+    const primaryCommands = [
+      { messageId: 'om_listed_bot', openId: listedBot },
+      { messageId: 'om_user', senderType: 'user', openId: BOSS },
+      { messageId: 'om_old_bot', createTime: String(cutoff - 1) },
+      { messageId: 'om_undated_bot', messageExtra: { create_time: undefined, createTime: cutoff } },
+      { messageId: 'om_invalid_time', createTime: `${cutoff}ms` },
+      { messageId: 'om_invalid_actor', openId: '' },
+      { messageId: 'om_other_group', chatId: 'oc_other' },
+    ];
+    for (const fields of primaryCommands) {
+      expect(await send(fields)).toEqual([handledBy('supplemental', 'continue'), handledBy('primary', 'stop')]);
+    }
+    expect(await send({ messageId: 'om_receipt', text: '✅ RoveTap 项目已接单' })).toEqual([
+      handledBy('supplemental', 'continue'), handledBy('primary', 'continue'),
+    ]);
+    const unauthorized = await supplemental.post(makeEnvelope(command), { authorization: 'Bearer wrong' });
+    expect(unauthorized.status).toBe(401);
+
+    await waitFor(() => h!.hub()?.submitCount === 2 && supplemental.hub()?.submitCount === 1);
+    expect(supplemental.hub().lastPayload).toMatchObject({
+      source_key: `lark/${APP}/om_new_bot`, actor: { app_id: APP, open_id: additionalBot },
+    });
+    expect(supplemental.svc.store.listJobs().map(job => job.messageId)).toEqual(['om_new_bot']);
+    expect(h.svc.store.listJobs().map(job => job.messageId)).toEqual(primaryCommands.map(fields => fields.messageId));
+    expect(h.svc.store.getJobByMessage('om_old_bot')).toMatchObject({ stage: 'denied', reasonCode: 'forbidden' });
+  } finally {
+    await supplemental.cleanup();
+  }
 });
 
 describe('rovetap-jobs  material selection', () => {

@@ -71,6 +71,7 @@ console.log(i.bot.open_id);'
   "selfOpenId": "ou_xxxxxxxxxxxxxxxx",
   "allowedChatIds": ["oc_xxxxxxxxxxxxxxxx"],
   "commanderOpenIds": ["ou_yyyyyyyyyyyyyyyy"],
+  "allowAllBotCommanders": false,
   "listen": { "host": "127.0.0.1", "port": 14517, "path": "/lark/events" },
   "pairfob": {
     "bin": "/usr/local/bin/pairfob",
@@ -87,7 +88,9 @@ console.log(i.bot.open_id);'
 - `appId`：被绑定 eventHandlers 的机器人 app；处理器校验信封外层 `app_id` 必须与它一致。
 - `handlerToken(File)`：与第 3 步 eventHandlers token 相同的 bearer。
 - `appSecret(File)`：回读材料和默认 `lark-api` 回执都要用。
-- `allowedChatIds` 指定派单群（`oc_...`）。`commanderOpenIds` 指定谁能在这些群里发令，真人和机器人共用这份名单。两项都要配置。给机器人授权时，填写接收应用在飞书消息事件 `sender.sender_id.open_id` 中看到的发送方 ID（`ou_...`）。未授权的真人会在派单群收到提示，未授权的机器人会被静默忽略。
+- `allowedChatIds` 指定派单群（`oc_...`）。真人和机器人都可以通过 `commanderOpenIds` 获得派单权限。填写接收应用在飞书消息事件 `sender.sender_id.open_id` 中看到的发送方 ID（`ou_...`）。未授权的真人会在派单群收到提示，未授权的机器人会被静默忽略。
+- 设置 `"allowAllBotCommanders": true` 后，`allowedChatIds` 中的群允许所有由飞书事件标识的机器人派单。真人仍需加入 `commanderOpenIds`。如果只允许机器人派单，可以把指挥官名单设为 `[]`。该开关默认关闭，只接受 JSON 布尔值。保存后重启插件服务即可生效。
+- 如需保留原处理器并单独接收名单外机器人的新派单，另起一个独立服务，使用独立数据目录、端口和处理器令牌。新服务设置 `allowAllBotCommanders: true`，在 `commanderOpenIds` 填原名单，在 `additionalBotCommandsSince` 填固定的启用时间，例如 `"2026-01-01T09:00:00+08:00"`。把新处理器放在原处理器之前。新服务仅接收 `allowedChatIds` 中名单外机器人在该时刻起发出的 `/job`，其他消息继续交给后续处理器。重启时沿用同一时间。
 - `listen.port` 默认 `0` 是随机端口，eventHandlers 需要稳定 URL，所以**固定一个空闲 loopback 端口**；host 保持 `127.0.0.1`。`listen.host` 只接受本机回环（`127.x.x.x`、`::1`、`localhost`），填 `0.0.0.0` 或局域网地址会在启动时直接报错退出。
 - `pairfob.bin` 必须绝对路径且当前用户可执行；`pairfob.project` 与 `hub project-job enable --project` 一致；`pairfob.tokenFile` 是必需的项目令牌文件（也可用环境变量 `ROVETAP_PROJECT_TOKEN_FILE`，但宿主会清洗 service 环境，建议显式写配置），socket 建议一并显式填写。
 - **启动即校验必需项**：缺少 `appSecret(File)`、`pairfob.bin`、`pairfob.tokenFile`（或文件不可读/为空、bin 不可执行）时，service 不会带病运行，而是在 stderr 打印 `[rovetap-jobs] failed to start: <含配置键名与路径的原因>` 并以状态码 1 退出；按提示补配置后重启即可，不会出现 `/job` 被 stop 却永远没有回执。

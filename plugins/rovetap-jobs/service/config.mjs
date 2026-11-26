@@ -70,6 +70,10 @@ async function assertUsablePath(path, mode, label, hint) {
 export async function loadConfig(path) {
   const raw = JSON.parse(await readFile(path, 'utf8'));
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error(`配置文件不是 JSON 对象：${path}`);
+  if (raw.allowAllBotCommanders !== undefined && typeof raw.allowAllBotCommanders !== 'boolean') {
+    throw new Error('allowAllBotCommanders 必须是布尔值 true 或 false');
+  }
+  const additionalBotCommandsSince = readAdditionalBotCommandsSince(raw);
   const configDir = resolve(path, '..');
 
   const dataDir = raw.dataDir
@@ -177,6 +181,8 @@ export async function loadConfig(path) {
     handlerToken,
     allowedChatIds: new Set(arr(raw.allowedChatIds ?? raw.dispatchChatIds)),
     commanderOpenIds: new Set(arr(raw.commanderOpenIds ?? raw.allowedOpenIds)),
+    allowAllBotCommanders: raw.allowAllBotCommanders === true,
+    additionalBotCommandsSince,
     projectAliases: new Set(['rovetap', ...arr(raw.projectAliases)].map((x) => x.toLowerCase())),
     webBaseUrl: str(raw.webBaseUrl).replace(/\/+$/, ''),
     listen,
@@ -189,6 +195,25 @@ export async function loadConfig(path) {
     retryBaseMs: num(raw.retryBaseMs, 500),
     httpMaxBodyBytes: num(raw.httpMaxBodyBytes, 1_048_576),
   };
+}
+
+function readAdditionalBotCommandsSince(raw) {
+  const value = raw.additionalBotCommandsSince;
+  if (value === undefined) return undefined;
+  if (raw.allowAllBotCommanders !== true) {
+    throw new Error('additionalBotCommandsSince 需要 allowAllBotCommanders 为 true');
+  }
+  const match = typeof value === 'string'
+    ? /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(?:\.(\d{1,3}))?(?:Z|[+-]\d{2}:\d{2})$/u.exec(value)
+    : null;
+  const since = match ? Date.parse(value) : NaN;
+  if (Number.isFinite(since)) {
+    // Date.parse normalizes out-of-range calendar days and 24:00.
+    const clock = `${match[1]}.${(match[2] ?? '').padEnd(3, '0')}Z`;
+    const clockTime = Date.parse(clock);
+    if (Number.isFinite(clockTime) && new Date(clockTime).toISOString() === clock) return since;
+  }
+  throw new Error('additionalBotCommandsSince 必须是带时区的 ISO 8601 时间');
 }
 
 function str(value) {
