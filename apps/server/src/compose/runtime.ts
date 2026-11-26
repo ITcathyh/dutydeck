@@ -49,7 +49,8 @@ export function claudeResumeSource(repos: ComposeContext['repos'], sessionId: st
     task.digestVersion === 'v1' && !steering && attempts.every(attempt => attempt.submissionState === 'not_submitted'
       || attempt.settlement?.kind === 'not_submitted'
       || attempt.submissionState === 'intent_recorded' && attempt.reconcileReason?.code === 'DRIVER_INPUT_UNCONFIRMED'
-        && attempt.settlement?.kind === 'manual' && (attempt.settlement.decision.action === 'retry' || attempt.settlement.outcome === 'failed')));
+        // Lark's quiet-turn recovery settles these as interrupted and promises the next message continues.
+        && attempt.settlement?.kind === 'manual' && (attempt.settlement.decision.action === 'retry' || attempt.settlement.outcome === 'failed' || attempt.settlement.outcome === 'interrupted')));
   return empty ? { ...latest, emptyInitialLaunch: true as const } : latest;
 }
 

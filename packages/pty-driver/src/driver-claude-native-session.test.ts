@@ -26,7 +26,8 @@ const timings = { nativeDiscoveryRetryMs: 100, nativeObservationRetryMs: 100 };
 const launches = (cwd: string) => readFileSync(join(cwd, 'launches.jsonl'), 'utf8').trim().split('\n').map(line => JSON.parse(line));
 
 describe.skipIf(process.platform !== 'linux')('Claude native process integration', () => {
-  it('starts the same pinned session after its first draft was retired, without replaying it', async () => {
+  // failed: an admin settles the reviewed draft; interrupted: Lark's quiet-turn recovery settles it after the terminal is gone.
+  it.each(['failed', 'interrupted'] as const)('starts the same pinned session after its first draft was settled %s, without replaying it', async resolution => {
     const cwd = realpathSync(mkdtempSync(join(tmpdir(), 'dd-claude-first-draft-')));
     vi.stubEnv('HOME', cwd); vi.stubEnv('TMUX_TMPDIR', cwd);
     const repos = createRepositories(join(cwd, 'state.db'), { newDatabaseAuthority: 'ledger_v1' });
@@ -50,10 +51,20 @@ describe.skipIf(process.platform !== 'linux')('Claude native process integration
       expect(failed.status).toBe('reconcile_required');
       expect(claudeResumeSource(repos, session.id)).not.toHaveProperty('emptyInitialLaunch');
       await vi.waitFor(() => expect(runtime.getActiveTaskContext(session.id)).toBeUndefined());
-      const facts = await runtime.inspectUnknownTask(session.id, failed.id);
-      await runtime.resolveUnknownTask(session.id, { taskId: failed.id, target: facts.target!, decisionId: 'review-first-draft',
-        action: 'failed', evidenceRefs: ['reviewed-original-terminal'] }, { kind: 'installation_owner', id: 'installation_owner' });
-      await runtime.stop(session.id);
+      const owner = { kind: 'installation_owner', id: 'installation_owner' } as const;
+      if (resolution === 'failed') {
+        const facts = await runtime.inspectUnknownTask(session.id, failed.id);
+        await runtime.resolveUnknownTask(session.id, { taskId: failed.id, target: facts.target!, decisionId: 'review-first-draft',
+          action: 'failed', evidenceRefs: ['reviewed-original-terminal'] }, owner);
+        await runtime.stop(session.id);
+      } else {
+        await runtime.stop(session.id);
+        const inspection = await runtime.inspectExecutionRecovery(session.id, owner);
+        const attempt = inspection.tasks.find(task => task.taskId === failed.id)!.attempt!;
+        await runtime.confirmExecutionRecovery(session.id, { runId: inspection.runId, taskId: failed.id, attemptId: attempt.attemptId,
+          expectedRevision: attempt.revision, decisionId: 'lark-quiet-first-draft', action: 'confirm_result', outcome: 'interrupted',
+          evidenceRefs: ['lark_agent_quiet'], resourceChecks: inspection.resourceChecks }, owner);
+      }
       const source = claudeResumeSource(repos, session.id)!;
       expect(source).toHaveProperty('emptyInitialLaunch', true);
       const transcript = join(cwd, 'projects', cwd.replace(/[^A-Za-z0-9-]/g, '-'), pinnedSessionUuid(session.id) + '.jsonl');
