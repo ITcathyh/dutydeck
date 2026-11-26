@@ -2594,7 +2594,10 @@ export class PtyCliDriver implements AgentDriver {
         new Error('getPaneSize returned no size; viewport expansion skipped'));
       return async () => {};
     }
-    const cols = Math.max(size.cols, Math.min(requestedColumns, 1024));
+    // A logical line wider than the viewport is word-wrapped by the CLI, and the
+    // input check cannot tell that wrap from a typed newline. 4096 columns keep
+    // long pasted lines whole while bounding the snapshot's per-row memory.
+    const cols = Math.max(size.cols, Math.min(requestedColumns, 4096));
     const rows = Math.max(size.rows, 200);
     if (rows === size.rows && cols === size.cols) return async () => {};
 

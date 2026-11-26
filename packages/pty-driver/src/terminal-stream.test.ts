@@ -253,6 +253,31 @@ describe('terminal initial screen', () => {
     }
   });
 
+  it('widens the viewport to the longest requested line, up to 4096 columns', async () => {
+    const { driver, backend } = fixture();
+    await driver.start();
+    vi.useFakeTimers();
+    const target = backend as SessionBackend & { getPaneSize(): Promise<{ cols: number; rows: number }> };
+    let paneSize = { cols: 120, rows: 200 };
+    target.getPaneSize = async () => paneSize;
+    target.resize = vi.fn(async (cols: number, rows: number) => { paneSize = { cols, rows }; });
+    try {
+      // 1576 is a real Lark first-turn prompt line; the old 1024 cap forced the CLI to word-wrap it.
+      for (const [requested, expected] of [[1576, 1576], [9000, 4096]] as const) {
+        const expanding = (driver as any).beginExpandedSubmissionInput(target, requested);
+        await vi.advanceTimersByTimeAsync(100);
+        const restore = await expanding;
+        expect(target.resize).toHaveBeenLastCalledWith(expected, 200);
+        const restoring = restore();
+        await vi.advanceTimersByTimeAsync(100);
+        await restoring;
+        expect(paneSize).toEqual({ cols: 120, rows: 200 });
+      }
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('returns a no-op restore without touching the snapshot when resize never confirms', async () => {
     const { driver, backend } = fixture();
     await driver.start();

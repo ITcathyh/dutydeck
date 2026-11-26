@@ -32,5 +32,7 @@ it('advertises a single full list and optional direct discovery with the current
     expect(prompt).toContain('tool manual <工具> <ID> --turn <本轮凭证>');
     expect(prompt).toContain('必需 SOP 仍完整冻结');
     expect(prompt).toContain('同次重试保留 call-id');
+    // Each command sits on its own line so terminal writers never need an extra-wide row.
+    for (const line of prompt.split('\n')) expect(line.match(/ tool (?:list|describe|manual|call) /g)?.length ?? 0).toBeLessThanOrEqual(1);
   } finally { vi.restoreAllMocks(); await service?.close(); await rm(root, { recursive: true, force: true }); }
 }, 30_000);

@@ -25,7 +25,16 @@ function pluginTools(session: Session, sources: SessionPromptSources, active?: A
     const resultTools = sources.plugins?.resultTools.list({ botAppId: session.sourceId?.split(':')[0], cwd: session.cwd }) ?? [];
     const resultPrompt = session.source === 'lark' && active?.actorId && active.attemptId && !sources.isAutomatedTask(active.taskId) && resultTools.length ? `受控插件结果工具：只返回回执，正文仅原请求者登录下载。调用 dutydeck plugin-tool call <工具> --json '<参数>' --call-id <稳定调用ID> --turn ${sources.tokens.finalTurnToken(session.id, active.taskId, active.attemptId)}；重试保持 call-id。可用工具：${resultTools.map(t => `${t.id}：${t.description}`).join('；')}\n\n` : '';
     const businessPrompt = sources.plugins?.businessTools.list({ botAppId: session.sourceId?.split(':')[0], cwd: session.workspaceSourceCwd ?? session.cwd }).length && active?.attemptId && !sources.isAutomatedTask(active.taskId)
-      ? `业务工具：使用本轮凭证执行 ${sources.command} tool list --turn ${sources.tokens.workbenchTurnToken(session.id, active.taskId, active.attemptId)}。大目录可用 ${sources.command} tool list --summary --turn <本轮凭证>；已知工具可直接 ${sources.command} tool describe <工具> --turn <本轮凭证>。详情中的可选手册按逻辑 ID 用 ${sources.command} tool manual <工具> <ID> --turn <本轮凭证> 读取；必需 SOP 仍完整冻结。按返回 schema 调用 ${sources.command} tool call <工具> --json '<参数>' --call-id <稳定ID> --turn <本轮凭证>。同次重试保留 call-id；unknown 仅用 tool reconcile 核对，不新建写操作。MCP tools 端点为 /api/plugin-tools/mcp，使用会话 relay Bearer 与 x-dutydeck-tool-turn；身份由宿主决定。\n\n` : '';
+      // One command per line: the full command prefix is long, and a single
+      // paragraph repeating it is wider than the terminal can show unwrapped.
+      ? [
+        `业务工具：使用本轮凭证执行 ${sources.command} tool list --turn ${sources.tokens.workbenchTurnToken(session.id, active.taskId, active.attemptId)}。`,
+        `- 大目录可用 ${sources.command} tool list --summary --turn <本轮凭证>。`,
+        `- 已知工具可直接 ${sources.command} tool describe <工具> --turn <本轮凭证>。`,
+        `- 详情中的可选手册按逻辑 ID 用 ${sources.command} tool manual <工具> <ID> --turn <本轮凭证> 读取；必需 SOP 仍完整冻结。`,
+        `- 按返回 schema 调用 ${sources.command} tool call <工具> --json '<参数>' --call-id <稳定ID> --turn <本轮凭证>。同次重试保留 call-id；unknown 仅用 tool reconcile 核对，不新建写操作。`,
+        '- MCP tools 端点为 /api/plugin-tools/mcp，使用会话 relay Bearer 与 x-dutydeck-tool-turn；身份由宿主决定。',
+      ].join('\n') + '\n\n' : '';
     return [resultPrompt, businessPrompt].filter(Boolean).map(content => ({ kind: 'dynamic_context', trustScope: 'host:current_authority', content }));
   } };
 }

@@ -91,13 +91,13 @@ export async function writeClaudeFamilyInput(backend: PtyLike, prompt: string): 
   const columns = prompt.split('\n').reduce((max, line) => Math.max(max, Buffer.byteLength(line) + 6), 0);
   const restoreViewport = await backend.beginExpandedInput?.(columns);
   try {
-    await writeClaudeFamilyInputBody(backend, prompt);
+    await writeClaudeFamilyInputBody(backend, prompt, columns);
   } finally {
     await restoreViewport?.();
   }
 }
 
-async function writeClaudeFamilyInputBody(backend: PtyLike, prompt: string): Promise<void> {
+async function writeClaudeFamilyInputBody(backend: PtyLike, prompt: string, columns: number): Promise<void> {
   const processKey = backend.processKey ?? backend;
   const isFirstWrite = !firstWriteSeen.has(processKey);
   if (isFirstWrite) await delay(200);
@@ -138,7 +138,7 @@ async function writeClaudeFamilyInputBody(backend: PtyLike, prompt: string): Pro
     if (!owned && backend.beginExpandedInput) {
       // 长草稿可能把输入框起始行滚出当前视口，而写入前的视口扩展可能未生效：
       // 重新申请一次扩展让 TUI 重排，再给一轮复核窗口，仍不匹配才按结果未知挂起。
-      const restore = await backend.beginExpandedInput(Buffer.byteLength(expectedDraft, 'utf8') + 6);
+      const restore = await backend.beginExpandedInput(columns);
       try {
         const reflowDeadline = Date.now() + 1000;
         while (!owned && Date.now() < reflowDeadline) {

@@ -460,7 +460,8 @@ describe('Claude composer ownership around the first terminal write', () => {
   it('restores the viewport after an unconfirmed write without retrying it', async () => {
     const backend = new ComposerBackend();
     let begins = 0, restores = 0;
-    Object.assign(backend, { beginExpandedInput: async () => { begins++; return async () => { restores++; }; } });
+    const requested: number[] = [];
+    Object.assign(backend, { beginExpandedInput: async (columns: number) => { begins++; requested.push(columns); return async () => { restores++; }; } });
     backend.onWrite = () => { backend.onWrite = undefined; backend.screen = box('foreign'); };
     const pending = writeClaudeFamilyInput(backend, 'business body');
     const outcome = pending.then(() => undefined, error => error);
@@ -468,6 +469,8 @@ describe('Claude composer ownership around the first terminal write', () => {
     expect(await outcome).toMatchObject({ name: 'DriverRecoveryError', code: 'DRIVER_INPUT_UNCONFIRMED' });
     // 复核失败后自愈逻辑再申请一次扩展视口；两次申请都对称归还，写入本身不重试。
     expect({ begins, restores }).toEqual({ begins: 2, restores: 2 });
+    // 两次都按最长一行申请宽度，而不是整段草稿的字节数。
+    expect(requested).toEqual([19, 19]);
     expect(backend.writes).toEqual(['business body']);
   });
 
