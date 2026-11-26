@@ -164,6 +164,14 @@ function isTimeoutError(err: unknown): boolean {
 /** Names /bin/sh can `export`; the rest still go through tmux set-environment. */
 const SHELL_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
+/**
+ * 无人值守 tmux 窗口从创建起就保留的最小行数。CLI TUI 在这个高度首次渲染，
+ * 长草稿的输入框起始行才不会滚出可视区；运行时再做 resize 依赖 TUI 响应
+ * SIGWINCH 重排，繁忙或竞态时可能不生效，直接按小视口布局会让写入复核误判。
+ * 与 driver 视口扩展目标（≥200 行）保持一致；列宽仍按调用方给的 cols。
+ */
+const HEADLESS_TMUX_MIN_ROWS = 200;
+
 /** tmux parses an argument ending in `;` as a command separator and drops
  *  that `;`; a trailing `\;` is kept as a literal semicolon. */
 const tmuxLiteralArg = (value: string): string => value.endsWith(';') ? `${value.slice(0, -1)}\\;` : value;
@@ -627,7 +635,7 @@ export class TmuxBackend implements PersistentSessionBackend {
         'new-session', '-d',
         '-s', tmuxFormatLiteral(this.sessionName),
         '-x', String(opts.cols),
-        '-y', String(opts.rows),
+        '-y', String(Math.max(opts.rows, HEADLESS_TMUX_MIN_ROWS)),
         '-c', tmuxLiteralArg(tmuxFormatLiteral(opts.cwd)),
       ], { cwd: opts.cwd }));
     } catch (err) {

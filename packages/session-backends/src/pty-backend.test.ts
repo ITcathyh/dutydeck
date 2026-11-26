@@ -205,11 +205,12 @@ tmuxDescribe('TmuxBackend', () => {
         const s = (await backend!.getPaneSize());
         expect(s).not.toBeNull();
         expect(s!.cols).toBe(100);
-        expect(s!.rows).toBe(30);
+        // 无人值守窗口行数有 200 的下限，保证长草稿输入框不滚出可视区；列宽按请求值。
+        expect(s!.rows).toBe(200);
         return s;
       });
       expect(size.cols).toBe(100);
-      expect(size.rows).toBe(30);
+      expect(size.rows).toBe(200);
 
       // capture-pane snapshot contains the echoed line (polled: the pane's first
       // render can race the capture under load).
