@@ -26,8 +26,8 @@ const timings = { nativeDiscoveryRetryMs: 100, nativeObservationRetryMs: 100 };
 const launches = (cwd: string) => readFileSync(join(cwd, 'launches.jsonl'), 'utf8').trim().split('\n').map(line => JSON.parse(line));
 
 describe.skipIf(process.platform !== 'linux')('Claude native process integration', () => {
-  // failed: an admin settles the reviewed draft; interrupted: Lark's quiet-turn recovery settles it after the terminal is gone.
-  it.each(['failed', 'interrupted'] as const)('starts the same pinned session after its first draft was settled %s, without replaying it', async resolution => {
+  // failed: an admin settles the reviewed draft; interrupted: quiet-turn recovery; unknown: continue in place or abandonment.
+  it.each(['failed', 'interrupted', 'unknown'] as const)('starts the same pinned session after its first draft was settled %s, without replaying it', async resolution => {
     const cwd = realpathSync(mkdtempSync(join(tmpdir(), 'dd-claude-first-draft-')));
     vi.stubEnv('HOME', cwd); vi.stubEnv('TMUX_TMPDIR', cwd);
     const repos = createRepositories(join(cwd, 'state.db'), { newDatabaseAuthority: 'ledger_v1' });
@@ -62,8 +62,8 @@ describe.skipIf(process.platform !== 'linux')('Claude native process integration
         const inspection = await runtime.inspectExecutionRecovery(session.id, owner);
         const attempt = inspection.tasks.find(task => task.taskId === failed.id)!.attempt!;
         await runtime.confirmExecutionRecovery(session.id, { runId: inspection.runId, taskId: failed.id, attemptId: attempt.attemptId,
-          expectedRevision: attempt.revision, decisionId: 'lark-quiet-first-draft', action: 'confirm_result', outcome: 'interrupted',
-          evidenceRefs: ['lark_agent_quiet'], resourceChecks: inspection.resourceChecks }, owner);
+          expectedRevision: attempt.revision, decisionId: `lark-${resolution}-first-draft`, action: 'confirm_result', outcome: resolution,
+          evidenceRefs: [resolution === 'interrupted' ? 'lark_agent_quiet' : 'lark_continue_in_place'], resourceChecks: inspection.resourceChecks }, owner);
       }
       const source = claudeResumeSource(repos, session.id)!;
       expect(source).toHaveProperty('emptyInitialLaunch', true);
